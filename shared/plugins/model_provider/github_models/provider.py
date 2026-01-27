@@ -18,6 +18,7 @@ Enterprise features:
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
         UserMessage,
     )
     from azure.core.credentials import AzureKeyCredential
+    from .copilot_client import CopilotClient, CopilotResponse
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -182,6 +184,10 @@ class GitHubModelsProvider:
         self._enterprise: Optional[str] = None
         self._endpoint: str = DEFAULT_ENDPOINT
 
+        # Copilot API support (for OAuth authentication)
+        self._use_copilot_api: bool = False
+        self._copilot_client: Optional["CopilotClient"] = None
+
         # Session state
         self._system_instruction: Optional[str] = None
         self._tools: Optional[List[ToolSchema]] = None
@@ -270,23 +276,54 @@ class GitHubModelsProvider:
             config = ProviderConfig()
 
         # Resolve configuration
-        self._token = config.api_key or resolve_token()
+        raw_token = config.api_key or resolve_token()
         self._organization = config.extra.get('organization') or resolve_organization()
         self._enterprise = config.extra.get('enterprise') or resolve_enterprise()
         self._endpoint = config.extra.get('endpoint') or resolve_endpoint()
 
         # Validate token
-        if not self._token:
+        if not raw_token:
             raise TokenNotFoundError(
                 auth_method=resolve_auth_method(),
                 checked_locations=get_checked_credential_locations(resolve_auth_method()),
             )
 
-        # Create the client
-        self._client = self._create_client()
+        # If using OAuth, exchange for Copilot token and use Copilot API
+        from .env import resolve_token_source
+        token_source = resolve_token_source()
+        self._trace(f"[INIT] token_source={token_source}, has_api_key={bool(config.api_key)}")
+        if token_source == "oauth" and not config.api_key:
+            # Using device code OAuth - use Copilot API (api.githubcopilot.com)
+            self._trace("[INIT] Using OAuth - getting Copilot token...")
+            from .oauth import get_stored_access_token
+            copilot_token = get_stored_access_token()
+            self._trace(f"[INIT] get_stored_access_token returned: {bool(copilot_token)}")
+            if copilot_token:
+                self._token = copilot_token
+                self._use_copilot_api = True
+                self._trace("[INIT] Creating Copilot client...")
+                from .copilot_client import CopilotClient
+                self._copilot_client = CopilotClient(copilot_token)
+                self._trace("[INIT] Copilot client created successfully")
+            else:
+                # Exchange failed - fall back to OAuth token (may not work)
+                self._trace("[INIT] Copilot token exchange failed, using raw OAuth token")
+                self._token = raw_token
+                self._trace("[INIT] Creating Azure SDK client...")
+                self._client = self._create_client()
+                self._trace("[INIT] Client created successfully")
+        else:
+            # Using PAT from env var or explicit api_key - use GitHub Models API
+            self._trace("[INIT] Using PAT or explicit api_key")
+            self._token = raw_token
+            self._trace("[INIT] Creating Azure SDK client...")
+            self._client = self._create_client()
+            self._trace("[INIT] Client created successfully")
 
         # Verify connectivity
+        self._trace("[INIT] Verifying connectivity...")
         self._verify_connectivity()
+        self._trace("[INIT] Initialize complete")
 
     def _create_client(self) -> "ChatCompletionsClient":
         """Create the ChatCompletionsClient.
@@ -294,10 +331,17 @@ class GitHubModelsProvider:
         Returns:
             Initialized ChatCompletionsClient.
         """
-        return get_chat_client_class()(
+        self._trace("[_create_client] Getting chat client class...")
+        client_class = get_chat_client_class()
+        self._trace("[_create_client] Getting credential class...")
+        cred_class = get_azure_key_credential()
+        self._trace(f"[_create_client] Creating client with endpoint={self._endpoint}")
+        client = client_class(
             endpoint=self._endpoint,
-            credential=get_azure_key_credential()(self._token),
+            credential=cred_class(self._token),
         )
+        self._trace("[_create_client] Client instance created")
+        return client
 
     def _verify_connectivity(self) -> None:
         """Verify connectivity by making a lightweight API call.
@@ -380,6 +424,10 @@ class GitHubModelsProvider:
         if self._client:
             self._client.close()
         self._client = None
+        if self._copilot_client:
+            self._copilot_client.close()
+        self._copilot_client = None
+        self._use_copilot_api = False
         self._model_name = None
         self._history = []
 
@@ -407,24 +455,38 @@ class GitHubModelsProvider:
         - Model access restrictions
         - Organization disabled GitHub Models
         """
-        if not self._client or not self._model_name:
-            return  # Will fail later with clear error
-
-        try:
-            # Send minimal request to verify model responds
-            messages = [get_models().UserMessage(content="hi")]
-            self._client.complete(
-                model=self._model_name,
-                messages=messages,
-                max_tokens=1,
-            )
-        except Exception as e:
-            # Use our error handler to provide helpful messages
-            self._handle_api_error(e)
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                return  # Will fail later with clear error
+            try:
+                # Send minimal request via Copilot API
+                messages = [{"role": "user", "content": "hi"}]
+                self._copilot_client.complete(
+                    model=self._copilot_model_name(),
+                    messages=messages,
+                    max_tokens=1,
+                )
+            except Exception as e:
+                self._handle_api_error(e)
+        else:
+            if not self._client or not self._model_name:
+                return  # Will fail later with clear error
+            try:
+                # Send minimal request via Azure SDK
+                messages = [get_models().UserMessage(content="hi")]
+                self._client.complete(
+                    model=self._model_name,
+                    messages=messages,
+                    max_tokens=1,
+                )
+            except Exception as e:
+                self._handle_api_error(e)
 
     @property
     def is_connected(self) -> bool:
         """Check if provider is connected and ready."""
+        if self._use_copilot_api:
+            return self._copilot_client is not None and self._model_name is not None
         return self._client is not None and self._model_name is not None
 
     @property
@@ -461,8 +523,13 @@ class GitHubModelsProvider:
                     return sorted([m for m in cached_models if m.startswith(prefix)])
                 return sorted(cached_models)
 
-        # Fetch from GitHub Models catalog API
-        models = self._fetch_models_from_api()
+        # Fetch models based on API type
+        if self._use_copilot_api and self._copilot_client:
+            # Copilot API returns model names like 'gpt-4o', 'claude-3.5-sonnet'
+            # Users can use either format - _copilot_model_name() strips prefixes
+            models = self._copilot_client.list_models()
+        else:
+            models = self._fetch_models_from_api()
 
         if models:
             # Update cache
@@ -533,8 +600,12 @@ class GitHubModelsProvider:
             tools: List of available tools.
             history: Previous conversation history to restore.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
+        else:
+            if not self._client or not self._model_name:
+                raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
 
         self._system_instruction = system_instruction
         self._tools = tools
@@ -559,22 +630,40 @@ class GitHubModelsProvider:
         Returns:
             ProviderResponse with the model's response.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not connected. Call connect() first.")
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("Provider not connected. Call connect() first.")
 
-        messages = [get_models().UserMessage(content=prompt)]
+            messages = [{"role": "user", "content": prompt}]
 
-        try:
-            response = self._client.complete(
-                model=self._model_name,
-                messages=messages,
-            )
-            provider_response = response_from_sdk(response)
-            self._last_usage = provider_response.usage
-            return provider_response
-        except Exception as e:
-            self._handle_api_error(e)
-            raise
+            try:
+                response = self._copilot_client.complete(
+                    model=self._copilot_model_name(),
+                    messages=messages,
+                )
+                provider_response = self._copilot_response_to_provider(response)
+                self._last_usage = provider_response.usage
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
+        else:
+            if not self._client or not self._model_name:
+                raise RuntimeError("Provider not connected. Call connect() first.")
+
+            messages = [get_models().UserMessage(content=prompt)]
+
+            try:
+                response = self._client.complete(
+                    model=self._model_name,
+                    messages=messages,
+                )
+                provider_response = response_from_sdk(response)
+                self._last_usage = provider_response.usage
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
 
     def send_message(
         self,
@@ -591,43 +680,75 @@ class GitHubModelsProvider:
         Returns:
             ProviderResponse with text and/or function calls.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Build messages list
-        messages = self._build_messages()
-        messages.append(get_models().UserMessage(content=message))
-
-        # Add user message to history
+        # Add user message to history first
         self._history.append(Message.from_text(Role.USER, message))
 
-        # Build completion kwargs
-        kwargs = self._build_completion_kwargs(response_schema)
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
 
-        try:
-            response = self._client.complete(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_sdk(response)
-            self._last_usage = provider_response.usage
+            # Build messages for Copilot API
+            messages = self._build_copilot_messages()
+            tools = self._build_copilot_tools()
 
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
+            try:
+                response = self._copilot_client.complete(
+                    model=self._copilot_model_name(),
+                    messages=messages,
+                    tools=tools,
+                )
+                provider_response = self._copilot_response_to_provider(response)
+                self._last_usage = provider_response.usage
 
-            # Parse structured output if schema was requested
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
+                # Add assistant response to history
+                self._add_response_to_history(provider_response)
 
-            return provider_response
-        except Exception as e:
-            self._handle_api_error(e)
-            raise
+                # Parse structured output if schema was requested
+                text = provider_response.get_text()
+                if response_schema and text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
+        else:
+            if not self._client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
+
+            # Build messages list (includes user message from history)
+            messages = self._build_messages()
+
+            # Build completion kwargs
+            kwargs = self._build_completion_kwargs(response_schema)
+
+            try:
+                response = self._client.complete(
+                    model=self._model_name,
+                    messages=messages,
+                    **kwargs,
+                )
+                provider_response = response_from_sdk(response)
+                self._last_usage = provider_response.usage
+
+                # Add assistant response to history
+                self._add_response_to_history(provider_response)
+
+                # Parse structured output if schema was requested
+                text = provider_response.get_text()
+                if response_schema and text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
 
     def send_message_with_parts(
         self,
@@ -666,9 +787,6 @@ class GitHubModelsProvider:
         Returns:
             ProviderResponse with the model's next response.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
         # Add tool results to history
         for result in results:
             self._history.append(Message(
@@ -676,36 +794,72 @@ class GitHubModelsProvider:
                 parts=[Part(function_response=result)],
             ))
 
-        # Build messages including tool results
-        messages = self._build_messages()
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
 
-        # Build completion kwargs
-        kwargs = self._build_completion_kwargs(response_schema)
+            # Build messages for Copilot API
+            messages = self._build_copilot_messages()
+            tools = self._build_copilot_tools()
 
-        try:
-            response = self._client.complete(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_sdk(response)
-            self._last_usage = provider_response.usage
+            try:
+                response = self._copilot_client.complete(
+                    model=self._copilot_model_name(),
+                    messages=messages,
+                    tools=tools,
+                )
+                provider_response = self._copilot_response_to_provider(response)
+                self._last_usage = provider_response.usage
 
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
+                # Add assistant response to history
+                self._add_response_to_history(provider_response)
 
-            # Parse structured output if schema was requested
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
+                # Parse structured output if schema was requested
+                text = provider_response.get_text()
+                if response_schema and text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
 
-            return provider_response
-        except Exception as e:
-            self._handle_api_error(e)
-            raise
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
+        else:
+            if not self._client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
+
+            # Build messages including tool results
+            messages = self._build_messages()
+
+            # Build completion kwargs
+            kwargs = self._build_completion_kwargs(response_schema)
+
+            try:
+                response = self._client.complete(
+                    model=self._model_name,
+                    messages=messages,
+                    **kwargs,
+                )
+                provider_response = response_from_sdk(response)
+                self._last_usage = provider_response.usage
+
+                # Add assistant response to history
+                self._add_response_to_history(provider_response)
+
+                # Parse structured output if schema was requested
+                text = provider_response.get_text()
+                if response_schema and text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+                return provider_response
+            except Exception as e:
+                self._handle_api_error(e)
+                raise
 
     def _build_messages(self) -> List:
         """Build the messages list for the API call."""
@@ -741,6 +895,132 @@ class GitHubModelsProvider:
         """Add the model's response to history."""
         if response.parts:
             self._history.append(Message(role=Role.MODEL, parts=response.parts))
+
+    # ==================== Copilot API Helpers ====================
+
+    def _copilot_model_name(self) -> str:
+        """Convert GitHub Models model name to Copilot API model name.
+
+        GitHub Models uses 'openai/gpt-4o', Copilot API uses 'gpt-4o'.
+        """
+        if not self._model_name:
+            return ""
+        # Strip provider prefix if present (e.g., 'openai/gpt-4o' -> 'gpt-4o')
+        if "/" in self._model_name:
+            return self._model_name.split("/", 1)[1]
+        return self._model_name
+
+    def _build_copilot_messages(self) -> List[Dict[str, Any]]:
+        """Build messages list for Copilot API (OpenAI format)."""
+        messages = []
+
+        # Add system instruction if present
+        if self._system_instruction:
+            messages.append({"role": "system", "content": self._system_instruction})
+
+        # Convert history to OpenAI format
+        for msg in self._history:
+            if msg.role == Role.USER:
+                text = msg.text or ""
+                messages.append({"role": "user", "content": text})
+            elif msg.role == Role.MODEL:
+                text = msg.text or ""
+                # Check for tool calls
+                tool_calls = []
+                for part in msg.parts:
+                    if part.function_call:
+                        tool_calls.append({
+                            "id": part.function_call.id or f"call_{part.function_call.name}",
+                            "type": "function",
+                            "function": {
+                                "name": part.function_call.name,
+                                "arguments": json.dumps(part.function_call.args or {}),
+                            }
+                        })
+                msg_dict: Dict[str, Any] = {"role": "assistant", "content": text or None}
+                if tool_calls:
+                    msg_dict["tool_calls"] = tool_calls
+                messages.append(msg_dict)
+            elif msg.role == Role.TOOL:
+                for part in msg.parts:
+                    if part.function_response:
+                        result = part.function_response.result
+                        if isinstance(result, dict):
+                            content = json.dumps(result)
+                        else:
+                            content = str(result) if result is not None else ""
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": part.function_response.id or f"call_{part.function_response.name}",
+                            "content": content,
+                        })
+
+        return messages
+
+    def _build_copilot_tools(self) -> Optional[List[Dict[str, Any]]]:
+        """Build tools list for Copilot API (OpenAI format)."""
+        if not self._tools:
+            return None
+
+        tools = []
+        for tool in self._tools:
+            tool_dict = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                }
+            }
+            if tool.parameters:
+                tool_dict["function"]["parameters"] = tool.parameters
+            tools.append(tool_dict)
+
+        return tools if tools else None
+
+    def _copilot_response_to_provider(self, response: "CopilotResponse") -> ProviderResponse:
+        """Convert Copilot API response to ProviderResponse."""
+        from .copilot_client import CopilotResponse
+        from ..types import FunctionCall
+
+        parts = []
+        finish_reason = FinishReason.STOP
+
+        if response.choices:
+            choice = response.choices[0]
+            # Extract text
+            if choice.message.content:
+                parts.append(Part.from_text(choice.message.content))
+            # Extract tool calls
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    try:
+                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    fc = FunctionCall(
+                        id=tc.get("id"),
+                        name=tc.get("function", {}).get("name", ""),
+                        args=args,
+                    )
+                    parts.append(Part.from_function_call(fc))
+                finish_reason = FinishReason.TOOL_USE
+
+            # Map finish reason
+            if choice.finish_reason:
+                finish_reason = self._map_finish_reason(choice.finish_reason)
+
+        usage = TokenUsage(
+            prompt_tokens=response.usage.prompt_tokens,
+            output_tokens=response.usage.completion_tokens,
+            total_tokens=response.usage.total_tokens,
+        )
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions."""
@@ -901,6 +1181,137 @@ class GitHubModelsProvider:
 
     # ==================== Streaming ====================
 
+    def _copilot_streaming_response(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        trace_prefix: str = "STREAM",
+    ) -> ProviderResponse:
+        """Handle streaming response from Copilot API.
+
+        Args:
+            messages: Messages in OpenAI format.
+            tools: Tools in OpenAI format.
+            on_chunk: Callback for each text chunk.
+            cancel_token: Optional cancellation token.
+            on_usage_update: Optional usage callback.
+            trace_prefix: Prefix for trace logging.
+
+        Returns:
+            ProviderResponse with accumulated response.
+        """
+        from ..types import FunctionCall
+
+        accumulated_text = []
+        parts = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        # Track tool call accumulation (streaming sends tool calls in pieces)
+        tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+
+        def flush_text_block():
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = ''.join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
+
+        def flush_tool_calls():
+            """Flush accumulated tool calls as Parts."""
+            nonlocal tool_call_accumulators
+            for idx in sorted(tool_call_accumulators.keys()):
+                tc = tool_call_accumulators[idx]
+                if tc.get("function", {}).get("name"):
+                    try:
+                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    fc = FunctionCall(
+                        id=tc.get("id"),
+                        name=tc["function"]["name"],
+                        args=args,
+                    )
+                    parts.append(Part.from_function_call(fc))
+                    function_calls.append(fc)
+            tool_call_accumulators.clear()
+
+        try:
+            self._trace(f"{trace_prefix}_START")
+            chunk_count = 0
+
+            for choice in self._copilot_client.complete_stream(
+                model=self._copilot_model_name(),
+                messages=messages,
+                tools=tools,
+            ):
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                delta = choice.delta
+
+                # Accumulate text
+                if delta.content:
+                    chunk_count += 1
+                    self._trace(f"{trace_prefix}_CHUNK[{chunk_count}] len={len(delta.content)}")
+                    accumulated_text.append(delta.content)
+                    on_chunk(delta.content)
+
+                # Accumulate tool calls (they come in pieces)
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_call_accumulators:
+                            tool_call_accumulators[idx] = {
+                                "id": tc.get("id"),
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        acc = tool_call_accumulators[idx]
+                        if tc.get("id"):
+                            acc["id"] = tc["id"]
+                        if tc.get("function", {}).get("name"):
+                            acc["function"]["name"] = tc["function"]["name"]
+                        if tc.get("function", {}).get("arguments"):
+                            acc["function"]["arguments"] += tc["function"]["arguments"]
+
+                # Extract finish reason
+                if choice.finish_reason:
+                    finish_reason = self._map_finish_reason(choice.finish_reason)
+
+            self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
+
+        except Exception as e:
+            self._trace(f"{trace_prefix}_ERROR {type(e).__name__}: {e}")
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                self._handle_api_error(e)
+                raise
+
+        # Flush remaining text and tool calls
+        flush_text_block()
+        flush_tool_calls()
+
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
+
     def send_message_streaming(
         self,
         message: str,
@@ -923,15 +1334,44 @@ class GitHubModelsProvider:
         Returns:
             ProviderResponse with accumulated text and/or function calls.
         """
+        # Add user message to history first
+        self._history.append(Message.from_text(Role.USER, message))
+
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
+
+            messages = self._build_copilot_messages()
+            tools = self._build_copilot_tools()
+
+            provider_response = self._copilot_streaming_response(
+                messages=messages,
+                tools=tools,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                on_usage_update=on_usage_update,
+                trace_prefix="STREAM",
+            )
+
+            self._last_usage = provider_response.usage
+            self._add_response_to_history(provider_response)
+
+            # Parse structured output if schema was requested
+            final_text = provider_response.get_text()
+            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
+                try:
+                    provider_response.structured_output = json.loads(final_text)
+                except json.JSONDecodeError:
+                    pass
+
+            return provider_response
+
+        # Azure SDK path
         if not self._client or not self._model_name:
             raise RuntimeError("No chat session. Call create_session() first.")
 
-        # Build messages list
+        # Build messages list (includes user message from history)
         messages = self._build_messages()
-        messages.append(get_models().UserMessage(content=message))
-
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
 
         # Build completion kwargs
         kwargs = self._build_completion_kwargs(response_schema)
@@ -1077,15 +1517,45 @@ class GitHubModelsProvider:
         Returns:
             ProviderResponse with accumulated text and/or function calls.
         """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
         # Add tool results to history
         for result in results:
             self._history.append(Message(
                 role=Role.TOOL,
                 parts=[Part(function_response=result)],
             ))
+
+        if self._use_copilot_api:
+            if not self._copilot_client or not self._model_name:
+                raise RuntimeError("No chat session. Call create_session() first.")
+
+            messages = self._build_copilot_messages()
+            tools = self._build_copilot_tools()
+
+            provider_response = self._copilot_streaming_response(
+                messages=messages,
+                tools=tools,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                on_usage_update=on_usage_update,
+                trace_prefix="STREAM_TOOL_RESULTS",
+            )
+
+            self._last_usage = provider_response.usage
+            self._add_response_to_history(provider_response)
+
+            # Parse structured output if schema was requested
+            final_text = provider_response.get_text()
+            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
+                try:
+                    provider_response.structured_output = json.loads(final_text)
+                except json.JSONDecodeError:
+                    pass
+
+            return provider_response
+
+        # Azure SDK path
+        if not self._client or not self._model_name:
+            raise RuntimeError("No chat session. Call create_session() first.")
 
         # Build messages including tool results
         messages = self._build_messages()

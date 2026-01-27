@@ -73,9 +73,11 @@ def resolve_token() -> Optional[str]:
         Token if found, None otherwise.
     """
     # First, try stored OAuth token from device code flow
+    # Note: We return the OAuth token here for validation purposes.
+    # The provider will exchange it for a Copilot token when making API calls.
     try:
-        from .oauth import get_stored_access_token
-        stored_token = get_stored_access_token()
+        from .oauth import get_stored_oauth_token
+        stored_token = get_stored_oauth_token()
         if stored_token:
             return stored_token
     except ImportError:
@@ -95,8 +97,8 @@ def resolve_token_source() -> Optional[str]:
     """
     # Check stored OAuth token first
     try:
-        from .oauth import get_stored_access_token
-        if get_stored_access_token():
+        from .oauth import get_stored_oauth_token
+        if get_stored_oauth_token():
             return "oauth"
     except ImportError:
         pass
@@ -158,8 +160,8 @@ def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[s
 
     # Check stored OAuth token
     try:
-        from .oauth import get_stored_access_token
-        oauth_token = get_stored_access_token()
+        from .oauth import get_stored_oauth_token
+        oauth_token = get_stored_oauth_token()
         if oauth_token:
             masked = f"{oauth_token[:10]}...{oauth_token[-4:]}"
             locations.append(f"Device Code OAuth: set ({masked})")

@@ -31,6 +31,9 @@ DEVICE_CODE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 VERIFICATION_URL = "https://github.com/login/device"
 
+# Copilot token exchange endpoint
+COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+
 # Scopes for GitHub Models access
 # read:user is minimal for authentication
 OAUTH_SCOPES = "read:user"
@@ -63,6 +66,44 @@ class OAuthTokens:
             token_type=data.get("token_type", "bearer"),
             scope=data.get("scope", ""),
         )
+
+
+@dataclass
+class CopilotToken:
+    """Copilot-specific token obtained by exchanging OAuth token.
+
+    This token is used for actual API calls to GitHub Copilot/Models.
+    It has an expiration time and needs to be refreshed periodically.
+    """
+    token: str
+    expires_at: int  # Unix timestamp
+    refresh_in: int = 0  # Seconds until refresh recommended
+
+    def to_dict(self) -> dict:
+        return {
+            "token": self.token,
+            "expires_at": self.expires_at,
+            "refresh_in": self.refresh_in,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CopilotToken":
+        return cls(
+            token=data["token"],
+            expires_at=data["expires_at"],
+            refresh_in=data.get("refresh_in", 0),
+        )
+
+    def is_expired(self) -> bool:
+        """Check if token has expired."""
+        return time.time() >= self.expires_at
+
+    def needs_refresh(self) -> bool:
+        """Check if token should be refreshed soon."""
+        if self.refresh_in > 0:
+            return time.time() >= (self.expires_at - self.refresh_in)
+        # Default: refresh if less than 5 minutes remaining
+        return time.time() >= (self.expires_at - 300)
 
 
 @dataclass
@@ -133,6 +174,83 @@ def _make_request(
         raise RuntimeError(f"HTTP {e.code}: {error_msg}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Request failed: {e.reason}") from e
+
+
+def _make_get_request(
+    url: str,
+    headers: Optional[dict] = None,
+) -> dict:
+    """Make HTTP GET request and return JSON response.
+
+    Args:
+        url: Request URL.
+        headers: Optional additional headers.
+
+    Returns:
+        Parsed JSON response.
+
+    Raises:
+        RuntimeError: If request fails.
+    """
+    default_headers = {
+        "Accept": "application/json",
+        "User-Agent": "jaato/1.0",
+    }
+    if headers:
+        default_headers.update(headers)
+
+    req = urllib.request.Request(
+        url,
+        headers=default_headers,
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else str(e)
+        try:
+            error_data = json.loads(error_body)
+            error_msg = error_data.get("error_description") or error_data.get("error") or error_body
+        except json.JSONDecodeError:
+            error_msg = error_body
+        raise RuntimeError(f"HTTP {e.code}: {error_msg}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Request failed: {e.reason}") from e
+
+
+def exchange_oauth_for_copilot_token(oauth_token: str) -> CopilotToken:
+    """Exchange OAuth token for Copilot-specific token.
+
+    This is the third stage of authentication - after getting the OAuth token,
+    we need to exchange it for a Copilot token that can be used for API calls.
+
+    Args:
+        oauth_token: GitHub OAuth access token.
+
+    Returns:
+        CopilotToken with the API token and expiration info.
+
+    Raises:
+        RuntimeError: If token exchange fails.
+    """
+    headers = {
+        "Authorization": f"token {oauth_token}",
+    }
+
+    response = _make_get_request(COPILOT_TOKEN_URL, headers)
+
+    if "token" not in response:
+        raise RuntimeError(
+            f"Token exchange failed: {response.get('message', 'No token in response')}"
+        )
+
+    return CopilotToken(
+        token=response["token"],
+        expires_at=response.get("expires_at", int(time.time()) + 3600),
+        refresh_in=response.get("refresh_in", 0),
+    )
 
 
 def request_device_code(
@@ -297,13 +415,27 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
         return home_path
 
 
-def save_tokens(tokens: OAuthTokens) -> None:
-    """Save tokens to persistent storage."""
+def save_tokens(
+    oauth_tokens: OAuthTokens,
+    copilot_token: Optional[CopilotToken] = None,
+) -> None:
+    """Save tokens to persistent storage.
+
+    Args:
+        oauth_tokens: OAuth tokens from device code flow.
+        copilot_token: Optional Copilot token from exchange.
+    """
     path = _get_token_storage_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    data = {
+        "oauth": oauth_tokens.to_dict(),
+    }
+    if copilot_token:
+        data["copilot"] = copilot_token.to_dict()
+
     with open(path, "w") as f:
-        json.dump(tokens.to_dict(), f)
+        json.dump(data, f)
 
     # Secure permissions on Unix
     if os.name == "posix":
@@ -311,7 +443,7 @@ def save_tokens(tokens: OAuthTokens) -> None:
 
 
 def load_tokens() -> Optional[OAuthTokens]:
-    """Load tokens from persistent storage."""
+    """Load OAuth tokens from persistent storage."""
     path = _get_token_storage_path()
 
     if not path.exists():
@@ -320,9 +452,49 @@ def load_tokens() -> Optional[OAuthTokens]:
     try:
         with open(path) as f:
             data = json.load(f)
-        return OAuthTokens.from_dict(data)
+        # Support both old format (direct) and new format (nested under "oauth")
+        if "oauth" in data:
+            return OAuthTokens.from_dict(data["oauth"])
+        elif "access_token" in data:
+            # Old format - direct OAuth token
+            return OAuthTokens.from_dict(data)
+        return None
     except Exception:
         return None
+
+
+def load_copilot_token() -> Optional[CopilotToken]:
+    """Load Copilot token from persistent storage."""
+    path = _get_token_storage_path()
+
+    if not path.exists():
+        return None
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if "copilot" in data:
+            return CopilotToken.from_dict(data["copilot"])
+        return None
+    except Exception:
+        return None
+
+
+def save_copilot_token(copilot_token: CopilotToken) -> None:
+    """Update stored Copilot token without modifying OAuth tokens."""
+    path = _get_token_storage_path()
+
+    if not path.exists():
+        return
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        data["copilot"] = copilot_token.to_dict()
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 
 def clear_tokens() -> None:
@@ -332,11 +504,73 @@ def clear_tokens() -> None:
         path.unlink()
 
 
+def _oauth_trace(msg: str) -> None:
+    """Write trace message for debugging OAuth operations."""
+    import datetime
+    import tempfile
+    trace_path = os.environ.get(
+        "JAATO_PROVIDER_TRACE",
+        os.path.join(tempfile.gettempdir(), "provider_trace.log")
+    )
+    try:
+        with open(trace_path, "a") as f:
+            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [oauth] {msg}\n")
+            f.flush()
+    except Exception:
+        pass
+
+
 def get_stored_access_token() -> Optional[str]:
-    """Get access token from storage.
+    """Get Copilot API token from storage, refreshing if needed.
+
+    This function handles the full token lifecycle:
+    1. Check for existing Copilot token
+    2. If valid, return it
+    3. If expired/missing, exchange OAuth token for new Copilot token
+    4. Save and return the new token
 
     Returns:
-        Access token if found, None otherwise.
+        Copilot API token if available, None otherwise.
+    """
+    _oauth_trace("get_stored_access_token: start")
+
+    # Try to get existing Copilot token
+    _oauth_trace("get_stored_access_token: loading copilot token...")
+    copilot_token = load_copilot_token()
+    _oauth_trace(f"get_stored_access_token: copilot_token={bool(copilot_token)}")
+
+    if copilot_token and not copilot_token.is_expired():
+        _oauth_trace("get_stored_access_token: returning existing valid token")
+        return copilot_token.token
+
+    # Need to refresh - get OAuth token
+    _oauth_trace("get_stored_access_token: token expired/missing, loading OAuth...")
+    oauth_tokens = load_tokens()
+    _oauth_trace(f"get_stored_access_token: oauth_tokens={bool(oauth_tokens)}")
+    if not oauth_tokens:
+        _oauth_trace("get_stored_access_token: no OAuth tokens, returning None")
+        return None
+
+    # Exchange OAuth token for Copilot token
+    _oauth_trace("get_stored_access_token: exchanging for Copilot token...")
+    try:
+        copilot_token = exchange_oauth_for_copilot_token(oauth_tokens.access_token)
+        _oauth_trace("get_stored_access_token: exchange successful, saving...")
+        save_copilot_token(copilot_token)
+        _oauth_trace("get_stored_access_token: returning new token")
+        return copilot_token.token
+    except RuntimeError as e:
+        # Token exchange failed - OAuth token may be invalid
+        _oauth_trace(f"get_stored_access_token: exchange failed: {e}")
+        return None
+
+
+def get_stored_oauth_token() -> Optional[str]:
+    """Get raw OAuth token from storage (for debugging/status).
+
+    Returns:
+        OAuth access token if found, None otherwise.
     """
     tokens = load_tokens()
     if tokens:
@@ -486,7 +720,19 @@ def complete_device_flow(
             expires_in=int(remaining),
             on_message=on_message,
         )
-        save_tokens(tokens)
+
+        # Exchange OAuth token for Copilot token
+        copilot_token = None
+        try:
+            if on_message:
+                on_message("Exchanging for Copilot API token...")
+            copilot_token = exchange_oauth_for_copilot_token(tokens.access_token)
+        except RuntimeError as e:
+            if on_message:
+                on_message(f"Warning: Could not get Copilot token: {e}")
+            # Continue anyway - OAuth token is still valid
+
+        save_tokens(tokens, copilot_token)
         clear_pending_auth()
         return tokens
     except (TimeoutError, RuntimeError) as e:
