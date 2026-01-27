@@ -8,8 +8,19 @@ import { PermissionModal } from '@/components/modals/PermissionModal';
 import { useUIStore } from '@/stores/ui';
 import { usePermissionStore } from '@/stores/permissions';
 
-// Get WebSocket URL from environment or default
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+// Get WebSocket URL from environment, or derive from current hostname
+function getWebSocketUrl(): string {
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL;
+  }
+  // Use same hostname as the page, default port 8080
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.hostname || 'localhost';
+  const port = import.meta.env.VITE_WS_PORT || '8080';
+  return `${protocol}//${host}:${port}`;
+}
+
+const WS_URL = getWebSocketUrl();
 
 function App() {
   const { status } = useWebSocket(WS_URL);
