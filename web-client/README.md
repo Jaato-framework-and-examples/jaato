@@ -70,6 +70,59 @@ See [docs/web-client-design.md](../docs/web-client-design.md) for detailed desig
 - **Vite** - Build tool
 - **Shiki** - Syntax highlighting (planned)
 
+### Why This Stack?
+
+#### React 18
+
+- **Streaming fits React's model** - `AgentOutputEvent` with `mode: "append"` maps naturally to state updates and re-renders
+- **Concurrent features** - `useTransition` and automatic batching help with high-frequency updates from streaming
+- **Ecosystem maturity** - Well-tested libraries for markdown (`react-markdown`), syntax highlighting (`shiki`), virtual scrolling (`react-window`)
+
+Vue 3 or Svelte would also work, but React has the deepest ecosystem for real-time updates, markdown, and code highlighting.
+
+#### Zustand over Redux/Context
+
+- **Minimal boilerplate** - No actions, reducers, or providers. Just functions that update state
+- **Subscriptions** - Components only re-render when their specific slice changes (critical for streaming)
+- **Works outside React** - WebSocket handler can update stores directly without hooks
+- **Tiny footprint** - 1.5kb bundle impact
+
+Redux Toolkit would add ceremony we don't need. React Context causes cascading re-renders with frequent updates.
+
+#### Tailwind CSS
+
+- **CSS variables for theming** - `var(--color-primary)` makes dark/light themes trivial
+- **No runtime cost** - Styles compiled at build time
+- **Responsive utilities** - `md:hidden lg:flex` for sidebar behavior
+
+CSS-in-JS (styled-components, Emotion) adds runtime overhead we don't need for a real-time app.
+
+#### Vite over webpack/CRA
+
+- **Fast HMR** - Sub-50ms hot reload during development
+- **ESM-native** - No bundling during dev, instant server start
+- **Simple config** - TypeScript, React, Tailwind work out of box
+
+Create React App is deprecated. Webpack is slower and more complex to configure.
+
+#### Native WebSocket + reconnecting-websocket
+
+- **Our protocol is simple** - JSON messages, no rooms, no namespaces needed
+- **Server compatibility** - Server already uses standard WebSocket (`websockets` library)
+- **Less overhead** - Socket.io adds protocol complexity we don't use
+- **Reconnection** - `reconnecting-websocket` (2kb) adds automatic reconnection with exponential backoff
+
+#### Trade-offs Accepted
+
+| Choice | Trade-off |
+|--------|-----------|
+| React | Larger bundle than Svelte/Preact |
+| Zustand | Less structured than Redux (fine for our scale) |
+| Tailwind | Class-heavy HTML (acceptable for productivity) |
+| Shiki | WASM load time for syntax highlighting |
+
+The stack prioritizes **developer velocity** and **real-time performance** over minimal bundle size, which matches our use case of a developer tool running locally.
+
 ### Project Structure
 
 ```
