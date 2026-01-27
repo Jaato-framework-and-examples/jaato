@@ -1940,7 +1940,7 @@ class JaatoServer:
         # Map provider names to their auth plugin names
         auth_plugin_map = {
             "anthropic": "anthropic_auth",
-            # Add other providers here as they implement auth plugins
+            "github_models": "github_auth",
         }
 
         plugin_name = auth_plugin_map.get(provider_name)
