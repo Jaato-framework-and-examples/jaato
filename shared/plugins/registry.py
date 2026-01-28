@@ -811,11 +811,14 @@ class PluginRegistry:
         Returns:
             List of ToolSchema objects for enabled tools only.
         """
+        _trace(f"get_enabled_tool_schemas: starting, exposed plugins: {list(self._exposed)}")
         schemas = []
         for name in self._exposed:
             try:
+                _trace(f"get_enabled_tool_schemas: getting schemas from '{name}'...")
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
+                _trace(f"get_enabled_tool_schemas: '{name}' returned {len(plugin_schemas)} schemas")
                 # Filter out disabled tools
                 enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
                 schemas.extend(enabled_schemas)
@@ -879,11 +882,14 @@ class PluginRegistry:
         Returns:
             List of ToolSchema objects for core tools only.
         """
+        _trace(f"get_core_tool_schemas: starting, exposed plugins: {list(self._exposed)}")
         schemas = []
         for name in self._exposed:
             try:
+                _trace(f"get_core_tool_schemas: getting schemas from '{name}'...")
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
+                _trace(f"get_core_tool_schemas: '{name}' returned {len(plugin_schemas)} schemas")
                 # Filter to core, enabled tools only
                 core_schemas = [
                     s for s in plugin_schemas

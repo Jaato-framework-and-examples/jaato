@@ -640,9 +640,10 @@ class JaatoServer:
             return True
 
         # Step 5: Configure tools (only if auth is complete)
-        # Use session env context so plugins can access session-specific config
+        # Use session env and workspace context so plugins can access session-specific
+        # config and tokens are loaded from the correct location
         self._emit_init_progress("Configuring tools", "running", 5, total_steps)
-        with self._with_session_env():
+        with self._with_session_env(), self._in_workspace():
             self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         gc_result = load_gc_from_file()
