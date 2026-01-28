@@ -42,7 +42,17 @@ from .events import (
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
+    # Workspace management events
+    WorkspaceListRequest,
+    WorkspaceListEvent,
+    WorkspaceCreateRequest,
+    WorkspaceCreatedEvent,
+    WorkspaceSelectRequest,
+    ConfigStatusEvent,
+    ConfigUpdateRequest,
+    ConfigUpdatedEvent,
 )
+from .workspace_manager import WorkspaceManager
 
 
 logger = logging.getLogger(__name__)
@@ -84,6 +94,7 @@ class JaatoWSServer:
         port: int = 8080,
         env_file: str = ".env",
         provider: Optional[str] = None,
+        workspace_root: Optional[str] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -92,6 +103,7 @@ class JaatoWSServer:
             port: Port to bind to.
             env_file: Path to .env file for JaatoServer.
             provider: Model provider override.
+            workspace_root: Root directory for workspaces (enables workspace mode).
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -102,12 +114,16 @@ class JaatoWSServer:
         self.port = port
         self._env_file = env_file
         self._provider = provider
+        self._workspace_root = workspace_root
 
         # Server state
         self._server: Optional[Any] = None
         self._clients: Dict[str, ClientConnection] = {}
         self._client_counter = 0
         self._lock = asyncio.Lock()
+
+        # Workspace manager (if workspace_root provided)
+        self._workspace_manager: Optional[WorkspaceManager] = None
 
         # Core server (runs in thread)
         self._jaato_server: Optional[JaatoServer] = None
@@ -120,22 +136,32 @@ class JaatoWSServer:
         """Start the server and block until shutdown.
 
         This method:
-        1. Initializes JaatoServer
-        2. Starts the WebSocket server
-        3. Runs event broadcasting loop
-        4. Blocks until stop() is called
+        1. Initializes WorkspaceManager (if workspace_root provided)
+        2. Initializes JaatoServer (only if NOT in workspace mode)
+        3. Starts the WebSocket server
+        4. Runs event broadcasting loop
+        5. Blocks until stop() is called
+
+        In workspace mode, JaatoServer initialization is deferred until
+        a workspace is selected and configured.
         """
-        # Initialize JaatoServer
-        self._jaato_server = JaatoServer(
-            env_file=self._env_file,
-            provider=self._provider,
-            on_event=self._on_server_event,
-        )
+        # Initialize workspace manager if workspace_root is provided
+        if self._workspace_root:
+            self._workspace_manager = WorkspaceManager(self._workspace_root)
+            self._workspace_manager.discover_workspaces()
+            logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
+        else:
+            # Non-workspace mode: initialize JaatoServer immediately
+            self._jaato_server = JaatoServer(
+                env_file=self._env_file,
+                provider=self._provider,
+                on_event=self._on_server_event,
+            )
 
-        if not self._jaato_server.initialize():
-            raise RuntimeError("Failed to initialize JaatoServer")
+            if not self._jaato_server.initialize():
+                raise RuntimeError("Failed to initialize JaatoServer")
 
-        logger.info(f"JaatoServer initialized: {self._jaato_server.model_provider}/{self._jaato_server.model_name}")
+            logger.info(f"JaatoServer initialized: {self._jaato_server.model_provider}/{self._jaato_server.model_name}")
 
         # Start WebSocket server
         async with websockets.serve(
@@ -266,13 +292,18 @@ class JaatoWSServer:
 
         # Send connected event
         try:
+            server_info = {
+                "client_id": client_id,
+                "workspace_mode": self._workspace_manager is not None,
+            }
+
+            if self._jaato_server:
+                server_info["model_provider"] = self._jaato_server.model_provider
+                server_info["model_name"] = self._jaato_server.model_name
+
             connected_event = ConnectedEvent(
                 protocol_version="1.0",
-                server_info={
-                    "model_provider": self._jaato_server.model_provider if self._jaato_server else "",
-                    "model_name": self._jaato_server.model_name if self._jaato_server else "",
-                    "client_id": client_id,
-                },
+                server_info=server_info,
             )
             await websocket.send(serialize_event(connected_event))
 
@@ -307,8 +338,16 @@ class JaatoWSServer:
             await self._send_error(client_id, str(e))
             return
 
-        if not self._jaato_server:
-            await self._send_error(client_id, "Server not initialized")
+        # Workspace requests work without JaatoServer
+        is_workspace_request = isinstance(event, (
+            WorkspaceListRequest,
+            WorkspaceCreateRequest,
+            WorkspaceSelectRequest,
+            ConfigUpdateRequest,
+        ))
+
+        if not self._jaato_server and not is_workspace_request:
+            await self._send_error(client_id, "No workspace selected")
             return
 
         # Route by event type
@@ -357,6 +396,24 @@ class JaatoWSServer:
                 )
             )
 
+        # Workspace management requests
+        elif isinstance(event, WorkspaceListRequest):
+            await self._handle_workspace_list(client_id)
+
+        elif isinstance(event, WorkspaceCreateRequest):
+            await self._handle_workspace_create(client_id, event.name)
+
+        elif isinstance(event, WorkspaceSelectRequest):
+            await self._handle_workspace_select(client_id, event.name)
+
+        elif isinstance(event, ConfigUpdateRequest):
+            await self._handle_config_update(
+                client_id,
+                event.provider,
+                event.model,
+                event.api_key,
+            )
+
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
 
@@ -378,6 +435,105 @@ class JaatoWSServer:
         )
 
     # =========================================================================
+    # Workspace Management Handlers
+    # =========================================================================
+
+    async def _handle_workspace_list(self, client_id: str) -> None:
+        """Handle workspace list request."""
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+
+        workspaces = self._workspace_manager.list_workspaces()
+        await self._send_to_client(
+            client_id,
+            WorkspaceListEvent(
+                workspaces=[ws.to_dict() for ws in workspaces],
+            )
+        )
+
+    async def _handle_workspace_create(self, client_id: str, name: str) -> None:
+        """Handle workspace creation request."""
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+
+        try:
+            ws_info = self._workspace_manager.create_workspace(name)
+            await self._send_to_client(
+                client_id,
+                WorkspaceCreatedEvent(workspace=ws_info.to_dict())
+            )
+        except ValueError as e:
+            await self._send_error(client_id, str(e))
+
+    async def _handle_workspace_select(self, client_id: str, name: str) -> None:
+        """Handle workspace selection request.
+
+        This selects the workspace and returns its configuration status.
+        """
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+
+        try:
+            ws_info = self._workspace_manager.select_workspace(name)
+            config_status = self._workspace_manager.get_config_status(name)
+
+            # Send config status to client
+            await self._send_to_client(
+                client_id,
+                ConfigStatusEvent(
+                    workspace=name,
+                    configured=ws_info.configured,
+                    provider=ws_info.provider,
+                    model=ws_info.model,
+                    available_providers=config_status.get("available_providers", []),
+                    missing_fields=config_status.get("missing_fields", []),
+                )
+            )
+
+        except ValueError as e:
+            await self._send_error(client_id, str(e))
+
+    async def _handle_config_update(
+        self,
+        client_id: str,
+        provider: str,
+        model: Optional[str],
+        api_key: Optional[str],
+    ) -> None:
+        """Handle workspace configuration update request."""
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+
+        selected = self._workspace_manager.get_selected_workspace()
+        if not selected:
+            await self._send_error(client_id, "No workspace selected")
+            return
+
+        try:
+            result = self._workspace_manager.update_config(
+                provider=provider,
+                model=model,
+                api_key=api_key,
+            )
+
+            await self._send_to_client(
+                client_id,
+                ConfigUpdatedEvent(
+                    workspace=result["workspace"],
+                    provider=result["provider"],
+                    model=result["model"],
+                    success=result["success"],
+                )
+            )
+
+        except ValueError as e:
+            await self._send_error(client_id, str(e))
+
+    # =========================================================================
     # Status Methods
     # =========================================================================
 
@@ -393,15 +549,23 @@ class JaatoWSServer:
 
     def get_server_info(self) -> Dict[str, Any]:
         """Get server status information."""
-        return {
+        info = {
             "host": self.host,
             "port": self.port,
             "is_running": self.is_running,
             "client_count": self.client_count,
+            "workspace_mode": self._workspace_manager is not None,
             "model_provider": self._jaato_server.model_provider if self._jaato_server else None,
             "model_name": self._jaato_server.model_name if self._jaato_server else None,
             "is_processing": self._jaato_server.is_processing if self._jaato_server else False,
         }
+
+        if self._workspace_manager:
+            selected = self._workspace_manager.get_selected_workspace()
+            info["workspace_root"] = str(self._workspace_manager.workspace_root)
+            info["selected_workspace"] = selected.name if selected else None
+
+        return info
 
 
 # =============================================================================
@@ -417,6 +581,11 @@ async def main():
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
     parser.add_argument("--env-file", default=".env", help="Path to .env file")
     parser.add_argument("--provider", help="Model provider override")
+    parser.add_argument(
+        "--workspace-root",
+        metavar="PATH",
+        help="Root directory for workspaces (enables workspace mode)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -431,6 +600,7 @@ async def main():
         port=args.port,
         env_file=args.env_file,
         provider=args.provider,
+        workspace_root=args.workspace_root,
     )
 
     try:

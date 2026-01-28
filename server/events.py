@@ -105,6 +105,16 @@ class EventType(str, Enum):
     MID_TURN_PROMPT_INJECTED = "mid_turn_prompt.injected"
     MID_TURN_INTERRUPT = "mid_turn_prompt.interrupt"  # Streaming interrupted for user prompt
 
+    # Workspace management (Client <-> Server)
+    WORKSPACE_LIST_REQUEST = "workspace.list"  # Client -> Server
+    WORKSPACE_LIST = "workspace.list_response"  # Server -> Client
+    WORKSPACE_CREATE_REQUEST = "workspace.create"  # Client -> Server
+    WORKSPACE_CREATED = "workspace.created"  # Server -> Client
+    WORKSPACE_SELECT_REQUEST = "workspace.select"  # Client -> Server
+    CONFIG_STATUS = "config.status"  # Server -> Client (response to workspace.select)
+    CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
+    CONFIG_UPDATED = "config.updated"  # Server -> Client
+
 
 # =============================================================================
 # Base Event
@@ -530,6 +540,60 @@ class SessionDescriptionUpdatedEvent(Event):
 
 
 # =============================================================================
+# Workspace Management Events (Server -> Client)
+# =============================================================================
+
+@dataclass
+class WorkspaceInfo:
+    """Information about a single workspace."""
+    name: str  # Relative path from workspace root (e.g., "project-a")
+    configured: bool  # Has valid .env with provider
+    provider: Optional[str] = None  # Provider if configured
+    model: Optional[str] = None  # Model if configured
+    last_accessed: Optional[str] = None  # ISO timestamp
+
+
+@dataclass
+class WorkspaceListEvent(Event):
+    """Response to workspace.list - list of available workspaces."""
+    type: EventType = field(default=EventType.WORKSPACE_LIST)
+    root: str = ""  # Absolute path to workspace root
+    workspaces: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of WorkspaceInfo as dicts
+
+
+@dataclass
+class WorkspaceCreatedEvent(Event):
+    """Response to workspace.create - new workspace created."""
+    type: EventType = field(default=EventType.WORKSPACE_CREATED)
+    name: str = ""  # Relative path from workspace root
+    path: str = ""  # Absolute path
+
+
+@dataclass
+class ConfigStatusEvent(Event):
+    """Response to workspace.select - configuration status of selected workspace."""
+    type: EventType = field(default=EventType.CONFIG_STATUS)
+    workspace: str = ""  # Workspace name (relative path)
+    configured: bool = False  # Has valid provider config
+    provider: Optional[str] = None  # Current provider if set
+    model: Optional[str] = None  # Current model if set
+    available_providers: List[str] = field(default_factory=list)  # Providers that can be configured
+    missing_fields: List[str] = field(default_factory=list)  # What's needed to complete config
+
+
+@dataclass
+class ConfigUpdatedEvent(Event):
+    """Response to config.update - configuration was updated."""
+    type: EventType = field(default=EventType.CONFIG_UPDATED)
+    workspace: str = ""  # Workspace name
+    provider: str = ""  # New provider
+    model: Optional[str] = None  # New model if set
+    success: bool = True
+    error: Optional[str] = None
+
+
+# =============================================================================
 # Client -> Server Events (Requests)
 # =============================================================================
 
@@ -629,6 +693,39 @@ class HistoryEvent(Event):
     # ^ List of serialized Message objects
     turn_accounting: List[Dict[str, int]] = field(default_factory=list)
     # ^ List of {prompt, output, total} per turn
+
+
+# =============================================================================
+# Workspace Management Requests (Client -> Server)
+# =============================================================================
+
+@dataclass
+class WorkspaceListRequest(Event):
+    """Client requests list of available workspaces."""
+    type: EventType = field(default=EventType.WORKSPACE_LIST_REQUEST)
+
+
+@dataclass
+class WorkspaceCreateRequest(Event):
+    """Client requests creation of a new workspace."""
+    type: EventType = field(default=EventType.WORKSPACE_CREATE_REQUEST)
+    name: str = ""  # Name for the new workspace (becomes subdirectory name)
+
+
+@dataclass
+class WorkspaceSelectRequest(Event):
+    """Client selects a workspace to use for the session."""
+    type: EventType = field(default=EventType.WORKSPACE_SELECT_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+
+
+@dataclass
+class ConfigUpdateRequest(Event):
+    """Client updates workspace configuration (provider, model, API key)."""
+    type: EventType = field(default=EventType.CONFIG_UPDATE_REQUEST)
+    provider: str = ""  # Provider name (anthropic, google, github, etc.)
+    model: Optional[str] = None  # Model name (optional, uses provider default)
+    api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
 
 
 @dataclass
@@ -744,6 +841,15 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
+    # Workspace management
+    EventType.WORKSPACE_LIST_REQUEST.value: WorkspaceListRequest,
+    EventType.WORKSPACE_LIST.value: WorkspaceListEvent,
+    EventType.WORKSPACE_CREATE_REQUEST.value: WorkspaceCreateRequest,
+    EventType.WORKSPACE_CREATED.value: WorkspaceCreatedEvent,
+    EventType.WORKSPACE_SELECT_REQUEST.value: WorkspaceSelectRequest,
+    EventType.CONFIG_STATUS.value: ConfigStatusEvent,
+    EventType.CONFIG_UPDATE_REQUEST.value: ConfigUpdateRequest,
+    EventType.CONFIG_UPDATED.value: ConfigUpdatedEvent,
 }
 
 
