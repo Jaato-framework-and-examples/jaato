@@ -300,6 +300,9 @@ class CopilotClient:
         response = self._make_request(COPILOT_CHAT_ENDPOINT, payload, stream=True)
 
         # Parse SSE stream using iter_lines for proper timeout handling
+        # Force UTF-8 encoding - SSE streams may not have charset in Content-Type,
+        # causing requests to default to ISO-8859-1 per HTTP/1.1 RFC
+        response.encoding = 'utf-8'
         try:
             for line in response.iter_lines(decode_unicode=True):
                 if not line:
