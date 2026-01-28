@@ -175,7 +175,7 @@ class TestListTools:
                 name="createPlan",
                 description="Create a new execution plan with steps.",
                 parameters={"type": "object", "properties": {}},
-                category="planning",
+                category="coordination",
             ),
         ])
         self.registry.register_plugin(planning_plugin)
@@ -456,7 +456,7 @@ class TestToolCategories:
         assert "code" in TOOL_CATEGORIES
         assert "search" in TOOL_CATEGORIES
         assert "memory" in TOOL_CATEGORIES
-        assert "planning" in TOOL_CATEGORIES
+        assert "coordination" in TOOL_CATEGORIES
         assert "system" in TOOL_CATEGORIES
         assert "web" in TOOL_CATEGORIES
         assert "communication" in TOOL_CATEGORIES

@@ -263,7 +263,7 @@ class TodoPlugin:
                     },
                     "required": ["title", "steps"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -282,7 +282,7 @@ class TodoPlugin:
                     },
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -312,7 +312,7 @@ class TodoPlugin:
                     },
                     "required": ["step_id", "status"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -328,7 +328,7 @@ class TodoPlugin:
                     },
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -351,7 +351,7 @@ class TodoPlugin:
                     },
                     "required": ["status"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -372,7 +372,7 @@ class TodoPlugin:
                     },
                     "required": ["description"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             # === Cross-agent collaboration tools ===
@@ -421,7 +421,7 @@ class TodoPlugin:
                     },
                     "required": ["event_types"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -492,7 +492,7 @@ class TodoPlugin:
                     },
                     "required": ["description", "depends_on"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -535,7 +535,7 @@ class TodoPlugin:
                     },
                     "required": ["step_id", "output"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -558,7 +558,7 @@ class TodoPlugin:
                     },
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -590,7 +590,7 @@ class TodoPlugin:
                     },
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -601,7 +601,7 @@ class TodoPlugin:
                     "properties": {},
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
             ToolSchema(
@@ -617,7 +617,7 @@ class TodoPlugin:
                     },
                     "required": ["subscription_id"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="core",
             ),
         ]

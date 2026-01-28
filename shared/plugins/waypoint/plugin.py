@@ -238,7 +238,7 @@ class WaypointPlugin:
                     "properties": {},
                     "required": [],
                 },
-                category="planning",
+                category="coordination",
             ),
             ToolSchema(
                 name="waypoint_info",
@@ -259,7 +259,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
-                category="planning",
+                category="coordination",
             ),
             ToolSchema(
                 name="create_waypoint",
@@ -282,7 +282,7 @@ class WaypointPlugin:
                     },
                     "required": ["description"],
                 },
-                category="planning",
+                category="coordination",
             ),
             ToolSchema(
                 name="restore_waypoint",
@@ -304,7 +304,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
-                category="planning",
+                category="coordination",
             ),
             ToolSchema(
                 name="delete_waypoint",
@@ -322,7 +322,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
-                category="planning",
+                category="coordination",
             ),
         ]
 

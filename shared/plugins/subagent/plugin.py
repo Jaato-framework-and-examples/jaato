@@ -199,24 +199,22 @@ class SubagentPlugin:
             ToolSchema(
                 name='spawn_subagent',
                 description=(
-                    'Spawn a subagent to handle a specialized task. Returns immediately with '
-                    'the agent_id while the subagent runs asynchronously in the background.\n\n'
-                    'ASYNC BEHAVIOR: The subagent executes independently. Its output appears in '
-                    'its own tab in the UI.\n\n'
+                    'DELEGATE work to a subagent that runs IN PARALLEL / IN THE BACKGROUND. '
+                    'Use this to run CONCURRENT tasks, OFFLOAD work, or have a HELPER agent '
+                    'handle specialized operations while you continue with other work.\n\n'
+                    'KEY CAPABILITIES:\n'
+                    '- Run tasks asynchronously without blocking\n'
+                    '- Execute multiple operations in parallel\n'
+                    '- Delegate specialized work to configured agent profiles\n'
+                    '- Coordinate complex multi-step workflows\n\n'
+                    'RETURNS: agent_id immediately. Subagent runs independently in background.\n\n'
                     'EVENT-DRIVEN PATTERN (RECOMMENDED):\n'
                     '1. Spawn the subagent with the task\n'
                     '2. Finish your turn - inform the user you delegated the task\n'
-                    '3. When the subagent completes, you will receive a COMPLETED event\n'
-                    '4. THEN process the results or spawn follow-up tasks\n\n'
-                    'DO NOT continuously poll list_active_subagents in a loop. This wastes tokens '
-                    'and prevents you from receiving completion events. Trust that the subagent '
-                    'will notify you when done.\n\n'
-                    'ONLY use list_active_subagents when:\n'
-                    '- User asks about subagent status\n'
-                    '- You need to check before sending a message via send_to_subagent\n'
-                    '- You suspect a subagent might be stuck (after several minutes)\n\n'
-                    'IMPORTANT: Always provide EITHER a profile name (for preconfigured agents) '
-                    'OR a descriptive name (for inline agents). This helps identify agents in the UI.'
+                    '3. When the subagent completes, you receive a COMPLETED event\n'
+                    '4. THEN process results or spawn follow-up tasks\n\n'
+                    'DO NOT poll list_active_subagents in a loop - wait for completion events.\n\n'
+                    'IMPORTANT: Provide EITHER a profile name (preconfigured) OR a descriptive name (inline).'
                 ),
                 parameters={
                     "type": "object",
@@ -329,7 +327,7 @@ class SubagentPlugin:
                     },
                     "required": ["task"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -363,7 +361,7 @@ class SubagentPlugin:
                     },
                     "required": ["subagent_id", "message"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -390,7 +388,7 @@ class SubagentPlugin:
                     },
                     "required": ["subagent_id"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -419,7 +417,7 @@ class SubagentPlugin:
                     },
                     "required": ["subagent_id"]
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -451,7 +449,7 @@ class SubagentPlugin:
                     "properties": {},
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -465,7 +463,7 @@ class SubagentPlugin:
                     "properties": {},
                     "required": []
                 },
-                category="planning",
+                category="coordination",
                 discoverability="discoverable",
             ),
         ]
