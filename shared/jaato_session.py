@@ -2845,37 +2845,87 @@ class JaatoSession:
             # Check if this is a token limit error
             error_str = str(e).lower()
             if 'token' in error_str and ('exceed' in error_str or 'limit' in error_str or 'maximum' in error_str):
-                self._trace(f"TOKEN_LIMIT_ERROR: Tool results too large, retrying with truncated results")
-                # Replace oversized results with error messages
-                truncated_results = self._truncate_oversized_results(tool_results)
-                return self._do_send_tool_results(
-                    truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
-                )
+                # Extract numbers from error message (e.g., "181145 exceeds the limit of 128000")
+                import re
+                numbers = re.findall(r'\d+', str(e))
+                current_tokens = int(numbers[0]) if len(numbers) >= 1 else 200000
+                limit_tokens = int(numbers[1]) if len(numbers) >= 2 else 128000
+                overflow = current_tokens - limit_tokens
+
+                self._trace(f"TOKEN_LIMIT_ERROR: current={current_tokens}, limit={limit_tokens}, overflow={overflow}")
+
+                # Truncate results to reduce by at least the overflow amount (plus 10% safety margin)
+                truncated_results = self._truncate_results_to_fit(tool_results, overflow * 1.1)
+
+                if truncated_results != tool_results:
+                    self._trace(f"TOKEN_LIMIT_ERROR: Retrying with truncated results")
+                    return self._do_send_tool_results(
+                        truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+                # If truncation didn't help, re-raise
             raise
 
-    def _truncate_oversized_results(self, tool_results: List[ToolResult]) -> List[ToolResult]:
-        """Replace oversized tool results with error messages guiding the model to retry."""
-        truncated = []
-        for tr in tool_results:
+    def _truncate_results_to_fit(self, tool_results: List[ToolResult], tokens_to_remove: float) -> List[ToolResult]:
+        """Truncate tool results to reduce token count by the specified amount.
+
+        Strategy: Truncate from largest results first, proportionally.
+        """
+        if tokens_to_remove <= 0:
+            return tool_results
+
+        # Estimate size of each result
+        result_sizes = []
+        for i, tr in enumerate(tool_results):
             result_str = str(tr.result) if tr.result is not None else ""
-            # Estimate tokens (~4 chars per token) - if over 100K tokens, truncate
-            estimated_tokens = len(result_str) // 4
-            if estimated_tokens > 100000:
+            estimated_tokens = len(result_str) / 4  # ~4 chars per token
+            result_sizes.append((i, estimated_tokens, tr))
+
+        # Sort by size descending (largest first)
+        result_sizes.sort(key=lambda x: x[1], reverse=True)
+
+        total_tokens = sum(size for _, size, _ in result_sizes)
+        tokens_remaining_to_remove = tokens_to_remove
+
+        truncated = list(tool_results)  # Copy
+
+        for idx, size, tr in result_sizes:
+            if tokens_remaining_to_remove <= 0:
+                break
+
+            # Calculate how much to remove from this result
+            # Remove proportionally more from larger results
+            proportion = size / total_tokens if total_tokens > 0 else 1
+            tokens_to_cut = min(size * 0.9, tokens_remaining_to_remove * proportion * 1.5)  # Cut up to 90% of this result
+
+            if tokens_to_cut > size * 0.5:  # If cutting more than 50%, replace with error message
                 error_msg = (
-                    f"[ERROR: Result too large ({estimated_tokens:,} estimated tokens). "
-                    f"This exceeds the context window. "
-                    f"Use chunked reading with offset/limit parameters, or process in smaller pieces.]"
-                    f"\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+                    f"[Result truncated: {tr.name} returned ~{int(size):,} tokens which contributed to "
+                    f"exceeding the input limit. Use chunked reading with offset/limit parameters, "
+                    f"or process in smaller pieces.]"
                 )
-                truncated.append(ToolResult(
+                truncated[idx] = ToolResult(
                     call_id=tr.call_id,
                     name=tr.name,
                     result=error_msg,
                     is_error=True,
-                    attachments=None  # Drop attachments too
-                ))
+                    attachments=None
+                )
+                tokens_remaining_to_remove -= size
             else:
-                truncated.append(tr)
+                # Partial truncation - keep beginning and note truncation
+                result_str = str(tr.result) if tr.result is not None else ""
+                chars_to_keep = int((size - tokens_to_cut) * 4)
+                truncated_content = result_str[:chars_to_keep]
+                truncated_content += f"\n\n[... truncated {int(tokens_to_cut):,} tokens to fit context limit ...]"
+                truncated[idx] = ToolResult(
+                    call_id=tr.call_id,
+                    name=tr.name,
+                    result=truncated_content,
+                    is_error=tr.is_error,
+                    attachments=tr.attachments
+                )
+                tokens_remaining_to_remove -= tokens_to_cut
+
         return truncated
 
     def _do_send_tool_results(

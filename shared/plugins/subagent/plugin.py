@@ -245,12 +245,16 @@ class SubagentPlugin:
                             "description": (
                                 "Optional context to provide to the subagent. Can be either:\n"
                                 "- A string: Simple text context\n"
-                                "- An object with structured context from your memory:\n"
-                                "  - files: {path: COMPLETE_CONTENT} - full file contents you've read\n"
+                                "- An object with structured context:\n"
+                                "  - files: {path: content} - relevant file contents\n"
                                 "  - findings: [list of facts/conclusions]\n"
                                 "  - notes: free-form guidance\n\n"
-                                "CRITICAL: Share COMPLETE file contents, not summaries or excerpts. "
-                                "Never omit content 'for brevity'. Do NOT re-read files - use your memory."
+                                "TOKEN ECONOMY: Be selective about what you share:\n"
+                                "- Share only content RELEVANT to the subagent's specific task\n"
+                                "- For large files, share only the relevant sections/functions\n"
+                                "- Prefer file PATHS over full content when the subagent can read them\n"
+                                "- Use 'findings' to summarize insights instead of raw data\n"
+                                "- Remember: every token shared reduces the subagent's working space"
                             ),
                             "oneOf": [
                                 {"type": "string"},
@@ -259,7 +263,7 @@ class SubagentPlugin:
                                     "properties": {
                                         "files": {
                                             "type": "object",
-                                            "description": "Files from memory: {path: COMPLETE content, not summarized}",
+                                            "description": "Relevant file content: {path: content}. Share only sections relevant to the task, or just paths if the subagent can read them.",
                                             "additionalProperties": {"type": "string"}
                                         },
                                         "findings": {
@@ -590,14 +594,18 @@ class SubagentPlugin:
             "- type: 'truncate', 'summarize', or 'hybrid'\n"
             "- threshold_percent: Trigger GC at this context usage (e.g., 5.0 for early testing)\n"
             "- preserve_recent_turns: Number of recent turns to keep after GC\n\n"
-            "CONTEXT SHARING (TELEPATHY):\n"
-            "When spawning subagents, share context from YOUR MEMORY (not disk):\n"
-            "- Use context parameter: {files: {path: COMPLETE_CONTENT}, findings: [...], notes: '...'}\n"
-            "- CRITICAL: Share COMPLETE file contents, never summarize or omit 'for brevity'.\n"
-            "- Do NOT re-read files - copy the full content directly from your context.\n"
-            "- Subagents will automatically have a share_context tool to send findings back to you.\n\n"
-            "Example spawn with context:\n"
-            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<FULL FILE CONTENT HERE>'}, findings: ['Uses JWT']})\n\n"
+            "CONTEXT SHARING (TOKEN-AWARE):\n"
+            "When spawning subagents, BE SELECTIVE about what you share:\n"
+            "- Use context parameter: {files: {path: content}, findings: [...], notes: '...'}\n"
+            "- Share only content RELEVANT to the subagent's specific task\n"
+            "- For large files, share only the relevant sections (functions, classes)\n"
+            "- Prefer file PATHS when the subagent has file_edit tools and can read them\n"
+            "- Use 'findings' to share insights/conclusions instead of raw content\n"
+            "- Every token you share reduces the subagent's working space for its task\n"
+            "- DON'T share everything upfront - subagents can ASK for more context if needed,\n"
+            "  and you'll see their request and can respond via send_to_subagent\n\n"
+            "Example spawn with selective context:\n"
+            "  spawn_subagent(task='fix auth bug in login()', context={files: {'auth.py': '<ONLY login() function>'}, findings: ['Uses JWT', 'Bug is in token validation']})\n\n"
             "ACTIVE COLLABORATION WITH TODO TOOLS:\n"
             "Use TODO planning tools for structured parent-child collaboration:\n\n"
             "PARENT WORKFLOW (before spawning):\n"
@@ -608,7 +616,9 @@ class SubagentPlugin:
             "CHILD WORKFLOW (in subagent):\n"
             "1. Create its own plan with createPlan for its subtask\n"
             "2. Execute work and report progress with updateStep\n"
-            "3. Complete with completePlan - this triggers events to parent\n\n"
+            "3. If you need additional context, ASK the parent - they see your output and can\n"
+            "   respond via send_to_subagent with the information you need\n"
+            "4. Complete with completePlan - this triggers events to parent\n\n"
             "SYNCHRONIZATION:\n"
             "- Parent's addDependentStep creates BLOCKED steps that auto-unblock when child completes\n"
             "- Use getBlockedSteps to see what's waiting on subagents\n"
