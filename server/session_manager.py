@@ -946,10 +946,9 @@ class SessionManager:
         if session.server:
             tools_data = session.server.get_tool_status()
 
-        # Get models list from the session's server
+        # Models list is lazy-loaded on demand to avoid API calls during init
+        # Client fetches models when user requests completions
         models_data = []
-        if session.server:
-            models_data = session.server.get_available_models()
 
         return SessionInfoEvent(
             session_id=session.session_id,

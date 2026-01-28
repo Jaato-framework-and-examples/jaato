@@ -434,18 +434,15 @@ class GitHubModelsProvider:
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:
-        """Set the model to use and verify it responds.
+        """Set the model to use.
+
+        Model validation is deferred to the first API call to avoid
+        unnecessary API usage during initialization.
 
         Args:
             model: Model ID (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet').
-
-        Raises:
-            ModelNotFoundError: Model doesn't exist or is not accessible.
         """
         self._model_name = model
-
-        # Verify model can actually respond
-        self._verify_model_responds()
 
     def _verify_model_responds(self) -> None:
         """Verify the model can actually respond.
