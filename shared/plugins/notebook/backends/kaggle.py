@@ -155,8 +155,13 @@ class KaggleBackend(NotebookBackend):
         auth_type = 'Bearer' if 'Bearer' in str(headers) else 'Basic' if 'Basic' in str(headers) else 'none'
         self._trace(f"REST status API: {url} (auth: {auth_type})")
 
+        from shared.http import get_requests_kwargs
+        proxy_kwargs = get_requests_kwargs(url)
+        if 'headers' in proxy_kwargs:
+            headers.update(proxy_kwargs.pop('headers'))
+
         try:
-            resp = requests.get(url, headers=headers, timeout=30)
+            resp = requests.get(url, headers=headers, timeout=30, **proxy_kwargs)
             if resp.status_code == 200:
                 data = resp.json()
                 status = data.get("status") or data.get("result", {}).get("status")
@@ -187,8 +192,13 @@ class KaggleBackend(NotebookBackend):
         headers = self._get_auth_headers()
         self._trace(f"REST output API: {url}")
 
+        from shared.http import get_requests_kwargs
+        proxy_kwargs = get_requests_kwargs(url)
+        if 'headers' in proxy_kwargs:
+            headers.update(proxy_kwargs.pop('headers'))
+
         try:
-            resp = requests.get(url, headers=headers, timeout=60)
+            resp = requests.get(url, headers=headers, timeout=60, **proxy_kwargs)
             if resp.status_code == 200:
                 # Response might be JSON with file list and download URLs
                 # or it might be the actual file content
@@ -212,7 +222,10 @@ class KaggleBackend(NotebookBackend):
                         file_url = file_info.get("url")
                         file_name = file_info.get("name", "output")
                         if file_url:
-                            file_resp = requests.get(file_url, headers=headers, timeout=60)
+                            file_proxy_kwargs = get_requests_kwargs(file_url)
+                            if 'headers' in file_proxy_kwargs:
+                                headers.update(file_proxy_kwargs.pop('headers'))
+                            file_resp = requests.get(file_url, headers=headers, timeout=60, **file_proxy_kwargs)
                             if file_resp.status_code == 200:
                                 file_path = os.path.join(output_dir, file_name)
                                 with open(file_path, "wb") as f:

@@ -99,22 +99,13 @@ class CopilotClient:
     def _create_session(self) -> requests.Session:
         """Create requests session with appropriate proxy configuration.
 
-        If JAATO_KERBEROS_PROXY is enabled, configures session with Kerberos
-        proxy authentication. Otherwise uses default session.
+        Uses shared.http module for unified proxy/Kerberos configuration.
 
         Returns:
             Configured requests.Session.
         """
-        from .env import is_kerberos_proxy_enabled
-
-        if is_kerberos_proxy_enabled():
-            try:
-                from .proxy_auth import create_kerberos_proxy_session
-                return create_kerberos_proxy_session()
-            except ImportError:
-                pass  # pyspnego not installed
-
-        return requests.Session()
+        from shared.http import get_requests_session
+        return get_requests_session()
 
     def _make_request(
         self,
@@ -142,20 +133,15 @@ class CopilotClient:
         Raises:
             RuntimeError: If request fails
         """
-        from .env import should_bypass_proxy, is_kerberos_proxy_enabled
+        from shared.http import should_bypass_proxy
 
         headers = {
             **COPILOT_HEADERS,
             "Authorization": f"Bearer {self._token}",
         }
 
-        # Determine proxy configuration
-        if should_bypass_proxy(url):
-            proxies = {}  # Bypass proxy
-        elif is_kerberos_proxy_enabled():
-            proxies = None  # Use session's Kerberos-configured proxy
-        else:
-            proxies = None  # Use default proxy from env
+        # Bypass proxy if URL matches JAATO_NO_PROXY
+        proxies = {} if should_bypass_proxy(url) else None
 
         try:
             response = self._session.request(

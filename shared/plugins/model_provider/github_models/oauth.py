@@ -148,7 +148,7 @@ def _make_request(
     Raises:
         RuntimeError: If request fails.
     """
-    from .env import get_url_opener
+    from shared.http import get_url_opener
 
     default_headers = {
         "Accept": "application/json",
@@ -203,7 +203,7 @@ def _make_get_request(
     Raises:
         RuntimeError: If request fails.
     """
-    from .env import get_url_opener
+    from shared.http import get_url_opener
 
     default_headers = {
         "Accept": "application/json",

@@ -295,13 +295,24 @@ web_fetch(url="https://example.com", include_headers=true)
         except ImportError:
             try:
                 import requests
+                from shared.http import get_requests_kwargs
+
+                # Get proxy configuration
+                proxy_kwargs = get_requests_kwargs(url)
+
+                # Merge custom headers with proxy headers
+                request_headers = headers.copy()
+                if 'headers' in proxy_kwargs:
+                    request_headers.update(proxy_kwargs.pop('headers'))
+
                 # Fallback to requests if httpx not available
                 response = requests.get(
                     url,
                     timeout=self._timeout,
-                    headers=headers,
+                    headers=request_headers,
                     allow_redirects=self._follow_redirects,
                     stream=True,  # Don't download body yet
+                    **proxy_kwargs,
                 )
                 response.raise_for_status()
 
@@ -330,11 +341,22 @@ web_fetch(url="https://example.com", include_headers=true)
             except Exception as e:
                 return "", url, f"Request failed: {str(e)}", None
 
+        from shared.http import get_httpx_kwargs
+
+        # Get proxy configuration for httpx
+        proxy_kwargs = get_httpx_kwargs(url)
+
+        # Merge custom headers with proxy headers
+        request_headers = headers.copy()
+        if 'headers' in proxy_kwargs:
+            request_headers.update(proxy_kwargs.pop('headers'))
+
         try:
             with httpx.Client(
                 timeout=self._timeout,
                 follow_redirects=self._follow_redirects,
-                headers=headers,
+                headers=request_headers,
+                **proxy_kwargs,
             ) as client:
                 # First, do a HEAD request to check content type (if supported)
                 # Fall back to GET with stream if HEAD fails
