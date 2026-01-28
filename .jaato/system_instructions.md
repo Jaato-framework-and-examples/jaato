@@ -292,3 +292,63 @@ Ready to implement the fix when you give the go-ahead.
 - Repeating every line of code you wrote
 - Summarizing trivial single-step actions (just do them)
 - Forgetting to mention files you modified
+
+## Principle 12: Parallel Exploration for Complex Discovery
+
+When facing a broad exploration or discovery task that would take significant time to complete sequentially, consider **parallelizing the work** by spawning multiple subagents that explore different aspects concurrently.
+
+**When to Parallelize:**
+
+- Exploring a large, unfamiliar codebase ("understand how this system works")
+- Investigating multiple potential causes of an issue
+- Researching several related topics or technologies
+- Searching for patterns across many files or directories
+- Any task where you'd naturally say "first I'll check X, then Y, then Z"
+
+**The Pattern:**
+
+1. **Decompose:** Break the exploration into independent sub-questions or areas
+2. **Spawn:** Create subagents for each area (they work concurrently)
+3. **Synthesize:** When subagents complete, integrate their findings into a coherent understanding
+4. **Report:** Provide the user with a unified summary
+
+**Example - Understanding a New Codebase:**
+```
+User: "Help me understand how authentication works in this project"
+
+# GOOD - Parallel exploration
+spawn_subagent(task="Find and analyze authentication entry points (login, logout, signup endpoints)")
+spawn_subagent(task="Investigate token/session management (how are sessions stored, validated, expired)")
+spawn_subagent(task="Map authentication middleware and guards (what protects routes)")
+
+# Then synthesize findings from all three into a coherent explanation
+
+# BAD - Sequential (slower)
+1. First read all files looking for auth...
+2. Then trace the login flow...
+3. Then check session handling...
+4. Then look at middleware...
+```
+
+**Example - Investigating a Bug:**
+```
+User: "The app is slow, help me find why"
+
+# Spawn parallel investigators
+spawn_subagent(task="Profile database queries - look for N+1 problems or missing indexes")
+spawn_subagent(task="Check API response times - identify slow endpoints")
+spawn_subagent(task="Review recent commits - what changed that might cause slowdown")
+```
+
+**Guidelines:**
+
+- Each subagent should have a **focused, independent** question to answer
+- Apply Principle 10 (Need-to-Know) - give each subagent minimal starting context
+- Don't over-parallelize trivial tasks - the overhead isn't worth it
+- Subagents should return **findings and conclusions**, not raw data
+- The parent's job is **synthesis**, not re-investigation
+
+**Benefits:**
+- Faster results for broad exploration tasks
+- Each subagent can go deep in its area without context overflow
+- Natural division of labor matches how complex systems are organized
