@@ -596,10 +596,17 @@ class JaatoServer:
                     auth_plugin.set_output_callback(plugin_output)
 
                     # Run the login command to show URL and instructions
+                    # This is a blocking call that waits for OAuth flow to complete
                     auth_plugin.execute_user_command(auth_plugin.get_user_commands()[0].name, {"action": "login"})
 
-                    self._emit_init_progress("Verifying authentication", "pending", 4, total_steps,
-                                             "Waiting for authentication")
+                    # Check if auth completed during the plugin execution
+                    # (the plugin blocks until OAuth flow completes or times out)
+                    self._check_auth_completion()
+
+                    # If still pending after check, emit waiting status
+                    if self._auth_pending:
+                        self._emit_init_progress("Verifying authentication", "pending", 4, total_steps,
+                                                 "Waiting for authentication")
                 else:
                     self._emit_init_progress("Verifying authentication", "error", 4, total_steps,
                                              "No credentials found")
