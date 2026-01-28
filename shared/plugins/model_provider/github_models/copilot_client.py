@@ -222,13 +222,34 @@ class CopilotClient:
                     except requests.exceptions.HTTPError:
                         pass  # Fall through to original error handling
 
-            error_body = e.response.text if e.response else str(e)
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            error_body = e.response.text if e.response is not None else str(e)
             try:
                 error_data = json.loads(error_body)
                 error_msg = error_data.get("error", {}).get("message", error_body)
             except json.JSONDecodeError:
                 error_msg = error_body
-            raise RuntimeError(f"Copilot API error (HTTP {e.response.status_code if e.response else 'unknown'}): {error_msg}") from e
+
+            # For 400 errors, add diagnostic context about the request
+            diagnostic = ""
+            if status_code == 400 and data:
+                messages = data.get("messages", [])
+                msg_summary = []
+                for m in messages[-5:]:  # Last 5 messages
+                    role = m.get("role", "?")
+                    content_len = len(m.get("content") or "") if m.get("content") else 0
+                    tool_calls = len(m.get("tool_calls", []))
+                    tool_call_id = m.get("tool_call_id", "")[:16] if m.get("tool_call_id") else ""
+                    if role == "assistant" and tool_calls:
+                        ids = [tc.get("id", "?")[:16] for tc in m.get("tool_calls", [])]
+                        msg_summary.append(f"{role}(tools={tool_calls}, ids={ids})")
+                    elif role == "tool":
+                        msg_summary.append(f"{role}(id={tool_call_id}, content_len={content_len})")
+                    else:
+                        msg_summary.append(f"{role}(content_len={content_len})")
+                diagnostic = f" | Last messages: {msg_summary}"
+
+            raise RuntimeError(f"Copilot API error (HTTP {status_code}): {error_msg}{diagnostic}") from e
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Copilot API request failed: {e}") from e
 
