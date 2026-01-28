@@ -336,7 +336,12 @@ class TestInstructionBudget:
 
     def test_snapshot(self):
         """snapshot should produce complete serializable output."""
-        budget = InstructionBudget(context_limit=128_000)
+        budget = InstructionBudget(
+            session_id="session-123",
+            agent_id="main",
+            agent_type="main",
+            context_limit=128_000,
+        )
         budget.set_entry(InstructionSource.SYSTEM, tokens=500)
         budget.set_entry(InstructionSource.PLUGIN, tokens=0)
         budget.add_child(
@@ -348,6 +353,9 @@ class TestInstructionBudget:
 
         snap = budget.snapshot()
 
+        assert snap["session_id"] == "session-123"
+        assert snap["agent_id"] == "main"
+        assert snap["agent_type"] == "main"
         assert snap["context_limit"] == 128_000
         assert snap["total_tokens"] == 1300
         assert "entries" in snap
@@ -357,12 +365,29 @@ class TestInstructionBudget:
 
     def test_create_default(self):
         """create_default should initialize all sources."""
-        budget = InstructionBudget.create_default(context_limit=200_000)
+        budget = InstructionBudget.create_default(
+            session_id="session-456",
+            agent_id="explore-1",
+            agent_type="explore",
+            context_limit=200_000,
+        )
 
+        assert budget.session_id == "session-456"
+        assert budget.agent_id == "explore-1"
+        assert budget.agent_type == "explore"
         assert budget.context_limit == 200_000
         for source in InstructionSource:
             assert budget.get_entry(source) is not None
             assert budget.get_entry(source).tokens == 0
+
+    def test_create_default_agent_type_defaults_to_agent_id(self):
+        """create_default should default agent_type to agent_id if not provided."""
+        budget = InstructionBudget.create_default(
+            session_id="session-789",
+            agent_id="custom-agent",
+        )
+
+        assert budget.agent_type == "custom-agent"
 
 
 class TestConversationTurnType:

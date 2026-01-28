@@ -154,7 +154,19 @@ class SourceEntry:
 
 @dataclass
 class InstructionBudget:
-    """Tracks token usage by instruction source for a session."""
+    """Tracks token usage by instruction source for an agent.
+
+    Attributes:
+        session_id: Server-managed session ID (umbrella that groups all agents).
+                    This is what clients connect to, not JaatoSession.
+        agent_id: Identifier for this agent within the session ("main", "explore-1", etc.)
+        agent_type: Type of agent ("main", "explore", "plan", etc.) for display purposes.
+        entries: Token usage broken down by instruction source.
+        context_limit: Model's context window size.
+    """
+    session_id: str = ""
+    agent_id: str = "main"
+    agent_type: Optional[str] = None
     entries: Dict[InstructionSource, SourceEntry] = field(default_factory=dict)
     context_limit: int = 128_000  # Model's context window
 
@@ -262,6 +274,9 @@ class InstructionBudget:
     def snapshot(self) -> Dict[str, Any]:
         """Serializable snapshot for UI events."""
         return {
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "agent_type": self.agent_type,
             "context_limit": self.context_limit,
             "total_tokens": self.total_tokens(),
             "gc_eligible_tokens": self.gc_eligible_tokens(),
@@ -279,9 +294,20 @@ class InstructionBudget:
     # --- Convenience Factories ---
 
     @classmethod
-    def create_default(cls, context_limit: int = 128_000) -> "InstructionBudget":
+    def create_default(
+        cls,
+        session_id: str,
+        agent_id: str = "main",
+        agent_type: Optional[str] = None,
+        context_limit: int = 128_000,
+    ) -> "InstructionBudget":
         """Create a budget with default empty entries for all sources."""
-        budget = cls(context_limit=context_limit)
+        budget = cls(
+            session_id=session_id,
+            agent_id=agent_id,
+            agent_type=agent_type or agent_id,
+            context_limit=context_limit,
+        )
         for source in InstructionSource:
             budget.set_entry(source, tokens=0)
         return budget

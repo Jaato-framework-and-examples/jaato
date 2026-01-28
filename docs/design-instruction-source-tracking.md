@@ -114,66 +114,51 @@ class SourceEntry:
     label: Optional[str] = None  # Display label (e.g., tool name, turn description)
     children: Dict[str, "SourceEntry"] = field(default_factory=dict)
 
-    def total_tokens(self) -> int:
-        """Total tokens including children"""
-        if self.children:
-            return sum(child.total_tokens() for child in self.children.values())
-        return self.tokens
-
-    def gc_eligible_tokens(self) -> int:
-        """Tokens that can be reclaimed by GC"""
-        if self.gc_policy == GCPolicy.LOCKED:
-            return 0
-        if self.gc_policy == GCPolicy.EPHEMERAL:
-            return self.total_tokens()
-        if self.children:
-            return sum(child.gc_eligible_tokens() for child in self.children.values())
-        return 0
-
 
 @dataclass
 class InstructionBudget:
-    """Tracks token usage by instruction source for a session"""
+    """Tracks token usage by instruction source for an agent.
+
+    Identity Model:
+    - session_id: Server-managed session (umbrella that groups all agents).
+                  This is what clients connect/reconnect to.
+    - agent_id: This agent's identity within the session ("main", "explore-1", etc.)
+    - agent_type: Type for display purposes ("main", "explore", "plan", etc.)
+
+    One InstructionBudget per agent (JaatoSession). When client reconnects to a
+    session_id, server provides budgets for ALL agents in that session.
+    """
+    session_id: str = ""           # Server session (umbrella)
+    agent_id: str = "main"         # This agent within the session
+    agent_type: Optional[str] = None  # For display
     entries: Dict[InstructionSource, SourceEntry] = field(default_factory=dict)
-    context_limit: int = 128_000  # Model's context window
-
-    def total_tokens(self) -> int:
-        """Total tokens across all sources"""
-        return sum(entry.total_tokens() for entry in self.entries.values())
-
-    def gc_eligible_tokens(self) -> int:
-        """Total tokens that can be reclaimed by GC"""
-        return sum(entry.gc_eligible_tokens() for entry in self.entries.values())
-
-    def utilization_percent(self) -> float:
-        """Context window utilization as percentage"""
-        return (self.total_tokens() / self.context_limit) * 100
-
-    def snapshot(self) -> Dict:
-        """Serializable snapshot for UI events"""
-        return {
-            "context_limit": self.context_limit,
-            "total_tokens": self.total_tokens(),
-            "gc_eligible_tokens": self.gc_eligible_tokens(),
-            "utilization_percent": self.utilization_percent(),
-            "entries": {
-                source.value: self._entry_to_dict(entry)
-                for source, entry in self.entries.items()
-            }
-        }
-
-    def _entry_to_dict(self, entry: SourceEntry) -> Dict:
-        return {
-            "tokens": entry.tokens,
-            "total_tokens": entry.total_tokens(),
-            "gc_policy": entry.gc_policy.value,
-            "label": entry.label,
-            "children": {
-                key: self._entry_to_dict(child)
-                for key, child in entry.children.items()
-            } if entry.children else None
-        }
+    context_limit: int = 128_000   # Model's context window
 ```
+
+### Session/Agent Relationship
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Server Session (session_id="abc123")               │
+│  - What client connects/reconnects to               │
+│  - Managed by SessionManager                        │
+│  - Persists across client disconnects               │
+│                                                     │
+│  ┌───────────────┐  ┌───────────────┐              │
+│  │ Main Agent    │  │ Subagent      │  ...         │
+│  │ agent_id=main │  │ agent_id=     │              │
+│  │               │  │ explore-1     │              │
+│  │ JaatoSession  │  │ JaatoSession  │              │
+│  │ + Budget      │  │ + Budget      │              │
+│  └───────────────┘  └───────────────┘              │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+On client reconnect:
+- Server gathers all `InstructionBudget` where `session_id` matches
+- Client receives budgets for main + all subagents (active or completed)
+- UI shows: `[Total] [Main] [explore-1] [subagent-2] ...`
 
 ---
 
