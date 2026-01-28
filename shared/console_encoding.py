@@ -3,10 +3,38 @@
 Windows consoles (cmd, PowerShell) use code pages like cp1252 by default,
 which cannot encode certain Unicode characters (emojis, checkmarks, etc.).
 This module provides utilities to configure UTF-8 encoding for console output.
+
+Git Bash (mintty/MSYS2) on Windows requires additional handling as it operates
+in a POSIX-like environment that may not respect Windows console encoding settings.
 """
 
 import os
 import sys
+
+
+def _is_git_bash() -> bool:
+    """Detect if running under Git Bash (mintty/MSYS2) on Windows.
+
+    Git Bash sets MSYSTEM to indicate the MSYS2 environment type:
+    - MINGW64: 64-bit MinGW
+    - MINGW32: 32-bit MinGW
+    - MSYS: MSYS2 environment
+
+    Additionally, mintty (Git Bash's terminal) sets TERM_PROGRAM.
+    """
+    if sys.platform != 'win32':
+        return False
+
+    # MSYSTEM is set by Git Bash/MSYS2 environments
+    msystem = os.environ.get('MSYSTEM', '')
+    if msystem in ('MINGW64', 'MINGW32', 'MSYS', 'UCRT64', 'CLANG64', 'CLANGARM64'):
+        return True
+
+    # Also check for mintty terminal (Git Bash default terminal)
+    if os.environ.get('TERM_PROGRAM') == 'mintty':
+        return True
+
+    return False
 
 
 def configure_utf8_output() -> None:
@@ -29,6 +57,16 @@ def configure_utf8_output() -> None:
         # PYTHONIOENCODING sets encoding for stdin/stdout/stderr
         os.environ.setdefault('PYTHONUTF8', '1')
         os.environ.setdefault('PYTHONIOENCODING', 'utf-8:replace')
+
+        # Git Bash (mintty/MSYS2) requires additional locale settings
+        # to properly handle UTF-8 encoding in its POSIX-like environment
+        if _is_git_bash():
+            # Set POSIX locale variables for UTF-8
+            # These are respected by mintty and MSYS2 applications
+            os.environ.setdefault('LANG', 'en_US.UTF-8')
+            os.environ.setdefault('LC_ALL', 'en_US.UTF-8')
+            # Ensure consistent character width calculation
+            os.environ.setdefault('LC_CTYPE', 'en_US.UTF-8')
 
         try:
             # Python 3.7+ supports reconfigure() on text streams
