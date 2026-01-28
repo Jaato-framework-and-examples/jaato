@@ -427,12 +427,16 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
+    from shared.http import get_requests_kwargs
+    proxy_kwargs = get_requests_kwargs(OAUTH_TOKEN_URL)
+
     try:
         resp = requests.post(
             OAUTH_TOKEN_URL,
             data=token_data,
             headers=headers,
             timeout=30,
+            **proxy_kwargs,
         )
         if resp.status_code != 200:
             try:
@@ -474,12 +478,16 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
 def _get_user_email(access_token: str) -> Optional[str]:
     """Get user email from Google userinfo endpoint."""
     import requests
+    from shared.http import get_requests_kwargs
+
+    proxy_kwargs = get_requests_kwargs(OAUTH_USERINFO_URL)
 
     try:
         resp = requests.get(
             OAUTH_USERINFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
+            **proxy_kwargs,
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -502,6 +510,7 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
         RuntimeError: If refresh fails.
     """
     import requests
+    from shared.http import get_requests_kwargs
 
     token_data = {
         "grant_type": "refresh_token",
@@ -514,12 +523,15 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
+    proxy_kwargs = get_requests_kwargs(OAUTH_TOKEN_URL)
+
     try:
         resp = requests.post(
             OAUTH_TOKEN_URL,
             data=token_data,
             headers=headers,
             timeout=30,
+            **proxy_kwargs,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -560,6 +572,7 @@ def load_code_assist_project(access_token: str) -> Optional[str]:
         Project ID if found, None otherwise.
     """
     import requests
+    from shared.http import get_requests_kwargs
 
     for endpoint in CODE_ASSIST_ENDPOINTS:
         url = f"{endpoint}/v1internal/loadCodeAssist"
@@ -568,12 +581,15 @@ def load_code_assist_project(access_token: str) -> Optional[str]:
             "Content-Type": "application/json",
         }
 
+        proxy_kwargs = get_requests_kwargs(url)
+
         try:
             resp = requests.post(
                 url,
                 json={},
                 headers=headers,
                 timeout=10,
+                **proxy_kwargs,
             )
             if resp.status_code == 200:
                 data = resp.json()
