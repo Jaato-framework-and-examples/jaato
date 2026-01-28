@@ -573,8 +573,9 @@ class JaatoServer:
             self.emit(SystemMessageEvent(message=msg, style="info"))
 
         try:
-            # Use session env context so auth can access session-specific credentials
-            with self._with_session_env():
+            # Use session env context and workspace directory so auth can access
+            # session-specific credentials and save tokens to the right location
+            with self._with_session_env(), self._in_workspace():
                 auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
 
             if not auth_ok:
@@ -595,9 +596,11 @@ class JaatoServer:
 
                     auth_plugin.set_output_callback(plugin_output)
 
-                    # Run the login command to show URL and instructions
-                    # This is a blocking call that waits for OAuth flow to complete
-                    auth_plugin.execute_user_command(auth_plugin.get_user_commands()[0].name, {"action": "login"})
+                    # Run the login command in workspace context so tokens are saved
+                    # to the correct location. This is a blocking call that waits
+                    # for OAuth flow to complete.
+                    with self._in_workspace():
+                        auth_plugin.execute_user_command(auth_plugin.get_user_commands()[0].name, {"action": "login"})
 
                     # Check if auth completed during the plugin execution
                     # (the plugin blocks until OAuth flow completes or times out)
@@ -1969,9 +1972,9 @@ class JaatoServer:
 
         self._trace("[auth] Checking if auth is now complete...")
 
-        # Try to verify auth again (use session env context for credentials)
+        # Try to verify auth again (use session env and workspace context for credentials)
         try:
-            with self._with_session_env():
+            with self._with_session_env(), self._in_workspace():
                 auth_ok = self._jaato.verify_auth(allow_interactive=False)
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")
@@ -1981,9 +1984,9 @@ class JaatoServer:
                 # Complete the remaining initialization steps that were skipped
                 self._emit_init_progress("Verifying authentication", "done", 4, 6)
 
-                # Step 5: Configure tools (use session env context for plugin config)
+                # Step 5: Configure tools (use session env and workspace context for plugin config)
                 self._emit_init_progress("Configuring tools", "running", 5, 6)
-                with self._with_session_env():
+                with self._with_session_env(), self._in_workspace():
                     self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
                 gc_result = load_gc_from_file()

@@ -11,6 +11,9 @@ Commands:
     github-auth status       - Show authentication status
 """
 
+# Plugin kind for registry discovery
+PLUGIN_KIND = "tool"
+
 from .plugin import GitHubAuthPlugin, create_plugin
 
-__all__ = ["GitHubAuthPlugin", "create_plugin"]
+__all__ = ["GitHubAuthPlugin", "create_plugin", "PLUGIN_KIND"]
