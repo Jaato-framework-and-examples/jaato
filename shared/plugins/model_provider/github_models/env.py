@@ -206,6 +206,10 @@ def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[s
 # Proxy Configuration
 # ============================================================
 
+# Environment variable to enable/disable Kerberos proxy auth
+ENV_JAATO_KERBEROS_PROXY = "JAATO_KERBEROS_PROXY"
+
+
 def _get_jaato_no_proxy_hosts() -> List[str]:
     """Get list of hosts from JAATO_NO_PROXY.
 
@@ -243,12 +247,25 @@ def should_bypass_proxy(url: str) -> bool:
     return host in no_proxy_hosts
 
 
+def is_kerberos_proxy_enabled() -> bool:
+    """Check if Kerberos proxy authentication is enabled.
+
+    Enabled when JAATO_KERBEROS_PROXY is set to 'true', '1', or 'yes'.
+
+    Returns:
+        True if Kerberos proxy auth should be used.
+    """
+    value = os.environ.get(ENV_JAATO_KERBEROS_PROXY, "").lower()
+    return value in ("true", "1", "yes")
+
+
 def get_url_opener(url: str) -> urllib.request.OpenerDirector:
     """Get an appropriate urllib opener for a URL.
 
-    If the URL's host matches JAATO_NO_PROXY (exact match), returns an opener
-    without proxy support. Otherwise returns the default opener which respects
-    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+    Priority:
+    1. If JAATO_NO_PROXY matches (exact), bypass proxy entirely
+    2. If JAATO_KERBEROS_PROXY=true, use Kerberos proxy authentication
+    3. Otherwise use default opener (standard proxy env vars)
 
     Args:
         url: The URL that will be requested.
@@ -259,6 +276,15 @@ def get_url_opener(url: str) -> urllib.request.OpenerDirector:
     if should_bypass_proxy(url):
         # Create opener with empty ProxyHandler to disable proxy
         return urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
-        # Use default opener (includes ProxyHandler with env vars)
-        return urllib.request.build_opener()
+
+    if is_kerberos_proxy_enabled():
+        # Use Kerberos proxy authentication
+        try:
+            from .proxy_auth import create_kerberos_proxy_opener
+            return create_kerberos_proxy_opener()
+        except ImportError:
+            # pyspnego not installed, fall back to default
+            pass
+
+    # Use default opener (includes ProxyHandler with env vars)
+    return urllib.request.build_opener()
