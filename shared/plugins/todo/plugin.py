@@ -475,6 +475,18 @@ class TodoPlugin:
                                     "step_id": {
                                         "type": "string",
                                         "description": "Step ID to depend on"
+                                    },
+                                    "agent_name": {
+                                        "type": "string",
+                                        "description": "Human-friendly agent name for display (optional)"
+                                    },
+                                    "step_sequence": {
+                                        "type": "integer",
+                                        "description": "Step sequence number for display (optional)"
+                                    },
+                                    "step_description": {
+                                        "type": "string",
+                                        "description": "Step description for display (optional)"
                                     }
                                 },
                                 "required": ["agent_id", "step_id"]
