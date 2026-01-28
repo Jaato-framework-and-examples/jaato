@@ -210,6 +210,7 @@ class JaatoServer:
 
         # Auth state
         self._auth_pending: bool = False
+        self._auth_plugin_command: Optional[str] = None  # Command name for pending auth plugin
 
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
@@ -564,6 +565,7 @@ class JaatoServer:
         self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
 
         self._auth_pending = False  # Track if auth is still needed
+        self._auth_plugin_command = None
 
         def auth_message(msg: str) -> None:
             """Send auth status messages to the client."""
@@ -582,6 +584,9 @@ class JaatoServer:
                 if auth_plugin:
                     self._trace(f"[auth] Using {auth_plugin.name} plugin for interactive login")
                     self._auth_pending = True
+                    # Store the auth command name for provider-agnostic completion check
+                    auth_commands = auth_plugin.get_user_commands()
+                    self._auth_plugin_command = auth_commands[0].name if auth_commands else None
 
                     # Set up output callback for plugin messages
                     def plugin_output(source: str, text: str, mode: str) -> None:
@@ -1801,8 +1806,8 @@ class JaatoServer:
                         style="info",
                     ))
 
-            # Handle auth completion - if auth was pending and user ran auth command
-            if self._auth_pending and command.lower() == "anthropic-auth":
+            # Handle auth completion - if auth was pending and user ran the matching auth command
+            if self._auth_pending and self._auth_plugin_command and command.lower() == self._auth_plugin_command.lower():
                 self._check_auth_completion()
 
             return result if isinstance(result, dict) else {"result": str(result)}
@@ -1964,6 +1969,7 @@ class JaatoServer:
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")
                 self._auth_pending = False
+                self._auth_plugin_command = None
 
                 # Complete the remaining initialization steps that were skipped
                 self._emit_init_progress("Verifying authentication", "done", 4, 6)
