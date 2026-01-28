@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -62,6 +63,47 @@ else:
 DEFAULT_PID_FILE = str(_TEMP_DIR / "jaato.pid")
 DEFAULT_LOG_FILE = str(_TEMP_DIR / "jaato.log")
 DEFAULT_CONFIG_FILE = str(_TEMP_DIR / "jaato.config.json")
+
+# Log rotation settings
+LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
+LOG_BACKUP_COUNT = 5  # Keep 5 backup files
+
+
+def configure_logging(
+    log_file: Optional[str] = None,
+    verbose: bool = False,
+) -> None:
+    """Configure logging with optional file rotation.
+
+    Args:
+        log_file: Path to log file. If provided, uses RotatingFileHandler.
+        verbose: If True, use DEBUG level; otherwise INFO.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+    # Remove any existing handlers
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+
+    root.setLevel(level)
+
+    if log_file:
+        # Use rotating file handler to prevent unbounded log growth
+        handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        )
+        handler.setFormatter(logging.Formatter(fmt))
+        root.addHandler(handler)
+    else:
+        # Console logging
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(fmt))
+        root.addHandler(handler)
 
 
 logger = logging.getLogger(__name__)
@@ -999,11 +1041,8 @@ Examples:
 
     args = parser.parse_args()
 
-    # Configure logging
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # Configure logging - initially to console, will switch to file for daemon mode
+    configure_logging(verbose=args.verbose)
 
     # Handle --status
     if args.status:
@@ -1091,6 +1130,11 @@ Examples:
         if args.workspace_root:
             print(f"  Workspace root: {args.workspace_root}")
         daemonize(args.log_file)
+
+    # Reconfigure logging for daemon/background mode with rotating file handler
+    # This ensures log files don't grow unbounded
+    if args.daemon or os.environ.get("JAATO_DAEMONIZED"):
+        configure_logging(log_file=args.log_file, verbose=args.verbose)
 
     # Create and run daemon
     daemon = JaatoDaemon(
