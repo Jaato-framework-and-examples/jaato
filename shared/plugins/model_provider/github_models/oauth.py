@@ -523,6 +523,28 @@ def clear_tokens() -> None:
         path.unlink()
 
 
+def clear_copilot_token() -> None:
+    """Clear only the Copilot token, keeping OAuth tokens intact.
+
+    This forces re-exchange of the OAuth token for a new Copilot token
+    on the next API call. Useful when a 401 is received even though the
+    token appeared valid.
+    """
+    path = _get_token_storage_path()
+    if not path.exists():
+        return
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if "copilot" in data:
+            del data["copilot"]
+            with open(path, "w") as f:
+                json.dump(data, f)
+    except Exception:
+        pass
+
+
 def _oauth_trace(msg: str) -> None:
     """Write trace message for debugging OAuth operations."""
     import datetime

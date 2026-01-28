@@ -84,6 +84,9 @@ class CopilotClient:
 
     This client provides an interface similar to the Azure SDK but uses
     the Copilot internal API which accepts OAuth tokens.
+
+    Token auto-refresh: Before each API request, the client checks if the
+    token needs to be refreshed and obtains a new one if needed.
     """
 
     def __init__(self, token: str):
@@ -95,6 +98,40 @@ class CopilotClient:
         self._token = token
         self._timeout = 120  # 2 minute timeout for completions
         self._session = self._create_session()
+
+    def _ensure_valid_token(self) -> None:
+        """Ensure the token is valid, refreshing if needed.
+
+        This method checks with the OAuth module if the token needs
+        to be refreshed and updates self._token if a new token is obtained.
+        """
+        try:
+            from .oauth import get_stored_access_token
+            fresh_token = get_stored_access_token()
+            if fresh_token and fresh_token != self._token:
+                self._token = fresh_token
+        except Exception:
+            # If refresh fails, continue with existing token
+            # The API call will fail with a clear error if token is invalid
+            pass
+
+    def _force_token_refresh(self) -> None:
+        """Force a token refresh by clearing cached token and re-exchanging.
+
+        Used when a 401 is received, indicating the token may be invalid
+        even if it appeared valid according to expiry time.
+        """
+        try:
+            from .oauth import clear_copilot_token, get_stored_access_token
+            # Clear the cached Copilot token to force re-exchange
+            clear_copilot_token()
+            # Get fresh token (will exchange OAuth token for new Copilot token)
+            fresh_token = get_stored_access_token()
+            if fresh_token:
+                self._token = fresh_token
+        except Exception:
+            # If refresh fails, keep existing token
+            pass
 
     def _create_session(self) -> requests.Session:
         """Create requests session with appropriate proxy configuration.
@@ -135,6 +172,9 @@ class CopilotClient:
         """
         from shared.http import should_bypass_proxy
 
+        # Ensure token is valid before making request
+        self._ensure_valid_token()
+
         headers = {
             **COPILOT_HEADERS,
             "Authorization": f"Bearer {self._token}",
@@ -158,6 +198,30 @@ class CopilotClient:
                 return response
             return response.json()
         except requests.exceptions.HTTPError as e:
+            # On 401, try to refresh token and retry once
+            if e.response is not None and e.response.status_code == 401:
+                old_token = self._token
+                self._force_token_refresh()
+                if self._token != old_token:
+                    # Token was refreshed, retry the request
+                    headers["Authorization"] = f"Bearer {self._token}"
+                    try:
+                        response = self._session.request(
+                            method=method,
+                            url=url,
+                            json=data,
+                            headers=headers,
+                            stream=stream,
+                            timeout=self._timeout,
+                            proxies=proxies,
+                        )
+                        response.raise_for_status()
+                        if stream:
+                            return response
+                        return response.json()
+                    except requests.exceptions.HTTPError:
+                        pass  # Fall through to original error handling
+
             error_body = e.response.text if e.response else str(e)
             try:
                 error_data = json.loads(error_body)
