@@ -1013,6 +1013,27 @@ class JaatoServer:
                             ))
                     server._formatter_pipeline.reset()
 
+                # Extract "message" or similar intent arguments and emit as model text
+                # This shows the model's intent before the tool block, not collapsed in it
+                # We keep the arg in tool_args so the tool still receives it
+                intent_arg_names = ("message", "summary", "intent", "rationale")
+                intent_text = None
+                if tool_args:
+                    for arg_name in intent_arg_names:
+                        if arg_name in tool_args:
+                            val = tool_args[arg_name]
+                            if val and isinstance(val, str) and val.strip():
+                                intent_text = val.strip()
+                                break  # Use first found intent arg
+
+                if intent_text:
+                    server.emit(AgentOutputEvent(
+                        agent_id=agent_id,
+                        source="model",
+                        text=intent_text,
+                        mode="write",
+                    ))
+
                 server.emit(ToolCallStartEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
