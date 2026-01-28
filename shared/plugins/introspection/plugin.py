@@ -180,19 +180,26 @@ class IntrospectionPlugin:
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the introspection plugin."""
         return (
-            "You have access to tool discovery capabilities.\n\n"
+            "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
+            "CRITICAL: Before saying 'I cannot do X', ALWAYS explore available tools first!\n\n"
             "TOOL DISCOVERY WORKFLOW:\n"
-            "1. `list_tools()` - See available categories and tool counts\n"
+            "1. `list_tools()` - See all categories with descriptions and tool counts\n"
             "2. `list_tools(category='...')` - See tools in a specific category\n"
             "3. `get_tool_schemas(names=[...])` - Get full schemas for tools you need\n"
             "4. Call the tools using the schema information\n\n"
+            "CATEGORY QUICK REFERENCE:\n"
+            "- coordination: Task tracking, TODO, DELEGATE work, SUBAGENTS, parallel execution\n"
+            "- filesystem: Read, write, search files\n"
+            "- code: Analysis, editing, LSP diagnostics\n"
+            "- web: Fetch URLs, web search\n"
+            "- system: Shell commands, environment\n"
+            "- communication: Ask user questions\n\n"
             "STREAMING TOOLS:\n"
             "Tools with `streaming: true` support incremental results. To use streaming:\n"
             "- Call `<tool_name>:stream` instead of `<tool_name>` (e.g., `grep_content:stream`)\n"
             "- You'll receive a stream_id and initial results immediately\n"
             "- More results arrive automatically as the tool finds them\n"
-            "- Call `dismiss_stream(stream_id)` when you have enough results\n\n"
-            "CATEGORIES: filesystem, code, search, memory, planning, system, web, communication"
+            "- Call `dismiss_stream(stream_id)` when you have enough results"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -224,6 +231,18 @@ class IntrospectionPlugin:
 
         # If no category specified, return category summary only
         if not category:
+            # Category descriptions to help models understand what's available
+            category_hints = {
+                "filesystem": "Read, write, search, and navigate files and directories",
+                "code": "Code analysis, editing, refactoring, and LSP diagnostics",
+                "search": "Search files, content, patterns across the codebase",
+                "memory": "Persistent memory, notes, context storage across sessions",
+                "coordination": "Task tracking, TODO, DELEGATE work, SUBAGENTS, PARALLEL execution",
+                "system": "Shell commands, environment, system operations",
+                "web": "Fetch URLs, web search, external API access",
+                "communication": "Ask user questions, request clarification, get input",
+            }
+
             category_counts: Dict[str, int] = {}
             for schema in all_schemas:
                 cat = schema.category or "uncategorized"
@@ -231,7 +250,11 @@ class IntrospectionPlugin:
 
             return {
                 "categories": [
-                    {"name": cat, "tool_count": count}
+                    {
+                        "name": cat,
+                        "tool_count": count,
+                        "description": category_hints.get(cat, ""),
+                    }
                     for cat, count in sorted(category_counts.items())
                 ],
                 "total_tools": len(all_schemas),

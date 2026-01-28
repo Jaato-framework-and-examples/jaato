@@ -26,7 +26,7 @@ TOOL_CATEGORIES = [
     "code",         # Code editing, refactoring, analysis
     "search",       # Searching files, content, web
     "memory",       # Persistent memory, notes, context storage
-    "planning",     # Task planning, progress tracking, todos
+    "coordination", # Task planning, delegation, subagents, parallel execution
     "system",       # System commands, shell execution, environment
     "web",          # Web fetching, API calls, external resources
     "communication",  # User interaction, prompts, questions
