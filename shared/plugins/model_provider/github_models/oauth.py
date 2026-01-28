@@ -303,6 +303,7 @@ def poll_for_token(
     expires_in: int = DEVICE_CODE_EXPIRES_IN,
     client_id: str = OAUTH_CLIENT_ID,
     on_message: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> OAuthTokens:
     """Poll token endpoint until user completes authorization.
 
@@ -312,6 +313,7 @@ def poll_for_token(
         expires_in: Time until device code expires.
         client_id: OAuth client ID.
         on_message: Optional callback for status messages.
+        on_progress: Optional callback for progress updates (updates same line).
 
     Returns:
         OAuthTokens on successful authorization.
@@ -350,9 +352,12 @@ def poll_for_token(
 
             if error == "authorization_pending":
                 # User hasn't completed authorization yet - keep polling
-                if on_message:
-                    remaining = int(expires_in - elapsed)
-                    on_message(f"Waiting for authorization... ({remaining}s remaining)")
+                remaining = int(expires_in - elapsed)
+                progress_msg = f"Waiting for authorization... ({remaining}s remaining)"
+                if on_progress:
+                    on_progress(progress_msg)
+                elif on_message:
+                    on_message(progress_msg)
                 time.sleep(current_interval)
                 continue
 
@@ -695,6 +700,7 @@ def start_device_flow(
 
 def complete_device_flow(
     on_message: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> Optional[OAuthTokens]:
     """Complete the device code flow by polling for token.
 
@@ -702,6 +708,7 @@ def complete_device_flow(
 
     Args:
         on_message: Optional callback for status messages.
+        on_progress: Optional callback for progress updates (updates same line).
 
     Returns:
         OAuthTokens if successful, None if no pending auth.
@@ -733,6 +740,7 @@ def complete_device_flow(
             interval=device_response.interval,
             expires_in=int(remaining),
             on_message=on_message,
+            on_progress=on_progress,
         )
 
         # Exchange OAuth token for Copilot token
@@ -757,12 +765,14 @@ def complete_device_flow(
 
 def login_interactive(
     on_message: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
     auto_poll: bool = True,
 ) -> Tuple[Optional[OAuthTokens], DeviceCodeResponse]:
     """Run full interactive device code login flow.
 
     Args:
         on_message: Optional callback for status messages.
+        on_progress: Optional callback for progress updates (updates same line).
         auto_poll: If True, automatically poll for token after displaying code.
 
     Returns:
@@ -782,5 +792,5 @@ def login_interactive(
         return None, device_response
 
     # Poll for token
-    tokens = complete_device_flow(on_message)
+    tokens = complete_device_flow(on_message, on_progress)
     return tokens, device_response
