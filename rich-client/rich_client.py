@@ -875,6 +875,16 @@ class RichClient:
             def on_tool_call_start(self, agent_id, tool_name, tool_args, call_id=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
+                    # Extract intent args (message, summary, etc.) and display as model text
+                    # This shows the model's intent before the tool block, not collapsed in it
+                    intent_arg_names = ("message", "summary", "intent", "rationale")
+                    if tool_args:
+                        for arg_name in intent_arg_names:
+                            if arg_name in tool_args:
+                                val = tool_args[arg_name]
+                                if val and isinstance(val, str) and val.strip():
+                                    buffer.append("model", val.strip(), "write")
+                                    break  # Use first found intent arg
                     buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
                     if display:

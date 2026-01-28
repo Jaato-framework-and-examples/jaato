@@ -907,7 +907,10 @@ class OutputBuffer:
             self._finalize_completed_tools()
 
         # Create a summary of args (truncated for display)
-        args_str = str(tool_args)
+        # Filter out intent args (message, summary, etc.) since they're shown as model text
+        intent_arg_names = {"message", "summary", "intent", "rationale"}
+        display_args = {k: v for k, v in (tool_args or {}).items() if k not in intent_arg_names}
+        args_str = str(display_args) if display_args else ""
         if len(args_str) > 60:
             args_str = args_str[:57] + "..."
 
