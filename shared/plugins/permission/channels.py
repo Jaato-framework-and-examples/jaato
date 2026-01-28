@@ -685,12 +685,19 @@ class WebhookChannel(Channel):
         if self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
 
+        from shared.http import get_requests_kwargs
+
+        proxy_kwargs = get_requests_kwargs(self._endpoint)
+        if 'headers' in proxy_kwargs:
+            headers.update(proxy_kwargs.pop('headers'))
+
         try:
             response = requests.post(
                 self._endpoint,
                 json=request.to_dict(),
                 headers=headers,
                 timeout=self._timeout,
+                **proxy_kwargs,
             )
 
             if response.status_code == 200:

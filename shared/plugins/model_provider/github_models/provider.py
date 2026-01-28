@@ -548,7 +548,7 @@ class GitHubModelsProvider:
         Returns:
             List of model IDs, or empty list on failure.
         """
-        from .env import get_url_opener
+        from shared.http import get_url_opener
 
         try:
             req = urllib.request.Request(

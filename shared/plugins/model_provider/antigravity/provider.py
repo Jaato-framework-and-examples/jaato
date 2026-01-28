@@ -691,12 +691,16 @@ class AntigravityProvider:
                 else:
                     url = f"{endpoint}/v1beta/models/{self._api_model}:generateContent"
 
+                from shared.http import get_requests_kwargs
+                proxy_kwargs = get_requests_kwargs(url)
+
                 response = requests.post(
                     url,
                     json=request_body,
                     headers=headers,
                     timeout=120,
                     stream=streaming,
+                    **proxy_kwargs,
                 )
 
                 if response.status_code == 200:
