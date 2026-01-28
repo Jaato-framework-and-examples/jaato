@@ -12,9 +12,12 @@ export interface BaseEvent {
 export interface ConnectedEvent extends BaseEvent {
   type: 'connected';
   server_info: {
-    version: string;
+    version?: string;
     client_id: string;
-    protocol_version: string;
+    protocol_version?: string;
+    workspace_mode?: boolean;
+    model_provider?: string;
+    model_name?: string;
   };
 }
 
@@ -241,6 +244,44 @@ export interface MidTurnPromptInjectedEvent extends BaseEvent {
   text: string;
 }
 
+// Workspace events
+export interface Workspace {
+  name: string;
+  path: string;
+  configured: boolean;
+  provider?: string;
+  model?: string;
+  last_accessed?: string;
+}
+
+export interface WorkspaceListEvent extends BaseEvent {
+  type: 'workspace.list_response';
+  workspaces: Workspace[];
+}
+
+export interface WorkspaceCreatedEvent extends BaseEvent {
+  type: 'workspace.created';
+  workspace: Workspace;
+}
+
+export interface ConfigStatusEvent extends BaseEvent {
+  type: 'config.status';
+  workspace: string;
+  configured: boolean;
+  provider?: string;
+  model?: string;
+  available_providers: string[];
+  missing_fields: string[];
+}
+
+export interface ConfigUpdatedEvent extends BaseEvent {
+  type: 'config.updated';
+  workspace: string;
+  provider: string;
+  model?: string;
+  success: boolean;
+}
+
 // Union type of all server events
 export type ServerEvent =
   | ConnectedEvent
@@ -269,7 +310,11 @@ export type ServerEvent =
   | RetryEvent
   | InitProgressEvent
   | MidTurnPromptQueuedEvent
-  | MidTurnPromptInjectedEvent;
+  | MidTurnPromptInjectedEvent
+  | WorkspaceListEvent
+  | WorkspaceCreatedEvent
+  | ConfigStatusEvent
+  | ConfigUpdatedEvent;
 
 // Client → Server request types
 export interface SendMessageRequest {
@@ -324,6 +369,32 @@ export interface HistoryRequest {
   timestamp: string;
 }
 
+// Workspace requests
+export interface WorkspaceListRequest {
+  type: 'workspace.list';
+  timestamp: string;
+}
+
+export interface WorkspaceCreateRequest {
+  type: 'workspace.create';
+  name: string;
+  timestamp: string;
+}
+
+export interface WorkspaceSelectRequest {
+  type: 'workspace.select';
+  name: string;
+  timestamp: string;
+}
+
+export interface ConfigUpdateRequest {
+  type: 'config.update';
+  provider: string;
+  model?: string;
+  api_key?: string;
+  timestamp: string;
+}
+
 export type ClientRequest =
   | SendMessageRequest
   | PermissionResponseRequest
@@ -331,4 +402,8 @@ export type ClientRequest =
   | StopRequest
   | CommandRequest
   | ClientConfigRequest
-  | HistoryRequest;
+  | HistoryRequest
+  | WorkspaceListRequest
+  | WorkspaceCreateRequest
+  | WorkspaceSelectRequest
+  | ConfigUpdateRequest;

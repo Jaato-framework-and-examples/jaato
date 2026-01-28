@@ -19,7 +19,7 @@ interface PlanStore {
   reset: () => void;
 }
 
-export const usePlanStore = create<PlanStore>((set, get) => ({
+export const usePlanStore = create<PlanStore>((set) => ({
   steps: [],
   expanded: false,
   agentPlans: new Map(),

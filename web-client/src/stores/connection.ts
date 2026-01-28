@@ -93,9 +93,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         set({
           clientId: info.client_id,
           serverInfo: {
-            version: info.version,
+            version: info.version || '1.0',
             clientId: info.client_id,
-            protocolVersion: info.protocol_version,
+            protocolVersion: info.protocol_version || '1',
           },
         });
       }

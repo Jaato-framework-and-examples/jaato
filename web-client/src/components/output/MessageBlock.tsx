@@ -10,7 +10,6 @@ export function MessageBlock({ line }: MessageBlockProps) {
   const { source, text } = line;
 
   // Determine styling based on source
-  const isModel = source === 'model';
   const isTool = source === 'tool';
   const isSystem = source === 'system';
   const isUser = source === 'user';

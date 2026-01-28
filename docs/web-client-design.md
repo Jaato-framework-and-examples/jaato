@@ -763,21 +763,21 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 
 **Goal:** Enable workspace selection and configuration before chat
 
-**Server Changes:**
-- [ ] Add `--workspace-root` parameter to server
-- [ ] Implement workspace discovery (scan for .jaato/ or .env)
-- [ ] Add `workspace.list` request/event
-- [ ] Add `workspace.create` request/event
-- [ ] Add `workspace.select` request/event
-- [ ] Add `config.update` request/event
-- [ ] Persist workspace registry to `~/.jaato/workspaces.json`
+**Server Changes:** ✅ Complete
+- [x] Add `--workspace-root` parameter to server
+- [x] Implement workspace discovery (scan for .jaato/ or .env)
+- [x] Add `workspace.list` request/event
+- [x] Add `workspace.create` request/event
+- [x] Add `workspace.select` request/event
+- [x] Add `config.update` request/event
+- [x] Persist workspace registry to `~/.jaato/workspaces.json`
 
-**Web Client Features:**
-- [ ] Workspace selection screen (list, select, create)
-- [ ] Configuration screen (provider, model selection)
-- [ ] OAuth flow integration (invoke existing auth commands)
-- [ ] Workspace store (Zustand)
-- [ ] Route: no workspace → workspace screen → chat
+**Web Client Features:** ✅ Complete
+- [x] Workspace selection screen (list, select, create)
+- [x] Configuration screen (provider, model selection)
+- [x] OAuth flow integration (invoke existing auth commands)
+- [x] Workspace store (Zustand)
+- [x] Route: no workspace → workspace screen → chat
 
 **Timeline:** 1-2 weeks
 

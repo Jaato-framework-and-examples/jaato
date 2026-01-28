@@ -5,8 +5,10 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { StatusBar } from '@/components/layout/StatusBar';
 import { PermissionModal } from '@/components/modals/PermissionModal';
+import { WorkspaceScreen } from '@/components/workspace/WorkspaceScreen';
 import { useUIStore } from '@/stores/ui';
 import { usePermissionStore } from '@/stores/permissions';
+import { useWorkspaceStore } from '@/stores/workspace';
 
 // Get WebSocket URL from environment, or derive from current hostname
 function getWebSocketUrl(): string {
@@ -26,8 +28,17 @@ function App() {
   const { status } = useWebSocket(WS_URL);
   const { sidebarOpen } = useUIStore();
   const { pendingRequest } = usePermissionStore();
+  const { workspaceMode, configStatus, selectedWorkspace } = useWorkspaceStore();
 
   useKeyboardShortcuts();
+
+  // In workspace mode, show workspace screen until a workspace is selected and configured
+  const showWorkspaceScreen =
+    workspaceMode && (!selectedWorkspace || !configStatus?.configured);
+
+  if (showWorkspaceScreen) {
+    return <WorkspaceScreen />;
+  }
 
   return (
     <div className="flex h-screen flex-col bg-base text-base">

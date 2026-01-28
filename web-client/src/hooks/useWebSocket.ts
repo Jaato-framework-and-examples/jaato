@@ -8,6 +8,7 @@ import { useAgentStore } from '@/stores/agents';
 import { usePermissionStore } from '@/stores/permissions';
 import { usePlanStore } from '@/stores/plan';
 import { useContextStore } from '@/stores/context';
+import { useWorkspaceStore } from '@/stores/workspace';
 import type { ServerEvent } from '@/types/events';
 import { createClientConfigRequest } from '@/lib/protocol';
 
@@ -18,7 +19,28 @@ export function useWebSocket(url: string = DEFAULT_WS_URL) {
 
   // Route events to appropriate stores
   const routeEvent = useCallback((event: ServerEvent) => {
+    console.log('[WS Event]', event.type, event);
+
     switch (event.type) {
+      // Connection events - handle workspace_mode
+      case 'connected':
+        console.log('[WS] Connected event, workspace_mode:', event.server_info.workspace_mode);
+        if (event.server_info.workspace_mode) {
+          console.log('[WS] Setting workspace mode to true');
+          useWorkspaceStore.getState().setWorkspaceMode(true);
+          // Request workspace list when in workspace mode
+          useWorkspaceStore.getState().requestWorkspaceList();
+        }
+        break;
+
+      // Workspace events
+      case 'workspace.list_response':
+      case 'workspace.created':
+      case 'config.status':
+      case 'config.updated':
+        useWorkspaceStore.getState().handleEvent(event);
+        break;
+
       // Agent events
       case 'agent.created':
         useAgentStore.getState().createAgent(
@@ -102,7 +124,7 @@ export function useWebSocket(url: string = DEFAULT_WS_URL) {
 
       default:
         // Log unhandled events for debugging
-        if (process.env.NODE_ENV === 'development') {
+        if (import.meta.env.DEV) {
           console.log('Unhandled event:', event.type, event);
         }
     }
