@@ -29,3 +29,6 @@ ipython-pygments-lexers>=1.0.0  # IPython syntax highlighting (handles !shell, %
 
 # AST search plugin dependencies (optional)
 ast-grep-py>=0.30.0  # AST-based structural code search
+
+# Kerberos proxy authentication (optional)
+pyspnego>=0.10.0  # SPNEGO/Negotiate auth for corporate proxies (Windows SSPI, macOS GSS, Linux Kerberos)

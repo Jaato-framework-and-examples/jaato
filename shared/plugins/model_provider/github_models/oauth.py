@@ -189,6 +189,10 @@ def _make_get_request(
 ) -> dict:
     """Make HTTP GET request and return JSON response.
 
+    Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
+    which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
+    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+
     Args:
         url: Request URL.
         headers: Optional additional headers.
@@ -199,6 +203,8 @@ def _make_get_request(
     Raises:
         RuntimeError: If request fails.
     """
+    from .env import get_url_opener
+
     default_headers = {
         "Accept": "application/json",
         "User-Agent": "jaato/1.0",
@@ -213,7 +219,8 @@ def _make_get_request(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        opener = get_url_opener(url)
+        with opener.open(req, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else str(e)

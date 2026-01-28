@@ -347,6 +347,24 @@ Available Models:
 | `AI_RETRY_BASE_DELAY` | Initial retry delay seconds (default: 1.0) |
 | `AI_RETRY_MAX_DELAY` | Maximum retry delay seconds (default: 30.0) |
 
+### Proxy Configuration
+| Variable | Purpose |
+|----------|---------|
+| `HTTPS_PROXY` / `HTTP_PROXY` | Standard proxy URL (e.g., `http://proxy:8080`) |
+| `NO_PROXY` | Standard no-proxy hosts (suffix matching) |
+| `JAATO_NO_PROXY` | Exact host matching for no-proxy (e.g., `github.com,api.github.com`) |
+| `JAATO_KERBEROS_PROXY` | Enable Kerberos/SPNEGO proxy auth (`true`/`false`) |
+
+**Kerberos Proxy Authentication:**
+For corporate proxies requiring SPNEGO/Negotiate authentication:
+```bash
+export HTTPS_PROXY=http://proxy.corp.com:8080
+export JAATO_KERBEROS_PROXY=true
+# Ensure you have valid Kerberos tickets (kinit on Linux/Mac, Windows domain login)
+```
+
+Requires `pyspnego` package: `pip install pyspnego`
+
 ## Rich Client Commands
 
 ### Authentication Commands
