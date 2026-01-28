@@ -383,7 +383,22 @@ class PlanPanel:
                     dep_line = Text()
                     dep_line.append("    ├─ ", style=self._get_dependency_style())
                     dep_line.append("waiting: ", style=self._get_dependency_style())
-                    refs = [f"{d['agent_id']}:{d['step_id'][:8]}" for d in blocked_by]
+                    refs = []
+                    for d in blocked_by:
+                        # Use rich display info if available, fallback to IDs
+                        agent_display = d.get('agent_name') or d.get('agent_id', '?')
+                        if d.get('step_sequence') is not None:
+                            step_display = f"#{d['step_sequence']}"
+                        else:
+                            step_display = d.get('step_id', '?')[:8]
+                        ref_text = f"{agent_display} {step_display}"
+                        # Add description snippet if available
+                        if d.get('step_description'):
+                            desc_snippet = d['step_description'][:30]
+                            if len(d['step_description']) > 30:
+                                desc_snippet += "..."
+                            ref_text += f" ({desc_snippet})"
+                        refs.append(ref_text)
                     dep_line.append(", ".join(refs), style=self._get_dependency_style())
                     elements.append(dep_line)
                 elif depends_on and received_outputs:

@@ -70,6 +70,11 @@ class TaskRef:
     step_id: str             # Step ID within the plan
     plan_id: Optional[str] = None  # Optional - if None, matches latest plan
 
+    # Optional display metadata (for richer UI presentation)
+    agent_name: Optional[str] = None      # Human-friendly agent name
+    step_sequence: Optional[int] = None   # Step sequence number (1, 2, 3...)
+    step_description: Optional[str] = None  # Step description text
+
     def to_uri(self) -> str:
         """Convert to URI format: agent:plan/step or agent:*/step"""
         plan_part = self.plan_id or "*"
@@ -94,7 +99,10 @@ class TaskRef:
         return cls(
             agent_id=data.get("agent_id", ""),
             step_id=data.get("step_id", ""),
-            plan_id=data.get("plan_id")
+            plan_id=data.get("plan_id"),
+            agent_name=data.get("agent_name"),
+            step_sequence=data.get("step_sequence"),
+            step_description=data.get("step_description"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -105,6 +113,13 @@ class TaskRef:
         }
         if self.plan_id:
             result["plan_id"] = self.plan_id
+        # Include display metadata if available
+        if self.agent_name:
+            result["agent_name"] = self.agent_name
+        if self.step_sequence is not None:
+            result["step_sequence"] = self.step_sequence
+        if self.step_description:
+            result["step_description"] = self.step_description
         return result
 
     def matches(self, agent_id: str, plan_id: str, step_id: str) -> bool:
