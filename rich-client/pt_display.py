@@ -1354,7 +1354,14 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
-            """Handle Up arrow - tool nav, scroll popup, or history/completion."""
+            """Handle Up arrow - scroll popup, tool nav, or history/completion."""
+            # Plan popup takes priority when visible (it's an overlay)
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_up(plan_data):
+                    self._app.invalidate()
+                return
+            # Tool navigation mode
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 # If selected tool is expanded and has output, try scrolling
@@ -1367,18 +1374,19 @@ class PTDisplay:
                 buffer.select_prev_tool()
                 self._app.invalidate()
                 return
-            # If plan popup is visible, scroll it up
-            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
-                plan_data = self._get_current_plan_data()
-                if self._plan_panel.scroll_popup_up(plan_data):
-                    self._app.invalidate()
-                return
             # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
         @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
-            """Handle Down arrow - tool nav, scroll popup, or history/completion."""
+            """Handle Down arrow - scroll popup, tool nav, or history/completion."""
+            # Plan popup takes priority when visible (it's an overlay)
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_down(plan_data):
+                    self._app.invalidate()
+                return
+            # Tool navigation mode
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 # If selected tool is expanded and has output, try scrolling
@@ -1390,12 +1398,6 @@ class PTDisplay:
                 # Navigate to next tool (either not expanded, no output, or at scroll boundary)
                 buffer.select_next_tool()
                 self._app.invalidate()
-                return
-            # If plan popup is visible, scroll it down
-            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
-                plan_data = self._get_current_plan_data()
-                if self._plan_panel.scroll_popup_down(plan_data):
-                    self._app.invalidate()
                 return
             # Normal mode - history/completion navigation
             event.current_buffer.auto_down()
