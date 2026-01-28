@@ -1417,6 +1417,11 @@ class SubagentPlugin:
             prompt: The prompt to send to the subagent.
             parent_cwd: Parent's working directory for resolving relative paths.
         """
+        # Set workspace path for thread-safe token resolution
+        # os.chdir() is process-wide and racy, so we also set an env var that
+        # token storage functions can use deterministically
+        os.environ["JAATO_WORKSPACE_PATH"] = parent_cwd
+
         # Change to parent's working directory so relative paths resolve correctly
         # This ensures trace logs, workspaceRoot, etc. work the same as parent
         try:
