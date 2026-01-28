@@ -94,7 +94,27 @@ class CopilotClient:
         """
         self._token = token
         self._timeout = 120  # 2 minute timeout for completions
-        self._session = requests.Session()
+        self._session = self._create_session()
+
+    def _create_session(self) -> requests.Session:
+        """Create requests session with appropriate proxy configuration.
+
+        If JAATO_KERBEROS_PROXY is enabled, configures session with Kerberos
+        proxy authentication. Otherwise uses default session.
+
+        Returns:
+            Configured requests.Session.
+        """
+        from .env import is_kerberos_proxy_enabled
+
+        if is_kerberos_proxy_enabled():
+            try:
+                from .proxy_auth import create_kerberos_proxy_session
+                return create_kerberos_proxy_session()
+            except ImportError:
+                pass  # pyspnego not installed
+
+        return requests.Session()
 
     def _make_request(
         self,
@@ -105,9 +125,10 @@ class CopilotClient:
     ) -> Any:
         """Make HTTP request to Copilot API.
 
-        Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
-        which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
-        standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+        Supports multiple proxy configurations:
+        1. JAATO_NO_PROXY: Exact host matching to bypass proxy
+        2. JAATO_KERBEROS_PROXY: Kerberos/SPNEGO authentication with proxy
+        3. Standard proxy env vars (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 
         Args:
             url: Request URL
@@ -121,15 +142,20 @@ class CopilotClient:
         Raises:
             RuntimeError: If request fails
         """
-        from .env import should_bypass_proxy
+        from .env import should_bypass_proxy, is_kerberos_proxy_enabled
 
         headers = {
             **COPILOT_HEADERS,
             "Authorization": f"Bearer {self._token}",
         }
 
-        # Check if we should bypass proxy for this URL
-        proxies = {} if should_bypass_proxy(url) else None
+        # Determine proxy configuration
+        if should_bypass_proxy(url):
+            proxies = {}  # Bypass proxy
+        elif is_kerberos_proxy_enabled():
+            proxies = None  # Use session's Kerberos-configured proxy
+        else:
+            proxies = None  # Use default proxy from env
 
         try:
             response = self._session.request(
