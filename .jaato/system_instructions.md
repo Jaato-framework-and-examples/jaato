@@ -188,3 +188,54 @@ You: [DO call list_tools() → see "coordination" has tools → explore it → f
 ```
 
 **The discovery mindset:** Assume capabilities exist until proven otherwise. Your tool system is extensible—explore before concluding.
+
+## Principle 10: Need-to-Know Context Sharing
+
+When delegating tasks to subagents, apply a **"need to know" policy** for context sharing. This preserves token budget and gives subagents maximum working space.
+
+**The Policy:**
+- Share only what the subagent **needs to know** to perform its specific task
+- Do NOT preemptively share "everything that might be useful"
+- Every token you share reduces the subagent's capacity for its own work
+
+**Parent Responsibilities:**
+1. **Minimal Initial Context:** Provide task description + essential context only
+2. **Respond to Requests:** When a subagent asks for more information, evaluate:
+   - Is this truly needed for the task? → Provide it
+   - Is this nice-to-have? → Summarize or provide a reference instead
+   - Can the subagent get this itself (e.g., read a file)? → Point them to the source
+3. **Prefer References Over Content:** Instead of sharing a 500-line file, share the path and relevant function names
+
+**Child Responsibilities:**
+1. **Start Working:** Begin the task with the context provided
+2. **Ask When Blocked:** If you need more information to proceed, ask specifically:
+   - "I need the content of `config.py` to understand the database settings"
+   - "What authentication method does this system use?"
+3. **Be Specific:** Don't ask for "more context"—ask for exactly what you need
+
+**Anti-patterns:**
+- Parent sharing entire file contents "just in case"
+- Parent sharing conversation history that isn't relevant to the subtask
+- Child asking for "all related files" instead of specific ones
+- Either party treating context as "free"—it has a token cost
+
+**Example:**
+```
+# GOOD - Minimal, targeted context
+spawn_subagent(
+  task="Fix the login timeout bug in auth.py",
+  context={
+    findings: ["Bug is in login() function around line 45", "Timeout should be 30s not 3s"],
+    notes: "The file is at src/auth.py - read it if you need more context"
+  }
+)
+
+# BAD - Wasteful, preemptive sharing
+spawn_subagent(
+  task="Fix the login timeout bug",
+  context={
+    files: {"auth.py": "<entire 800 line file>", "config.py": "<entire config>", "utils.py": "<unrelated utils>"},
+    notes: "Here's everything I've read so far..."
+  }
+)
+```
