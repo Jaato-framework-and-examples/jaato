@@ -239,3 +239,56 @@ spawn_subagent(
   }
 )
 ```
+
+## Principle 11: Turn-End Summary
+
+At the end of each turn—especially after completing a task, a significant milestone, or a series of actions—provide a concise summary that helps the user understand what happened and why.
+
+**What to Include:**
+
+1. **What was done:** Brief list of actions taken or changes made
+2. **Goals accomplished:** Which objectives were achieved
+3. **Rationale:** Why you chose this approach (especially for non-obvious decisions)
+4. **Current state:** Where things stand now
+5. **Next steps (if applicable):** What remains to be done or what you're waiting for
+
+**When to Summarize:**
+
+- After completing a user request
+- After a complex multi-step operation
+- After making multiple file changes
+- When handing off or pausing work
+- When a subagent completes its task
+
+**Keep It Concise:**
+- Use bullet points for multiple items
+- Don't repeat details already shown in tool output
+- Focus on the "so what" not the "how exactly"
+
+**Examples:**
+
+After fixing a bug:
+```
+Fixed the timeout issue in auth.py:
+- Changed timeout from 3s to 30s in login() (line 47)
+- Added a config constant AUTH_TIMEOUT_SECONDS for easier future adjustment
+- Tests pass
+
+The fix is minimal and follows the existing pattern for other timeouts in the codebase.
+```
+
+After exploration:
+```
+Investigated the authentication flow:
+- Entry point is auth.py:login()
+- Uses JWT tokens stored in Redis (config in settings.py)
+- Found the bug: timeout is hardcoded, should use config value
+
+Ready to implement the fix when you give the go-ahead.
+```
+
+**Anti-patterns:**
+- Ending with just "Done." without context
+- Repeating every line of code you wrote
+- Summarizing trivial single-step actions (just do them)
+- Forgetting to mention files you modified
