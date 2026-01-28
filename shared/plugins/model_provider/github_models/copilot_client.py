@@ -105,6 +105,10 @@ class CopilotClient:
     ) -> Any:
         """Make HTTP request to Copilot API.
 
+        Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
+        which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
+        standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+
         Args:
             url: Request URL
             data: JSON data for POST requests
@@ -117,10 +121,15 @@ class CopilotClient:
         Raises:
             RuntimeError: If request fails
         """
+        from .env import should_bypass_proxy
+
         headers = {
             **COPILOT_HEADERS,
             "Authorization": f"Bearer {self._token}",
         }
+
+        # Check if we should bypass proxy for this URL
+        proxies = {} if should_bypass_proxy(url) else None
 
         try:
             response = self._session.request(
@@ -130,6 +139,7 @@ class CopilotClient:
                 headers=headers,
                 stream=stream,
                 timeout=self._timeout,
+                proxies=proxies,
             )
             response.raise_for_status()
             if stream:
