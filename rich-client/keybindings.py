@@ -429,6 +429,8 @@ class KeybindingConfig:
         # Try profile-specific files first (if not default profile)
         if profile != "default":
             profile_paths = [
+                f"{project_dir}/keybindings/{profile}.json",
+                f"{user_dir}/keybindings/{profile}.json",
                 f"{project_dir}/keybindings.{profile}.json",
                 f"{user_dir}/keybindings.{profile}.json",
             ]
