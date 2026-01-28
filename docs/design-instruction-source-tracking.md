@@ -63,10 +63,12 @@ A dedicated panel in the rich client (toggled, replaces output panel) showing to
 │  turn_1 (clarify Q)    200  ◑    ▏█░░░░░░░░░░░░░  │
 │  turn_2 (clarify A)     30  ◑    ▏░░░░░░░░░░░░░░  │
 │  turn_3 (model)       2200  ○    ▏████████░░░░░░  │
+│  turn_3 (summary)      150  ◑    ▏░░░░░░░░░░░░░░  │
 │  turn_4 (user)          80  ○    ▏░░░░░░░░░░░░░░  │
-│  turn_5 (model)       2440  ○    ▏█████████░░░░░  │
+│  turn_5 (model)       2140  ○    ▏████████░░░░░░  │
+│  turn_5 (summary)      150  ◑    ▏░░░░░░░░░░░░░░  │
 │                                                   │
-│  🔒 = original  ◑ = clarification  ○ = ephemeral  │
+│  🔒 = original  ◑ = preservable  ○ = ephemeral    │
 ╰───────────────────────────────────────────────────╯
  [← Back]                                      ESC
 ```
@@ -199,7 +201,14 @@ class InstructionBudget:
 | Original user request (turn 0) | LOCKED | The task definition |
 | Clarification questions (model) | PRESERVABLE | Important context |
 | Clarification answers (user) | PRESERVABLE | Important context |
-| Working turns | EPHEMERAL | Can be summarized or truncated |
+| Turn summaries/conclusions | PRESERVABLE | High-value compressed context |
+| Working turns (verbose output) | EPHEMERAL | Can be discarded if summary exists |
+
+**GC Strategy for Conversation:**
+When GC needs to reclaim tokens from CONVERSATION, it should:
+1. First, discard EPHEMERAL working turns that have an associated summary
+2. Then, summarize remaining working turns (creating PRESERVABLE summaries)
+3. Only under extreme pressure, consider PRESERVABLE content
 
 ---
 
