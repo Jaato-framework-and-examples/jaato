@@ -5,6 +5,7 @@ with a detailed popup overlay accessible via the configured toggle key.
 """
 
 import logging
+import textwrap
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from rich.panel import Panel
@@ -336,13 +337,33 @@ class PlanPanel:
                 symbol, _ = self.STATUS_SYMBOLS.get(step_status, ("○", "dim"))
                 color = self._get_status_style(step_status)
 
-                # Step line
-                line = Text()
-                line.append(f" {symbol} ", style=color)
-                line.append(f"{seq}. ", style=self._style("plan_popup_step_number"))
+                # Step line with proper text wrapping
+                prefix_symbol = f" {symbol} "
+                prefix_seq = f"{seq}. "
+                prefix_width = len(prefix_symbol) + len(prefix_seq)
                 desc_style = self._style("plan_popup_step_active") if step_status == "in_progress" else self._style("plan_popup_step_description")
-                line.append(desc, style=desc_style)
+
+                # Calculate available width for description (panel width - borders - prefix)
+                # Panel borders take ~4 chars (2 on each side)
+                available_width = max(width - 4 - prefix_width, 20)
+
+                # Wrap description to fit available width
+                wrapped_lines = textwrap.wrap(desc, width=available_width) if desc else [""]
+
+                # First line with prefix
+                line = Text()
+                line.append(prefix_symbol, style=color)
+                line.append(prefix_seq, style=self._style("plan_popup_step_number"))
+                line.append(wrapped_lines[0] if wrapped_lines else "", style=desc_style)
                 elements.append(line)
+
+                # Continuation lines with proper indentation
+                indent = " " * prefix_width
+                for continuation in wrapped_lines[1:]:
+                    cont_line = Text()
+                    cont_line.append(indent)
+                    cont_line.append(continuation, style=desc_style)
+                    elements.append(cont_line)
 
                 # Result/error line
                 if step_status == "completed" and result:
