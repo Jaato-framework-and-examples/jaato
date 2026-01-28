@@ -14,6 +14,8 @@ Resolution priority:
 """
 
 import os
+import urllib.parse
+import urllib.request
 from typing import Literal, Optional, List
 
 # Auth method type
@@ -31,6 +33,10 @@ ENV_GITHUB_AUTH_METHOD = "JAATO_GITHUB_AUTH_METHOD"
 ENV_GITHUB_ORGANIZATION = "JAATO_GITHUB_ORGANIZATION"
 ENV_GITHUB_ENTERPRISE = "JAATO_GITHUB_ENTERPRISE"
 ENV_GITHUB_ENDPOINT = "JAATO_GITHUB_ENDPOINT"
+
+# Proxy configuration (JAATO namespace)
+# JAATO_NO_PROXY uses exact host matching (unlike standard NO_PROXY which does suffix matching)
+ENV_JAATO_NO_PROXY = "JAATO_NO_PROXY"
 
 # Default endpoint for GitHub Models (new API as of May 2025)
 # The old Azure endpoint (models.inference.ai.azure.com) was deprecated July 2025
@@ -194,3 +200,65 @@ def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[s
         locations.append(f"Endpoint: {DEFAULT_ENDPOINT} (default)")
 
     return locations
+
+
+# ============================================================
+# Proxy Configuration
+# ============================================================
+
+def _get_jaato_no_proxy_hosts() -> List[str]:
+    """Get list of hosts from JAATO_NO_PROXY.
+
+    Returns:
+        List of hostnames (lowercase) that should bypass proxy.
+    """
+    value = os.environ.get(ENV_JAATO_NO_PROXY, "")
+    if not value:
+        return []
+    return [h.strip().lower() for h in value.split(",") if h.strip()]
+
+
+def should_bypass_proxy(url: str) -> bool:
+    """Check if a URL should bypass proxy based on JAATO_NO_PROXY.
+
+    Uses exact host matching (case-insensitive), unlike standard NO_PROXY
+    which does suffix matching.
+
+    Args:
+        url: The URL to check.
+
+    Returns:
+        True if the host matches exactly an entry in JAATO_NO_PROXY.
+    """
+    no_proxy_hosts = _get_jaato_no_proxy_hosts()
+    if not no_proxy_hosts:
+        return False
+
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+
+    host = host.lower()
+    return host in no_proxy_hosts
+
+
+def get_url_opener(url: str) -> urllib.request.OpenerDirector:
+    """Get an appropriate urllib opener for a URL.
+
+    If the URL's host matches JAATO_NO_PROXY (exact match), returns an opener
+    without proxy support. Otherwise returns the default opener which respects
+    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+
+    Args:
+        url: The URL that will be requested.
+
+    Returns:
+        An OpenerDirector configured appropriately for the URL.
+    """
+    if should_bypass_proxy(url):
+        # Create opener with empty ProxyHandler to disable proxy
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    else:
+        # Use default opener (includes ProxyHandler with env vars)
+        return urllib.request.build_opener()
