@@ -803,13 +803,17 @@ def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
         # Add a marker to indicate we're already daemonized
         env = os.environ.copy()
         env["JAATO_DAEMONIZED"] = "1"
-        # Start detached process
+        # Start detached process without console window
         subprocess.Popen(
             args,
             stdout=open(log_file, 'a'),
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=(
+                subprocess.DETACHED_PROCESS |
+                subprocess.CREATE_NEW_PROCESS_GROUP |
+                subprocess.CREATE_NO_WINDOW
+            ),
             env=env,
         )
         sys.exit(0)
