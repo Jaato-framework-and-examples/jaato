@@ -481,6 +481,8 @@ class GitHubModelsProvider:
         Returns:
             List of model IDs, or empty list on failure.
         """
+        from .env import get_url_opener
+
         try:
             req = urllib.request.Request(
                 CATALOG_API_ENDPOINT,
@@ -490,7 +492,8 @@ class GitHubModelsProvider:
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
             )
-            with urllib.request.urlopen(req, timeout=10) as response:
+            opener = get_url_opener(CATALOG_API_ENDPOINT)
+            with opener.open(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
 
             # Extract model IDs from the response

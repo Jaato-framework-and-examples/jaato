@@ -92,6 +92,10 @@ def _make_request(
 ) -> dict:
     """Make HTTP POST request and return JSON response.
 
+    Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
+    which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
+    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+
     Args:
         url: Request URL.
         data: Form data to POST.
@@ -103,6 +107,8 @@ def _make_request(
     Raises:
         RuntimeError: If request fails.
     """
+    from .env import get_url_opener
+
     default_headers = {
         "Accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -121,7 +127,8 @@ def _make_request(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        opener = get_url_opener(url)
+        with opener.open(req, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else str(e)
