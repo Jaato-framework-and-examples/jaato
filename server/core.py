@@ -558,15 +558,11 @@ class JaatoServer:
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
         # Set up formatter pipeline for server-side output formatting
-        logger.info("Setting up formatter pipeline...")
         self._setup_formatter_pipeline()
-        logger.info("Formatter pipeline setup complete")
 
         # Step 4: Verify authentication (may trigger interactive login via plugin)
-        logger.info("Starting Step 4: Verify authentication")
         self._emit_init_progress("Verifying authentication", "running", 4, total_steps)
         self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
-        logger.info(f"[auth] verify_auth starting for provider: {self._model_provider}")
 
         self._auth_pending = False  # Track if auth is still needed
         self._auth_plugin_command = None
@@ -579,11 +575,8 @@ class JaatoServer:
         try:
             # Use session env context and workspace directory so auth can access
             # session-specific credentials and save tokens to the right location
-            logger.info(f"[auth] Entering session env and workspace context (workspace={self._workspace_path})")
             with self._with_session_env(), self._in_workspace():
-                logger.info(f"[auth] Context entered, calling verify_auth...")
                 auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
-                logger.info(f"[auth] verify_auth returned: {auth_ok}")
 
             if not auth_ok:
                 # Credentials not found - try to use provider-specific auth plugin
