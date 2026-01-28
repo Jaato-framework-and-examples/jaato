@@ -955,6 +955,22 @@ class GitHubModelsProvider:
                             "content": content,
                         })
 
+        # Validate tool_call_id references match assistant tool_calls
+        # Collect all tool_call IDs from assistant messages
+        assistant_tool_ids: set = set()
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id"):
+                        assistant_tool_ids.add(tc["id"])
+
+        # Check tool messages reference valid IDs
+        for msg in messages:
+            if msg.get("role") == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and assistant_tool_ids and tool_call_id not in assistant_tool_ids:
+                    self._trace(f"WARNING: tool_call_id '{tool_call_id}' not found in assistant tool_calls: {assistant_tool_ids}")
+
         return messages
 
     def _build_copilot_tools(self) -> Optional[List[Dict[str, Any]]]:
@@ -1232,8 +1248,13 @@ class GitHubModelsProvider:
                         args = json.loads(tc.get("function", {}).get("arguments", "{}"))
                     except json.JSONDecodeError:
                         args = {}
+                    # OpenAI/Copilot API should always return an ID for tool calls.
+                    # If missing, log for investigation - this indicates a parsing issue.
+                    tool_id = tc.get("id")
+                    if not tool_id:
+                        self._trace(f"ERROR: Missing tool call ID from API for {tc['function']['name']} - this will cause 400 errors")
                     fc = FunctionCall(
-                        id=tc.get("id"),
+                        id=tool_id,  # May be None - will cause API error, which is correct
                         name=tc["function"]["name"],
                         args=args,
                     )
@@ -1270,8 +1291,12 @@ class GitHubModelsProvider:
                     for tc in delta.tool_calls:
                         idx = tc.get("index", 0)
                         if idx not in tool_call_accumulators:
+                            # Log first occurrence of tool call
+                            tc_id = tc.get("id")
+                            tc_name = tc.get("function", {}).get("name", "")
+                            self._trace(f"TOOL_CALL_START idx={idx} id={tc_id!r} name={tc_name!r}")
                             tool_call_accumulators[idx] = {
-                                "id": tc.get("id"),
+                                "id": tc_id,
                                 "type": "function",
                                 "function": {"name": "", "arguments": ""},
                             }
