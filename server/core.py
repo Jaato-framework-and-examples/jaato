@@ -1970,11 +1970,13 @@ class JaatoServer:
         if not self._auth_pending:
             return
 
-        self._trace("[auth] Checking if auth is now complete...")
+        self._trace(f"[auth] Checking if auth is now complete... (workspace={self._workspace_path})")
 
         # Try to verify auth again (use session env and workspace context for credentials)
         try:
             with self._with_session_env(), self._in_workspace():
+                import os
+                self._trace(f"[auth] Current working directory: {os.getcwd()}")
                 auth_ok = self._jaato.verify_auth(allow_interactive=False)
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")
@@ -2032,3 +2034,8 @@ class JaatoServer:
                 self._trace("[auth] Auth still pending")
         except Exception as e:
             self._trace(f"[auth] Auth check failed: {e}")
+            # Emit error so user knows what happened
+            self.emit(SystemMessageEvent(
+                message=f"Auth verification failed: {e}",
+                style="error",
+            ))
