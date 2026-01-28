@@ -713,6 +713,29 @@ class OutputBuffer:
                     is_new_turn = (self._last_turn_source != effective_source)
                     self._last_turn_source = effective_source
                 self._current_block = (source, [text], is_new_turn)
+        elif mode == "update":
+            # Update mode: replace the last line from the same source
+            # Used for progress indicators that update in place (e.g., OAuth countdown)
+            self._flush_current_block()
+            # Search backwards for the last line from this source
+            updated = False
+            for i in range(len(self._lines) - 1, -1, -1):
+                if self._lines[i].source == source:
+                    # Replace the line
+                    display_lines = self._measure_display_lines(source, text, False)
+                    self._lines[i] = OutputLine(
+                        source=source,
+                        text=text,
+                        style=self._lines[i].style,
+                        display_lines=display_lines,
+                        is_turn_start=False,
+                    )
+                    updated = True
+                    break
+            if not updated:
+                # No previous line from this source, just add a new one
+                self._add_line(source, text, "line", is_turn_start=False)
+            self._last_source = source
         elif mode == "flush":
             # Flush mode: process pending output but don't add any content
             # Used to synchronize output before UI events like tool tree rendering

@@ -54,6 +54,11 @@ class GitHubAuthPlugin:
         if self._output_callback:
             self._output_callback("github_auth", text, mode)
 
+    def _emit_progress(self, text: str) -> None:
+        """Emit progress output that updates the same line."""
+        if self._output_callback:
+            self._output_callback("github_auth", text, "update")
+
     def shutdown(self) -> None:
         """Clean up resources."""
         pass
@@ -181,7 +186,10 @@ class GitHubAuthPlugin:
             def on_message(msg: str) -> None:
                 self._emit(f"{msg}\n")
 
-            tokens = complete_device_flow(on_message=on_message)
+            def on_progress(msg: str) -> None:
+                self._emit_progress(msg)
+
+            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress)
 
             if tokens:
                 # Mask the token for display
@@ -216,8 +224,11 @@ class GitHubAuthPlugin:
             def on_message(msg: str) -> None:
                 self._emit(f"{msg}\n")
 
+            def on_progress(msg: str) -> None:
+                self._emit_progress(msg)
+
             self._emit("Polling for authorization...\n")
-            tokens = complete_device_flow(on_message=on_message)
+            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress)
 
             if tokens:
                 masked = f"{tokens.access_token[:10]}...{tokens.access_token[-4:]}"
