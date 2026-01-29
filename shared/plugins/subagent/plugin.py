@@ -193,6 +193,175 @@ class SubagentPlugin:
         self._initialized = False
         logger.info("Subagent plugin shutdown")
 
+    # =========================================================================
+    # Persistence Methods
+    # =========================================================================
+
+    def get_persistence_state(self) -> Dict[str, Any]:
+        """Export subagent registry for session persistence.
+
+        Returns a lightweight registry suitable for storing in SessionState.metadata.
+        The full state for each subagent should be saved separately to per-agent files
+        using get_agent_full_state().
+
+        Returns:
+            Dict with 'version' and 'agents' list, suitable for JSON serialization.
+        """
+        from .serializer import serialize_subagent_registry
+
+        with self._sessions_lock:
+            return serialize_subagent_registry(self._active_sessions)
+
+    def get_agent_full_state(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get full serializable state for a specific subagent.
+
+        This is used to save per-agent state files to
+        .jaato/sessions/{session_id}/subagents/{agent_id}.json
+
+        Args:
+            agent_id: The subagent ID.
+
+        Returns:
+            Full serializable state dict, or None if agent not found.
+        """
+        from .serializer import serialize_subagent_state
+
+        with self._sessions_lock:
+            session_info = self._active_sessions.get(agent_id)
+            if not session_info:
+                return None
+            return serialize_subagent_state(session_info)
+
+    def restore_persistence_state(
+        self,
+        registry_data: Dict[str, Any],
+        agent_states: Dict[str, Dict[str, Any]],
+        runtime: 'JaatoRuntime'
+    ) -> int:
+        """Restore subagents from persisted state.
+
+        Recreates subagent sessions using the persisted registry and per-agent
+        state files. Sessions are recreated using the runtime's create_session().
+
+        Args:
+            registry_data: Registry dict from SessionState.metadata["subagents"].
+            agent_states: Dict mapping agent_id to full state dict (from per-agent files).
+            runtime: JaatoRuntime to use for creating sessions.
+
+        Returns:
+            Number of subagents successfully restored.
+        """
+        from .serializer import deserialize_subagent_registry, deserialize_subagent_state
+        from .config import expand_plugin_configs
+
+        if not registry_data:
+            return 0
+
+        restored_count = 0
+        agents = deserialize_subagent_registry(registry_data)
+
+        for agent_info in agents:
+            agent_id = agent_info['agent_id']
+
+            # Get full state from per-agent file
+            full_state = agent_states.get(agent_id)
+            if not full_state:
+                logger.warning(
+                    "Skipping restore for subagent %s: no state file found",
+                    agent_id
+                )
+                continue
+
+            try:
+                # Deserialize full state
+                session_data = deserialize_subagent_state(full_state)
+                profile = session_data.get('profile')
+                history = session_data.get('history', [])
+                turn_accounting = session_data.get('turn_accounting', [])
+
+                if not profile:
+                    logger.warning(
+                        "Skipping restore for subagent %s: no profile data",
+                        agent_id
+                    )
+                    continue
+
+                # Determine model and provider
+                model = profile.model or (self._config.default_model if self._config else None)
+                provider = profile.provider or (self._config.default_provider if self._config else None)
+
+                # Expand plugin configs
+                effective_plugin_configs = expand_plugin_configs(
+                    profile.plugin_configs.copy() if profile.plugin_configs else {},
+                    {}
+                )
+                for plugin_name in (profile.plugins or []):
+                    if plugin_name not in effective_plugin_configs:
+                        effective_plugin_configs[plugin_name] = {}
+                    effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+
+                # Create session using runtime
+                session = runtime.create_session(
+                    model=model,
+                    tools=profile.plugins,
+                    system_instructions=profile.system_instructions,
+                    plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
+                    provider_name=provider
+                )
+
+                # Restore history
+                if history:
+                    session.reset_session(history)
+
+                # Restore turn accounting
+                if turn_accounting:
+                    session._turn_accounting = list(turn_accounting)
+
+                # Set agent context
+                session.set_agent_context(
+                    agent_type="subagent",
+                    agent_name=profile.name
+                )
+
+                # Set parent session for output forwarding
+                if self._parent_session:
+                    session.set_parent_session(self._parent_session)
+
+                # Register in active sessions
+                with self._sessions_lock:
+                    self._active_sessions[agent_id] = {
+                        'session': session,
+                        'profile': profile,
+                        'agent_id': agent_id,
+                        'created_at': session_data.get('created_at', datetime.now()),
+                        'last_activity': session_data.get('last_activity', datetime.now()),
+                        'turn_count': session_data.get('turn_count', 0),
+                        'max_turns': session_data.get('max_turns', profile.max_turns),
+                    }
+
+                # Update counter to avoid ID collisions
+                # Extract numeric suffix from agent_id like "subagent_5"
+                if agent_id.startswith("subagent_"):
+                    try:
+                        num = int(agent_id.split("_")[1])
+                        if num >= self._subagent_counter:
+                            self._subagent_counter = num + 1
+                    except (IndexError, ValueError):
+                        pass
+
+                restored_count += 1
+                logger.info("Restored subagent %s (profile: %s)", agent_id, profile.name)
+
+            except Exception as e:
+                logger.error(
+                    "Failed to restore subagent %s: %s",
+                    agent_id, e
+                )
+                continue
+
+        logger.info("Restored %d/%d subagents", restored_count, len(agents))
+        return restored_count
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return function declarations for subagent tools."""
         declarations = [
