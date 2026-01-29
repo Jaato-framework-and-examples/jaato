@@ -41,7 +41,7 @@ if TYPE_CHECKING:
         UserMessage,
     )
     from azure.core.credentials import AzureKeyCredential
-    from .copilot_client import CopilotClient, CopilotResponse
+    from .copilot_client import CopilotClient, CopilotResponse, ResponsesAPIResponse
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -692,12 +692,24 @@ class GitHubModelsProvider:
             tools = self._build_copilot_tools()
 
             try:
-                response = self._copilot_client.complete(
-                    model=self._copilot_model_name(),
-                    messages=messages,
-                    tools=tools,
-                )
-                provider_response = self._copilot_response_to_provider(response)
+                # Route to Responses API for codex models
+                if self._is_responses_api_model():
+                    self._trace(f"[SEND_MESSAGE] Using Responses API for {self._copilot_model_name()}")
+                    response = self._copilot_client.complete_responses(
+                        model=self._copilot_model_name(),
+                        messages=messages,
+                        system_instruction=self._system_instruction,
+                        tools=tools,
+                    )
+                    provider_response = self._responses_api_response_to_provider(response)
+                else:
+                    response = self._copilot_client.complete(
+                        model=self._copilot_model_name(),
+                        messages=messages,
+                        tools=tools,
+                    )
+                    provider_response = self._copilot_response_to_provider(response)
+
                 self._last_usage = provider_response.usage
 
                 # Add assistant response to history
@@ -803,12 +815,24 @@ class GitHubModelsProvider:
             tools = self._build_copilot_tools()
 
             try:
-                response = self._copilot_client.complete(
-                    model=self._copilot_model_name(),
-                    messages=messages,
-                    tools=tools,
-                )
-                provider_response = self._copilot_response_to_provider(response)
+                # Route to Responses API for codex models
+                if self._is_responses_api_model():
+                    self._trace(f"[SEND_TOOL_RESULTS] Using Responses API for {self._copilot_model_name()}")
+                    response = self._copilot_client.complete_responses(
+                        model=self._copilot_model_name(),
+                        messages=messages,
+                        system_instruction=self._system_instruction,
+                        tools=tools,
+                    )
+                    provider_response = self._responses_api_response_to_provider(response)
+                else:
+                    response = self._copilot_client.complete(
+                        model=self._copilot_model_name(),
+                        messages=messages,
+                        tools=tools,
+                    )
+                    provider_response = self._copilot_response_to_provider(response)
+
                 self._last_usage = provider_response.usage
 
                 # Add assistant response to history
@@ -909,6 +933,64 @@ class GitHubModelsProvider:
         if "/" in self._model_name:
             return self._model_name.split("/", 1)[1]
         return self._model_name
+
+    def _is_responses_api_model(self) -> bool:
+        """Check if the current model requires the Responses API.
+
+        Codex models (gpt-5-codex, gpt-5.2-codex, etc.) use the Responses API
+        instead of the Chat Completions API.
+
+        Returns:
+            True if model requires Responses API.
+        """
+        from .copilot_client import is_responses_api_model
+        model_name = self._copilot_model_name()
+        return is_responses_api_model(model_name)
+
+    def _responses_api_response_to_provider(self, response: "ResponsesAPIResponse") -> ProviderResponse:
+        """Convert Responses API response to ProviderResponse."""
+        from .copilot_client import ResponsesAPIResponse
+        from ..types import FunctionCall
+
+        parts = []
+        finish_reason = FinishReason.STOP
+
+        for item in response.output:
+            if item.type == "message":
+                # Extract text from content array
+                if item.content:
+                    for content_item in item.content:
+                        if content_item.get("type") == "output_text":
+                            text = content_item.get("text", "")
+                            if text:
+                                parts.append(Part.from_text(text))
+
+            elif item.type == "function_call":
+                # Convert function call
+                try:
+                    args = json.loads(item.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                fc = FunctionCall(
+                    id=item.call_id,
+                    name=item.name or "",
+                    args=args,
+                )
+                parts.append(Part.from_function_call(fc))
+                finish_reason = FinishReason.TOOL_USE
+
+        usage = TokenUsage(
+            prompt_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.total_tokens,
+        )
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
 
     def _build_copilot_messages(self) -> List[Dict[str, Any]]:
         """Build messages list for Copilot API (OpenAI format)."""
@@ -1337,6 +1419,125 @@ class GitHubModelsProvider:
             raw=None,
         )
 
+    def _copilot_responses_streaming(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        trace_prefix: str = "RESPONSES_STREAM",
+    ) -> ProviderResponse:
+        """Handle streaming response from Copilot Responses API.
+
+        Args:
+            messages: Messages in OpenAI format.
+            tools: Tools in OpenAI format.
+            on_chunk: Callback for each text chunk.
+            cancel_token: Optional cancellation token.
+            on_usage_update: Optional usage callback.
+            trace_prefix: Prefix for trace logging.
+
+        Returns:
+            ProviderResponse with accumulated response.
+        """
+        from ..types import FunctionCall
+
+        accumulated_text = []
+        parts = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        def flush_text_block():
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = ''.join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
+
+        try:
+            self._trace(f"{trace_prefix}_START")
+            chunk_count = 0
+
+            for event in self._copilot_client.complete_responses_stream(
+                model=self._copilot_model_name(),
+                messages=messages,
+                system_instruction=self._system_instruction,
+                tools=tools,
+            ):
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                event_type = event.get("type", "")
+
+                if event_type == "text":
+                    # Text content
+                    text = event.get("text", "")
+                    if text:
+                        chunk_count += 1
+                        self._trace(f"{trace_prefix}_CHUNK[{chunk_count}] len={len(text)}")
+                        accumulated_text.append(text)
+                        on_chunk(text)
+
+                elif event_type == "function_call":
+                    # Function call complete
+                    flush_text_block()
+                    try:
+                        args = json.loads(event.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    fc = FunctionCall(
+                        id=event.get("call_id"),
+                        name=event.get("name", ""),
+                        args=args,
+                    )
+                    parts.append(Part.from_function_call(fc))
+                    function_calls.append(fc)
+                    self._trace(f"{trace_prefix}_FUNC_CALL name={fc.name}")
+
+                elif event_type == "done":
+                    # Completion with optional usage
+                    usage_data = event.get("usage", {})
+                    if usage_data:
+                        usage = TokenUsage(
+                            prompt_tokens=usage_data.get("input_tokens", 0),
+                            output_tokens=usage_data.get("output_tokens", 0),
+                            total_tokens=usage_data.get("total_tokens", 0),
+                        )
+                        self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
+                        if on_usage_update and usage.total_tokens > 0:
+                            on_usage_update(usage)
+                    finish_reason = FinishReason.STOP
+
+            self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
+
+        except Exception as e:
+            self._trace(f"{trace_prefix}_ERROR {type(e).__name__}: {e}")
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                self._handle_api_error(e)
+                raise
+
+        # Flush remaining text
+        flush_text_block()
+
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
+
     def send_message_streaming(
         self,
         message: str,
@@ -1369,14 +1570,26 @@ class GitHubModelsProvider:
             messages = self._build_copilot_messages()
             tools = self._build_copilot_tools()
 
-            provider_response = self._copilot_streaming_response(
-                messages=messages,
-                tools=tools,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                trace_prefix="STREAM",
-            )
+            # Route to Responses API for codex models
+            if self._is_responses_api_model():
+                self._trace(f"[SEND_MESSAGE_STREAMING] Using Responses API for {self._copilot_model_name()}")
+                provider_response = self._copilot_responses_streaming(
+                    messages=messages,
+                    tools=tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    trace_prefix="RESPONSES_STREAM",
+                )
+            else:
+                provider_response = self._copilot_streaming_response(
+                    messages=messages,
+                    tools=tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    trace_prefix="STREAM",
+                )
 
             self._last_usage = provider_response.usage
             self._add_response_to_history(provider_response)
@@ -1556,14 +1769,26 @@ class GitHubModelsProvider:
             messages = self._build_copilot_messages()
             tools = self._build_copilot_tools()
 
-            provider_response = self._copilot_streaming_response(
-                messages=messages,
-                tools=tools,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                trace_prefix="STREAM_TOOL_RESULTS",
-            )
+            # Route to Responses API for codex models
+            if self._is_responses_api_model():
+                self._trace(f"[SEND_TOOL_RESULTS_STREAMING] Using Responses API for {self._copilot_model_name()}")
+                provider_response = self._copilot_responses_streaming(
+                    messages=messages,
+                    tools=tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    trace_prefix="RESPONSES_STREAM_TOOL_RESULTS",
+                )
+            else:
+                provider_response = self._copilot_streaming_response(
+                    messages=messages,
+                    tools=tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    trace_prefix="STREAM_TOOL_RESULTS",
+                )
 
             self._last_usage = provider_response.usage
             self._add_response_to_history(provider_response)
