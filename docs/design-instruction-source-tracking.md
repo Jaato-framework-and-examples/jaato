@@ -81,34 +81,32 @@ A dedicated panel in the rich client (toggled, replaces output panel) showing to
 
 **Per-agent view** (shows limit and percentage):
 ```
-╭─ Token Usage (8230 / 128K = 6.4%) ────────────────╮
+╭─ Token Usage (8030 / 128K = 6.3%) ────────────────╮
 │                                                   │
 │  Source         Tokens  GC   ▏ Usage              │
 │  ──────────────────────────────────────────────── │
-│  System            890  🔒   ▏████░░░░░░░░░░░░░░  │
-│  Session           200  🔒   ▏█░░░░░░░░░░░░░░░░░  │
-│  Plugin           1840  ◐    ▏████████░░░░░░░░░░  │
+│  System           1090  🔒 ▸ ▏████░░░░░░░░░░░░░░  │
+│  Plugin           1840  ◐  ▸ ▏████████░░░░░░░░░░  │
 │  Enrichment        300  ○    ▏█░░░░░░░░░░░░░░░░░  │
-│  Conversation     5000  ◐    ▏██████████████████  │
+│  Conversation     5000  ◐  ▸ ▏██████████████████  │
 │                                                   │
-│  🔒 = locked  ◐ = partial  ○ = ephemeral          │
+│  🔒 = locked  ◐ = partial  ○ = ephemeral  ▸ = drill │
 ╰───────────────────────────────────────────────────╯
  [Total] [Main] [explore-1] [subagent-2]       TAB →
 ```
 
 **Total view** (aggregated across agents - no limit/percentage since agents may have different context windows):
 ```
-╭─ Token Usage (Total: 12450 tokens) ───────────────╮
+╭─ Token Usage (Total: 12050 tokens) ───────────────╮
 │                                                   │
 │  Source         Tokens  GC   ▏ Distribution       │
 │  ──────────────────────────────────────────────── │
-│  System           1200  🔒   ▏███░░░░░░░░░░░░░░░  │
-│  Session           400  🔒   ▏█░░░░░░░░░░░░░░░░░  │
-│  Plugin           2850  ◐    ▏██████░░░░░░░░░░░░  │
+│  System           1600  🔒 ▸ ▏███░░░░░░░░░░░░░░░  │
+│  Plugin           2850  ◐  ▸ ▏██████░░░░░░░░░░░░  │
 │  Enrichment        500  ○    ▏█░░░░░░░░░░░░░░░░░  │
-│  Conversation     7500  ◐    ▏██████████████████  │
+│  Conversation     7500  ◐  ▸ ▏██████████████████  │
 │                                                   │
-│  🔒 = locked  ◐ = partial  ○ = ephemeral          │
+│  🔒 = locked  ◐ = partial  ○ = ephemeral  ▸ = drill │
 ╰───────────────────────────────────────────────────╯
  [Total] [Main] [explore-1] [subagent-2]       TAB →
 ```
@@ -120,6 +118,21 @@ A dedicated panel in the rich client (toggled, replaces output panel) showing to
 - **ESC**: Return to parent view / close panel
 
 ### Drill-Down Views
+
+**System drill-down (base, client, framework):**
+```
+╭─ System Breakdown (1090 tokens) ──────────────────╮
+│                                                   │
+│  Component          Tokens  GC   ▏ Usage          │
+│  ──────────────────────────────────────────────── │
+│  Base Instructions     500  🔒   ▏█████████░░░░░  │
+│  Client Instructions   200  🔒   ▏███░░░░░░░░░░░  │
+│  Framework             390  🔒   ▏███████░░░░░░░  │
+│                                                   │
+│  All components are locked (essential)            │
+╰───────────────────────────────────────────────────╯
+ [← Back]                                      ESC
+```
 
 **Plugin drill-down (per-tool):**
 ```
@@ -168,12 +181,18 @@ A dedicated panel in the rich client (toggled, replaces output panel) showing to
 from enum import Enum
 
 class InstructionSource(Enum):
-    """The 5 tracked instruction source layers"""
-    SYSTEM = "system"           # Base + framework constants (task completion, parallel, sandbox, permission)
-    SESSION = "session"         # Programmatic system_instructions param
+    """The 4 tracked instruction source layers"""
+    SYSTEM = "system"           # System instructions (children: base, client, framework)
     PLUGIN = "plugin"           # Plugin instructions (children: per-tool)
     ENRICHMENT = "enrichment"   # Prompt enrichment pipeline additions
     CONVERSATION = "conversation"  # Message history (children: per-turn)
+
+
+class SystemChildType(Enum):
+    """Types of SYSTEM instruction children"""
+    BASE = "base"           # User-provided .jaato/system_instructions.md
+    CLIENT = "client"       # Programmatic system_instructions param
+    FRAMEWORK = "framework" # Task completion, parallel tool guidance
 
 
 class GCPolicy(Enum):
@@ -422,6 +441,55 @@ class GCPlugin:
 
 3. ~~**Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?~~
    **Decision**: Show raw token counts only; omit limit/percentage since they're meaningless across different context windows.
+
+---
+
+## Provider Token Counting
+
+### History Handling by Provider
+
+Different providers handle conversation history differently, which affects how token counting works:
+
+| Provider | Mode | History Handling | Pre-request `count_tokens()` |
+|----------|------|------------------|------------------------------|
+| **Google GenAI** | Stateless | Full history sent each request via `chats.create()` SDK | ✅ Actual (API call) |
+| **Anthropic** | Stateless | Full history sent each request via `messages.create()` | ✅ Actual (API call) |
+| **GitHub Models** | Stateless | Full history sent each request via `complete()` | ❌ Estimate (`len // 4`) |
+| **Antigravity** | Stateless | Full history sent each request | ❌ Estimate (`len // 4`) |
+| **Ollama** | Stateless | Inherits from Anthropic provider | ❌ Estimate (`len // 4`) |
+| **Claude CLI** | **Stateful** | Uses `--resume {session_id}` - only new content sent | ❌ Estimate (`len // 4`) |
+
+### Stateless Providers
+
+For stateless providers (all except Claude CLI), each API request includes the **full context**:
+- System instructions (sent with every request)
+- Tool definitions (sent with every request)
+- Full conversation history (all previous messages)
+- Current new message
+
+The `response.usage.prompt_tokens` reflects the total input context for that request.
+
+### Stateful Provider: Claude CLI
+
+Claude CLI maintains **server-side session state**:
+- First call: Full context sent → CLI returns `session_id` in SystemMessage
+- Subsequent calls: `--resume {session_id}` → only new message sent
+
+For Claude CLI, `prompt_tokens` in subsequent responses reflects **only the incremental content**, not the full history.
+
+### Implications for Token Budget Tracking
+
+1. **Pre-request breakdown**: For providers with `count_tokens()` APIs (Google, Anthropic), we can get accurate per-piece counts by calling `provider.count_tokens()` on each component separately.
+
+2. **Post-response total**: All providers return `response.usage.prompt_tokens` after each request, but this is only a single total—no breakdown by source.
+
+3. **Claude CLI special case**: Token tracking needs different logic since subsequent turns only report incremental tokens.
+
+### Current Implementation
+
+Currently using `estimate_tokens()` (chars/4 approximation) for all providers. This could be improved by:
+- Using `provider.count_tokens()` where APIs are available (Google, Anthropic)
+- Falling back to estimates for providers without token counting APIs
 
 ---
 

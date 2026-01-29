@@ -1011,6 +1011,31 @@ class JaatoSession:
             history=history
         )
 
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens using provider if available, else estimate.
+
+        Uses the provider's count_tokens() API when available (Google GenAI,
+        Anthropic) for accurate counts. Falls back to estimate_tokens()
+        (chars/4 approximation) for providers without token counting APIs.
+
+        Args:
+            text: The text to count tokens for.
+
+        Returns:
+            Token count (actual or estimated).
+        """
+        if not text:
+            return 0
+        if self._provider and hasattr(self._provider, 'count_tokens'):
+            try:
+                result = self._provider.count_tokens(text)
+                # Ensure we got an int (handles mocked providers returning MagicMock)
+                if isinstance(result, int):
+                    return result
+            except Exception:
+                pass  # Fall back to estimate on error
+        return estimate_tokens(text)
+
     def _populate_instruction_budget(
         self,
         session_instructions: Optional[str] = None
@@ -1045,13 +1070,18 @@ class JaatoSession:
         )
 
         # SYSTEM: Track as children (base, client, framework)
-        from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION, _PARALLEL_TOOL_GUIDANCE, _is_parallel_tools_enabled
+        from .jaato_runtime import (
+            _TASK_COMPLETION_INSTRUCTION,
+            _PARALLEL_TOOL_GUIDANCE,
+            _TURN_SUMMARY_INSTRUCTION,
+            _is_parallel_tools_enabled,
+        )
 
         total_system_tokens = 0
 
         # 1. Base instructions from .jaato/system_instructions.md
         base_instructions = getattr(self._runtime, '_base_system_instructions', None)
-        base_tokens = estimate_tokens(base_instructions) if base_instructions else 0
+        base_tokens = self._count_tokens(base_instructions) if base_instructions else 0
         if base_tokens > 0:
             self._instruction_budget.add_child(
                 InstructionSource.SYSTEM,
@@ -1063,7 +1093,7 @@ class JaatoSession:
             total_system_tokens += base_tokens
 
         # 2. Client-provided session instructions (programmatic)
-        client_tokens = estimate_tokens(session_instructions) if session_instructions else 0
+        client_tokens = self._count_tokens(session_instructions) if session_instructions else 0
         if client_tokens > 0:
             self._instruction_budget.add_child(
                 InstructionSource.SYSTEM,
@@ -1074,10 +1104,11 @@ class JaatoSession:
             )
             total_system_tokens += client_tokens
 
-        # 3. Framework constants (task completion, parallel tool guidance)
-        framework_tokens = estimate_tokens(_TASK_COMPLETION_INSTRUCTION)
+        # 3. Framework constants (task completion, parallel tool guidance, turn summary)
+        framework_tokens = self._count_tokens(_TASK_COMPLETION_INSTRUCTION)
         if _is_parallel_tools_enabled():
-            framework_tokens += estimate_tokens(_PARALLEL_TOOL_GUIDANCE)
+            framework_tokens += self._count_tokens(_PARALLEL_TOOL_GUIDANCE)
+        framework_tokens += self._count_tokens(_TURN_SUMMARY_INSTRUCTION)
         self._instruction_budget.add_child(
             InstructionSource.SYSTEM,
             SystemChildType.FRAMEWORK.value,
@@ -1098,7 +1129,7 @@ class JaatoSession:
                 if plugin and hasattr(plugin, 'get_system_instructions'):
                     instr = plugin.get_system_instructions()
                     if instr:
-                        tokens = estimate_tokens(instr)
+                        tokens = self._count_tokens(instr)
                         plugin_tokens += tokens
                         # Add as child entry for drill-down
                         from .instruction_budget import PluginToolType, DEFAULT_TOOL_POLICIES
@@ -1179,15 +1210,15 @@ class JaatoSession:
                         break
 
         for i, msg in enumerate(history):
-            # Estimate tokens for this message
+            # Count tokens for this message
             msg_tokens = 0
             for part in msg.parts:
                 if hasattr(part, 'text') and part.text:
-                    msg_tokens += estimate_tokens(part.text)
+                    msg_tokens += self._count_tokens(part.text)
                 elif hasattr(part, 'tool_result') and part.tool_result:
                     # Tool results can be large
                     result_text = str(part.tool_result.content) if part.tool_result.content else ''
-                    msg_tokens += estimate_tokens(result_text)
+                    msg_tokens += self._count_tokens(result_text)
 
             conversation_tokens += msg_tokens
 
