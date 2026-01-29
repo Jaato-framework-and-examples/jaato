@@ -1123,6 +1123,30 @@ class GitHubModelsProvider:
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions."""
+        import requests.exceptions
+
+        # Check for chunked encoding errors (response ended prematurely)
+        # These are transient network errors that should be retriable
+        if isinstance(error, requests.exceptions.ChunkedEncodingError):
+            raise InfrastructureError(
+                status_code=0,  # No HTTP status for network-level errors
+                original_error=f"ChunkedEncodingError: {error}",
+            ) from error
+
+        # Check for connection errors (network issues)
+        if isinstance(error, requests.exceptions.ConnectionError):
+            raise InfrastructureError(
+                status_code=0,
+                original_error=f"ConnectionError: {error}",
+            ) from error
+
+        # Check for timeout errors
+        if isinstance(error, requests.exceptions.Timeout):
+            raise InfrastructureError(
+                status_code=0,
+                original_error=f"Timeout: {error}",
+            ) from error
+
         error_str = str(error).lower()
 
         # Check for disabled error

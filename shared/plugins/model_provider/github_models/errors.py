@@ -385,14 +385,18 @@ class InfrastructureError(GitHubModelsError):
         super().__init__(message)
 
     def _format_message(self) -> str:
-        lines = [f"GitHub API infrastructure error (HTTP {self.status_code})."]
+        if self.status_code == 0:
+            # Network-level error (no HTTP status)
+            lines = ["GitHub API network error."]
+        else:
+            lines = [f"GitHub API infrastructure error (HTTP {self.status_code})."]
 
         if self.original_error:
             lines.append(f"Error: {self.original_error}")
 
         lines.extend([
             "",
-            "This is a transient server-side error.",
+            "This is a transient error.",
             "The request will be automatically retried.",
         ])
 
