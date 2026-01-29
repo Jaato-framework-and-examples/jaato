@@ -140,9 +140,32 @@ class SourceEntry:
             return sum(child.preservable_tokens() for child in self.children.values())
         return 0
 
+    def effective_gc_policy(self) -> GCPolicy:
+        """Determine effective GC policy considering children.
+
+        If no children, returns the stored gc_policy.
+        If children exist, aggregates their effective policies:
+        - All same policy → use that policy
+        - Mixed policies → PARTIAL
+        """
+        if not self.children:
+            return self.gc_policy
+
+        # Collect effective policies from all children (recursive)
+        child_policies = {
+            child.effective_gc_policy() for child in self.children.values()
+        }
+
+        # All children share the same policy → use that
+        if len(child_policies) == 1:
+            return child_policies.pop()
+
+        # Mixed policies → PARTIAL
+        return GCPolicy.PARTIAL
+
     def indicator(self) -> str:
-        """Get the UI indicator for this entry's GC policy."""
-        return GC_POLICY_INDICATORS.get(self.gc_policy, "?")
+        """Get the UI indicator for this entry's effective GC policy."""
+        return GC_POLICY_INDICATORS.get(self.effective_gc_policy(), "?")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -150,7 +173,7 @@ class SourceEntry:
             "source": self.source.value,
             "tokens": self.tokens,
             "total_tokens": self.total_tokens(),
-            "gc_policy": self.gc_policy.value,
+            "gc_policy": self.effective_gc_policy().value,
             "gc_eligible_tokens": self.gc_eligible_tokens(),
             "indicator": self.indicator(),
         }

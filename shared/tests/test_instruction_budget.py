@@ -185,6 +185,121 @@ class TestSourceEntry:
             gc_policy=GCPolicy.PRESERVABLE,
         ).indicator() == "◑"
 
+    def test_effective_gc_policy_no_children(self):
+        """effective_gc_policy() with no children returns stored policy."""
+        entry = SourceEntry(
+            source=InstructionSource.PLUGIN,
+            tokens=100,
+            gc_policy=GCPolicy.PARTIAL,
+        )
+        assert entry.effective_gc_policy() == GCPolicy.PARTIAL
+
+    def test_effective_gc_policy_all_children_same(self):
+        """effective_gc_policy() with all children same policy returns that policy."""
+        entry = SourceEntry(
+            source=InstructionSource.PLUGIN,
+            tokens=0,
+            gc_policy=GCPolicy.PARTIAL,  # Stored as PARTIAL
+            children={
+                "cli": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=800,
+                    gc_policy=GCPolicy.LOCKED,
+                ),
+                "file_edit": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=200,
+                    gc_policy=GCPolicy.LOCKED,
+                ),
+            },
+        )
+        # All children are LOCKED, so effective policy is LOCKED
+        assert entry.effective_gc_policy() == GCPolicy.LOCKED
+        assert entry.indicator() == "🔒"
+
+    def test_effective_gc_policy_mixed_children(self):
+        """effective_gc_policy() with mixed children returns PARTIAL."""
+        entry = SourceEntry(
+            source=InstructionSource.PLUGIN,
+            tokens=0,
+            gc_policy=GCPolicy.LOCKED,  # Stored as LOCKED (shouldn't matter)
+            children={
+                "cli": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=800,
+                    gc_policy=GCPolicy.LOCKED,
+                ),
+                "web_search": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=200,
+                    gc_policy=GCPolicy.EPHEMERAL,
+                ),
+            },
+        )
+        # Mixed policies -> PARTIAL
+        assert entry.effective_gc_policy() == GCPolicy.PARTIAL
+        assert entry.indicator() == "◐"
+
+    def test_effective_gc_policy_nested_children(self):
+        """effective_gc_policy() recurses into nested children."""
+        entry = SourceEntry(
+            source=InstructionSource.PLUGIN,
+            tokens=0,
+            gc_policy=GCPolicy.PARTIAL,
+            children={
+                "group1": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=0,
+                    gc_policy=GCPolicy.PARTIAL,
+                    children={
+                        "tool_a": SourceEntry(
+                            source=InstructionSource.PLUGIN,
+                            tokens=100,
+                            gc_policy=GCPolicy.LOCKED,
+                        ),
+                        "tool_b": SourceEntry(
+                            source=InstructionSource.PLUGIN,
+                            tokens=100,
+                            gc_policy=GCPolicy.LOCKED,
+                        ),
+                    },
+                ),
+                "group2": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=0,
+                    gc_policy=GCPolicy.PARTIAL,
+                    children={
+                        "tool_c": SourceEntry(
+                            source=InstructionSource.PLUGIN,
+                            tokens=100,
+                            gc_policy=GCPolicy.LOCKED,
+                        ),
+                    },
+                ),
+            },
+        )
+        # All leaf children are LOCKED -> groups are effectively LOCKED -> parent is LOCKED
+        assert entry.effective_gc_policy() == GCPolicy.LOCKED
+
+    def test_to_dict_gc_policy_uses_effective(self):
+        """to_dict should serialize effective gc_policy, not stored."""
+        entry = SourceEntry(
+            source=InstructionSource.PLUGIN,
+            tokens=0,
+            gc_policy=GCPolicy.PARTIAL,  # Stored as PARTIAL
+            children={
+                "cli": SourceEntry(
+                    source=InstructionSource.PLUGIN,
+                    tokens=800,
+                    gc_policy=GCPolicy.LOCKED,
+                ),
+            },
+        )
+        d = entry.to_dict()
+        # All children are LOCKED, so serialized gc_policy should be "locked"
+        assert d["gc_policy"] == "locked"
+        assert d["indicator"] == "🔒"
+
     def test_to_dict(self):
         """to_dict should produce serializable output."""
         entry = SourceEntry(
