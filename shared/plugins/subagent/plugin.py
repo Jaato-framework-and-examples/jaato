@@ -300,6 +300,10 @@ class SubagentPlugin:
                         effective_plugin_configs[plugin_name] = {}
                     effective_plugin_configs[plugin_name]["agent_name"] = profile.name
 
+                # Save parent session before create_session because configure() on
+                # the new session will overwrite self._parent_session
+                parent_session = self._parent_session
+
                 # Create session using runtime
                 session = runtime.create_session(
                     model=model,
@@ -308,6 +312,9 @@ class SubagentPlugin:
                     plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                     provider_name=provider
                 )
+
+                # Restore parent session reference (was overwritten by configure())
+                self._parent_session = parent_session
 
                 # Restore history
                 if history:
@@ -324,8 +331,8 @@ class SubagentPlugin:
                 )
 
                 # Set parent session for output forwarding
-                if self._parent_session:
-                    session.set_parent_session(self._parent_session)
+                if parent_session:
+                    session.set_parent_session(parent_session)
 
                 # Register in active sessions
                 with self._sessions_lock:
