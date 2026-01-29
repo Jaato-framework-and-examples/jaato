@@ -28,7 +28,15 @@ async def run_headless_mode(
     """Run the client in headless mode with file output.
 
     All output goes to files in {workspace}/jaato-headless-client-agents/.
-    Permissions are auto-approved.
+
+    Permission handling:
+    - Sets session default policy to "allow" via `permissions default allow`
+    - This auto-approves all tools not in the blacklist
+    - If a prompt still occurs (blacklisted tool), responds with "y" (once)
+
+    Session isolation:
+    - Use --new-session to create an isolated session for headless mode
+    - Without --new-session, may attach to existing session (shared permission state)
 
     Args:
         socket_path: Path to the Unix domain socket.
@@ -99,6 +107,15 @@ async def run_headless_mode(
         print(f"[headless] Connection failed: {e}", file=sys.stderr)
         renderer.shutdown()
         return
+
+    # Request new session if specified (recommended for headless to ensure isolation)
+    if new_session:
+        await client.new_session()
+
+    # Set default permission policy to "allow" for headless mode
+    # This auto-approves all tools not in blacklist, avoiding per-prompt responses
+    print("[headless] Setting permission policy to auto-approve...", file=sys.stderr)
+    await client.execute_command("permissions", ["default", "allow"])
 
     async def handle_events():
         """Handle events from the server."""
@@ -171,7 +188,8 @@ async def run_headless_mode(
 
             # ==================== Permission Events ====================
             elif isinstance(event, PermissionInputModeEvent):
-                # Auto-approve in headless mode
+                # With "permissions default allow" policy, this shouldn't happen
+                # But if it does (e.g., blacklisted tool), respond with "y" (once)
                 renderer.on_permission_requested(
                     agent_id=event.agent_id or "main",
                     request_id=event.request_id,
@@ -179,8 +197,8 @@ async def run_headless_mode(
                     call_id=event.call_id,
                     response_options=event.response_options,
                 )
-                # Send auto-approval: "a" = always approve
-                await client.respond_to_permission(event.request_id, "a")
+                # Respond with "y" (once) - safer than "a" (always) for edge cases
+                await client.respond_to_permission(event.request_id, "y")
 
             elif isinstance(event, PermissionResolvedEvent):
                 renderer.on_permission_resolved(
@@ -271,12 +289,6 @@ async def run_headless_mode(
 
     # Send the prompt
     print(f"[headless] Sending prompt...", file=sys.stderr)
-
-    # Request new session if specified
-    if new_session:
-        await client.new_session()
-
-    # Send the message
     await client.send_message(prompt)
 
     # Wait for events until turn completes
