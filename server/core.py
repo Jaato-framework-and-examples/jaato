@@ -128,6 +128,9 @@ class AgentState:
         # GC configuration (set when agent is created with GC)
         self.gc_threshold: Optional[float] = None
         self.gc_strategy: Optional[str] = None
+        # Per-agent formatter pipeline for output formatting
+        # Initialized lazily via JaatoServer._get_agent_pipeline()
+        self.formatter_pipeline: Optional[Any] = None
 
 
 class JaatoServer:
@@ -257,9 +260,13 @@ class JaatoServer:
         # Propagate to JaatoClient if connected
         if self._jaato:
             self._jaato.set_terminal_width(width)
-        # Propagate to formatter pipeline if initialized
+        # Propagate to main formatter pipeline if initialized
         if self._formatter_pipeline:
             self._formatter_pipeline.set_console_width(width)
+        # Propagate to all agent-specific pipelines
+        for agent in self._agents.values():
+            if agent.formatter_pipeline:
+                agent.formatter_pipeline.set_console_width(width)
 
     @property
     def auth_pending(self) -> bool:
@@ -752,6 +759,41 @@ class JaatoServer:
 
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
+    def _get_agent_pipeline(self, agent_id: str) -> Optional[Any]:
+        """Get the formatter pipeline for a specific agent.
+
+        Each agent has its own formatter pipeline to prevent cross-contamination
+        of buffered content when multiple agents are active.
+
+        Args:
+            agent_id: The agent's unique identifier.
+
+        Returns:
+            The agent's formatter pipeline, or None if agent not found.
+        """
+        if agent_id not in self._agents:
+            return None
+
+        agent = self._agents[agent_id]
+        if agent.formatter_pipeline is None and self._formatter_pipeline:
+            # Lazily create a new pipeline for this agent using the same config
+            # We clone the main pipeline's configuration
+            from shared.plugins.formatter_pipeline import create_registry
+            formatter_registry = create_registry()
+            formatter_registry.discover()
+            if self.registry:
+                formatter_registry.set_tool_registry(self.registry)
+            # Use same config loading as main pipeline
+            config_loaded = (
+                formatter_registry.load_config(".jaato/formatters.json") or
+                formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
+            )
+            if not config_loaded:
+                formatter_registry.use_defaults()
+            agent.formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
+            self._trace(f"Created formatter pipeline for agent {agent_id}")
+        return agent.formatter_pipeline
+
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin.
 
@@ -845,11 +887,13 @@ class JaatoServer:
 
             def on_agent_output(self, agent_id, source, text, mode):
                 server._trace(f"ON_AGENT_OUTPUT agent={agent_id} source={source} len={len(text)} mode={mode}")
+                # Get agent-specific formatter pipeline to prevent cross-contamination
+                agent_pipeline = server._get_agent_pipeline(agent_id)
                 # For model output with streaming formatter pipeline
-                if source == "model" and server._formatter_pipeline:
+                if source == "model" and agent_pipeline:
                     # Process chunk through streaming pipeline
                     # Pipeline buffers code blocks, passes through regular text
-                    for output in server._formatter_pipeline.process_chunk(text):
+                    for output in agent_pipeline.process_chunk(text):
                         if output:
                             server.emit(AgentOutputEvent(
                                 agent_id=agent_id,
@@ -864,8 +908,8 @@ class JaatoServer:
 
                     # Flush mode: flush the formatter pipeline to emit buffered content
                     # BEFORE tool events, ensuring text appears in correct order
-                    if mode == "flush" and server._formatter_pipeline:
-                        for output in server._formatter_pipeline.flush():
+                    if mode == "flush" and agent_pipeline:
+                        for output in agent_pipeline.flush():
                             if output:
                                 server.emit(AgentOutputEvent(
                                     agent_id=agent_id,
@@ -915,9 +959,10 @@ class JaatoServer:
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
                                         function_calls):
-                # Flush any remaining buffered content from the formatter pipeline
-                if server._formatter_pipeline:
-                    for output in server._formatter_pipeline.flush():
+                # Flush any remaining buffered content from the agent's formatter pipeline
+                agent_pipeline = server._get_agent_pipeline(agent_id)
+                if agent_pipeline:
+                    for output in agent_pipeline.flush():
                         if output:
                             server.emit(AgentOutputEvent(
                                 agent_id=agent_id,
@@ -926,7 +971,7 @@ class JaatoServer:
                                 mode="append",
                             ))
                     # Reset pipeline for next turn
-                    server._formatter_pipeline.reset()
+                    agent_pipeline.reset()
 
                 if agent_id in server._agents:
                     server._agents[agent_id].turn_accounting.append({
@@ -1008,8 +1053,10 @@ class JaatoServer:
 
                 # Flush any buffered model output before starting the tool
                 # This ensures model text appears BEFORE the tool tree
-                if server._formatter_pipeline:
-                    for output in server._formatter_pipeline.flush():
+                # Use agent-specific pipeline to prevent cross-contamination
+                agent_pipeline = server._get_agent_pipeline(agent_id)
+                if agent_pipeline:
+                    for output in agent_pipeline.flush():
                         if output:
                             server.emit(AgentOutputEvent(
                                 agent_id=agent_id,
@@ -1017,7 +1064,7 @@ class JaatoServer:
                                 text=output,
                                 mode="append",
                             ))
-                    server._formatter_pipeline.reset()
+                    agent_pipeline.reset()
 
                 # Extract "message" or similar intent arguments and emit as model text
                 # This shows the model's intent before the tool block, not collapsed in it
@@ -1061,13 +1108,15 @@ class JaatoServer:
             def on_tool_output(self, agent_id, call_id, chunk):
                 # Process tool output through formatter pipeline for syntax highlighting
                 # and marker transformation (e.g., <notebook-cell> → <nb-row>)
-                if server._formatter_pipeline:
+                # Use agent-specific pipeline to prevent cross-contamination
+                agent_pipeline = server._get_agent_pipeline(agent_id)
+                if agent_pipeline:
                     formatted_parts = []
-                    for output in server._formatter_pipeline.process_chunk(chunk):
+                    for output in agent_pipeline.process_chunk(chunk):
                         formatted_parts.append(output)
-                    for output in server._formatter_pipeline.flush():
+                    for output in agent_pipeline.flush():
                         formatted_parts.append(output)
-                    server._formatter_pipeline.reset()
+                    agent_pipeline.reset()
                     chunk = "".join(formatted_parts)
 
                 server.emit(ToolOutputEvent(
@@ -1136,10 +1185,12 @@ class JaatoServer:
                     else:
                         prompt_lines, format_hint, language, raw_details = result
 
-                    if server._formatter_pipeline:
+                    # Use agent-specific pipeline to prevent cross-contamination
+                    agent_pipeline = server._get_agent_pipeline(server._current_tool_agent_id)
+                    if agent_pipeline:
                         # First, flush any buffered model output and emit it separately
                         # This prevents model text from leaking into the permission prompt
-                        for output in server._formatter_pipeline.flush():
+                        for output in agent_pipeline.flush():
                             if output:
                                 server.emit(AgentOutputEvent(
                                     agent_id=server._current_tool_agent_id,
@@ -1147,7 +1198,7 @@ class JaatoServer:
                                     text=output,
                                     mode="append",
                                 ))
-                        server._formatter_pipeline.reset()
+                        agent_pipeline.reset()
 
                         # Build permission content for unified output flow
                         content_parts = []
@@ -1157,11 +1208,11 @@ class JaatoServer:
                             code_block = f"```{language}\n{raw_details}\n```\n"
                             # Format through pipeline for syntax highlighting
                             formatted_code = []
-                            for output in server._formatter_pipeline.process_chunk(code_block):
+                            for output in agent_pipeline.process_chunk(code_block):
                                 formatted_code.append(output)
-                            for output in server._formatter_pipeline.flush():
+                            for output in agent_pipeline.flush():
                                 formatted_code.append(output)
-                            server._formatter_pipeline.reset()
+                            agent_pipeline.reset()
                             if formatted_code:
                                 content_parts.append("".join(formatted_code))
 
@@ -1176,11 +1227,11 @@ class JaatoServer:
                         if prompt_lines:
                             formatted_lines = []
                             for line in prompt_lines:
-                                for output in server._formatter_pipeline.process_chunk(line + "\n"):
+                                for output in agent_pipeline.process_chunk(line + "\n"):
                                     formatted_lines.extend(output.rstrip("\n").split("\n"))
-                            for output in server._formatter_pipeline.flush():
+                            for output in agent_pipeline.flush():
                                 formatted_lines.extend(output.rstrip("\n").split("\n"))
-                            server._formatter_pipeline.reset()
+                            agent_pipeline.reset()
                             content_parts.append("\n".join(formatted_lines))
 
                         # Emit content as AgentOutputEvent (flows through main output area)
