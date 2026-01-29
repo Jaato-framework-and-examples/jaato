@@ -111,8 +111,6 @@ class SubagentPlugin:
         self._retry_callback: Optional['RetryCallback'] = None
         # Plan reporter for subagent TodoPlugins (propagated from parent)
         self._plan_reporter: Optional[Any] = None  # TodoReporter instance
-        # Workspace path for subagent execution (set via set_workspace_path broadcast)
-        self._workspace_path: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -801,19 +799,6 @@ class SubagentPlugin:
         """
         self._plan_reporter = reporter
 
-    def set_workspace_path(self, path: str) -> None:
-        """Set workspace path for subagent execution.
-
-        This is called by the PluginRegistry when broadcasting workspace path
-        to all plugins. Subagents will be spawned with this path as their
-        working directory, ensuring they run in the same context as the client.
-
-        Args:
-            path: Absolute path to the workspace root directory.
-        """
-        self._workspace_path = path
-        logger.debug("SubagentPlugin workspace path set to: %s", path)
-
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
 
@@ -1401,10 +1386,13 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Use workspace path from registry broadcast (preferred) or fall back to cwd
-        # The workspace path is set by the client when connecting and broadcast
-        # to all plugins, ensuring subagents run in the client's original directory
-        parent_cwd = self._workspace_path or os.getcwd()
+        # Get workspace path from the shared registry (set by client on connect)
+        # This ensures subagents run in the client's original directory, not wherever
+        # the server process happens to be
+        workspace_path = None
+        if self._runtime and self._runtime.registry:
+            workspace_path = self._runtime.registry.get_workspace_path()
+        parent_cwd = workspace_path or os.getcwd()
 
         # Submit to thread pool (always async)
         self._executor.submit(
