@@ -1175,6 +1175,8 @@ class SessionManager:
             ReferenceSelectionResponseRequest,
             StopRequest,
             CommandRequest,
+            GetInstructionBudgetRequest,
+            InstructionBudgetEvent,
         )
 
         if isinstance(event, SendMessageRequest):
@@ -1244,6 +1246,51 @@ class SessionManager:
                     message=str(result),
                     style="info",
                 ))
+
+        elif isinstance(event, GetInstructionBudgetRequest):
+            # Get instruction budget for the requested agent
+            agent_id = event.agent_id or "main"
+
+            if agent_id == "main":
+                # Main agent budget from JaatoClient session
+                jaato_session = server._jaato.get_session() if server._jaato else None
+                if jaato_session and jaato_session.instruction_budget:
+                    self._emit_to_client(client_id, InstructionBudgetEvent(
+                        agent_id=agent_id,
+                        budget_snapshot=jaato_session.instruction_budget.snapshot(),
+                    ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error="No instruction budget available for main agent",
+                        error_type="BudgetNotFound",
+                    ))
+            else:
+                # Subagent budget from SubagentPlugin
+                subagent_plugin = server.registry.get_plugin("subagent") if server.registry else None
+                if subagent_plugin and hasattr(subagent_plugin, '_active_sessions'):
+                    session_info = subagent_plugin._active_sessions.get(agent_id)
+                    if session_info:
+                        subagent_session = session_info.get('session')
+                        if subagent_session and hasattr(subagent_session, 'instruction_budget') and subagent_session.instruction_budget:
+                            self._emit_to_client(client_id, InstructionBudgetEvent(
+                                agent_id=agent_id,
+                                budget_snapshot=subagent_session.instruction_budget.snapshot(),
+                            ))
+                        else:
+                            self._emit_to_client(client_id, ErrorEvent(
+                                error=f"No instruction budget available for agent {agent_id}",
+                                error_type="BudgetNotFound",
+                            ))
+                    else:
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=f"Agent not found: {agent_id}",
+                            error_type="AgentNotFound",
+                        ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error=f"Subagent plugin not available",
+                        error_type="PluginNotFound",
+                    ))
 
         else:
             self._emit_to_client(client_id, ErrorEvent(

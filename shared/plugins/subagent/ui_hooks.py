@@ -249,3 +249,23 @@ class AgentUIHooks(Protocol):
             chunk: Output text chunk (may contain newlines).
         """
         ...
+
+    def on_agent_instruction_budget_updated(
+        self,
+        agent_id: str,
+        budget_snapshot: Dict[str, Any]
+    ) -> None:
+        """Called when agent's instruction budget is updated.
+
+        Enables per-agent instruction budget tracking, showing token allocation
+        by source layer (system, session, plugin, enrichment, conversation).
+
+        Args:
+            agent_id: Which agent's budget updated.
+            budget_snapshot: Budget snapshot from InstructionBudget.snapshot().
+                Contains: session_id, agent_id, agent_type, context_limit,
+                total_tokens, gc_eligible_tokens, locked_tokens, preservable_tokens,
+                utilization_percent, available_tokens, gc_headroom_percent,
+                entries (per-source breakdown with children for drill-down).
+        """
+        ...

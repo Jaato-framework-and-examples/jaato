@@ -6,6 +6,71 @@ Track token consumption by instruction source to help users understand where the
 
 ---
 
+## Implementation Status
+
+### Phase 1: Data Model - COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| `InstructionSource` enum | `shared/instruction_budget.py` | Done |
+| `GCPolicy` enum | `shared/instruction_budget.py` | Done |
+| `SourceEntry` dataclass | `shared/instruction_budget.py` | Done |
+| `InstructionBudget` dataclass | `shared/instruction_budget.py` | Done |
+| `ConversationTurnType` enum | `shared/instruction_budget.py` | Done |
+| `PluginToolType` enum | `shared/instruction_budget.py` | Done |
+| `estimate_tokens()` helper | `shared/instruction_budget.py` | Done |
+| Unit tests (35 tests) | `shared/tests/test_instruction_budget.py` | Done |
+
+### Phase 2: Session Integration - COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| `InstructionBudgetEvent` | `server/events.py` | Done |
+| `_instruction_budget` attribute | `shared/jaato_session.py` | Done |
+| `instruction_budget` property | `shared/jaato_session.py` | Done |
+| `_populate_instruction_budget()` | `shared/jaato_session.py` | Done |
+| `_update_conversation_budget()` | `shared/jaato_session.py` | Done |
+| `_emit_instruction_budget_update()` | `shared/jaato_session.py` | Done |
+| `set_instruction_budget_callback()` | `shared/jaato_session.py` | Done |
+| Wire up in `configure()` | `shared/jaato_session.py` | Done |
+| Wire up on turn completion | `shared/jaato_session.py` | Done |
+
+### Phase 3: Server Integration - COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| Import `InstructionBudgetEvent` | `server/core.py` | Done |
+| Wire up callback in server | `server/core.py` | Done |
+| Add `on_agent_instruction_budget_updated` hook | `shared/plugins/subagent/ui_hooks.py` | Done |
+| Implement hook in `ServerAgentHooks` | `server/core.py` | Done |
+| Emit budgets in `emit_current_state()` | `server/core.py` | Done |
+| Emit budgets in `_emit_subagent_state()` | `server/core.py` | Done |
+| Add `GetInstructionBudgetRequest` | `server/events.py` | Done |
+| Handle request in `SessionManager` | `server/session_manager.py` | Done |
+
+### Phase 4: Rich Client UI - NOT STARTED
+
+| Component | File | Status |
+|-----------|------|--------|
+| Token usage panel widget | `rich-client/` | Pending |
+| Drill-down navigation | `rich-client/` | Pending |
+| Multi-agent view tabs | `rich-client/` | Pending |
+| Keybinding for panel toggle | `rich-client/` | Pending |
+
+### Decisions Made
+
+| Question | Decision |
+|----------|----------|
+| Token counting | Using `estimate_tokens()` (chars/4 approximation) initially |
+| Update frequency | Update after `configure()` and after each turn completes |
+
+### Open Questions (Remaining)
+
+1. **Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?
+2. **Enrichment tracking**: How to accurately track enrichment pipeline token contributions?
+
+---
+
 ## Visual Design
 
 ### Panel Layout
@@ -199,33 +264,114 @@ When GC needs to reclaim tokens from CONVERSATION, it should:
 
 ## Integration Points
 
-### JaatoSession
+### JaatoSession (Implemented)
 
 ```python
 class JaatoSession:
-    instruction_budget: InstructionBudget
+    _instruction_budget: Optional[InstructionBudget] = None
+    _on_instruction_budget_updated: Optional[Callable[[Dict], None]] = None
 
-    def configure(self, ...):
-        # After assembling system instructions, populate budget
-        self._populate_instruction_budget()
+    @property
+    def instruction_budget(self) -> Optional[InstructionBudget]:
+        return self._instruction_budget
 
-    def _populate_instruction_budget(self):
-        # Count tokens per source and create entries
-        ...
+    def set_instruction_budget_callback(self, callback: Callable[[Dict], None]) -> None:
+        """Set callback for budget updates (used by server to emit events)."""
+        self._on_instruction_budget_updated = callback
+
+    def configure(self, system_instructions: Optional[str] = None, ...):
+        # ... existing configuration ...
+        self._populate_instruction_budget(session_instructions=system_instructions)
+
+    def _populate_instruction_budget(self, session_instructions: Optional[str] = None):
+        """Populate budget with token counts from all source layers."""
+        # Creates InstructionBudget with entries for:
+        # - SYSTEM: Framework constants (task completion, parallel tools)
+        # - SESSION: User-provided system_instructions
+        # - PLUGIN: Per-plugin instructions (with children per-tool)
+        # - ENRICHMENT: Pipeline additions (placeholder)
+        # - CONVERSATION: Message history (initially 0)
+        self._emit_instruction_budget_update()
+
+    def _update_conversation_budget(self):
+        """Update CONVERSATION entry from current history (called after each turn)."""
+        # Iterates history, counts tokens per message, adds children per-turn
+        self._emit_instruction_budget_update()
+
+    def _emit_instruction_budget_update(self):
+        """Emit budget update via callback if registered."""
+        if self._on_instruction_budget_updated and self._instruction_budget:
+            self._on_instruction_budget_updated(self._instruction_budget.snapshot())
 ```
 
-### Server Events
-
-New event for UI updates:
+### Server Events (Implemented)
 
 ```python
+class EventType(str, Enum):
+    INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
+
 @dataclass
-class InstructionBudgetEvent:
-    """Emitted when instruction budget changes"""
-    session_id: str
-    agent_id: str
-    budget_snapshot: Dict  # From InstructionBudget.snapshot()
+class InstructionBudgetEvent(Event):
+    """Emitted when instruction budget changes."""
+    type: EventType = field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
+    agent_id: str = ""
+    budget_snapshot: Dict[str, Any] = field(default_factory=dict)
 ```
+
+### Server Core (Implemented)
+
+```python
+# In server/core.py - callback for main session:
+def instruction_budget_callback(snapshot: dict):
+    server.emit(InstructionBudgetEvent(
+        agent_id=snapshot.get('agent_id', 'main'),
+        budget_snapshot=snapshot,
+    ))
+session.set_instruction_budget_callback(instruction_budget_callback)
+
+# In ServerAgentHooks - hook for all agents (main + subagents):
+def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):
+    server.emit(InstructionBudgetEvent(
+        agent_id=agent_id,
+        budget_snapshot=budget_snapshot,
+    ))
+
+# In emit_current_state() - emit on client reconnect:
+if session and session.instruction_budget:
+    emit(InstructionBudgetEvent(
+        agent_id=session.agent_id,
+        budget_snapshot=session.instruction_budget.snapshot(),
+    ))
+```
+
+### AgentUIHooks Protocol (Implemented)
+
+```python
+# In shared/plugins/subagent/ui_hooks.py:
+def on_agent_instruction_budget_updated(
+    self,
+    agent_id: str,
+    budget_snapshot: Dict[str, Any]
+) -> None:
+    """Called when agent's instruction budget is updated."""
+    ...
+```
+
+### On-Demand Request (Implemented)
+
+Clients can request the current instruction budget at any time:
+
+```python
+# Client sends:
+GetInstructionBudgetRequest(agent_id="main")  # or specific subagent ID
+
+# Server responds with:
+InstructionBudgetEvent(agent_id="main", budget_snapshot={...})
+```
+
+The request is handled by `SessionManager._dispatch_to_session()`, which:
+1. For `agent_id="main"` (or None): Gets budget from `server._jaato.get_session().instruction_budget`
+2. For subagents: Gets budget from `SubagentPlugin._active_sessions[agent_id].session.instruction_budget`
 
 ### GC Plugin Integration
 
@@ -248,9 +394,14 @@ class GCPlugin:
 
 ## Open Questions
 
-1. **Token counting**: Use model's tokenizer or approximate (chars/4)?
-2. **Update frequency**: Update budget on every turn or only when panel is shown?
+1. ~~**Token counting**: Use model's tokenizer or approximate (chars/4)?~~
+   **Decision**: Using `estimate_tokens()` with chars/4 approximation. Can be upgraded to model tokenizer later.
+
+2. ~~**Update frequency**: Update budget on every turn or only when panel is shown?~~
+   **Decision**: Update after `configure()` and after each turn completes. Callback mechanism allows lazy UI updates.
+
 3. **Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?
+   *Still open* - need to decide on weighted average, sum, or separate displays.
 
 ---
 

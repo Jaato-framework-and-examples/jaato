@@ -69,6 +69,10 @@ class EventType(str, Enum):
     # Context/token updates (Server -> Client)
     CONTEXT_UPDATED = "context.updated"
     TURN_COMPLETED = "turn.completed"
+    INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
+
+    # Instruction budget (Client <-> Server)
+    INSTRUCTION_BUDGET_REQUEST = "instruction_budget.request"  # Client -> Server
 
     # System messages (Server -> Client)
     SYSTEM_MESSAGE = "system.message"
@@ -434,6 +438,24 @@ class ContextUpdatedEvent(Event):
 
 
 @dataclass
+class InstructionBudgetEvent(Event):
+    """Instruction budget has been updated.
+
+    Provides detailed breakdown of token usage by instruction source layer.
+    Sent after session configuration and when budget changes significantly.
+
+    The budget_snapshot contains:
+    - session_id, agent_id, agent_type: Identity
+    - context_limit, total_tokens, utilization_percent: Overall usage
+    - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
+    - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
+    """
+    type: EventType = field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
+    agent_id: str = ""
+    budget_snapshot: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TurnCompletedEvent(Event):
     """A conversation turn has completed."""
     type: EventType = field(default=EventType.TURN_COMPLETED)
@@ -655,6 +677,17 @@ class CommandRequest(Event):
 
 
 @dataclass
+class GetInstructionBudgetRequest(Event):
+    """Request current instruction budget for an agent.
+
+    Server responds with InstructionBudgetEvent containing the budget snapshot.
+    If agent_id is None or empty, returns budget for main agent.
+    """
+    type: EventType = field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
+    agent_id: Optional[str] = None  # None = main agent
+
+
+@dataclass
 class CommandListRequest(Event):
     """Request list of available commands from server."""
     type: EventType = field(default=EventType.COMMAND_LIST_REQUEST)
@@ -819,6 +852,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
+    EventType.INSTRUCTION_BUDGET_UPDATED.value: InstructionBudgetEvent,
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.INIT_PROGRESS.value: InitProgressEvent,
@@ -832,6 +866,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
     EventType.STOP.value: StopRequest,
     EventType.COMMAND.value: CommandRequest,
+    EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,

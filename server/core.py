@@ -79,6 +79,7 @@ from .events import (
     PlanUpdatedEvent,
     PlanClearedEvent,
     ContextUpdatedEvent,
+    InstructionBudgetEvent,
     TurnCompletedEvent,
     SystemMessageEvent,
     InitProgressEvent,
@@ -426,6 +427,15 @@ class JaatoServer:
                     status=agent.status,
                 ))
 
+        # Emit instruction budget for main agent
+        if self._jaato:
+            session = self._jaato.get_session()
+            if session and session.instruction_budget:
+                emit(InstructionBudgetEvent(
+                    agent_id=session.agent_id,
+                    budget_snapshot=session.instruction_budget.snapshot(),
+                ))
+
         # Emit restored subagent state from SubagentPlugin
         # This handles subagents that were restored from persistence but not yet
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
@@ -483,6 +493,13 @@ class JaatoServer:
                     tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
                     turns=usage.get('turns', 0),
                 ))
+
+                # Emit instruction budget for the subagent
+                if hasattr(session, 'instruction_budget') and session.instruction_budget:
+                    emit(InstructionBudgetEvent(
+                        agent_id=agent_id,
+                        budget_snapshot=session.instruction_budget.snapshot(),
+                    ))
 
     # =========================================================================
     # Initialization
@@ -1183,6 +1200,12 @@ class JaatoServer:
                     chunk=chunk,
                 ))
 
+            def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):
+                server.emit(InstructionBudgetEvent(
+                    agent_id=agent_id,
+                    budget_snapshot=budget_snapshot,
+                ))
+
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
         logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
@@ -1684,6 +1707,16 @@ class JaatoServer:
                 ))
 
             session.set_mid_turn_interrupt_callback(mid_turn_interrupt_callback)
+
+            # Set up callback for instruction budget updates
+            # This notifies clients when the instruction budget changes (after configure, per turn)
+            def instruction_budget_callback(snapshot: dict):
+                server.emit(InstructionBudgetEvent(
+                    agent_id=snapshot.get('agent_id', 'main'),
+                    budget_snapshot=snapshot,
+                ))
+
+            session.set_instruction_budget_callback(instruction_budget_callback)
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
