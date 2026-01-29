@@ -3551,6 +3551,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.update_context_usage(usage)
 
             elif isinstance(event, TurnCompletedEvent):
+                # Flush the output buffer to ensure all pending content from this turn
+                # is rendered before the next turn starts. This prevents late-arriving
+                # chunks from being concatenated with chunks from a new turn.
+                buffer = agent_registry.get_buffer(event.agent_id)
+                if buffer:
+                    buffer.flush()
                 model_running = False
                 display.refresh()
 
