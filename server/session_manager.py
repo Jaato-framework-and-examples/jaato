@@ -15,7 +15,9 @@ Integration with Session Plugin:
 - Session IDs are consistent between runtime and storage
 """
 
+import json
 import logging
+import os
 import sys
 import pathlib
 import threading
@@ -45,6 +47,8 @@ from .events import (
     ErrorEvent,
     SessionInfoEvent,
     SessionDescriptionUpdatedEvent,
+    ContextUpdatedEvent,
+    AgentCreatedEvent,
 )
 
 
@@ -622,6 +626,14 @@ class SessionManager:
                     ))
                     logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
 
+        # Restore subagent state if present in metadata
+        if state.metadata.get('subagents') and server._jaato:
+            self._restore_subagent_states(
+                session_id,
+                state.metadata['subagents'],
+                server
+            )
+
         session = Session(
             session_id=session_id,
             name=state.description or f"Session {session_id}",
@@ -635,6 +647,95 @@ class SessionManager:
 
         logger.info(f"Loaded session from disk: {session_id}")
         return session
+
+    def _restore_subagent_states(
+        self,
+        session_id: str,
+        subagent_registry: Dict[str, Any],
+        server: JaatoServer
+    ) -> int:
+        """Restore subagent states from persisted data.
+
+        Args:
+            session_id: The parent session ID.
+            subagent_registry: Registry dict from state.metadata["subagents"].
+            server: The JaatoServer to restore subagents into.
+
+        Returns:
+            Number of subagents successfully restored.
+        """
+        if not server.registry:
+            logger.warning("Cannot restore subagents: no registry available")
+            return 0
+
+        subagent_plugin = server.registry.get_plugin("subagent")
+        if not subagent_plugin or not hasattr(subagent_plugin, 'restore_persistence_state'):
+            logger.warning("Cannot restore subagents: subagent plugin not available")
+            return 0
+
+        # Load per-agent state files
+        subagents_dir = pathlib.Path(
+            self._session_config.storage_path
+        ) / session_id / "subagents"
+
+        agent_states: Dict[str, Dict[str, Any]] = {}
+        if subagents_dir.exists():
+            for agent_file in subagents_dir.glob("*.json"):
+                agent_id = agent_file.stem
+                try:
+                    with open(agent_file, 'r', encoding='utf-8') as f:
+                        agent_states[agent_id] = json.load(f)
+                    logger.debug(f"Loaded subagent state file: {agent_file}")
+                except Exception as e:
+                    logger.error(f"Failed to load subagent state {agent_file}: {e}")
+
+        # Get runtime from server's jaato client
+        runtime = server._jaato.get_runtime() if server._jaato else None
+        if not runtime:
+            logger.warning("Cannot restore subagents: no runtime available")
+            return 0
+
+        # Restore subagents
+        restored = subagent_plugin.restore_persistence_state(
+            subagent_registry,
+            agent_states,
+            runtime
+        )
+
+        # Emit AgentCreatedEvent for each restored subagent so clients see them
+        for agent_id, info in subagent_plugin._active_sessions.items():
+            profile = info.get('profile')
+            created_at = info.get('created_at')
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+
+            server.emit(AgentCreatedEvent(
+                agent_id=agent_id,
+                agent_name=profile.name if profile else agent_id,
+                agent_type="subagent",
+                profile_name=profile.name if profile else "",
+                parent_agent_id="main",
+                created_at=created_at,
+            ))
+
+            # Emit context update for restored subagent
+            session = info.get('session')
+            if session:
+                usage = session.get_context_usage()
+                context_limit = session.get_context_limit()
+                server.emit(ContextUpdatedEvent(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    context_limit=context_limit,
+                    percent_used=usage.get('percent_used', 0.0),
+                    tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
+                    turns=usage.get('turns', 0),
+                ))
+
+        logger.info(f"Restored {restored} subagents for session {session_id}")
+        return restored
 
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
@@ -653,6 +754,22 @@ class SessionManager:
             if session.server and "main" in session.server._agents:
                 turn_accounting = session.server._agents["main"].turn_accounting
 
+            # Get subagent state if subagent plugin is available
+            subagent_metadata = {}
+            if session.server and session.server.registry:
+                subagent_plugin = session.server.registry.get_plugin("subagent")
+                if subagent_plugin and hasattr(subagent_plugin, 'get_persistence_state'):
+                    subagent_registry = subagent_plugin.get_persistence_state()
+                    if subagent_registry.get('agents'):
+                        subagent_metadata['subagents'] = subagent_registry
+
+                        # Save per-agent state files
+                        self._save_subagent_states(
+                            session.session_id,
+                            subagent_plugin,
+                            subagent_registry.get('agents', [])
+                        )
+
             # Create SessionState
             state = SessionState(
                 session_id=session.session_id,
@@ -664,6 +781,7 @@ class SessionManager:
                 turn_accounting=turn_accounting,
                 model=session.server.model_name if session.server else None,
                 workspace_path=session.workspace_path,
+                metadata=subagent_metadata,
             )
 
             self._session_plugin.save(state)
@@ -675,6 +793,44 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session {session.session_id}: {e}")
             return False
+
+    def _save_subagent_states(
+        self,
+        session_id: str,
+        subagent_plugin: Any,
+        agents: List[Dict[str, Any]]
+    ) -> None:
+        """Save per-agent state files for subagents.
+
+        Args:
+            session_id: The parent session ID.
+            subagent_plugin: The SubagentPlugin instance.
+            agents: List of agent info dicts from the registry.
+        """
+        # Create subagents directory
+        subagents_dir = pathlib.Path(
+            self._session_config.storage_path
+        ) / session_id / "subagents"
+        subagents_dir.mkdir(parents=True, exist_ok=True)
+
+        for agent_info in agents:
+            agent_id = agent_info.get('agent_id')
+            if not agent_id:
+                continue
+
+            # Get full state from plugin
+            full_state = subagent_plugin.get_agent_full_state(agent_id)
+            if not full_state:
+                continue
+
+            # Write to file
+            agent_file = subagents_dir / f"{agent_id}.json"
+            try:
+                with open(agent_file, 'w', encoding='utf-8') as f:
+                    json.dump(full_state, f, indent=2)
+                logger.debug(f"Saved subagent state: {agent_file}")
+            except Exception as e:
+                logger.error(f"Failed to save subagent {agent_id}: {e}")
 
     def _maybe_unload_session(self, session_id: str) -> None:
         """Unload a session from memory if no clients attached.
@@ -1019,6 +1175,8 @@ class SessionManager:
             ReferenceSelectionResponseRequest,
             StopRequest,
             CommandRequest,
+            GetInstructionBudgetRequest,
+            InstructionBudgetEvent,
         )
 
         if isinstance(event, SendMessageRequest):
@@ -1088,6 +1246,51 @@ class SessionManager:
                     message=str(result),
                     style="info",
                 ))
+
+        elif isinstance(event, GetInstructionBudgetRequest):
+            # Get instruction budget for the requested agent
+            agent_id = event.agent_id or "main"
+
+            if agent_id == "main":
+                # Main agent budget from JaatoClient session
+                jaato_session = server._jaato.get_session() if server._jaato else None
+                if jaato_session and jaato_session.instruction_budget:
+                    self._emit_to_client(client_id, InstructionBudgetEvent(
+                        agent_id=agent_id,
+                        budget_snapshot=jaato_session.instruction_budget.snapshot(),
+                    ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error="No instruction budget available for main agent",
+                        error_type="BudgetNotFound",
+                    ))
+            else:
+                # Subagent budget from SubagentPlugin
+                subagent_plugin = server.registry.get_plugin("subagent") if server.registry else None
+                if subagent_plugin and hasattr(subagent_plugin, '_active_sessions'):
+                    session_info = subagent_plugin._active_sessions.get(agent_id)
+                    if session_info:
+                        subagent_session = session_info.get('session')
+                        if subagent_session and hasattr(subagent_session, 'instruction_budget') and subagent_session.instruction_budget:
+                            self._emit_to_client(client_id, InstructionBudgetEvent(
+                                agent_id=agent_id,
+                                budget_snapshot=subagent_session.instruction_budget.snapshot(),
+                            ))
+                        else:
+                            self._emit_to_client(client_id, ErrorEvent(
+                                error=f"No instruction budget available for agent {agent_id}",
+                                error_type="BudgetNotFound",
+                            ))
+                    else:
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=f"Agent not found: {agent_id}",
+                            error_type="AgentNotFound",
+                        ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error=f"Subagent plugin not available",
+                        error_type="PluginNotFound",
+                    ))
 
         else:
             self._emit_to_client(client_id, ErrorEvent(

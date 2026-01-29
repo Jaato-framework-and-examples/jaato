@@ -226,9 +226,14 @@ class AgentTabBar:
         total_width += separator_width * (len(tab_entries) - 1)
 
         # Reserve space for hint and possible scroll indicators
-        key_hint = format_key_for_display(self._cycle_key)
-        hint_text = f"({key_hint}: cycle)"
-        reserved_width = 4 + len(hint_text)  # leading/trailing space + hint
+        # Only show cycle hint when there are multiple agents
+        if len(agents) > 1:
+            key_hint = format_key_for_display(self._cycle_key)
+            hint_text = f"({key_hint}: cycle)"
+            reserved_width = 4 + len(hint_text)  # leading/trailing space + hint
+        else:
+            hint_text = ""
+            reserved_width = 4  # just leading/trailing space
         available_width = self._width - reserved_width
 
         # Check if we need overflow handling

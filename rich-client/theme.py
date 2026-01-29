@@ -425,6 +425,15 @@ DEFAULT_SEMANTIC_STYLES = {
     # Input area
     "input_text": StyleSpec(fg="text"),
     "input_prompt": StyleSpec(fg="primary", bold=True),
+
+    # Budget panel
+    "budget_panel_border": StyleSpec(fg="primary"),
+    "budget_popup_background": StyleSpec(bg="background"),
+    "budget_header": StyleSpec(bold=True),
+    "budget_gc_locked": StyleSpec(fg="error"),
+    "budget_gc_preservable": StyleSpec(fg="warning"),
+    "budget_gc_partial": StyleSpec(fg="#5f87ff"),  # Blue
+    "budget_gc_ephemeral": StyleSpec(dim=True),
 }
 
 

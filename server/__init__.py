@@ -51,6 +51,9 @@ from .events import (
     StopRequest,
     CommandRequest,
     ClientConfigRequest,
+    GetInstructionBudgetRequest,
+    # Server -> Client (instruction budget)
+    InstructionBudgetEvent,
     # Serialization
     serialize_event,
     deserialize_event,
@@ -94,6 +97,8 @@ __all__ = [
     "StopRequest",
     "CommandRequest",
     "ClientConfigRequest",
+    "GetInstructionBudgetRequest",
+    "InstructionBudgetEvent",
     "serialize_event",
     "deserialize_event",
 ]
