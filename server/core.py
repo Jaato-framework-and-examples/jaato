@@ -303,6 +303,12 @@ class JaatoServer:
         Since all env-dependent operations happen within session contexts,
         we simply apply the session's env vars without restoration - the next
         session will apply its own env vars when needed.
+
+        LIMITATION: This only overlays vars present in the session's .env file.
+        Variables set by the server at startup or other sessions are NOT cleared.
+        If a user comments out a variable (e.g., REQUESTS_CA_BUNDLE), the stale
+        value persists. Workaround: set vars to empty string instead of commenting.
+        See docs/architecture.md "Environment Variable Isolation" for details.
         """
         # Apply session env vars (no restoration needed - next session will
         # apply its own env vars anyway)
