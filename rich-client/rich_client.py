@@ -3085,6 +3085,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ToolCallEndEvent,
         ToolOutputEvent,
         ContextUpdatedEvent,
+        InstructionBudgetEvent,
         TurnCompletedEvent,
         SystemMessageEvent,
         InitProgressEvent,
@@ -3549,6 +3550,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "percent_used": event.percent_used,
                 }
                 display.update_context_usage(usage)
+
+            elif isinstance(event, InstructionBudgetEvent):
+                # Update budget panel with new budget data
+                if hasattr(display, 'update_instruction_budget'):
+                    display.update_instruction_budget(event.agent_id, event.budget_snapshot)
 
             elif isinstance(event, TurnCompletedEvent):
                 # Flush the output buffer to ensure all pending content from this turn

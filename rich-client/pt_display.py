@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from agent_registry import AgentRegistry
 
 from plan_panel import PlanPanel
+from budget_panel import BudgetPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
@@ -458,6 +459,8 @@ class PTDisplay:
         # Rich components
         self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
         self._plan_panel.set_theme(self._theme)
+        self._budget_panel = BudgetPanel(toggle_key=self._keybinding_config.toggle_budget)
+        self._budget_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
@@ -853,6 +856,15 @@ class PTDisplay:
         available_height = self._height - 1 - input_height  # minus status bar and input area
         # Scroll by half the visible content area
         return max(3, (available_height - 4) // 2)
+
+    def _get_budget_popup_content(self):
+        """Get rendered budget popup content as ANSI for prompt_toolkit."""
+        # Calculate popup dimensions based on terminal size
+        popup_width = max(50, min(90, int(self._width * 0.7)))
+        popup_height = max(10, min(20, int(self._height * 0.5)))
+
+        rendered = self._budget_panel.render(popup_height, popup_width)
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_plan_popup_content(self):
         """Get rendered plan popup content as ANSI for prompt_toolkit."""
@@ -1410,6 +1422,34 @@ class PTDisplay:
                 self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
+        @kb.add(*keys.get_key_args("toggle_budget"))
+        def handle_ctrl_b(event):
+            """Handle Ctrl+B - toggle budget panel visibility."""
+            if self._budget_panel.has_data():
+                self._budget_panel.toggle()
+                self._app.invalidate()
+
+        # Budget panel navigation (only active when budget panel is visible)
+        @kb.add("tab", filter=Condition(lambda: self._budget_panel.is_visible))
+        def handle_budget_tab(event):
+            """Handle TAB in budget panel - cycle to next agent."""
+            self._budget_panel.cycle_agent(forward=True)
+            self._app.invalidate()
+
+        @kb.add("s-tab", filter=Condition(lambda: self._budget_panel.is_visible))
+        def handle_budget_shift_tab(event):
+            """Handle Shift+TAB in budget panel - cycle to previous agent."""
+            self._budget_panel.cycle_agent(forward=False)
+            self._app.invalidate()
+
+        @kb.add("escape", filter=Condition(lambda: self._budget_panel.is_visible))
+        def handle_budget_escape(event):
+            """Handle ESC in budget panel - drill up or close."""
+            if not self._budget_panel.drill_up():
+                # Already at top level, close the panel
+                self._budget_panel.hide()
+            self._app.invalidate()
+
         @kb.add(*keys.get_key_args("cycle_agents"))
         def handle_f2(event):
             """Handle cycle_agents keybinding - cycle through agents."""
@@ -1655,6 +1695,19 @@ class PTDisplay:
             filter=Condition(lambda: self._plan_panel.is_popup_visible and self._current_plan_has_data()),
         )
 
+        # Budget popup (floating overlay, toggled with Ctrl+B)
+        def get_budget_popup_height():
+            """Calculate budget popup height based on terminal size."""
+            return max(10, min(20, int(self._height * 0.5)))
+
+        budget_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_budget_popup_content),
+                height=get_budget_popup_height,
+            ),
+            filter=Condition(lambda: self._budget_panel.is_visible and self._budget_panel.has_data()),
+        )
+
         # Agent details popup (floating overlay, shown on agent cycle)
         def get_agent_popup_height():
             """Calculate popup height based on content."""
@@ -1694,6 +1747,11 @@ class PTDisplay:
                     top=3,  # Below session bar, tab bar, and status bar
                     left=2,
                     content=plan_popup_window,
+                ),
+                Float(
+                    top=3,  # Same position as plan popup (they toggle separately)
+                    right=2,  # Positioned on the right side
+                    content=budget_popup_window,
                 ),
                 Float(
                     top=2,  # Below session bar, aligned with selected tab
@@ -1979,6 +2037,30 @@ class PTDisplay:
     def has_plan(self) -> bool:
         """Check if there's an active plan for the current agent."""
         return self._current_plan_has_data()
+
+    # Budget panel methods
+
+    def update_instruction_budget(self, agent_id: str, budget_snapshot: Dict[str, Any]) -> None:
+        """Update the instruction budget for an agent.
+
+        Args:
+            agent_id: Agent identifier ("main", "subagent_1", etc.)
+            budget_snapshot: Budget snapshot from InstructionBudget.snapshot()
+        """
+        self._budget_panel.update_budget(agent_id, budget_snapshot)
+        # Only refresh if the panel is visible to avoid unnecessary renders
+        if self._budget_panel.is_visible:
+            self.refresh()
+
+    def clear_instruction_budget(self, agent_id: str) -> None:
+        """Clear the instruction budget for an agent.
+
+        Args:
+            agent_id: Agent identifier to clear.
+        """
+        self._budget_panel.clear_budget(agent_id)
+        if self._budget_panel.is_visible:
+            self.refresh()
 
     @property
     def theme(self) -> ThemeConfig:

@@ -146,6 +146,7 @@ DEFAULT_KEYBINDINGS = {
     # Features
     "toggle_plan": "c-p",
     "toggle_tools": "c-t",
+    "toggle_budget": "c-b",
     "cycle_agents": "c-a",
     "yank": "c-y",
     "view_full": "v",
@@ -318,6 +319,7 @@ class KeybindingConfig:
     # Features
     toggle_plan: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_plan"])
     toggle_tools: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_tools"])
+    toggle_budget: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_budget"])
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
@@ -516,6 +518,7 @@ class KeybindingConfig:
             "pager_next": self.pager_next,
             "toggle_plan": self.toggle_plan,
             "toggle_tools": self.toggle_tools,
+            "toggle_budget": self.toggle_budget,
             "cycle_agents": self.cycle_agents,
             "yank": self.yank,
             "view_full": self.view_full,
@@ -695,6 +698,7 @@ def generate_example_config() -> str:
 
         "toggle_plan": "c-p",
         "toggle_tools": "c-t",
+        "toggle_budget": "c-b",
         "cycle_agents": "c-a",
         "yank": "c-y",
         "view_full": "v",

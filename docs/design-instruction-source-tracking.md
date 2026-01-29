@@ -48,14 +48,16 @@ Track token consumption by instruction source to help users understand where the
 | Add `GetInstructionBudgetRequest` | `server/events.py` | Done |
 | Handle request in `SessionManager` | `server/session_manager.py` | Done |
 
-### Phase 4: Rich Client UI - NOT STARTED
+### Phase 4: Rich Client UI - COMPLETE
 
 | Component | File | Status |
 |-----------|------|--------|
-| Token usage panel widget | `rich-client/` | Pending |
-| Drill-down navigation | `rich-client/` | Pending |
-| Multi-agent view tabs | `rich-client/` | Pending |
-| Keybinding for panel toggle | `rich-client/` | Pending |
+| Token usage panel widget | `rich-client/budget_panel.py` | Done |
+| Drill-down navigation | `rich-client/budget_panel.py:158-179` | Done |
+| Multi-agent view tabs | `rich-client/budget_panel.py:142-156, 423-446` | Done |
+| Keybinding for panel toggle | `rich-client/keybindings.py:149, 322` | Done |
+| Event handling | `rich-client/rich_client.py:3554-3557` | Done |
+| PTDisplay integration | `rich-client/pt_display.py:462-463, 1426-1451, 1680-1696` | Done |
 
 ### Decisions Made
 
@@ -418,8 +420,8 @@ class GCPlugin:
 2. ~~**Update frequency**: Update budget on every turn or only when panel is shown?~~
    **Decision**: Update after `configure()` and after each turn completes. Callback mechanism allows lazy UI updates.
 
-3. **Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?
-   *Still open* - need to decide on weighted average, sum, or separate displays.
+3. ~~**Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?~~
+   **Decision**: Show raw token counts only; omit limit/percentage since they're meaningless across different context windows.
 
 ---
 
