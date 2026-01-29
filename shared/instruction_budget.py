@@ -13,9 +13,8 @@ from typing import Dict, Optional, List, Any
 
 
 class InstructionSource(Enum):
-    """The 5 tracked instruction source layers."""
-    SYSTEM = "system"           # Base + framework constants (task completion, parallel, sandbox, permission)
-    SESSION = "session"         # Programmatic system_instructions param
+    """The 4 tracked instruction source layers."""
+    SYSTEM = "system"           # System instructions (children: base, client, framework)
     PLUGIN = "plugin"           # Plugin instructions (children: per-tool)
     ENRICHMENT = "enrichment"   # Prompt enrichment pipeline additions
     CONVERSATION = "conversation"  # Message history (children: per-turn)
@@ -40,11 +39,25 @@ GC_POLICY_INDICATORS: Dict[GCPolicy, str] = {
 
 # Default GC policies per source
 DEFAULT_SOURCE_POLICIES: Dict[InstructionSource, GCPolicy] = {
-    InstructionSource.SYSTEM: GCPolicy.LOCKED,
-    InstructionSource.SESSION: GCPolicy.LOCKED,
+    InstructionSource.SYSTEM: GCPolicy.LOCKED,  # All children are LOCKED
     InstructionSource.PLUGIN: GCPolicy.PARTIAL,
     InstructionSource.ENRICHMENT: GCPolicy.EPHEMERAL,
     InstructionSource.CONVERSATION: GCPolicy.PARTIAL,
+}
+
+
+class SystemChildType(Enum):
+    """Types of SYSTEM instruction children with their default GC policies."""
+    BASE = "base"           # User-provided .jaato/system_instructions.md - LOCKED
+    CLIENT = "client"       # Programmatic system_instructions param - LOCKED
+    FRAMEWORK = "framework" # Task completion, parallel tool guidance - LOCKED
+
+
+# Default GC policies per system child type
+DEFAULT_SYSTEM_POLICIES: Dict[SystemChildType, GCPolicy] = {
+    SystemChildType.BASE: GCPolicy.LOCKED,
+    SystemChildType.CLIENT: GCPolicy.LOCKED,
+    SystemChildType.FRAMEWORK: GCPolicy.LOCKED,
 }
 
 

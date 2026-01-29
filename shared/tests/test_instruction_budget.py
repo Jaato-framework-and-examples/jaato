@@ -8,9 +8,11 @@ from shared.instruction_budget import (
     InstructionBudget,
     ConversationTurnType,
     PluginToolType,
+    SystemChildType,
     DEFAULT_SOURCE_POLICIES,
     DEFAULT_TURN_POLICIES,
     DEFAULT_TOOL_POLICIES,
+    DEFAULT_SYSTEM_POLICIES,
     GC_POLICY_INDICATORS,
     estimate_tokens,
 )
@@ -44,7 +46,6 @@ class TestInstructionSource:
     def test_source_values(self):
         """Source values should match expected strings."""
         assert InstructionSource.SYSTEM.value == "system"
-        assert InstructionSource.SESSION.value == "session"
         assert InstructionSource.PLUGIN.value == "plugin"
         assert InstructionSource.ENRICHMENT.value == "enrichment"
         assert InstructionSource.CONVERSATION.value == "conversation"
@@ -245,7 +246,7 @@ class TestInstructionBudget:
         """set_entry should accept custom GC policy."""
         budget = InstructionBudget()
         entry = budget.set_entry(
-            InstructionSource.SESSION,
+            InstructionSource.PLUGIN,
             tokens=200,
             gc_policy=GCPolicy.PRESERVABLE,
         )
@@ -257,7 +258,7 @@ class TestInstructionBudget:
         budget.set_entry(InstructionSource.SYSTEM, tokens=500)
 
         assert budget.get_entry(InstructionSource.SYSTEM) is not None
-        assert budget.get_entry(InstructionSource.SESSION) is None
+        assert budget.get_entry(InstructionSource.PLUGIN) is None
 
     def test_update_tokens(self):
         """update_tokens should modify existing entry."""
@@ -419,6 +420,27 @@ class TestPluginToolType:
         """Tool types should have expected default policies."""
         assert DEFAULT_TOOL_POLICIES[PluginToolType.CORE] == GCPolicy.LOCKED
         assert DEFAULT_TOOL_POLICIES[PluginToolType.DISCOVERABLE] == GCPolicy.EPHEMERAL
+
+
+class TestSystemChildType:
+    """Tests for SystemChildType enum."""
+
+    def test_all_child_types_have_default_policies(self):
+        """Every system child type should have a default GC policy."""
+        for child_type in SystemChildType:
+            assert child_type in DEFAULT_SYSTEM_POLICIES
+
+    def test_expected_policies(self):
+        """System child types should have expected default policies."""
+        assert DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE] == GCPolicy.LOCKED
+        assert DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT] == GCPolicy.LOCKED
+        assert DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK] == GCPolicy.LOCKED
+
+    def test_child_type_values(self):
+        """System child type values should match expected strings."""
+        assert SystemChildType.BASE.value == "base"
+        assert SystemChildType.CLIENT.value == "client"
+        assert SystemChildType.FRAMEWORK.value == "framework"
 
 
 class TestEstimateTokens:

@@ -749,6 +749,28 @@ class JaatoServer:
             gc_strategy = getattr(gc_plugin, 'name', 'gc')
             if gc_strategy.startswith('gc_'):
                 gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
+
+        # Set up instruction budget callback and emit initial budget
+        # This must happen after configure_tools() which populates the budget
+        session = self._jaato.get_session()
+        if session:
+            server = self
+
+            def instruction_budget_callback(snapshot: dict):
+                server.emit(InstructionBudgetEvent(
+                    agent_id=snapshot.get('agent_id', 'main'),
+                    budget_snapshot=snapshot,
+                ))
+
+            session.set_instruction_budget_callback(instruction_budget_callback)
+
+            # Emit initial budget snapshot
+            if session.instruction_budget:
+                self.emit(InstructionBudgetEvent(
+                    agent_id=session.agent_id,
+                    budget_snapshot=session.instruction_budget.snapshot(),
+                ))
+
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
 
         # Step 6: Set up session
@@ -1708,15 +1730,7 @@ class JaatoServer:
 
             session.set_mid_turn_interrupt_callback(mid_turn_interrupt_callback)
 
-            # Set up callback for instruction budget updates
-            # This notifies clients when the instruction budget changes (after configure, per turn)
-            def instruction_budget_callback(snapshot: dict):
-                server.emit(InstructionBudgetEvent(
-                    agent_id=snapshot.get('agent_id', 'main'),
-                    budget_snapshot=snapshot,
-                ))
-
-            session.set_instruction_budget_callback(instruction_budget_callback)
+            # Note: instruction_budget_callback is set up in initialize() after configure_tools()
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks

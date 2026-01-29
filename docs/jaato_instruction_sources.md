@@ -326,6 +326,21 @@ Plugins can define:
 
 ---
 
+## Budget Panel Categories
+
+The budget panel (Ctrl+B) groups instruction sources differently for a cleaner display:
+
+| Budget Category | Contains | Drill-Down |
+|----------------|----------|------------|
+| **System** | Base instructions + Client (session) instructions + Framework constants | Yes (3 children) |
+| **Plugin** | Plugin-specific instructions | Yes (per-tool) |
+| **Enrichment** | Enrichment pipeline additions | No |
+| **Conversation** | Message history | Yes (per-turn) |
+
+This grouping consolidates all "system-level" instructions (base, session-specific, and framework) under a single "System" category, making it easier to understand context budget allocation at a glance.
+
+---
+
 ## Color Coding Suggestion for Infographic
 
 - **🔵 Blue:** Static/Base instructions (always present)
