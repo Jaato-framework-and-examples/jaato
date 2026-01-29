@@ -868,7 +868,15 @@ class OutputBuffer:
         self._selected_tool_index = None
 
     def start_spinner(self) -> None:
-        """Start showing spinner in the output."""
+        """Start showing spinner in the output.
+
+        This is called when a new turn starts. Flushes any pending content
+        from the previous turn to ensure clean turn boundaries.
+        """
+        # Flush any pending content from the previous turn before starting
+        # a new one. This prevents late-arriving chunks from the previous
+        # turn from being concatenated with new turn content.
+        self._flush_current_block()
         self._spinner_active = True
         self._spinner_index = 0
 
