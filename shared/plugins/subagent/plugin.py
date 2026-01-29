@@ -1386,9 +1386,13 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Capture parent's working directory so subagent runs in same context
-        # This ensures relative paths (trace logs, workspaceRoot) resolve correctly
-        parent_cwd = os.getcwd()
+        # Get workspace path from the shared registry (set by client on connect)
+        # This ensures subagents run in the client's original directory, not wherever
+        # the server process happens to be
+        workspace_path = None
+        if self._runtime and self._runtime.registry:
+            workspace_path = self._runtime.registry.get_workspace_path()
+        parent_cwd = workspace_path or os.getcwd()
 
         # Submit to thread pool (always async)
         self._executor.submit(
