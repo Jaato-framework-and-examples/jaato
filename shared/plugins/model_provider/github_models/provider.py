@@ -86,6 +86,7 @@ from .errors import (
     InfrastructureError,
     ModelNotFoundError,
     ModelsDisabledError,
+    PayloadTooLargeError,
     RateLimitError,
     TokenInvalidError,
     TokenNotFoundError,
@@ -1182,6 +1183,13 @@ class GitHubModelsProvider:
         # Check for rate limit errors
         if "429" in error_str or "rate limit" in error_str:
             raise RateLimitError(
+                original_error=str(error),
+            ) from error
+
+        # Check for payload too large errors (HTTP 413)
+        # This indicates the request body is too large for the API
+        if "413" in error_str or "payload too large" in error_str:
+            raise PayloadTooLargeError(
                 original_error=str(error),
             ) from error
 

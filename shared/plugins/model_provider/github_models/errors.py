@@ -401,3 +401,44 @@ class InfrastructureError(GitHubModelsError):
         ])
 
         return "\n".join(lines)
+
+
+class PayloadTooLargeError(GitHubModelsError):
+    """Request payload exceeded API limits.
+
+    Raised when the API returns HTTP 413, indicating the request body
+    is too large. This could be caused by:
+    - Large tool results (file contents, command output)
+    - Long conversation history
+    - Large system instructions
+    """
+
+    def __init__(
+        self,
+        original_error: Optional[str] = None,
+    ):
+        self.original_error = original_error
+
+        message = self._format_message()
+        super().__init__(message)
+
+    def _format_message(self) -> str:
+        lines = ["Request payload too large for GitHub API."]
+
+        if self.original_error:
+            lines.append(f"Error: {self.original_error}")
+
+        lines.extend([
+            "",
+            "Possible causes:",
+            "  - A tool result was too large (file read, command output)",
+            "  - Conversation history has grown too long",
+            "  - System instructions are too large",
+            "",
+            "To fix:",
+            "  1. Check if a recent tool returned a large result",
+            "  2. Try 'clear' to reset conversation history",
+            "  3. Use smaller file reads or limit command output",
+        ])
+
+        return "\n".join(lines)
