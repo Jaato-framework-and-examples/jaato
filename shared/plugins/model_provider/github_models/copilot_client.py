@@ -338,6 +338,58 @@ class CopilotClient:
                 "o1-mini",
             ]
 
+    def list_models_with_info(self) -> Dict[str, Dict[str, Any]]:
+        """List available models with detailed info including token limits.
+
+        Returns:
+            Dict mapping model IDs to model info dicts with keys:
+            - id: Model ID
+            - max_input_tokens: Maximum input tokens
+            - max_output_tokens: Maximum output tokens
+            - context_window: Total context window size
+        """
+        try:
+            response = self._make_request(COPILOT_MODELS_ENDPOINT, method="GET")
+            models_info: Dict[str, Dict[str, Any]] = {}
+
+            for model in response.get("data", []):
+                model_id = model.get("id")
+                if not model_id:
+                    continue
+
+                # Extract token limits from various possible field names
+                max_input = (
+                    model.get("max_input_tokens") or
+                    model.get("maxInputTokens") or
+                    model.get("input_token_limit") or
+                    model.get("context_length") or
+                    0
+                )
+                max_output = (
+                    model.get("max_output_tokens") or
+                    model.get("maxOutputTokens") or
+                    model.get("output_token_limit") or
+                    0
+                )
+                context_window = (
+                    model.get("context_window") or
+                    model.get("contextWindow") or
+                    model.get("context_length") or
+                    0
+                )
+
+                models_info[model_id] = {
+                    "id": model_id,
+                    "max_input_tokens": int(max_input) if max_input else 0,
+                    "max_output_tokens": int(max_output) if max_output else 0,
+                    "context_window": int(context_window) if context_window else 0,
+                }
+
+            return models_info
+        except Exception:
+            # Return empty dict to trigger fallback in provider
+            return {}
+
     def complete(
         self,
         model: str,
