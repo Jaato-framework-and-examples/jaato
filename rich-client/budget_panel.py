@@ -209,7 +209,9 @@ class BudgetPanel:
             entries = budget.get("entries", {})
             source_entry = entries.get(self._drill_down_source, {})
             children = source_entry.get("children", {})
-            return max(0, len(children) - 1)
+            # Count only children with non-zero tokens (matches drill-down filtering)
+            non_zero_count = sum(1 for v in children.values() if v.get("tokens", 0) > 0)
+            return max(0, non_zero_count - 1)
         else:
             # Top level - 5 sources
             return len(self._source_order) - 1
@@ -451,9 +453,9 @@ class BudgetPanel:
         table.add_column("GC", justify="center", width=4)
         table.add_column("Usage", width=18)
 
-        # Sort children by tokens descending
+        # Sort children by tokens descending, filter out 0-token entries
         sorted_children = sorted(
-            children.items(),
+            ((k, v) for k, v in children.items() if v.get("tokens", 0) > 0),
             key=lambda x: x[1].get("tokens", 0),
             reverse=True
         )
@@ -490,11 +492,13 @@ class BudgetPanel:
         legend.append(" ephemeral", style="dim")
         table.add_row(legend, "", "", "")
 
-        # Navigation hint
-        hint = Text("↑↓ navigate  ", style="dim")
-        hint.append("ESC", style="dim bold")
-        hint.append(" back", style="dim")
+        # Navigation hint with ordering explanation
+        hint = Text("Sorted by token count (0-token entries hidden)  ", style="dim italic")
         table.add_row(hint, "", "", "")
+        nav_hint = Text("↑↓ navigate  ", style="dim")
+        nav_hint.append("ESC", style="dim bold")
+        nav_hint.append(" back", style="dim")
+        table.add_row(nav_hint, "", "", "")
 
         return table
 
