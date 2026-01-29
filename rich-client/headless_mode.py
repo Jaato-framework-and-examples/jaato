@@ -34,6 +34,11 @@ async def run_headless_mode(
     - This auto-approves all tools not in the blacklist
     - If a prompt still occurs (blacklisted tool), responds with "y" (once)
 
+    Clarification handling:
+    - Sets main agent's channel to "auto" via `clarification channel auto`
+    - Main agent clarifications are auto-responded (no user to ask)
+    - Subagent clarifications still forward to parent agent (ParentBridgedChannel)
+
     Session isolation:
     - Use --new-session to create an isolated session for headless mode
     - Without --new-session, may attach to existing session (shared permission state)
@@ -116,6 +121,12 @@ async def run_headless_mode(
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses
     print("[headless] Setting permission policy to auto-approve...", file=sys.stderr)
     await client.execute_command("permissions", ["default", "allow"])
+
+    # Set clarification channel to "auto" for main agent
+    # This auto-responds to clarifications (no user to ask)
+    # Subagents still use ParentBridgedChannel (forwarded to parent agent)
+    print("[headless] Setting clarification channel to auto...", file=sys.stderr)
+    await client.execute_command("clarification", ["channel", "auto"])
 
     async def handle_events():
         """Handle events from the server."""
@@ -210,7 +221,8 @@ async def run_headless_mode(
 
             # ==================== Clarification Events ====================
             elif isinstance(event, ClarificationInputModeEvent):
-                # Auto-respond with empty string (skip clarification in headless)
+                # With AutoChannel, this shouldn't happen for main agent
+                # But handle as fallback (e.g., if channel wasn't set correctly)
                 renderer.on_system_message(
                     f"[headless] Clarification requested for {event.tool_name}, auto-skipping",
                     style="system_warning"

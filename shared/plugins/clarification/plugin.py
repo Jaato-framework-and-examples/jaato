@@ -301,9 +301,53 @@ The tool returns responses keyed by question number (1-based):
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands.
 
-        This plugin only provides model tools, no direct user commands.
+        Provides a command to configure the clarification channel type.
         """
-        return []
+        return [
+            UserCommand(
+                name="clarification",
+                description="Configure clarification plugin: clarification channel <auto|queue>",
+                args=[
+                    {"name": "subcommand", "description": "Subcommand (channel)", "required": True},
+                    {"name": "value", "description": "Channel type (auto, queue)", "required": False},
+                ],
+                handler=self._execute_user_command,
+                share_with_model=False,  # User-only command
+            )
+        ]
+
+    def _execute_user_command(self, args: Dict[str, Any]) -> str:
+        """Execute a user command.
+
+        Args:
+            args: Command arguments with 'subcommand' and optional 'value'.
+
+        Returns:
+            Result message string.
+        """
+        subcommand = args.get("subcommand", "").lower()
+
+        if subcommand == "channel":
+            value = args.get("value", "").lower()
+            if not value:
+                # Show current channel type
+                channel = self._get_channel()
+                if channel:
+                    channel_name = type(channel).__name__
+                    return f"Current clarification channel: {channel_name}"
+                return "No channel configured"
+
+            if value not in self.get_supported_channels():
+                supported = ", ".join(self.get_supported_channels())
+                return f"Invalid channel type: {value}. Supported: {supported}"
+
+            try:
+                self.set_channel(value)
+                return f"Clarification channel set to: {value}"
+            except ValueError as e:
+                return f"Error: {e}"
+
+        return f"Unknown subcommand: {subcommand}. Use: clarification channel <auto|queue>"
 
     def _execute_clarification(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a clarification request.
