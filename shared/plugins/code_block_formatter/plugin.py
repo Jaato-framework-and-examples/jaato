@@ -63,6 +63,8 @@ LANGUAGE_ALIASES = {
     'objective-c': 'objectivec',
     'ipython3': 'ipython',  # IPython with !shell, %magic support
     'jupyter': 'ipython',  # Jupyter notebooks use IPython kernel
+    'cbl': 'cobol',  # COBOL source files
+    'cob': 'cobol',  # COBOL source files
 }
 
 # Priority for pipeline ordering (40-59 = syntax highlighting)
