@@ -189,6 +189,29 @@ python rich_client.py --connect /tmp/jaato.sock
 | **Resource sharing** | N/A | Shared sessions, single model connection |
 | **Client types** | TUI only | TUI, Web, IDE extensions, mobile |
 
+### Environment Variable Isolation (Known Limitation)
+
+In server mode, all sessions share the same Python process and therefore the same `os.environ`. Session-specific `.env` files only **overlay** variables onto the global environment—they do not clear variables that were set by the server at startup or by previous sessions.
+
+**Impact:** If you change or remove environment variables in your workspace `.env` file after the server has started, sessions may still see stale values from:
+- The server's initial startup environment
+- Other sessions that previously set those variables
+
+**Affected variables include:** `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, proxy settings, and any SDK-specific configuration read from `os.environ`.
+
+**Workaround:** To clear a variable for a specific session, set it to an empty value instead of commenting it out:
+
+```bash
+# This does NOT work - server retains the original value:
+#REQUESTS_CA_BUNDLE=./certs/corp_bundle.pem
+
+# This works - empty value overrides the stale path:
+REQUESTS_CA_BUNDLE=
+SSL_CERT_FILE=
+```
+
+**Alternative:** Restart the server daemon to reload environment from scratch.
+
 ---
 
 ## High-Level Overview
