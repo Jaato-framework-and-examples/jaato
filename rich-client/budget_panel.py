@@ -25,18 +25,9 @@ if TYPE_CHECKING:
 class BudgetPanel:
     """Renders instruction budget as a table with drill-down support."""
 
-    # GC policy indicators
-    GC_INDICATORS = {
-        "locked": ("🔒", "red"),
-        "preservable": ("◑", "yellow"),
-        "partial": ("◐", "blue"),
-        "ephemeral": ("○", "dim"),
-    }
-
     # Source display names
     SOURCE_NAMES = {
         "system": "System",
-        "session": "Session",
         "plugin": "Plugin",
         "enrichment": "Enrichment",
         "conversation": "Conversation",
@@ -53,8 +44,8 @@ class BudgetPanel:
         self._selected_agent_index: int = 0  # 0 = Total, 1 = Main, 2+ = subagents
         self._agent_order: List[str] = []  # ["_total", "main", "subagent_1", ...]
         self._drill_down_source: Optional[str] = None  # None = top level, or source name
-        self._scroll_offset: int = 0
-        self._max_visible_rows: int = 10
+        self._selected_row: int = 0  # Currently selected row in the table
+        self._source_order: List[str] = ["system", "plugin", "enrichment", "conversation"]
 
     def set_theme(self, theme: "ThemeConfig") -> None:
         """Set the theme configuration for styling."""
@@ -69,29 +60,20 @@ class BudgetPanel:
         return ""
 
     def _get_border_style(self) -> str:
-        """Get style for panel border from theme or fallback."""
-        if self._theme:
-            style = self._theme.get_rich_style("budget_panel_border")
-            if style:
-                return style
-        return "cyan"
+        """Get style for panel border from theme."""
+        return self._theme.get_rich_style("budget_panel_border") if self._theme else ""
 
     def _get_header_style(self) -> str:
-        """Get style for table headers from theme or fallback."""
-        if self._theme:
-            style = self._theme.get_rich_style("budget_header")
-            if style:
-                return style
-        return "bold"
+        """Get style for table headers from theme."""
+        return self._theme.get_rich_style("budget_header") if self._theme else ""
 
     def _get_gc_style(self, policy: str) -> str:
-        """Get style for GC policy indicator."""
-        _, fallback = self.GC_INDICATORS.get(policy, ("?", "dim"))
-        if self._theme:
-            style = self._theme.get_rich_style(f"budget_gc_{policy}")
-            if style:
-                return style
-        return fallback
+        """Get style for GC policy indicator from theme."""
+        return self._theme.get_rich_style(f"budget_gc_{policy}") if self._theme else ""
+
+    def _get_popup_background_style(self) -> str:
+        """Get style for popup background from theme."""
+        return self._theme.get_rich_style("budget_popup_background") if self._theme else ""
 
     @property
     def is_visible(self) -> bool:
@@ -104,7 +86,7 @@ class BudgetPanel:
         if self._visible:
             # Reset to top-level view when opening
             self._drill_down_source = None
-            self._scroll_offset = 0
+            self._selected_row = 0
 
     def hide(self) -> None:
         """Hide the panel."""
@@ -151,9 +133,9 @@ class BudgetPanel:
             self._selected_agent_index = (self._selected_agent_index + 1) % len(self._agent_order)
         else:
             self._selected_agent_index = (self._selected_agent_index - 1) % len(self._agent_order)
-        # Reset drill-down when switching agents
+        # Reset view state when switching agents
         self._drill_down_source = None
-        self._scroll_offset = 0
+        self._selected_row = 0
 
     def drill_down(self) -> bool:
         """Enter drill-down view for the selected source.
@@ -162,8 +144,27 @@ class BudgetPanel:
             True if drill-down was entered, False if not applicable.
         """
         # Only Plugin and Conversation support drill-down
-        # This would be called when user presses ENTER on a row
-        # For now, we'll track this state but need row selection logic
+        if self._drill_down_source:
+            # Already in drill-down, can't go deeper
+            return False
+
+        selected_source = self._get_selected_source()
+        if selected_source in ("system", "plugin", "conversation"):
+            # Check if this source has children
+            selected_agent = self._get_selected_agent_id()
+            if selected_agent == "_total":
+                budget = self._get_aggregated_budget()
+            else:
+                budget = self._budgets.get(selected_agent, {})
+
+            entries = budget.get("entries", {})
+            source_entry = entries.get(selected_source, {})
+            children = source_entry.get("children", {})
+
+            if children:
+                self._drill_down_source = selected_source
+                self._selected_row = 0  # Reset row selection for drill-down view
+                return True
         return False
 
     def drill_up(self) -> bool:
@@ -174,17 +175,53 @@ class BudgetPanel:
         """
         if self._drill_down_source:
             self._drill_down_source = None
-            self._scroll_offset = 0
+            self._selected_row = 0  # Reset to first row
             return True
         return False
 
+    def nav_up(self) -> None:
+        """Navigate to previous row."""
+        if self._selected_row > 0:
+            self._selected_row -= 1
+
+    def nav_down(self) -> None:
+        """Navigate to next row."""
+        max_row = self._get_max_row()
+        if self._selected_row < max_row:
+            self._selected_row += 1
+
+    def _get_selected_source(self) -> Optional[str]:
+        """Get the source name at the currently selected row."""
+        if self._selected_row < len(self._source_order):
+            return self._source_order[self._selected_row]
+        return None
+
+    def _get_max_row(self) -> int:
+        """Get the maximum valid row index for current view."""
+        if self._drill_down_source:
+            # In drill-down view, count children
+            selected_agent = self._get_selected_agent_id()
+            if selected_agent == "_total":
+                budget = self._get_aggregated_budget()
+            else:
+                budget = self._budgets.get(selected_agent, {})
+
+            entries = budget.get("entries", {})
+            source_entry = entries.get(self._drill_down_source, {})
+            children = source_entry.get("children", {})
+            return max(0, len(children) - 1)
+        else:
+            # Top level - 5 sources
+            return len(self._source_order) - 1
+
+    # Keep old method names for compatibility but redirect to new ones
     def scroll_up(self, lines: int = 1) -> None:
-        """Scroll content up."""
-        self._scroll_offset = max(0, self._scroll_offset - lines)
+        """Navigate up (legacy name for compatibility)."""
+        self.nav_up()
 
     def scroll_down(self, lines: int = 1) -> None:
-        """Scroll content down."""
-        self._scroll_offset += lines
+        """Navigate down (legacy name for compatibility)."""
+        self.nav_down()
 
     def _get_selected_agent_id(self) -> Optional[str]:
         """Get the currently selected agent ID."""
@@ -266,6 +303,16 @@ class BudgetPanel:
         Returns:
             Rich Panel containing the budget display.
         """
+        # Handle empty state
+        if not self._budgets:
+            return Panel(
+                Text("No token usage data yet.\nSend a message to start tracking.", style="dim italic"),
+                title="[bold]Token Usage[/bold]",
+                border_style=self._get_border_style(),
+                style=self._get_popup_background_style(),
+                padding=(0, 1),
+            )
+
         selected_agent = self._get_selected_agent_id()
 
         if selected_agent == "_total":
@@ -302,6 +349,7 @@ class BudgetPanel:
             title=f"[bold]{title}[/bold]",
             subtitle=f"[dim]{title_suffix}[/dim]",
             border_style=self._get_border_style(),
+            style=self._get_popup_background_style(),
             padding=(0, 1),
         )
 
@@ -324,18 +372,16 @@ class BudgetPanel:
         total_tokens = budget.get("total_tokens", 1)  # Avoid div by zero
         context_limit = budget.get("context_limit", 0)
 
-        # Render in consistent order
-        source_order = ["system", "session", "plugin", "enrichment", "conversation"]
-
-        for source in source_order:
+        for row_idx, source in enumerate(self._source_order):
             entry = entries.get(source, {})
             if not entry:
                 continue
 
+            is_selected = row_idx == self._selected_row
             name = self.SOURCE_NAMES.get(source, source.title())
             tokens = entry.get("total_tokens", entry.get("tokens", 0))
             gc_policy = entry.get("gc_policy", "partial")
-            indicator, _ = self.GC_INDICATORS.get(gc_policy, ("?", "dim"))
+            indicator = entry.get("indicator", "?")
 
             # Usage bar - relative to context_limit if available, else total
             max_for_bar = context_limit if context_limit > 0 else total_tokens
@@ -343,14 +389,19 @@ class BudgetPanel:
 
             # Check if has children (drillable)
             children = entry.get("children", {})
-            name_display = f"{name}" if not children else f"{name} ▸"
+            drill_indicator = " ▸" if children else ""
 
-            table.add_row(
-                name_display,
-                self._format_tokens(tokens),
-                Text(indicator, style=self._get_gc_style(gc_policy)),
-                usage_bar,
-            )
+            # Apply selection highlighting
+            if is_selected:
+                name_text = Text(f"▶ {name}{drill_indicator}", style="bold reverse")
+                tokens_text = Text(self._format_tokens(tokens), style="reverse")
+                gc_text = Text(indicator, style=f"{self._get_gc_style(gc_policy)} reverse")
+            else:
+                name_text = Text(f"  {name}{drill_indicator}")
+                tokens_text = Text(self._format_tokens(tokens))
+                gc_text = Text(indicator, style=self._get_gc_style(gc_policy))
+
+            table.add_row(name_text, tokens_text, gc_text, usage_bar)
 
         # Add legend
         table.add_row("", "", "", "")
@@ -362,6 +413,14 @@ class BudgetPanel:
         legend.append("○", style=self._get_gc_style("ephemeral"))
         legend.append(" ephemeral", style="dim")
         table.add_row(legend, "", "", "")
+
+        # Navigation hint
+        hint = Text("↑↓ navigate  ", style="dim")
+        hint.append("Enter", style="dim bold")
+        hint.append(" drill down  ", style="dim")
+        hint.append("ESC", style="dim bold")
+        hint.append(" close", style="dim")
+        table.add_row(hint, "", "", "")
 
         return table
 
@@ -399,24 +458,43 @@ class BudgetPanel:
             reverse=True
         )
 
-        for child_id, child in sorted_children:
+        for row_idx, (child_id, child) in enumerate(sorted_children):
+            is_selected = row_idx == self._selected_row
             label = child.get("label", child_id)
             tokens = child.get("tokens", 0)
             gc_policy = child.get("gc_policy", "ephemeral")
-            indicator, _ = self.GC_INDICATORS.get(gc_policy, ("?", "dim"))
+            indicator = child.get("indicator", "?")
 
             usage_bar = self._render_usage_bar(tokens, source_tokens)
 
-            table.add_row(
-                label,
-                self._format_tokens(tokens),
-                Text(indicator, style=self._get_gc_style(gc_policy)),
-                usage_bar,
-            )
+            # Apply selection highlighting
+            if is_selected:
+                label_text = Text(f"▶ {label}", style="bold reverse")
+                tokens_text = Text(self._format_tokens(tokens), style="reverse")
+                gc_text = Text(indicator, style=f"{self._get_gc_style(gc_policy)} reverse")
+            else:
+                label_text = Text(f"  {label}")
+                tokens_text = Text(self._format_tokens(tokens))
+                gc_text = Text(indicator, style=self._get_gc_style(gc_policy))
 
-        # Back hint
+            table.add_row(label_text, tokens_text, gc_text, usage_bar)
+
+        # Add legend (same as top level)
         table.add_row("", "", "", "")
-        table.add_row(Text("[← Back] ESC", style="dim"), "", "", "")
+        legend = Text()
+        legend.append("🔒", style=self._get_gc_style("locked"))
+        legend.append(" locked  ", style="dim")
+        legend.append("◐", style=self._get_gc_style("partial"))
+        legend.append(" partial  ", style="dim")
+        legend.append("○", style=self._get_gc_style("ephemeral"))
+        legend.append(" ephemeral", style="dim")
+        table.add_row(legend, "", "", "")
+
+        # Navigation hint
+        hint = Text("↑↓ navigate  ", style="dim")
+        hint.append("ESC", style="dim bold")
+        hint.append(" back", style="dim")
+        table.add_row(hint, "", "", "")
 
         return table
 

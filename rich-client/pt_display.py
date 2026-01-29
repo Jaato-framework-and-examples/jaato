@@ -41,7 +41,7 @@ from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
-from keybindings import KeybindingConfig, load_keybindings
+from keybindings import KeybindingConfig, load_keybindings, format_key_for_display
 from theme import ThemeConfig, load_theme
 from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
@@ -843,8 +843,14 @@ class PTDisplay:
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
-            ("class:status-bar", " "),
         ])
+
+        # Add budget hint when panel has data and is not visible
+        if self._budget_panel.has_data() and not self._budget_panel.is_visible:
+            budget_key = format_key_for_display(self._keybinding_config.toggle_budget)
+            result.append(("class:status-bar.label", f" [{budget_key} for budget]"))
+
+        result.append(("class:status-bar", " "))
 
         return result
 
@@ -1119,7 +1125,8 @@ class PTDisplay:
         kb = KeyBindings()
         keys = self._keybinding_config
 
-        @kb.add(*keys.get_key_args("submit"), eager=True)
+        @kb.add(*keys.get_key_args("submit"), eager=True,
+                filter=Condition(lambda: not self._budget_panel.is_visible))
         def handle_enter(event):
             """Handle enter key - submit input, select permission option, or advance pager."""
             if getattr(self, '_pager_active', False):
@@ -1214,7 +1221,8 @@ class PTDisplay:
             # Normal mode - insert space character
             event.current_buffer.insert_text(" ")
 
-        @kb.add(*keys.get_key_args("permission_next"), eager=True)
+        @kb.add(*keys.get_key_args("permission_next"), eager=True,
+                filter=Condition(lambda: not self._budget_panel.is_visible))
         def handle_permission_next(event):
             """Handle TAB - cycle to next permission option, or complete in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1235,7 +1243,8 @@ class PTDisplay:
                 else:
                     buff.start_completion()
 
-        @kb.add(*keys.get_key_args("permission_prev"), eager=True)
+        @kb.add(*keys.get_key_args("permission_prev"), eager=True,
+                filter=Condition(lambda: not self._budget_panel.is_visible))
         def handle_permission_prev(event):
             """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1367,6 +1376,11 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - scroll popup, tool nav, or history/completion."""
+            # Budget panel takes priority when visible (it's an overlay)
+            if self._budget_panel.is_visible:
+                self._budget_panel.scroll_up()
+                self._app.invalidate()
+                return
             # Plan popup takes priority when visible (it's an overlay)
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -1392,6 +1406,11 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
             """Handle Down arrow - scroll popup, tool nav, or history/completion."""
+            # Budget panel takes priority when visible (it's an overlay)
+            if self._budget_panel.is_visible:
+                self._budget_panel.scroll_down()
+                self._app.invalidate()
+                return
             # Plan popup takes priority when visible (it's an overlay)
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -1425,9 +1444,8 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("toggle_budget"))
         def handle_ctrl_b(event):
             """Handle Ctrl+B - toggle budget panel visibility."""
-            if self._budget_panel.has_data():
-                self._budget_panel.toggle()
-                self._app.invalidate()
+            self._budget_panel.toggle()
+            self._app.invalidate()
 
         # Budget panel navigation (only active when budget panel is visible)
         @kb.add("tab", filter=Condition(lambda: self._budget_panel.is_visible))
@@ -1448,6 +1466,12 @@ class PTDisplay:
             if not self._budget_panel.drill_up():
                 # Already at top level, close the panel
                 self._budget_panel.hide()
+            self._app.invalidate()
+
+        @kb.add("enter", filter=Condition(lambda: self._budget_panel.is_visible))
+        def handle_budget_enter(event):
+            """Handle Enter in budget panel - drill down into selected source."""
+            self._budget_panel.drill_down()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("cycle_agents"))
@@ -1697,15 +1721,28 @@ class PTDisplay:
 
         # Budget popup (floating overlay, toggled with Ctrl+B)
         def get_budget_popup_height():
-            """Calculate budget popup height based on terminal size."""
-            return max(10, min(20, int(self._height * 0.5)))
+            """Calculate budget popup height by rendering content and counting lines."""
+            if not self._budget_panel.has_data():
+                return 4  # Minimal height for "no data" message
+
+            # Render the popup to get actual line count
+            popup_width = max(50, min(90, int(self._width * 0.7)))
+            popup_height = max(10, min(20, int(self._height * 0.5)))
+            rendered = self._budget_panel.render(popup_height, popup_width)
+
+            # Render to string and count lines
+            rendered_str = self._renderer.render(rendered)
+            line_count = rendered_str.count('\n') + 1
+
+            # Cap at available screen height
+            return min(line_count, self._height - 4)
 
         budget_popup_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_budget_popup_content),
                 height=get_budget_popup_height,
             ),
-            filter=Condition(lambda: self._budget_panel.is_visible and self._budget_panel.has_data()),
+            filter=Condition(lambda: self._budget_panel.is_visible),
         )
 
         # Agent details popup (floating overlay, shown on agent cycle)
