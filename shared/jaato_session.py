@@ -26,7 +26,14 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
-from .instruction_budget import InstructionBudget, InstructionSource, estimate_tokens
+from .instruction_budget import (
+    InstructionBudget,
+    InstructionSource,
+    estimate_tokens,
+    SystemChildType,
+    DEFAULT_SYSTEM_POLICIES,
+    GCPolicy,
+)
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
@@ -236,6 +243,11 @@ class JaatoSession:
 
         # Turn counter for telemetry
         self._turn_index: int = 0
+
+        # Turn complexity tracking for GC policy classification
+        # Tracks whether the current turn is "complex" (multiple model responses with tool calls)
+        self._turn_model_response_count: int = 0
+        self._turn_had_tool_calls: bool = False
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -1032,18 +1044,50 @@ class JaatoSession:
             context_limit=context_limit,
         )
 
-        # SYSTEM: Framework constants
-        from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
-        system_tokens = estimate_tokens(_TASK_COMPLETION_INSTRUCTION)
-        # Add parallel tool guidance if enabled
-        from .jaato_runtime import _PARALLEL_TOOL_GUIDANCE, _is_parallel_tools_enabled
-        if _is_parallel_tools_enabled():
-            system_tokens += estimate_tokens(_PARALLEL_TOOL_GUIDANCE)
-        self._instruction_budget.update_tokens(InstructionSource.SYSTEM, system_tokens)
+        # SYSTEM: Track as children (base, client, framework)
+        from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION, _PARALLEL_TOOL_GUIDANCE, _is_parallel_tools_enabled
 
-        # SESSION: User-provided system_instructions
-        session_tokens = estimate_tokens(session_instructions) if session_instructions else 0
-        self._instruction_budget.update_tokens(InstructionSource.SESSION, session_tokens)
+        total_system_tokens = 0
+
+        # 1. Base instructions from .jaato/system_instructions.md
+        base_instructions = getattr(self._runtime, '_base_system_instructions', None)
+        base_tokens = estimate_tokens(base_instructions) if base_instructions else 0
+        if base_tokens > 0:
+            self._instruction_budget.add_child(
+                InstructionSource.SYSTEM,
+                SystemChildType.BASE.value,
+                base_tokens,
+                DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
+                label="Base Instructions",
+            )
+            total_system_tokens += base_tokens
+
+        # 2. Client-provided session instructions (programmatic)
+        client_tokens = estimate_tokens(session_instructions) if session_instructions else 0
+        if client_tokens > 0:
+            self._instruction_budget.add_child(
+                InstructionSource.SYSTEM,
+                SystemChildType.CLIENT.value,
+                client_tokens,
+                DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
+                label="Client Instructions",
+            )
+            total_system_tokens += client_tokens
+
+        # 3. Framework constants (task completion, parallel tool guidance)
+        framework_tokens = estimate_tokens(_TASK_COMPLETION_INSTRUCTION)
+        if _is_parallel_tools_enabled():
+            framework_tokens += estimate_tokens(_PARALLEL_TOOL_GUIDANCE)
+        self._instruction_budget.add_child(
+            InstructionSource.SYSTEM,
+            SystemChildType.FRAMEWORK.value,
+            framework_tokens,
+            DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
+            label="Framework",
+        )
+        total_system_tokens += framework_tokens
+
+        self._instruction_budget.update_tokens(InstructionSource.SYSTEM, total_system_tokens)
 
         # PLUGIN: Per-tool system instructions
         plugin_tokens = 0
@@ -1115,6 +1159,25 @@ class JaatoSession:
         if conv_entry:
             conv_entry.children.clear()  # Reset children
 
+        # Determine if the just-completed turn was complex
+        # Complex turn = multiple model responses AND had tool calls
+        # The final model response in a complex turn contains the summary (per framework guidance)
+        is_complex_turn = self._turn_model_response_count > 1 and self._turn_had_tool_calls
+
+        # Find the index of the last MODEL message with text-only content (no tool calls)
+        # This is the turn summary candidate if the turn was complex
+        last_model_text_only_idx = -1
+        if is_complex_turn:
+            for i in range(len(history) - 1, -1, -1):
+                msg = history[i]
+                if msg.role == Role.MODEL:
+                    # Check if this message has text but no function calls
+                    has_text = any(p.text for p in msg.parts)
+                    has_function_calls = any(p.function_call for p in msg.parts)
+                    if has_text and not has_function_calls:
+                        last_model_text_only_idx = i
+                        break
+
         for i, msg in enumerate(history):
             # Estimate tokens for this message
             msg_tokens = 0
@@ -1131,10 +1194,15 @@ class JaatoSession:
             # Add as child for per-turn drill-down
             if conv_entry:
                 from .instruction_budget import ConversationTurnType, DEFAULT_TURN_POLICIES, GCPolicy
-                # Determine turn type (simplified - first user message is original)
+                # Determine turn type based on position and turn complexity
                 if i == 0 and msg.role == Role.USER:
+                    # First user message is the original request - LOCKED
                     turn_type = ConversationTurnType.ORIGINAL_REQUEST
+                elif i == last_model_text_only_idx:
+                    # Final text-only model response in a complex turn - TURN_SUMMARY (PRESERVABLE)
+                    turn_type = ConversationTurnType.TURN_SUMMARY
                 else:
+                    # Everything else is working output - EPHEMERAL
                     turn_type = ConversationTurnType.WORKING
                 gc_policy = DEFAULT_TURN_POLICIES[turn_type]
                 role_str = msg.role.value if msg.role else 'unknown'
@@ -1793,6 +1861,10 @@ class JaatoSession:
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
 
+        # Reset turn complexity tracking
+        self._turn_model_response_count = 0
+        self._turn_had_tool_calls = False
+
         # Track tokens and timing
         turn_start = datetime.now()
         turn_data = {
@@ -1915,6 +1987,8 @@ class JaatoSession:
                     )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
+                # Track model response count for turn complexity
+                self._turn_model_response_count += 1
                 # Record token usage to telemetry span
                 if response.usage:
                     llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
@@ -2576,6 +2650,9 @@ class JaatoSession:
         # Set activity phase: we're executing tools
         self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
 
+        # Track that this turn has tool calls (for turn complexity classification)
+        self._turn_had_tool_calls = True
+
         # Check if parallel execution is enabled
         parallel_enabled = os.environ.get(
             'JAATO_PARALLEL_TOOLS', 'true'
@@ -3183,6 +3260,8 @@ class JaatoSession:
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
+            # Track model response count for turn complexity
+            self._turn_model_response_count += 1
             # Record token usage to telemetry span
             if response.usage:
                 llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
