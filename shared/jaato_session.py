@@ -26,6 +26,14 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
+from .instruction_budget import (
+    InstructionBudget,
+    InstructionSource,
+    estimate_tokens,
+    SystemChildType,
+    DEFAULT_SYSTEM_POLICIES,
+    GCPolicy,
+)
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
@@ -141,6 +149,9 @@ class JaatoSession:
         # Per-turn token accounting
         self._turn_accounting: List[Dict[str, int]] = []
 
+        # Instruction budget tracking (token usage by source layer)
+        self._instruction_budget: Optional[InstructionBudget] = None
+
         # User commands for this session
         self._user_commands: Dict[str, UserCommand] = {}
 
@@ -225,8 +236,18 @@ class JaatoSession:
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
 
+        # Callback when instruction budget is updated
+        # Used by server to emit InstructionBudgetEvent
+        # Callback receives the budget snapshot dict
+        self._on_instruction_budget_updated: Optional[Callable[[Dict[str, Any]], None]] = None
+
         # Turn counter for telemetry
         self._turn_index: int = 0
+
+        # Turn complexity tracking for GC policy classification
+        # Tracks whether the current turn is "complex" (multiple model responses with tool calls)
+        self._turn_model_response_count: int = 0
+        self._turn_had_tool_calls: bool = False
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -301,6 +322,16 @@ class JaatoSession:
         """
         return self._agent_id
 
+    @property
+    def instruction_budget(self) -> Optional[InstructionBudget]:
+        """Get the instruction budget for this session.
+
+        Returns:
+            The instruction budget tracking token usage by source layer,
+            or None if not yet populated.
+        """
+        return self._instruction_budget
+
     def set_agent_context(
         self,
         agent_type: str = "main",
@@ -369,6 +400,21 @@ class JaatoSession:
             )
         """
         self._on_retry = callback
+
+    def set_instruction_budget_callback(
+        self,
+        callback: Optional[Callable[[Dict[str, Any]], None]]
+    ) -> None:
+        """Set callback for instruction budget updates.
+
+        Called when the instruction budget changes (e.g., after configure(),
+        on conversation changes).
+
+        Args:
+            callback: Function called with the budget snapshot dict.
+                Set to None to disable notifications.
+        """
+        self._on_instruction_budget_updated = callback
 
     def set_parent_session(self, parent: Optional['JaatoSession']) -> None:
         """Set parent session for output forwarding.
@@ -939,6 +985,9 @@ class JaatoSession:
         if not skip_provider:
             self._create_provider_session()
 
+        # Populate instruction budget after all configuration is complete
+        self._populate_instruction_budget(session_instructions=system_instructions)
+
     def _create_provider_session(
         self,
         history: Optional[List[Message]] = None
@@ -961,6 +1010,245 @@ class JaatoSession:
             tools=tools_to_pass,
             history=history
         )
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens using provider if available, else estimate.
+
+        Uses the provider's count_tokens() API when available (Google GenAI,
+        Anthropic) for accurate counts. Falls back to estimate_tokens()
+        (chars/4 approximation) for providers without token counting APIs.
+
+        Args:
+            text: The text to count tokens for.
+
+        Returns:
+            Token count (actual or estimated).
+        """
+        if not text:
+            return 0
+        if self._provider and hasattr(self._provider, 'count_tokens'):
+            try:
+                result = self._provider.count_tokens(text)
+                # Ensure we got an int (handles mocked providers returning MagicMock)
+                if isinstance(result, int):
+                    return result
+            except Exception:
+                pass  # Fall back to estimate on error
+        return estimate_tokens(text)
+
+    def _populate_instruction_budget(
+        self,
+        session_instructions: Optional[str] = None
+    ) -> None:
+        """Populate instruction budget with token counts by source layer.
+
+        Called after configure() to track token usage from:
+        - SYSTEM: Framework constants (task completion, parallel tools guidance)
+        - SESSION: User-provided system_instructions parameter
+        - PLUGIN: Per-tool system instructions (with children per-tool)
+        - ENRICHMENT: Enrichment pipeline additions
+        - CONVERSATION: Message history (initially 0, updated per turn)
+
+        Args:
+            session_instructions: The user-provided system_instructions from configure().
+        """
+        # Get context limit from provider if available
+        context_limit = 128_000  # Default
+        if self._provider and hasattr(self._provider, 'context_limit'):
+            context_limit = self._provider.context_limit
+
+        # Get session_id - use runtime's session ID or generate placeholder
+        # The server will assign proper session_id when session is registered
+        session_id = getattr(self._runtime, 'session_id', '') or ''
+
+        # Create budget with default entries
+        self._instruction_budget = InstructionBudget.create_default(
+            session_id=session_id,
+            agent_id=self._agent_id,
+            agent_type=self._agent_type,
+            context_limit=context_limit,
+        )
+
+        # SYSTEM: Track as children (base, client, framework)
+        from .jaato_runtime import (
+            _TASK_COMPLETION_INSTRUCTION,
+            _PARALLEL_TOOL_GUIDANCE,
+            _TURN_SUMMARY_INSTRUCTION,
+            _is_parallel_tools_enabled,
+        )
+
+        total_system_tokens = 0
+
+        # 1. Base instructions from .jaato/system_instructions.md
+        base_instructions = getattr(self._runtime, '_base_system_instructions', None)
+        base_tokens = self._count_tokens(base_instructions) if base_instructions else 0
+        if base_tokens > 0:
+            self._instruction_budget.add_child(
+                InstructionSource.SYSTEM,
+                SystemChildType.BASE.value,
+                base_tokens,
+                DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
+                label="Base Instructions",
+            )
+            total_system_tokens += base_tokens
+
+        # 2. Client-provided session instructions (programmatic)
+        client_tokens = self._count_tokens(session_instructions) if session_instructions else 0
+        if client_tokens > 0:
+            self._instruction_budget.add_child(
+                InstructionSource.SYSTEM,
+                SystemChildType.CLIENT.value,
+                client_tokens,
+                DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
+                label="Client Instructions",
+            )
+            total_system_tokens += client_tokens
+
+        # 3. Framework constants (task completion, parallel tool guidance, turn summary)
+        framework_tokens = self._count_tokens(_TASK_COMPLETION_INSTRUCTION)
+        if _is_parallel_tools_enabled():
+            framework_tokens += self._count_tokens(_PARALLEL_TOOL_GUIDANCE)
+        framework_tokens += self._count_tokens(_TURN_SUMMARY_INSTRUCTION)
+        self._instruction_budget.add_child(
+            InstructionSource.SYSTEM,
+            SystemChildType.FRAMEWORK.value,
+            framework_tokens,
+            DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
+            label="Framework",
+        )
+        total_system_tokens += framework_tokens
+
+        self._instruction_budget.update_tokens(InstructionSource.SYSTEM, total_system_tokens)
+
+        # PLUGIN: Per-tool system instructions
+        plugin_tokens = 0
+        if self._runtime.registry:
+            plugin_entry = self._instruction_budget.get_entry(InstructionSource.PLUGIN)
+            for plugin_name in self._runtime.registry._exposed:
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'get_system_instructions'):
+                    instr = plugin.get_system_instructions()
+                    if instr:
+                        tokens = self._count_tokens(instr)
+                        plugin_tokens += tokens
+                        # Add as child entry for drill-down
+                        from .instruction_budget import PluginToolType, DEFAULT_TOOL_POLICIES
+                        # Determine if core or discoverable
+                        discoverability = getattr(plugin, 'discoverability', 'core')
+                        tool_type = PluginToolType.CORE if discoverability == 'core' else PluginToolType.DISCOVERABLE
+                        gc_policy = DEFAULT_TOOL_POLICIES[tool_type]
+                        self._instruction_budget.add_child(
+                            InstructionSource.PLUGIN,
+                            plugin_name,
+                            tokens,
+                            gc_policy,
+                            label=plugin_name,
+                        )
+        self._instruction_budget.update_tokens(InstructionSource.PLUGIN, plugin_tokens)
+
+        # ENRICHMENT: Enrichment pipeline additions
+        # The enrichment tokens are included in the combined system instruction
+        # but we can estimate them by subtracting known components
+        # For now, track as 0 - will be populated by enrichment pipeline
+        self._instruction_budget.update_tokens(InstructionSource.ENRICHMENT, 0)
+
+        # CONVERSATION: Message history (initially 0)
+        self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, 0)
+
+        # Emit budget update event
+        self._emit_instruction_budget_update()
+
+    def _emit_instruction_budget_update(self) -> None:
+        """Emit instruction budget update via callback and/or UI hooks."""
+        if not self._instruction_budget:
+            return
+
+        try:
+            snapshot = self._instruction_budget.snapshot()
+
+            # Direct callback (for main session in server)
+            if self._on_instruction_budget_updated:
+                self._on_instruction_budget_updated(snapshot)
+
+            # UI hooks (for both main and subagent sessions)
+            if self._ui_hooks and hasattr(self._ui_hooks, 'on_agent_instruction_budget_updated'):
+                self._ui_hooks.on_agent_instruction_budget_updated(
+                    agent_id=self._agent_id,
+                    budget_snapshot=snapshot,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to emit instruction budget update: {e}")
+
+    def _update_conversation_budget(self) -> None:
+        """Update CONVERSATION entry in instruction budget from current history."""
+        if not self._instruction_budget:
+            return
+
+        history = self.get_history()
+        conversation_tokens = 0
+        conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
+        if conv_entry:
+            conv_entry.children.clear()  # Reset children
+
+        # Determine if the just-completed turn was complex
+        # Complex turn = multiple model responses AND had tool calls
+        # The final model response in a complex turn contains the summary (per framework guidance)
+        is_complex_turn = self._turn_model_response_count > 1 and self._turn_had_tool_calls
+
+        # Find the index of the last MODEL message with text-only content (no tool calls)
+        # This is the turn summary candidate if the turn was complex
+        last_model_text_only_idx = -1
+        if is_complex_turn:
+            for i in range(len(history) - 1, -1, -1):
+                msg = history[i]
+                if msg.role == Role.MODEL:
+                    # Check if this message has text but no function calls
+                    has_text = any(p.text for p in msg.parts)
+                    has_function_calls = any(p.function_call for p in msg.parts)
+                    if has_text and not has_function_calls:
+                        last_model_text_only_idx = i
+                        break
+
+        for i, msg in enumerate(history):
+            # Count tokens for this message
+            msg_tokens = 0
+            for part in msg.parts:
+                if hasattr(part, 'text') and part.text:
+                    msg_tokens += self._count_tokens(part.text)
+                elif hasattr(part, 'tool_result') and part.tool_result:
+                    # Tool results can be large
+                    result_text = str(part.tool_result.content) if part.tool_result.content else ''
+                    msg_tokens += self._count_tokens(result_text)
+
+            conversation_tokens += msg_tokens
+
+            # Add as child for per-turn drill-down
+            if conv_entry:
+                from .instruction_budget import ConversationTurnType, DEFAULT_TURN_POLICIES, GCPolicy
+                # Determine turn type based on position and turn complexity
+                if i == 0 and msg.role == Role.USER:
+                    # First user message is the original request - LOCKED
+                    turn_type = ConversationTurnType.ORIGINAL_REQUEST
+                elif i == last_model_text_only_idx:
+                    # Final text-only model response in a complex turn - TURN_SUMMARY (PRESERVABLE)
+                    turn_type = ConversationTurnType.TURN_SUMMARY
+                else:
+                    # Everything else is working output - EPHEMERAL
+                    turn_type = ConversationTurnType.WORKING
+                gc_policy = DEFAULT_TURN_POLICIES[turn_type]
+                role_str = msg.role.value if msg.role else 'unknown'
+                self._instruction_budget.add_child(
+                    InstructionSource.CONVERSATION,
+                    f"turn_{i}",
+                    msg_tokens,
+                    gc_policy,
+                    label=f"turn_{i} ({role_str})",
+                )
+
+        self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, conversation_tokens)
+
+        # Emit budget update event
+        self._emit_instruction_budget_update()
 
     def refresh_tools(self) -> None:
         """Refresh tools from the runtime.
@@ -1604,6 +1892,10 @@ class JaatoSession:
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
 
+        # Reset turn complexity tracking
+        self._turn_model_response_count = 0
+        self._turn_had_tool_calls = False
+
         # Track tokens and timing
         turn_start = datetime.now()
         turn_data = {
@@ -1726,6 +2018,8 @@ class JaatoSession:
                     )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
+                # Track model response count for turn complexity
+                self._turn_model_response_count += 1
                 # Record token usage to telemetry span
                 if response.usage:
                     llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
@@ -2348,6 +2642,9 @@ class JaatoSession:
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
 
+            # Update instruction budget with conversation tokens
+            self._update_conversation_budget()
+
             # Clean up cancellation state and activity phase
             self._is_running = False
             self._cancel_token = None
@@ -2383,6 +2680,9 @@ class JaatoSession:
         """
         # Set activity phase: we're executing tools
         self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
+
+        # Track that this turn has tool calls (for turn complexity classification)
+        self._turn_had_tool_calls = True
 
         # Check if parallel execution is enabled
         parallel_enabled = os.environ.get(
@@ -2991,6 +3291,8 @@ class JaatoSession:
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
+            # Track model response count for turn complexity
+            self._turn_model_response_count += 1
             # Record token usage to telemetry span
             if response.usage:
                 llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)

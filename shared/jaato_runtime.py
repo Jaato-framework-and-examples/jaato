@@ -34,6 +34,15 @@ _PARALLEL_TOOL_GUIDANCE = (
     "significantly reducing latency."
 )
 
+# Turn-end summary guidance - encourages model to summarize after complex tool-using turns
+_TURN_SUMMARY_INSTRUCTION = (
+    "After completing a complex turn involving multiple tool calls, provide a concise summary "
+    "of what was done and why. This helps maintain context for future turns and enables "
+    "efficient garbage collection of verbose intermediate outputs. Include: actions taken, "
+    "goals accomplished, rationale for non-obvious decisions, and next steps if applicable. "
+    "Skip summaries for simple single-tool lookups or direct conversational responses."
+)
+
 
 def _get_sandbox_guidance() -> Optional[str]:
     """Get sandbox guidance if workspace is configured.
@@ -851,6 +860,9 @@ class JaatoRuntime:
         # 5. Parallel tool guidance (when parallel execution is enabled)
         if _is_parallel_tools_enabled():
             result_parts.append(_PARALLEL_TOOL_GUIDANCE)
+
+        # 6. Turn-end summary guidance (always included)
+        result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
         return "\n\n".join(result_parts)
 

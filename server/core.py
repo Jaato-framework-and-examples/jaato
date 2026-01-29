@@ -79,6 +79,7 @@ from .events import (
     PlanUpdatedEvent,
     PlanClearedEvent,
     ContextUpdatedEvent,
+    InstructionBudgetEvent,
     TurnCompletedEvent,
     SystemMessageEvent,
     InitProgressEvent,
@@ -408,7 +409,7 @@ class JaatoServer:
                 model_name=self._model_name,
             ))
 
-        # Emit AgentCreatedEvent for all existing agents
+        # Emit AgentCreatedEvent for all existing agents (from _agents dict)
         for agent_id, agent in self._agents.items():
             emit(AgentCreatedEvent(
                 agent_id=agent.agent_id,
@@ -425,6 +426,80 @@ class JaatoServer:
                     agent_id=agent.agent_id,
                     status=agent.status,
                 ))
+
+        # Emit instruction budget for main agent
+        if self._jaato:
+            session = self._jaato.get_session()
+            if session and session.instruction_budget:
+                emit(InstructionBudgetEvent(
+                    agent_id=session.agent_id,
+                    budget_snapshot=session.instruction_budget.snapshot(),
+                ))
+
+        # Emit restored subagent state from SubagentPlugin
+        # This handles subagents that were restored from persistence but not yet
+        # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
+        self._emit_subagent_state(emit)
+
+    def _emit_subagent_state(self, emit: EventCallback) -> None:
+        """Emit state for subagents from SubagentPlugin._active_sessions.
+
+        This is called by emit_current_state() to ensure reconnecting clients
+        see all active subagents, including those restored from persistence.
+
+        Args:
+            emit: Event callback to use for emission.
+        """
+        if not self.registry:
+            return
+
+        subagent_plugin = self.registry.get_plugin("subagent")
+        if not subagent_plugin or not hasattr(subagent_plugin, '_active_sessions'):
+            return
+
+        from datetime import datetime
+
+        for agent_id, info in subagent_plugin._active_sessions.items():
+            # Skip if already emitted via _agents dict
+            if agent_id in self._agents:
+                continue
+
+            profile = info.get('profile')
+            created_at = info.get('created_at')
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+
+            emit(AgentCreatedEvent(
+                agent_id=agent_id,
+                agent_name=profile.name if profile else agent_id,
+                agent_type="subagent",
+                profile_name=profile.name if profile else "",
+                parent_agent_id="main",
+                created_at=created_at,
+            ))
+
+            # Emit context update for the subagent
+            session = info.get('session')
+            if session:
+                usage = session.get_context_usage()
+                context_limit = session.get_context_limit()
+                emit(ContextUpdatedEvent(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    context_limit=context_limit,
+                    percent_used=usage.get('percent_used', 0.0),
+                    tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
+                    turns=usage.get('turns', 0),
+                ))
+
+                # Emit instruction budget for the subagent
+                if hasattr(session, 'instruction_budget') and session.instruction_budget:
+                    emit(InstructionBudgetEvent(
+                        agent_id=agent_id,
+                        budget_snapshot=session.instruction_budget.snapshot(),
+                    ))
 
     # =========================================================================
     # Initialization
@@ -674,6 +749,28 @@ class JaatoServer:
             gc_strategy = getattr(gc_plugin, 'name', 'gc')
             if gc_strategy.startswith('gc_'):
                 gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
+
+        # Set up instruction budget callback and emit initial budget
+        # This must happen after configure_tools() which populates the budget
+        session = self._jaato.get_session()
+        if session:
+            server = self
+
+            def instruction_budget_callback(snapshot: dict):
+                server.emit(InstructionBudgetEvent(
+                    agent_id=snapshot.get('agent_id', 'main'),
+                    budget_snapshot=snapshot,
+                ))
+
+            session.set_instruction_budget_callback(instruction_budget_callback)
+
+            # Emit initial budget snapshot
+            if session.instruction_budget:
+                self.emit(InstructionBudgetEvent(
+                    agent_id=session.agent_id,
+                    budget_snapshot=session.instruction_budget.snapshot(),
+                ))
+
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
 
         # Step 6: Set up session
@@ -1123,6 +1220,12 @@ class JaatoServer:
                     agent_id=agent_id,
                     call_id=call_id,
                     chunk=chunk,
+                ))
+
+            def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):
+                server.emit(InstructionBudgetEvent(
+                    agent_id=agent_id,
+                    budget_snapshot=budget_snapshot,
                 ))
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
@@ -1626,6 +1729,8 @@ class JaatoServer:
                 ))
 
             session.set_mid_turn_interrupt_callback(mid_turn_interrupt_callback)
+
+            # Note: instruction_budget_callback is set up in initialize() after configure_tools()
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks

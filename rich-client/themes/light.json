@@ -156,6 +156,14 @@
     "pending_prompt_overflow": {"fg": "muted", "italic": true},
 
     "input_text": {"fg": "text"},
-    "input_prompt": {"fg": "primary", "bold": true}
+    "input_prompt": {"fg": "primary", "bold": true},
+
+    "budget_panel_border": {"fg": "primary"},
+    "budget_popup_background": {"bg": "background"},
+    "budget_header": {"bold": true},
+    "budget_gc_locked": {"fg": "error"},
+    "budget_gc_preservable": {"fg": "warning"},
+    "budget_gc_partial": {"fg": "#0055cc"},
+    "budget_gc_ephemeral": {"fg": "#888888"}
   }
 }
