@@ -390,7 +390,8 @@ class MCPToolPlugin:
                     schema = ToolSchema(
                         name=normalized_name,
                         description=tool.description,
-                        parameters=cleaned_schema
+                        parameters=cleaned_schema,
+                        category="MCP",
                     )
                     schemas.append(schema)
                 except Exception as exc:
