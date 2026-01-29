@@ -63,11 +63,11 @@ Track token consumption by instruction source to help users understand where the
 |----------|----------|
 | Token counting | Using `estimate_tokens()` (chars/4 approximation) initially |
 | Update frequency | Update after `configure()` and after each turn completes |
+| Multi-agent aggregation | Show raw token counts only; omit limit/percentage since they're meaningless across different context windows |
 
 ### Open Questions (Remaining)
 
-1. **Multi-agent aggregation**: How to aggregate "Total" view across agents with different context limits?
-2. **Enrichment tracking**: How to accurately track enrichment pipeline token contributions?
+1. **Enrichment tracking**: How to accurately track enrichment pipeline token contributions?
 
 ---
 
@@ -77,6 +77,7 @@ Track token consumption by instruction source to help users understand where the
 
 A dedicated panel in the rich client (toggled, replaces output panel) showing token usage per source with drill-down capability.
 
+**Per-agent view** (shows limit and percentage):
 ```
 ╭─ Token Usage (8230 / 128K = 6.4%) ────────────────╮
 │                                                   │
@@ -87,6 +88,23 @@ A dedicated panel in the rich client (toggled, replaces output panel) showing to
 │  Plugin           1840  ◐    ▏████████░░░░░░░░░░  │
 │  Enrichment        300  ○    ▏█░░░░░░░░░░░░░░░░░  │
 │  Conversation     5000  ◐    ▏██████████████████  │
+│                                                   │
+│  🔒 = locked  ◐ = partial  ○ = ephemeral          │
+╰───────────────────────────────────────────────────╯
+ [Total] [Main] [explore-1] [subagent-2]       TAB →
+```
+
+**Total view** (aggregated across agents - no limit/percentage since agents may have different context windows):
+```
+╭─ Token Usage (Total: 12450 tokens) ───────────────╮
+│                                                   │
+│  Source         Tokens  GC   ▏ Distribution       │
+│  ──────────────────────────────────────────────── │
+│  System           1200  🔒   ▏███░░░░░░░░░░░░░░░  │
+│  Session           400  🔒   ▏█░░░░░░░░░░░░░░░░░  │
+│  Plugin           2850  ◐    ▏██████░░░░░░░░░░░░  │
+│  Enrichment        500  ○    ▏█░░░░░░░░░░░░░░░░░  │
+│  Conversation     7500  ◐    ▏██████████████████  │
 │                                                   │
 │  🔒 = locked  ◐ = partial  ○ = ephemeral          │
 ╰───────────────────────────────────────────────────╯
