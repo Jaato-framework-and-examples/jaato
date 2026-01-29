@@ -4842,15 +4842,48 @@ Server Mode:
         action="store_true",
         help="Start with a new session instead of resuming the default (only with --connect)"
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode with file output (requires --connect and --prompt). "
+             "Output goes to {workspace}/jaato-headless-client-agents/"
+    )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        help="Workspace directory for headless output (default: current directory)"
+    )
 
     args = parser.parse_args()
 
-    # Check TTY before proceeding (except for single prompt mode)
-    if not sys.stdout.isatty() and not args.prompt:
+    # Validate headless mode requirements
+    if args.headless:
+        if not args.connect:
+            sys.exit("Error: --headless requires --connect")
+        if not args.prompt:
+            sys.exit("Error: --headless requires --prompt")
+
+    # Check TTY before proceeding (except for single prompt mode or headless)
+    if not sys.stdout.isatty() and not args.prompt and not args.headless:
         sys.exit(
             "Error: rich-client requires an interactive terminal.\n"
-            "Use simple-client for non-TTY environments."
+            "Use --headless for non-TTY environments."
         )
+
+    # Headless mode: file-based output, auto-approve permissions
+    if args.headless:
+        import asyncio
+        from headless_mode import run_headless_mode
+        workspace = pathlib.Path(args.workspace) if args.workspace else pathlib.Path.cwd()
+        asyncio.run(run_headless_mode(
+            socket_path=args.connect,
+            prompt=args.prompt,
+            workspace=workspace,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+            new_session=args.new_session,
+        ))
+        return
 
     # Connection mode: connect to server via IPC
     if args.connect:
