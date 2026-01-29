@@ -868,7 +868,15 @@ class OutputBuffer:
         self._selected_tool_index = None
 
     def start_spinner(self) -> None:
-        """Start showing spinner in the output."""
+        """Start showing spinner in the output.
+
+        This is called when a new turn starts. Flushes any pending content
+        from the previous turn to ensure clean turn boundaries.
+        """
+        # Flush any pending content from the previous turn before starting
+        # a new one. This prevents late-arriving chunks from the previous
+        # turn from being concatenated with new turn content.
+        self._flush_current_block()
         self._spinner_active = True
         self._spinner_index = 0
 
@@ -879,6 +887,16 @@ class OutputBuffer:
         self._flush_current_block()
         # Convert tool tree to scrollable lines if all tools are done
         self.finalize_tool_tree()
+
+    def flush(self) -> None:
+        """Flush the current streaming block to finalized lines.
+
+        This should be called at turn boundaries to ensure all pending
+        content from the current turn is rendered before the next turn starts.
+        This prevents late-arriving chunks from being concatenated with
+        chunks from a new turn.
+        """
+        self._flush_current_block()
 
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
