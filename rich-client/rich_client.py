@@ -4397,7 +4397,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     continue
 
                 text = text.strip()
-                if not text:
+                # Allow empty input for clarification (optional answers without default)
+                if not text and not pending_clarification_request:
                     continue
 
                 # Handle permission response
