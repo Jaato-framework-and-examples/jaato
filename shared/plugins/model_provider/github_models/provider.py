@@ -83,6 +83,7 @@ from .env import (
 )
 from .errors import (
     ContextLimitError,
+    InfrastructureError,
     ModelNotFoundError,
     ModelsDisabledError,
     RateLimitError,
@@ -1182,6 +1183,17 @@ class GitHubModelsProvider:
                 original_error=str(error),
             ) from error
 
+        # Check for infrastructure errors (5xx)
+        import re
+        status_match = re.search(r'http (\d{3})', error_str)
+        if status_match:
+            status_code = int(status_match.group(1))
+            if 500 <= status_code < 600:
+                raise InfrastructureError(
+                    status_code=status_code,
+                    original_error=str(error),
+                ) from error
+
     # ==================== Token Management ====================
 
     def count_tokens(self, content: str) -> int:
@@ -1984,7 +1996,8 @@ class GitHubModelsProvider:
     def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
         """Classify an exception for retry purposes.
 
-        GitHub Models API uses specific error types for rate limits.
+        GitHub Models API uses specific error types for rate limits
+        and infrastructure errors.
 
         Args:
             exc: The exception to classify.
@@ -1992,10 +2005,13 @@ class GitHubModelsProvider:
         Returns:
             Classification dict or None to use fallback.
         """
-        from .errors import RateLimitError
+        from .errors import RateLimitError, InfrastructureError
 
         if isinstance(exc, RateLimitError):
             return {"transient": True, "rate_limit": True, "infra": False}
+
+        if isinstance(exc, InfrastructureError):
+            return {"transient": True, "rate_limit": False, "infra": True}
 
         # Fall back to global classification
         return None

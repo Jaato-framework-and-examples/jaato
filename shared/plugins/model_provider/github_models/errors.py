@@ -364,3 +364,36 @@ class ContextLimitError(GitHubModelsError):
         ])
 
         return "\n".join(lines)
+
+
+class InfrastructureError(GitHubModelsError):
+    """Transient infrastructure error from GitHub API.
+
+    Raised when the API returns a 5xx error indicating a temporary
+    server-side issue. These errors are typically retriable.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        original_error: Optional[str] = None,
+    ):
+        self.status_code = status_code
+        self.original_error = original_error
+
+        message = self._format_message()
+        super().__init__(message)
+
+    def _format_message(self) -> str:
+        lines = [f"GitHub API infrastructure error (HTTP {self.status_code})."]
+
+        if self.original_error:
+            lines.append(f"Error: {self.original_error}")
+
+        lines.extend([
+            "",
+            "This is a transient server-side error.",
+            "The request will be automatically retried.",
+        ])
+
+        return "\n".join(lines)
