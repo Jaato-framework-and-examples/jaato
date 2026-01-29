@@ -97,9 +97,40 @@ from .errors import (
 CATALOG_API_ENDPOINT = "https://models.github.ai/catalog/models"
 
 
-# Context window limits for known models (total tokens)
+@dataclass
+class ModelInfo:
+    """Model information from the GitHub Models catalog API.
+
+    Attributes:
+        id: Model identifier (e.g., 'openai/gpt-4o').
+        max_input_tokens: Maximum input tokens allowed.
+        max_output_tokens: Maximum output tokens allowed.
+        context_window: Total context window size (max_input + max_output or API-provided).
+    """
+    id: str
+    max_input_tokens: int = 0
+    max_output_tokens: int = 0
+    context_window: int = 0
+
+    @property
+    def effective_context_limit(self) -> int:
+        """Get the effective context limit for GC calculations.
+
+        Uses context_window if available, otherwise sums input + output limits.
+        Falls back to DEFAULT_CONTEXT_LIMIT if no data available.
+        """
+        if self.context_window > 0:
+            return self.context_window
+        if self.max_input_tokens > 0:
+            # Context window is typically max_input_tokens (output is separate budget)
+            return self.max_input_tokens
+        return DEFAULT_CONTEXT_LIMIT
+
+
+# Fallback context window limits for known models (total tokens)
+# Used when API doesn't return token limits or API call fails
 # These are approximate - actual limits may vary
-MODEL_CONTEXT_LIMITS: Dict[str, int] = {
+FALLBACK_CONTEXT_LIMITS: Dict[str, int] = {
     # OpenAI models
     "openai/gpt-4o": 128_000,
     "openai/gpt-4o-mini": 128_000,
@@ -124,6 +155,9 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "mistral/mistral-large": 32_000,
     "mistral/mistral-small": 32_000,
 }
+
+# Keep MODEL_CONTEXT_LIMITS as alias for backwards compatibility
+MODEL_CONTEXT_LIMITS = FALLBACK_CONTEXT_LIMITS
 
 DEFAULT_CONTEXT_LIMIT = 128_000
 
@@ -196,8 +230,8 @@ class GitHubModelsProvider:
         self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
 
-        # Models cache: (timestamp, models_list)
-        self._models_cache: Optional[Tuple[float, List[str]]] = None
+        # Models cache: (timestamp, {model_id: ModelInfo})
+        self._models_cache: Optional[Tuple[float, Dict[str, ModelInfo]]] = None
 
         # Agent context for trace identification
         self._agent_type: str = "main"
@@ -505,47 +539,87 @@ class GitHubModelsProvider:
         Returns:
             List of model IDs (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet').
         """
+        models_info = self._get_models_info()
+        model_ids = list(models_info.keys())
+
+        if prefix:
+            model_ids = [m for m in model_ids if m.startswith(prefix)]
+        return sorted(model_ids)
+
+    def _get_models_info(self) -> Dict[str, ModelInfo]:
+        """Get cached model info, fetching from API if needed.
+
+        Returns:
+            Dict mapping model IDs to ModelInfo objects.
+        """
         if not self._token:
             # Fallback to static list if not initialized
-            models = list(MODEL_CONTEXT_LIMITS.keys())
-            if prefix:
-                models = [m for m in models if m.startswith(prefix)]
-            return sorted(models)
+            return {
+                model_id: ModelInfo(
+                    id=model_id,
+                    context_window=limit,
+                )
+                for model_id, limit in FALLBACK_CONTEXT_LIMITS.items()
+            }
 
         # Check cache validity
         now = time.time()
         if self._models_cache:
             cache_time, cached_models = self._models_cache
             if now - cache_time < self._MODELS_CACHE_TTL:
-                # Cache is valid
-                if prefix:
-                    return sorted([m for m in cached_models if m.startswith(prefix)])
-                return sorted(cached_models)
+                return cached_models
 
         # Fetch models based on API type
+        models_info: Dict[str, ModelInfo] = {}
         if self._use_copilot_api and self._copilot_client:
-            # Copilot API returns model names like 'gpt-4o', 'claude-3.5-sonnet'
-            # Users can use either format - _copilot_model_name() strips prefixes
-            models = self._copilot_client.list_models()
+            # Copilot API - get models with token limits (returns dicts)
+            raw_info = self._copilot_client.list_models_with_info()
+            for model_id, info in raw_info.items():
+                models_info[model_id] = ModelInfo(
+                    id=info.get("id", model_id),
+                    max_input_tokens=info.get("max_input_tokens", 0),
+                    max_output_tokens=info.get("max_output_tokens", 0),
+                    context_window=info.get("context_window", 0),
+                )
         else:
-            models = self._fetch_models_from_api()
+            models_info = self._fetch_models_from_api()
 
-        if models:
+        if models_info:
             # Update cache
-            self._models_cache = (now, models)
+            self._models_cache = (now, models_info)
         else:
             # API failed, fallback to static list
-            models = list(MODEL_CONTEXT_LIMITS.keys())
+            models_info = {
+                model_id: ModelInfo(
+                    id=model_id,
+                    context_window=limit,
+                )
+                for model_id, limit in FALLBACK_CONTEXT_LIMITS.items()
+            }
 
-        if prefix:
-            models = [m for m in models if m.startswith(prefix)]
-        return sorted(models)
+        return models_info
 
-    def _fetch_models_from_api(self) -> List[str]:
+    def get_model_info(self, model_id: Optional[str] = None) -> Optional[ModelInfo]:
+        """Get detailed model info including token limits.
+
+        Args:
+            model_id: Model ID to look up. Uses current model if not specified.
+
+        Returns:
+            ModelInfo if found, None otherwise.
+        """
+        model_id = model_id or self._model_name
+        if not model_id:
+            return None
+
+        models_info = self._get_models_info()
+        return models_info.get(model_id)
+
+    def _fetch_models_from_api(self) -> Dict[str, ModelInfo]:
         """Fetch available models from the GitHub Models catalog API.
 
         Returns:
-            List of model IDs, or empty list on failure.
+            Dict mapping model IDs to ModelInfo, or empty dict on failure.
         """
         from shared.http import get_url_opener
 
@@ -562,27 +636,63 @@ class GitHubModelsProvider:
             with opener.open(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
 
-            # Extract model IDs from the response
-            # Response format: list of model objects with 'id' field (e.g., "openai/gpt-4.1")
-            models = []
+            # Extract model info from the response
+            # Response format: list of model objects with 'id', 'max_input_tokens', 'max_output_tokens'
+            models: Dict[str, ModelInfo] = {}
+
+            def parse_model(model: Dict[str, Any]) -> Optional[ModelInfo]:
+                """Parse a model object into ModelInfo."""
+                model_id = model.get('id') or model.get('name') or model.get('model_id')
+                if not model_id:
+                    return None
+
+                # Extract token limits - try various field names used by GitHub API
+                max_input = (
+                    model.get('max_input_tokens') or
+                    model.get('maxInputTokens') or
+                    model.get('input_token_limit') or
+                    0
+                )
+                max_output = (
+                    model.get('max_output_tokens') or
+                    model.get('maxOutputTokens') or
+                    model.get('output_token_limit') or
+                    0
+                )
+                context_window = (
+                    model.get('context_window') or
+                    model.get('contextWindow') or
+                    model.get('context_length') or
+                    0
+                )
+
+                return ModelInfo(
+                    id=model_id,
+                    max_input_tokens=int(max_input) if max_input else 0,
+                    max_output_tokens=int(max_output) if max_output else 0,
+                    context_window=int(context_window) if context_window else 0,
+                )
+
             if isinstance(data, list):
                 for model in data:
-                    # 'id' is the primary field for model identifier
-                    model_id = model.get('id') or model.get('name') or model.get('model_id')
-                    if model_id:
-                        models.append(model_id)
+                    info = parse_model(model)
+                    if info:
+                        models[info.id] = info
             elif isinstance(data, dict):
                 # Response might be paginated with a 'models' key
-                model_list = data.get('models', data.get('items', []))
+                model_list = data.get('models', data.get('items', data.get('data', [])))
                 for model in model_list:
-                    model_id = model.get('id') or model.get('name') or model.get('model_id')
-                    if model_id:
-                        models.append(model_id)
+                    info = parse_model(model)
+                    if info:
+                        models[info.id] = info
 
             return models
         except urllib.error.HTTPError:
             # API error, return empty to trigger fallback
-            return []
+            return {}
+        except Exception:
+            # Network or parsing error
+            return {}
         except Exception:
             # Network or parsing error
             return []
@@ -1246,18 +1356,29 @@ class GitHubModelsProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Attempts to use API-fetched token limits first, then falls back
+        to hardcoded limits if API data is unavailable.
+
         Returns:
             Maximum tokens the model can handle.
         """
         if not self._model_name:
             return DEFAULT_CONTEXT_LIMIT
 
+        # Try to get from API-fetched model info first
+        model_info = self.get_model_info()
+        if model_info:
+            limit = model_info.effective_context_limit
+            if limit > 0:
+                return limit
+
+        # Fallback to hardcoded limits
         # Try exact match
-        if self._model_name in MODEL_CONTEXT_LIMITS:
-            return MODEL_CONTEXT_LIMITS[self._model_name]
+        if self._model_name in FALLBACK_CONTEXT_LIMITS:
+            return FALLBACK_CONTEXT_LIMITS[self._model_name]
 
         # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+        for model_prefix, limit in FALLBACK_CONTEXT_LIMITS.items():
             if self._model_name.startswith(model_prefix):
                 return limit
 
