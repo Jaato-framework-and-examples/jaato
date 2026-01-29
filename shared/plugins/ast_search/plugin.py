@@ -201,7 +201,9 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
                             "description": (
                                 "Programming language. If not specified, auto-detected from "
                                 "file extension. Supported: python, javascript, typescript, "
-                                "go, rust, java, c, cpp, ruby, kotlin, swift, etc."
+                                "tsx, jsx, go, rust, java, c, cpp, csharp, ruby, kotlin, "
+                                "swift, scala, php, lua, html, css, json, yaml, toml, bash, sql. "
+                                "Languages like COBOL, Perl, Haskell are NOT supported."
                             ),
                         },
                         "path": {
@@ -271,6 +273,39 @@ Use `grep_content` for **text-based** queries:
 - Find comments containing certain text
 - Find TODO/FIXME markers
 - Simple text searches
+
+## Supported Languages
+
+ast_search supports 22 languages with their file extensions:
+
+| Language | Extensions |
+|----------|------------|
+| python | .py, .pyi |
+| javascript | .js, .mjs, .cjs |
+| typescript | .ts, .mts, .cts |
+| tsx | .tsx |
+| jsx | .jsx |
+| go | .go |
+| rust | .rs |
+| java | .java |
+| c | .c, .h |
+| cpp | .cpp, .cc, .cxx, .hpp, .hh, .hxx |
+| csharp | .cs |
+| ruby | .rb |
+| kotlin | .kt, .kts |
+| swift | .swift |
+| scala | .scala |
+| php | .php |
+| lua | .lua |
+| html | .html, .htm |
+| css | .css |
+| json | .json |
+| yaml | .yaml, .yml |
+| toml | .toml |
+| bash | .sh, .bash |
+| sql | .sql |
+
+Languages like COBOL, Perl, and Haskell are **not supported**. For unsupported languages, use `grep_content` for text-based search instead.
 
 ## Pattern Syntax
 
