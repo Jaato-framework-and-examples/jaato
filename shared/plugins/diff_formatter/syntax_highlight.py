@@ -60,6 +60,12 @@ EXTENSION_MAP = {
     '.R': 'r',
     '.pl': 'perl',
     '.pm': 'perl',
+    '.cob': 'cobol',
+    '.COB': 'cobol',
+    '.cbl': 'cobol',
+    '.CBL': 'cobol',
+    '.cpy': 'cobol',
+    '.CPY': 'cobol',
 }
 
 
