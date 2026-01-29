@@ -880,6 +880,16 @@ class OutputBuffer:
         # Convert tool tree to scrollable lines if all tools are done
         self.finalize_tool_tree()
 
+    def flush(self) -> None:
+        """Flush the current streaming block to finalized lines.
+
+        This should be called at turn boundaries to ensure all pending
+        content from the current turn is rendered before the next turn starts.
+        This prevents late-arriving chunks from being concatenated with
+        chunks from a new turn.
+        """
+        self._flush_current_block()
+
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
         if self._spinner_active:
