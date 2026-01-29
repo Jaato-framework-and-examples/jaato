@@ -255,7 +255,7 @@ class AtFileCompleter(Completer):
     Triggers completion when user types @, providing:
     - File and folder suggestions from the filesystem
     - Visual dropdown with arrow key navigation
-    - Directory indicators (trailing /)
+    - Directory metadata indicator (user types / to explore contents)
     - Support for relative and absolute paths
     - Home directory expansion (~)
 
@@ -319,15 +319,13 @@ class AtFileCompleter(Completer):
         for completion in self._path_completer.get_completions(path_doc, complete_event):
             text = completion.text
 
-            # Add metadata for directories and append / to directory completions
+            # Add metadata for directories
             display_meta = completion.display_meta
             full_path = self._resolve_path(path_text, completion.text)
             is_dir = full_path and os.path.isdir(full_path)
 
             if is_dir:
-                # Append / to directory completions for easier navigation
-                if not text.endswith('/'):
-                    text = text + '/'
+                # Don't append / - let user type it to explore folder contents
                 if not display_meta:
                     display_meta = "directory"
             elif not display_meta:
@@ -337,7 +335,7 @@ class AtFileCompleter(Completer):
             yield Completion(
                 text,
                 start_position=completion.start_position,
-                display=text,  # Use text as display (includes / for dirs)
+                display=text,
                 display_meta=display_meta,
             )
 
