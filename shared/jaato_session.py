@@ -1209,7 +1209,13 @@ class JaatoSession:
                         last_model_text_only_idx = i
                         break
 
+        # Track actual turn numbers - a turn starts with each USER message
+        current_turn = 0
         for i, msg in enumerate(history):
+            # Increment turn number when we see a USER message
+            if msg.role == Role.USER:
+                current_turn += 1
+
             # Count tokens for this message
             msg_tokens = 0
             for part in msg.parts:
@@ -1237,12 +1243,13 @@ class JaatoSession:
                     turn_type = ConversationTurnType.WORKING
                 gc_policy = DEFAULT_TURN_POLICIES[turn_type]
                 role_str = msg.role.value if msg.role else 'unknown'
+                # Use message index i for unique key, but display actual turn number
                 self._instruction_budget.add_child(
                     InstructionSource.CONVERSATION,
-                    f"turn_{i}",
+                    f"msg_{i}",  # Unique key using message index
                     msg_tokens,
                     gc_policy,
-                    label=f"turn_{i} ({role_str})",
+                    label=f"turn_{current_turn} ({role_str})",  # Display turn number
                 )
 
         self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, conversation_tokens)
