@@ -1252,6 +1252,7 @@ class JaatoSession:
             has_tool_result = False
             has_text = False
             text_content = ""
+            tool_names = []
             for part in msg.parts:
                 if hasattr(part, 'text') and part.text:
                     msg_tokens += self._count_tokens(part.text)
@@ -1262,11 +1263,15 @@ class JaatoSession:
                     result_text = str(part.tool_result.result) if part.tool_result.result else ''
                     msg_tokens += self._count_tokens(result_text)
                     has_tool_result = True
+                    if part.tool_result.name:
+                        tool_names.append(part.tool_result.name)
                 elif hasattr(part, 'function_response') and part.function_response:
                     # Alternative tool result field
                     result_text = str(part.function_response.result) if part.function_response.result else ''
                     msg_tokens += self._count_tokens(result_text)
                     has_tool_result = True
+                    if hasattr(part.function_response, 'name') and part.function_response.name:
+                        tool_names.append(part.function_response.name)
 
             conversation_tokens += msg_tokens
 
@@ -1289,7 +1294,10 @@ class JaatoSession:
                 if msg.role == Role.MODEL:
                     role_label = "output (model)"
                 elif msg.role == Role.USER:
-                    if has_tool_result:
+                    if has_tool_result and tool_names:
+                        tools_str = ", ".join(tool_names)
+                        role_label = f"input (tool = {tools_str})"
+                    elif has_tool_result:
                         role_label = "input (tool)"
                     elif self._has_framework_enrichment(text_content):
                         role_label = "input (framework)"
