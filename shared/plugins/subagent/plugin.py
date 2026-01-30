@@ -111,6 +111,8 @@ class SubagentPlugin:
         self._retry_callback: Optional['RetryCallback'] = None
         # Plan reporter for subagent TodoPlugins (propagated from parent)
         self._plan_reporter: Optional[Any] = None  # TodoReporter instance
+        # Workspace path (set by registry broadcast in server mode)
+        self._workspace_path: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -896,6 +898,18 @@ class SubagentPlugin:
         """
         self._parent_session = session
 
+    def set_workspace_path(self, path: str) -> None:
+        """Set the workspace path for subagent spawning.
+
+        This is called by the PluginRegistry when broadcasting workspace path
+        to all plugins. Subagents will use this path as their working directory.
+
+        Args:
+            path: Absolute path to the workspace root directory.
+        """
+        self._workspace_path = path
+        logger.debug("SubagentPlugin: workspace path set to %s", path)
+
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
 
@@ -1568,11 +1582,10 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Get workspace path from the shared registry (set by client on connect)
-        # This ensures subagents run in the client's original directory, not wherever
-        # the server process happens to be
-        workspace_path = None
-        if self._runtime and self._runtime.registry:
+        # Get workspace path - prefer directly set path (from server registry broadcast),
+        # then try runtime registry (for JaatoClient mode), finally fall back to os.getcwd()
+        workspace_path = self._workspace_path
+        if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         parent_cwd = workspace_path or os.getcwd()
 
