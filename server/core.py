@@ -278,7 +278,7 @@ class JaatoServer:
     def _in_workspace(self):
         """Context manager to temporarily change to the workspace directory.
 
-        Also sets JAATO_WORKSPACE_PATH env var for thread-safe token resolution
+        Also sets JAATO_WORKSPACE_ROOT env var for thread-safe token resolution
         in subagents (since os.chdir is process-wide and racy).
         """
         if not self._workspace_path:
@@ -286,18 +286,18 @@ class JaatoServer:
             return
 
         original_cwd = os.getcwd()
-        original_workspace_env = os.environ.get("JAATO_WORKSPACE_PATH")
+        original_workspace_env = os.environ.get("JAATO_WORKSPACE_ROOT")
         try:
             os.chdir(self._workspace_path)
-            os.environ["JAATO_WORKSPACE_PATH"] = self._workspace_path
+            os.environ["JAATO_WORKSPACE_ROOT"] = self._workspace_path
             logger.debug(f"Changed to workspace: {self._workspace_path}")
             yield
         finally:
             os.chdir(original_cwd)
             if original_workspace_env is not None:
-                os.environ["JAATO_WORKSPACE_PATH"] = original_workspace_env
-            elif "JAATO_WORKSPACE_PATH" in os.environ:
-                del os.environ["JAATO_WORKSPACE_PATH"]
+                os.environ["JAATO_WORKSPACE_ROOT"] = original_workspace_env
+            elif "JAATO_WORKSPACE_ROOT" in os.environ:
+                del os.environ["JAATO_WORKSPACE_ROOT"]
             logger.debug(f"Restored to: {original_cwd}")
 
     @contextlib.contextmanager
