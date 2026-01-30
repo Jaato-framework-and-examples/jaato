@@ -15,6 +15,7 @@ Reference: https://github.com/NoeFabris/opencode-antigravity-auth
 """
 
 import json
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -184,6 +185,13 @@ class AntigravityProvider:
         """
         if config is None:
             config = ProviderConfig()
+
+        # Set workspace path from config.extra if provided
+        # This ensures token resolution can find workspace-specific OAuth tokens
+        # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
+        workspace_path = config.extra.get('workspace_path')
+        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
+            os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
 
         # Load account manager
         self._account_manager = load_accounts()

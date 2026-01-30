@@ -627,6 +627,17 @@ class JaatoRuntime:
             )
             self._provider_configs[effective_provider] = config
 
+        # Inject workspace_path into config.extra for providers that need it
+        # (e.g., GitHub Models provider for OAuth token resolution)
+        if self._registry:
+            workspace_path = self._registry.get_workspace_path()
+            if workspace_path:
+                # Create a copy of config with workspace_path in extra to avoid
+                # modifying the stored config
+                from dataclasses import replace
+                extra_with_workspace = {**config.extra, 'workspace_path': workspace_path}
+                config = replace(config, extra=extra_with_workspace)
+
         provider = load_provider(effective_provider, config)
         provider.connect(model)
         return provider

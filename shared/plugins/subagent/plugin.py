@@ -1582,12 +1582,25 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Get workspace path - prefer directly set path (from server registry broadcast),
-        # then try runtime registry (for JaatoClient mode), finally fall back to os.getcwd()
+        # Get workspace path - priority order:
+        # 1. Directly set path (from server registry broadcast)
+        # 2. Runtime registry (for JaatoClient mode)
+        # 3. JAATO_WORKSPACE_ROOT env var (if set by server context)
+        # 4. os.getcwd() as last resort
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
+        if workspace_path is None:
+            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
         parent_cwd = workspace_path or os.getcwd()
+        logger.debug(
+            "SubagentPlugin.spawn_subagent: workspace resolution: "
+            f"self._workspace_path={self._workspace_path}, "
+            f"registry={self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None}, "
+            f"env={os.environ.get('JAATO_WORKSPACE_ROOT')}, "
+            f"cwd={os.getcwd()}, "
+            f"result={parent_cwd}"
+        )
 
         # Submit to thread pool (always async)
         self._executor.submit(
@@ -1624,20 +1637,34 @@ class SubagentPlugin:
             prompt: The prompt to send to the subagent.
             parent_cwd: Parent's working directory for resolving relative paths.
         """
-        # Set workspace path for thread-safe token resolution
+        # Get workspace path from runtime registry as authoritative source
+        # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
+        workspace_path = parent_cwd
+        if self._runtime and self._runtime.registry:
+            registry_workspace = self._runtime.registry.get_workspace_path()
+            if registry_workspace:
+                workspace_path = registry_workspace
+                logger.debug(
+                    f"SubagentPlugin._run_subagent_async: using registry workspace {registry_workspace} "
+                    f"instead of parent_cwd {parent_cwd}"
+                )
+
+        # Set workspace path for thread-safe operations
         # os.chdir() is process-wide and racy, so we also set an env var that
-        # token storage functions can use deterministically
-        os.environ["JAATO_WORKSPACE_PATH"] = parent_cwd
+        # various components can use deterministically:
+        # - OAuth token storage (github_models, anthropic, antigravity)
+        # - Tool plugins (file_edit, cli) for path sandboxing
+        os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
 
         # Change to parent's working directory so relative paths resolve correctly
         # This ensures trace logs, workspaceRoot, etc. work the same as parent
         try:
-            os.chdir(parent_cwd)
+            os.chdir(workspace_path)
         except OSError as e:
             if self._parent_session:
                 self._parent_session.inject_prompt(
                     f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
-                    f"Cannot change to workspace directory {parent_cwd}: {e}",
+                    f"Cannot change to workspace directory {workspace_path}: {e}",
                     source_id=agent_id,
                     source_type=SourceType.CHILD
                 )
