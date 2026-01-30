@@ -3622,6 +3622,9 @@ class JaatoSession:
             pending_tool_calls=pending_tool_calls,
         )
 
+        # Also emit instruction budget update for budget panel
+        self._emit_instruction_budget_update()
+
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""
         if not self._runtime.ledger:
