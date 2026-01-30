@@ -311,6 +311,14 @@ class GitHubModelsProvider:
         if config is None:
             config = ProviderConfig()
 
+        # Set workspace path from config.extra if provided
+        # This ensures token resolution can find workspace-specific OAuth tokens
+        # even when JAATO_WORKSPACE_PATH env var isn't set (e.g., subagent spawning)
+        workspace_path = config.extra.get('workspace_path')
+        if workspace_path and not os.environ.get('JAATO_WORKSPACE_PATH'):
+            os.environ['JAATO_WORKSPACE_PATH'] = workspace_path
+            self._trace(f"[INIT] Set JAATO_WORKSPACE_PATH from config.extra: {workspace_path}")
+
         # Resolve configuration
         raw_token = config.api_key or resolve_token()
         self._organization = config.extra.get('organization') or resolve_organization()

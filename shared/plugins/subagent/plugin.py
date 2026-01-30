@@ -1582,12 +1582,25 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Get workspace path - prefer directly set path (from server registry broadcast),
-        # then try runtime registry (for JaatoClient mode), finally fall back to os.getcwd()
+        # Get workspace path - priority order:
+        # 1. Directly set path (from server registry broadcast)
+        # 2. Runtime registry (for JaatoClient mode)
+        # 3. JAATO_WORKSPACE_PATH env var (if set by server context)
+        # 4. os.getcwd() as last resort
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
+        if workspace_path is None:
+            workspace_path = os.environ.get("JAATO_WORKSPACE_PATH")
         parent_cwd = workspace_path or os.getcwd()
+        logger.debug(
+            "SubagentPlugin.spawn_subagent: workspace resolution: "
+            f"self._workspace_path={self._workspace_path}, "
+            f"registry={self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None}, "
+            f"env={os.environ.get('JAATO_WORKSPACE_PATH')}, "
+            f"cwd={os.getcwd()}, "
+            f"result={parent_cwd}"
+        )
 
         # Submit to thread pool (always async)
         self._executor.submit(
