@@ -1290,7 +1290,7 @@ class JaatoSession:
                     role_label = "output (model)"
                 elif msg.role == Role.USER:
                     if has_tool_result:
-                        role_label = "input (tool output)"
+                        role_label = "input (tool)"
                     elif self._has_framework_enrichment(text_content):
                         role_label = "input (framework)"
                     else:
