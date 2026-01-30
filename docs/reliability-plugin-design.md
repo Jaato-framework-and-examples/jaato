@@ -11,6 +11,7 @@ The **reliability plugin** is a cross-cutting concern that tracks failures from 
 3. **Transparent operation** - Clear user notifications when escalation occurs
 4. **Recovery paths** - Tools can "earn back" trust after a cooldown period
 5. **Rich context** - Capture enough information to make intelligent escalation decisions
+6. **Adaptive model selection** - Enable model switching when current model consistently fails at specific tools
 
 ---
 
@@ -55,21 +56,23 @@ The reliability plugin is a **hybrid plugin**:
 ```python
 @dataclass
 class FailureRecord:
-    # Identity
+    # Identity - keyed by tool + parameters (see Design Decisions #2)
+    failure_key: str                  # e.g., "readFile|path_prefix=/etc"
     tool_name: str                    # e.g., "bash", "readFile", "http_request"
     plugin_name: str                  # e.g., "cli", "file_edit", "service_connector"
     timestamp: datetime
 
-    # Context
-    arguments_hash: str               # Hash of args (privacy-preserving)
-    argument_summary: Dict[str, Any]  # Sanitized key info (domain, path prefix, etc.)
+    # Parameter context (extracted for tracking granularity)
+    parameter_signature: str          # Normalized key parameters
     domain: Optional[str]             # For HTTP: extracted domain
     service: Optional[str]            # For MCP: server name
+    path_prefix: Optional[str]        # For file ops: parent directory
 
     # Failure details
     error_type: str                   # Exception class name or error category
     error_message: str                # Actual error message
     severity: FailureSeverity         # See below
+    weight: float = 1.0               # Failure weight (0.5 for model errors, 1.0 default)
 
     # Execution context
     call_id: str                      # Links to permission/ledger records
@@ -523,13 +526,15 @@ class TrustState(Enum):
 
 @dataclass
 class ToolReliabilityState:
-    """Current reliability state for a tool."""
+    """Current reliability state for a tool+parameters combination."""
 
-    tool_name: str
+    # Identity - keyed by tool + parameters (see Design Decisions #2)
+    failure_key: str                  # e.g., "http_request|domain=api.example.com"
+    tool_name: str                    # Base tool name for display
     state: TrustState
 
     # Failure tracking
-    failures_in_window: int
+    failures_in_window: float         # Effective count (with decay/weights)
     consecutive_failures: int
     last_failure: Optional[datetime]
     last_success: Optional[datetime]
@@ -968,11 +973,156 @@ JAATO_RELIABILITY_PERSIST=false
 
 ---
 
+## Adaptive Model Selection
+
+When model errors (INVALID_INPUT severity) accumulate for a specific tool, the reliability plugin can suggest or trigger model switching.
+
+### Model Reliability Profile
+
+Track per-model success rates for each tool:
+
+```python
+@dataclass
+class ModelToolProfile:
+    """Tracks a model's reliability with a specific tool."""
+
+    model_name: str
+    failure_key: str
+    total_attempts: int = 0
+    failures: int = 0
+    last_failure: Optional[datetime] = None
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_attempts == 0:
+            return 1.0
+        return 1.0 - (self.failures / self.total_attempts)
+
+
+@dataclass
+class ModelReliabilityData:
+    """Aggregated model reliability across tools."""
+
+    profiles: Dict[Tuple[str, str], ModelToolProfile]  # (model, failure_key) -> profile
+
+    def get_best_model_for_tool(
+        self,
+        failure_key: str,
+        available_models: List[str],
+        min_attempts: int = 3,
+    ) -> Optional[str]:
+        """Find the model with best success rate for this tool."""
+
+        candidates = []
+        for model in available_models:
+            key = (model, failure_key)
+            if key in self.profiles:
+                profile = self.profiles[key]
+                if profile.total_attempts >= min_attempts:
+                    candidates.append((model, profile.success_rate))
+
+        if not candidates:
+            return None
+
+        # Return model with highest success rate
+        return max(candidates, key=lambda x: x[1])[0]
+```
+
+### Model Switch Triggers
+
+```python
+class ModelSwitchStrategy(Enum):
+    DISABLED = "disabled"       # Never suggest model switches
+    SUGGEST = "suggest"         # Notify user when switch might help
+    AUTO = "auto"               # Automatically switch on threshold
+
+
+@dataclass
+class ModelSwitchConfig:
+    strategy: ModelSwitchStrategy = ModelSwitchStrategy.SUGGEST
+    failure_threshold: int = 3              # Failures before suggesting switch
+    min_success_rate_diff: float = 0.3      # Min improvement to suggest (30%)
+    preferred_models: List[str] = field(default_factory=list)  # Priority order
+```
+
+### Integration with Session
+
+```python
+def _check_model_switch(
+    self,
+    failure_key: str,
+    current_model: str,
+) -> Optional[ModelSwitchSuggestion]:
+    """Check if a different model would be more reliable for this tool."""
+
+    if self._model_switch_config.strategy == ModelSwitchStrategy.DISABLED:
+        return None
+
+    current_profile = self._model_data.profiles.get((current_model, failure_key))
+    if not current_profile or current_profile.failures < self._model_switch_config.failure_threshold:
+        return None
+
+    # Find better model
+    available = self._get_available_models()
+    best_model = self._model_data.get_best_model_for_tool(failure_key, available)
+
+    if not best_model or best_model == current_model:
+        return None
+
+    best_profile = self._model_data.profiles[(best_model, failure_key)]
+    improvement = best_profile.success_rate - current_profile.success_rate
+
+    if improvement < self._model_switch_config.min_success_rate_diff:
+        return None
+
+    return ModelSwitchSuggestion(
+        current_model=current_model,
+        suggested_model=best_model,
+        failure_key=failure_key,
+        current_success_rate=current_profile.success_rate,
+        suggested_success_rate=best_profile.success_rate,
+    )
+
+
+def _handle_model_switch_suggestion(self, suggestion: ModelSwitchSuggestion):
+    """Handle a model switch suggestion based on strategy."""
+
+    if self._model_switch_config.strategy == ModelSwitchStrategy.SUGGEST:
+        self._output_callback(
+            "reliability",
+            f"💡 Model '{suggestion.suggested_model}' has {suggestion.suggested_success_rate:.0%} "
+            f"success rate with '{suggestion.failure_key}' vs current {suggestion.current_success_rate:.0%}.\n"
+            f"   Consider: model {suggestion.suggested_model}",
+            "write"
+        )
+
+    elif self._model_switch_config.strategy == ModelSwitchStrategy.AUTO:
+        self._session.switch_model(suggestion.suggested_model)
+        self._output_callback(
+            "reliability",
+            f"⚡ Auto-switched to '{suggestion.suggested_model}' for better reliability "
+            f"with '{suggestion.failure_key}'",
+            "write"
+        )
+```
+
+### User Command
+
+```
+reliability model                    # Show per-model tool profiles
+reliability model suggest            # Enable model switch suggestions
+reliability model auto               # Enable automatic model switching
+reliability model disabled           # Disable model switching
+```
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: Core Infrastructure
+- [ ] FailureKey model with parameter extraction
 - [ ] FailureRecord data model
-- [ ] ReliabilityState tracking
+- [ ] ToolReliabilityState tracking
 - [ ] Basic escalation/recovery logic
 - [ ] Integration with ToolExecutor result hook
 
@@ -981,44 +1131,355 @@ JAATO_RELIABILITY_PERSIST=false
 - [ ] Enhanced permission request formatting
 - [ ] User notification system
 
-### Phase 3: Rich Analysis
-- [ ] Severity classification rules
-- [ ] Domain/service aggregation
-- [ ] Rate-based thresholds
+### Phase 3: User Commands
+- [ ] `reliability status` command
+- [ ] `reliability recovery auto|ask` with completion
+- [ ] `reliability reset <failure_key>` with completion
+- [ ] `reliability history` command
 
-### Phase 4: Persistence & Configuration
-- [ ] JSON persistence layer
+### Phase 4: Rich Analysis
+- [ ] Severity classification rules
+- [ ] Parameter-based tracking (tool + args)
+- [ ] Rate-based thresholds with decay
+
+### Phase 5: Persistence & Configuration
+- [ ] JSON persistence layer (cross-session)
 - [ ] Project/user config loading
 - [ ] Migration support
+- [ ] Session boundary tracking for decay
 
-### Phase 5: Observability
-- [ ] reliability_status tool
+### Phase 6: Model Reliability
+- [ ] ModelToolProfile tracking
+- [ ] Model success rate comparison
+- [ ] `reliability model suggest|auto|disabled` command
+- [ ] Auto-switch integration with session
+
+### Phase 7: Observability
+- [ ] reliability_status tool (for model)
 - [ ] OpenTelemetry integration
 - [ ] Dashboard metrics
 
 ---
 
-## Open Questions
+## Design Decisions
 
-1. **Should failures from model errors (invalid arguments) count toward reliability?**
-   - Argument: Tool isn't unreliable, model just used it wrong
-   - Counter-argument: Repeated invalid usage might indicate tool schema issues
+### 1. Model Errors Count Toward Reliability
 
-2. **How to handle tools that are expected to fail often?**
-   - e.g., file existence checks, grep for optional patterns
-   - Option: Tool-level `expected_failure_rate` configuration
-   - Option: Distinguish "informational failures" from "error failures"
+**Decision**: Yes, failures from model errors (invalid arguments) **do count** toward reliability tracking.
 
-3. **Should recovery be automatic or require user confirmation?**
-   - Automatic is more seamless
-   - User confirmation provides more control
-   - Hybrid: automatic for ESCALATED, manual for BLOCKED?
+**Rationale**: If a model consistently fails to use a tool correctly, this is valuable signal. The agent could potentially:
+- Switch to a different model that handles the tool better
+- Request clarification about tool usage
+- Escalate to user for guidance
 
-4. **Cross-session vs per-session tracking?**
-   - Per-session: Fresh start each time, no accumulated distrust
-   - Cross-session: Remember problem tools, but might unfairly penalize
-   - Hybrid: Decay factor for old failures?
+This enables **adaptive model selection** - if Gemini keeps failing at a particular tool but Claude handles it well, the system could suggest or auto-switch models.
 
-5. **How granular should domain tracking be?**
-   - Full URL path? Just domain? Domain + path prefix?
-   - Trade-off between precision and complexity
+```python
+# Model error detection
+if "invalid" in error_msg or "required" in error_msg or "must be" in error_msg:
+    severity = FailureSeverity.INVALID_INPUT
+    # Still counts toward thresholds, but with lower weight
+    failure_weight = 0.5  # Half weight for model errors
+```
+
+### 2. Tracking Granularity: Tool Name + Parameters
+
+**Decision**: Track failures at the **tool name + input parameters** level, not just tool name.
+
+**Rationale**: Not all invocations of a tool are equivalent:
+- `readFile("/etc/passwd")` failing is different from `readFile("/tmp/test.txt")` failing
+- `http_request("api.example.com")` vs `http_request("api.other.com")`
+- `grep("pattern", "/path/a")` vs `grep("pattern", "/path/b")`
+
+**Implementation**: Use a **failure key** that combines tool name with relevant parameter values:
+
+```python
+@dataclass
+class FailureKey:
+    """Identifies a specific tool+parameters combination for tracking."""
+
+    tool_name: str
+    parameter_signature: str  # Hash or normalized representation of key params
+
+    @classmethod
+    def from_invocation(cls, tool_name: str, args: dict) -> "FailureKey":
+        """Create failure key from tool invocation."""
+        # Extract relevant parameters based on tool type
+        key_params = cls._extract_key_params(tool_name, args)
+        signature = cls._normalize_signature(key_params)
+        return cls(tool_name=tool_name, parameter_signature=signature)
+
+    @staticmethod
+    def _extract_key_params(tool_name: str, args: dict) -> dict:
+        """Extract parameters relevant for failure tracking."""
+
+        # File operations: track by path
+        if tool_name in ("readFile", "writeFile", "updateFile", "removeFile"):
+            path = args.get("path", "")
+            return {"path_prefix": str(Path(path).parent)}
+
+        # HTTP requests: track by domain
+        if tool_name in ("http_request", "fetch"):
+            url = args.get("url", "")
+            parsed = urlparse(url)
+            return {"domain": parsed.netloc, "path_prefix": parsed.path.split("/")[1] if "/" in parsed.path else ""}
+
+        # CLI commands: track by command prefix
+        if tool_name == "bash":
+            cmd = args.get("command", "")
+            # Extract first word (the actual command)
+            cmd_name = cmd.split()[0] if cmd else ""
+            return {"command": cmd_name}
+
+        # MCP tools: track by server + tool
+        if tool_name.startswith("mcp_"):
+            return {"mcp_server": args.get("_mcp_server", "")}
+
+        # Default: hash all args
+        return {"args_hash": hashlib.md5(json.dumps(args, sort_keys=True).encode()).hexdigest()[:8]}
+
+    @staticmethod
+    def _normalize_signature(params: dict) -> str:
+        """Create stable signature from key params."""
+        return "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+```
+
+**State Tracking**: The `ToolReliabilityState` is now keyed by `FailureKey`:
+
+```python
+# Instead of:
+tool_states: Dict[str, ToolReliabilityState]  # tool_name -> state
+
+# Now:
+tool_states: Dict[str, ToolReliabilityState]  # failure_key.to_string() -> state
+
+# Example keys:
+# "readFile|path_prefix=/etc"
+# "http_request|domain=api.example.com|path_prefix=v1"
+# "bash|command=rm"
+```
+
+### 3. User-Controlled Recovery Mode
+
+**Decision**: Recovery mode is controlled via user command with completion support.
+
+**Command**: `reliability recovery auto|ask`
+
+```python
+def get_user_commands(self) -> List[UserCommand]:
+    return [
+        UserCommand(
+            name="reliability",
+            description="Manage reliability tracking and recovery",
+            subcommands=[
+                UserCommand(
+                    name="recovery",
+                    description="Set recovery mode",
+                    subcommands=[
+                        UserCommand(
+                            name="auto",
+                            description="Automatically recover tools after cooldown + successes",
+                            handler=lambda: self._set_recovery_mode("auto"),
+                        ),
+                        UserCommand(
+                            name="ask",
+                            description="Prompt user before recovering escalated tools",
+                            handler=lambda: self._set_recovery_mode("ask"),
+                        ),
+                    ],
+                ),
+                UserCommand(
+                    name="status",
+                    description="Show reliability status for all tracked tools",
+                    handler=self._show_status,
+                ),
+                UserCommand(
+                    name="reset",
+                    description="Reset reliability state for a tool",
+                    handler=self._reset_tool,
+                    # Completion provides list of escalated tools
+                ),
+            ],
+        ),
+    ]
+
+def get_command_completions(self, command_parts: List[str]) -> List[str]:
+    """Provide completions for reliability commands."""
+
+    if command_parts == ["reliability"]:
+        return ["recovery", "status", "reset"]
+
+    if command_parts == ["reliability", "recovery"]:
+        return ["auto", "ask"]
+
+    if command_parts == ["reliability", "reset"]:
+        # Return list of currently escalated tools
+        return [
+            key for key, state in self._tool_states.items()
+            if state.state in (TrustState.ESCALATED, TrustState.BLOCKED)
+        ]
+
+    return []
+```
+
+**Recovery Mode Behavior**:
+
+```python
+class RecoveryMode(Enum):
+    AUTO = "auto"  # Recover automatically after conditions met
+    ASK = "ask"    # Prompt user before recovering
+
+def _attempt_recovery(self, state: ToolReliabilityState) -> bool:
+    """Attempt to recover a tool. Returns True if recovered."""
+
+    if not self._can_recover(state):
+        return False
+
+    if self._recovery_mode == RecoveryMode.AUTO:
+        self._do_recovery(state)
+        self._notify_recovery(state, automatic=True)
+        return True
+
+    elif self._recovery_mode == RecoveryMode.ASK:
+        # Queue recovery request for user
+        self._pending_recoveries.append(state.failure_key)
+        self._output_callback(
+            "reliability",
+            f"Tool '{state.failure_key}' ready for recovery. "
+            f"Use 'reliability recover {state.failure_key}' to restore trust.",
+            "write"
+        )
+        return False
+```
+
+### 4. Cross-Session Tracking
+
+**Decision**: Reliability state **persists across sessions**.
+
+**Rationale**:
+- Tools that were unreliable yesterday are likely still unreliable today
+- Prevents "reset by restart" exploitation
+- Builds long-term reliability profile
+
+**Implementation**: Already covered in Persistence section, but with refinements:
+
+```python
+@dataclass
+class ReliabilityPersistence:
+    """Persisted reliability data across sessions."""
+
+    version: int = 2
+
+    # Tool states persist across sessions
+    tool_states: Dict[str, ToolReliabilityState] = field(default_factory=dict)
+
+    # Failure history with session boundaries
+    failure_history: List[FailureRecord] = field(default_factory=list)
+
+    # Session metadata for decay calculations
+    session_history: List[SessionInfo] = field(default_factory=list)
+
+    # Configuration
+    recovery_mode: RecoveryMode = RecoveryMode.AUTO
+
+
+@dataclass
+class SessionInfo:
+    """Tracks session boundaries for failure aging."""
+    session_id: str
+    started: datetime
+    ended: Optional[datetime]
+    failure_count: int
+    success_count: int
+```
+
+**Decay Mechanism**: Old failures have reduced weight:
+
+```python
+def _calculate_effective_failures(
+    self,
+    failure_key: str,
+    window_seconds: int
+) -> float:
+    """Calculate failures with age-based decay."""
+
+    now = datetime.now()
+    effective_count = 0.0
+
+    for failure in self._get_failures_for_key(failure_key):
+        age_seconds = (now - failure.timestamp).total_seconds()
+
+        if age_seconds > window_seconds:
+            continue
+
+        # Apply decay: failures lose 10% weight per hour
+        decay_factor = max(0.1, 1.0 - (age_seconds / 3600) * 0.1)
+
+        # Cross-session decay: additional 20% reduction per session boundary
+        sessions_crossed = self._count_session_boundaries(failure.timestamp)
+        session_decay = 0.8 ** sessions_crossed
+
+        effective_count += failure.weight * decay_factor * session_decay
+
+    return effective_count
+```
+
+### 5. Parameter-Level Tracking
+
+**Decision**: Track at **tool name + input parameters** granularity.
+
+This is covered in Decision #2 above. The key insight is that the same tool can have very different reliability profiles depending on what it's operating on:
+
+```
+Failure tracking examples:
+
+readFile|path_prefix=/etc          → ESCALATED (permission errors)
+readFile|path_prefix=/home/user    → TRUSTED (works fine)
+
+http_request|domain=api.flaky.com  → ESCALATED (frequent 503s)
+http_request|domain=api.stable.com → TRUSTED (always works)
+
+bash|command=git                   → TRUSTED
+bash|command=rm                    → ESCALATED (dangerous, user declined often)
+```
+
+---
+
+## Additional User Commands
+
+Based on Decision #3, the full command interface:
+
+```
+reliability                         # Show help
+reliability status                  # Show all tracked tools with states
+reliability status <failure_key>    # Show detailed status for specific key
+reliability recovery auto           # Enable automatic recovery
+reliability recovery ask            # Require confirmation for recovery
+reliability reset <failure_key>     # Manually reset a tool to TRUSTED
+reliability reset --all             # Reset all tools (requires confirmation)
+reliability history [--limit N]     # Show recent failure history
+reliability config                  # Show current configuration
+```
+
+### Command Output Examples
+
+```
+> reliability status
+
+Reliability Status:
+───────────────────────────────────────────────────────────────
+  Tool/Parameters                  State       Failures  Recovery
+───────────────────────────────────────────────────────────────
+  http_request|domain=api.bad.com  ESCALATED   5/3       2/3 successes
+  bash|command=rm                  BLOCKED     -         manual reset required
+  readFile|path_prefix=/etc        ESCALATED   3/3       cooldown: 12m remaining
+───────────────────────────────────────────────────────────────
+  3 escalated, 47 trusted (not shown)
+  Recovery mode: auto
+
+> reliability reset "http_request|domain=api.bad.com"
+✓ Reset 'http_request|domain=api.bad.com' to TRUSTED
+
+> reliability recovery ask
+✓ Recovery mode set to 'ask' - you'll be prompted before tools are restored
+```
