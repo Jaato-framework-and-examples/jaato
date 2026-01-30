@@ -3353,6 +3353,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     buffer = agent_registry.get_buffer(event.agent_id)
                     if buffer:
                         buffer.stop_spinner()
+                elif event.status == "idle":
+                    # Subagent finished its turn but remains available for more prompts
+                    # Stop spinner but keep model_running unchanged (main agent may still be active)
+                    agent_registry.update_status(event.agent_id, event.status)
+                    buffer = agent_registry.get_buffer(event.agent_id)
+                    if buffer:
+                        buffer.stop_spinner()
                 ipc_trace("  calling display.refresh()...")
                 display.refresh()
                 ipc_trace("  display.refresh() done, continuing loop...")
