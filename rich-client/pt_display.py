@@ -1797,16 +1797,19 @@ class PTDisplay:
                     top=3,  # Below session bar, tab bar, and status bar
                     left=2,
                     content=plan_popup_window,
+                    z_index=100,  # Highest priority - always on top
                 ),
                 Float(
                     top=3,  # Same position as plan popup (they toggle separately)
                     right=2,  # Positioned on the right side
                     content=budget_popup_window,
+                    z_index=50,  # Below plan popup
                 ),
                 Float(
                     top=2,  # Below session bar, aligned with selected tab
                     left=1,
                     content=agent_popup_window,
+                    z_index=50,  # Same level as budget popup
                 ),
             ],
         )
