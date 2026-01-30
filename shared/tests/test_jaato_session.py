@@ -418,7 +418,7 @@ class TestJaatoSessionTurnProgress:
 
 
 class TestJaatoSessionFrameworkEnrichment:
-    """Tests for JaatoSession._has_framework_enrichment()."""
+    """Tests for JaatoSession._get_framework_enrichments()."""
 
     def test_detects_system_reminder_tag(self):
         """Test that system reminder tags are detected."""
@@ -426,15 +426,44 @@ class TestJaatoSessionFrameworkEnrichment:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
         text = "Some text <system-reminder>Remember this</system-reminder> more text"
-        assert session._has_framework_enrichment(text) is True
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["system-reminder"]
 
-    def test_detects_system_prefix(self):
-        """Test that [System: ...] prefix is detected."""
+    def test_detects_system_notice_gc(self):
+        """Test that [System: ...] GC notices are detected."""
         mock_runtime = MagicMock()
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
-        text = "[System: Image analysis complete] The image shows..."
-        assert session._has_framework_enrichment(text) is True
+        text = "[System: Context reduced by 50%] Continuing conversation..."
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["gc"]
+
+    def test_detects_system_notice_cancellation(self):
+        """Test that [System: ...] cancellation notices are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "[System: Your previous response was cancelled by the user]"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["cancellation"]
+
+    def test_detects_system_notice_multimodal(self):
+        """Test that [System: ...] multimodal notices are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "[System: The following image files are referenced: photo.jpg]"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["multimodal"]
+
+    def test_detects_system_notice_session(self):
+        """Test that [System: ...] session notices are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "[System: This conversation has been ongoing for a while...]"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["session"]
 
     def test_detects_memory_injection(self):
         """Test that memory injection marker is detected."""
@@ -442,15 +471,55 @@ class TestJaatoSessionFrameworkEnrichment:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
         text = "💡 **Available Memories**\n- Memory 1\n- Memory 2"
-        assert session._has_framework_enrichment(text) is True
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["memory"]
 
-    def test_detects_hidden_tags(self):
+    def test_detects_hidden_waypoint(self):
         """Test that hidden waypoint tags are detected."""
         mock_runtime = MagicMock()
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
-        text = "<hidden>waypoint marker</hidden>"
-        assert session._has_framework_enrichment(text) is True
+        text = "<hidden><waypoint-restore>Restored to checkpoint</waypoint-restore></hidden>"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["waypoint"]
+
+    def test_detects_hidden_streaming(self):
+        """Test that hidden streaming tags are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "<hidden><streaming_updates>New data available</streaming_updates></hidden>"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["streaming"]
+
+        # Also test streaming with tool prefix format
+        text2 = "<hidden>[tool_name] chunk content</hidden>"
+        enrichments2 = session._get_framework_enrichments(text2)
+        assert enrichments2 == ["streaming"]
+
+    def test_detects_hidden_nudge(self):
+        """Test that hidden nudge tags are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "<hidden>Your response indicated TOOL_USE but contained no function call.</hidden>"
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == ["nudge"]
+
+    def test_detects_multiple_enrichments(self):
+        """Test that multiple enrichment types are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = (
+            "💡 **Available Memories**\n- Memory 1\n"
+            "<system-reminder>Remember this</system-reminder>\n"
+            "[System: GC completed]"
+        )
+        enrichments = session._get_framework_enrichments(text)
+        assert "system-reminder" in enrichments
+        assert "memory" in enrichments
+        assert "gc" in enrichments
 
     def test_no_enrichment_in_plain_text(self):
         """Test that plain user text is not flagged as enrichment."""
@@ -458,12 +527,13 @@ class TestJaatoSessionFrameworkEnrichment:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
         text = "Please help me fix this bug in my Python code"
-        assert session._has_framework_enrichment(text) is False
+        enrichments = session._get_framework_enrichments(text)
+        assert enrichments == []
 
     def test_empty_text_not_enrichment(self):
         """Test that empty text is not flagged as enrichment."""
         mock_runtime = MagicMock()
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
 
-        assert session._has_framework_enrichment("") is False
-        assert session._has_framework_enrichment(None) is False
+        assert session._get_framework_enrichments("") == []
+        assert session._get_framework_enrichments(None) == []
