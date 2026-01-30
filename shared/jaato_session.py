@@ -1287,13 +1287,15 @@ class JaatoSession:
                 # Determine descriptive label based on role and content type
                 if msg.role == Role.MODEL:
                     role_label = "output (model)"
-                elif msg.role == Role.USER:
-                    if has_tool_result and tool_names:
+                elif has_tool_result:
+                    # Handle tool results regardless of USER or TOOL role
+                    if tool_names:
                         tools_str = ", ".join(tool_names)
                         role_label = f"input (tool = {tools_str})"
-                    elif has_tool_result:
+                    else:
                         role_label = "input (tool)"
-                    elif self._has_framework_enrichment(text_content):
+                elif msg.role == Role.USER:
+                    if self._has_framework_enrichment(text_content):
                         role_label = "input (framework)"
                     else:
                         role_label = "input (external)"
