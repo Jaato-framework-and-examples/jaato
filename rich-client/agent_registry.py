@@ -330,7 +330,7 @@ class AgentRegistry:
 
         Args:
             agent_id: Which agent to update.
-            status: New status ("active", "done", "error").
+            status: New status ("active", "done", "error", "idle").
         """
         with self._lock:
             agent = self._agents.get(agent_id)
