@@ -1258,20 +1258,14 @@ class JaatoSession:
                     msg_tokens += self._count_tokens(part.text)
                     has_text = True
                     text_content += part.text
-                elif hasattr(part, 'tool_result') and part.tool_result:
-                    # Tool results can be large
-                    result_text = str(part.tool_result.result) if part.tool_result.result else ''
-                    msg_tokens += self._count_tokens(result_text)
-                    has_tool_result = True
-                    if part.tool_result.name:
-                        tool_names.append(part.tool_result.name)
                 elif hasattr(part, 'function_response') and part.function_response:
-                    # Alternative tool result field
-                    result_text = str(part.function_response.result) if part.function_response.result else ''
+                    # Tool results (function_response is a ToolResult)
+                    tr = part.function_response
+                    result_text = str(tr.result) if tr.result else ''
                     msg_tokens += self._count_tokens(result_text)
                     has_tool_result = True
-                    if hasattr(part.function_response, 'name') and part.function_response.name:
-                        tool_names.append(part.function_response.name)
+                    if tr.name:
+                        tool_names.append(tr.name)
 
             conversation_tokens += msg_tokens
 
