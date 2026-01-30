@@ -325,17 +325,21 @@ class AtFileCompleter(Completer):
             is_dir = full_path and os.path.isdir(full_path)
 
             if is_dir:
-                # Don't append / - let user type it to explore folder contents
+                # Don't append / to text - let user type it to explore folder contents
+                # But show / in display as visual indicator that it's a folder
+                display = text + "/" if not text.endswith("/") else text
                 if not display_meta:
                     display_meta = "directory"
-            elif not display_meta:
-                if full_path and os.path.isfile(full_path):
-                    display_meta = self._get_file_type(full_path)
+            else:
+                display = text
+                if not display_meta:
+                    if full_path and os.path.isfile(full_path):
+                        display_meta = self._get_file_type(full_path)
 
             yield Completion(
                 text,
                 start_position=completion.start_position,
-                display=text,
+                display=display,
                 display_meta=display_meta,
             )
 
