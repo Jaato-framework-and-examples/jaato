@@ -226,6 +226,71 @@ class FinishReason(Enum):
 
 ---
 
+## 11. Waypoints with Shared Ownership
+
+**Principle**: Both user and model can create checkpoints, with an ownership model that protects user work while giving the model agency to manage its own.
+
+### The Ownership Model
+
+Waypoints form a navigable tree structure where both parties can participate:
+
+| Owner | Created By | Model Can... |
+|-------|------------|--------------|
+| **User** | `waypoint create` command | View, restore (with permission), NOT delete |
+| **Model** | `create_waypoint` tool | View, restore, delete freely |
+
+All waypoints use sequential IDs (w1, w2, w3...) regardless of owner. Ownership is tracked separately.
+
+### Why Model Agency?
+
+The model can proactively protect against mistakes:
+
+```
+1. create_waypoint("before auth refactor")  → w1 (model-owned)
+2. Make risky changes across multiple files
+3. If changes fail: restore_waypoint("w1")  → reverts all files
+4. If changes work: delete_waypoint("w1")   → cleanup
+```
+
+This is more powerful than user-only checkpoints because:
+
+1. **Proactive safety** - Model creates checkpoints before risky operations without user intervention
+2. **Self-correction** - Model can undo its own mistakes without asking permission
+3. **Clean workspace** - Model can delete its own checkpoints when no longer needed
+
+### Why Ownership Boundaries?
+
+User-created waypoints are protected:
+
+- Model cannot delete user waypoints (prevents accidental loss of user safety nets)
+- Model needs permission to restore to user waypoints (user controls their checkpoints)
+- User can always restore to any waypoint regardless of owner
+
+### Tree Structure with Auto-Preservation
+
+Waypoints form a tree, not a linear list:
+
+```
+w0 "session start" ◀ current
+├── w1 "before auth refactor" [user]
+│   └── w2 "pre-optimization" [model]
+└── w3 "alternate approach" [model]
+```
+
+**Auto-save on restore**: When restoring to a previous waypoint with uncommitted file changes, a "ceiling" waypoint is automatically created. This ensures you never lose work when navigating the tree.
+
+### What's Captured
+
+Unlike pure conversation branching, waypoints capture:
+
+- **File state** - All modified files tracked via backup system
+- **Conversation metadata** - Message count, turn index, preview
+- **Ownership** - Who created it and what permissions apply
+
+**Implementation**: `shared/plugins/waypoint/` with `WaypointManager` tracking the tree structure and `BackupManager` integration for file state.
+
+---
+
 ## Future Additions
 
 Document new design decisions here as they emerge. Each entry should include:
