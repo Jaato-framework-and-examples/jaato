@@ -3625,46 +3625,32 @@ class JaatoSession:
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
 
-        Note: Each turn's prompt_tokens includes ALL previous history,
-        so we use the LAST turn's values (not sum) for context usage.
-
-        When turn_accounting is empty (e.g., after GC reset), we estimate
-        tokens from the actual history to avoid incorrectly reporting 0%.
+        Uses InstructionBudget as the single source of truth for token accounting.
+        This includes system instructions, plugin schemas, enrichment, and conversation
+        tokens - providing accurate context usage from startup through all turns.
         """
-        turn_accounting = self.get_turn_accounting()
-
-        if turn_accounting:
-            # Use the last turn's values - prompt includes full history
-            last_turn = turn_accounting[-1]
-            # The current context is the last turn's prompt + its output
-            # (which will become part of the next turn's prompt)
-            total_prompt = last_turn.get('prompt', 0)
-            total_output = last_turn.get('output', 0)
-            total_tokens = last_turn.get('total', 0)
+        # Use InstructionBudget as the single source of truth
+        if self._instruction_budget:
+            total_tokens = self._instruction_budget.total_tokens()
+            context_limit = self._instruction_budget.context_limit
+            percent_used = self._instruction_budget.utilization_percent()
+            tokens_remaining = self._instruction_budget.available_tokens()
         else:
-            # No turn accounting available - estimate from history
-            # This happens after GC resets the session with compressed history
-            history = self.get_history()
-            if history:
-                estimated_tokens = estimate_history_tokens(history)
-                total_prompt = estimated_tokens
-                total_output = 0
-                total_tokens = estimated_tokens
-            else:
-                total_prompt = 0
-                total_output = 0
-                total_tokens = 0
+            # Fallback if budget not initialized
+            total_tokens = 0
+            context_limit = self.get_context_limit()
+            percent_used = 0.0
+            tokens_remaining = context_limit
 
-        context_limit = self.get_context_limit()
-        percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
-        tokens_remaining = max(0, context_limit - total_tokens)
+        # Get turn count from turn_accounting for backward compatibility
+        turn_accounting = self.get_turn_accounting()
 
         return {
             'model': self._model_name or 'unknown',
             'context_limit': context_limit,
             'total_tokens': total_tokens,
-            'prompt_tokens': total_prompt,
-            'output_tokens': total_output,
+            'prompt_tokens': total_tokens,  # InstructionBudget tracks total, not split
+            'output_tokens': 0,  # Output tokens are included in conversation total
             'turns': len(turn_accounting),
             'percent_used': percent_used,
             'tokens_remaining': tokens_remaining,
