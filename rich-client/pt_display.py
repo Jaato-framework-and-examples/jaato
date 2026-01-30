@@ -730,10 +730,15 @@ class PTDisplay:
     def _budget_captures_keys(self) -> bool:
         """Check if budget panel should capture navigation keys.
 
-        Budget panel captures keys only when visible AND input buffer is empty.
-        When input has content, keys go to the input field instead.
+        Budget panel captures keys only when visible AND input buffer is empty
+        AND no permission request is pending. Permission requests have priority
+        over budget panel navigation.
         """
-        return self._budget_panel.is_visible and not self._input_buffer.text.strip()
+        return (
+            self._budget_panel.is_visible
+            and not self._input_buffer.text.strip()
+            and not self._waiting_for_channel_input
+        )
 
     def _get_session_bar_content(self):
         """Get session bar content as formatted text."""
@@ -1384,8 +1389,8 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - scroll popup, tool nav, or history/completion."""
-            # Budget panel takes priority when visible (it's an overlay)
-            if self._budget_panel.is_visible:
+            # Budget panel takes priority when visible AND input is empty
+            if self._budget_captures_keys():
                 self._budget_panel.scroll_up()
                 self._app.invalidate()
                 return
@@ -1414,8 +1419,8 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
             """Handle Down arrow - scroll popup, tool nav, or history/completion."""
-            # Budget panel takes priority when visible (it's an overlay)
-            if self._budget_panel.is_visible:
+            # Budget panel takes priority when visible AND input is empty
+            if self._budget_captures_keys():
                 self._budget_panel.scroll_down()
                 self._app.invalidate()
                 return
