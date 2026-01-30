@@ -1105,6 +1105,12 @@ class SubagentPlugin:
                         turns=len(turn_accounting),
                         percent_used=percent_used
                     )
+                    # Also emit instruction budget for real-time budget panel updates
+                    if session.instruction_budget:
+                        self._ui_hooks.on_agent_instruction_budget_updated(
+                            agent_id=agent_id,
+                            budget_snapshot=session.instruction_budget.snapshot()
+                        )
 
             # Process the message
             response = session.send_message(
@@ -1812,6 +1818,12 @@ class SubagentPlugin:
                         turns=len(turn_accounting),
                         percent_used=percent_used
                     )
+                    # Also emit instruction budget for real-time budget panel updates
+                    if session.instruction_budget:
+                        self._ui_hooks.on_agent_instruction_budget_updated(
+                            agent_id=agent_id,
+                            budget_snapshot=session.instruction_budget.snapshot()
+                        )
 
             # Emit the initial prompt to UI
             if self._ui_hooks:

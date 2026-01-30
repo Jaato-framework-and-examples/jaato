@@ -3555,6 +3555,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Update budget panel with new budget data
                 if hasattr(display, 'update_instruction_budget'):
                     display.update_instruction_budget(event.agent_id, event.budget_snapshot)
+                # Also derive toolbar context usage from budget snapshot
+                # This ensures the toolbar shows accurate context consumption at startup
+                # (before any ContextUpdatedEvent is emitted)
+                budget = event.budget_snapshot
+                if budget and agent_registry:
+                    agent_registry.update_context_usage(
+                        agent_id=event.agent_id,
+                        total_tokens=budget.get('total_tokens', 0),
+                        prompt_tokens=0,  # Not tracked in budget, but not needed for toolbar %
+                        output_tokens=0,  # Not tracked in budget, but not needed for toolbar %
+                        turns=0,  # Not tracked in budget
+                        percent_used=budget.get('utilization_percent', 0),
+                    )
+                # Also update display directly (fallback if no registry)
+                if budget:
+                    usage = {
+                        "total_tokens": budget.get('total_tokens', 0),
+                        "context_size": budget.get('context_limit', 0),
+                        "percent_used": budget.get('utilization_percent', 0),
+                    }
+                    display.update_context_usage(usage)
 
             elif isinstance(event, TurnCompletedEvent):
                 # Flush the output buffer to ensure all pending content from this turn

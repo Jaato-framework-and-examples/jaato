@@ -727,6 +727,19 @@ class PTDisplay:
         """Check if there's plan data for the current agent."""
         return self._get_current_plan_data() is not None
 
+    def _budget_captures_keys(self) -> bool:
+        """Check if budget panel should capture navigation keys.
+
+        Budget panel captures keys only when visible AND input buffer is empty
+        AND no permission request is pending. Permission requests have priority
+        over budget panel navigation.
+        """
+        return (
+            self._budget_panel.is_visible
+            and not self._input_buffer.text.strip()
+            and not self._waiting_for_channel_input
+        )
+
     def _get_session_bar_content(self):
         """Get session bar content as formatted text."""
         if not self._session_id:
@@ -1126,7 +1139,7 @@ class PTDisplay:
         keys = self._keybinding_config
 
         @kb.add(*keys.get_key_args("submit"), eager=True,
-                filter=Condition(lambda: not self._budget_panel.is_visible))
+                filter=Condition(lambda: not self._budget_captures_keys()))
         def handle_enter(event):
             """Handle enter key - submit input, select permission option, or advance pager."""
             if getattr(self, '_pager_active', False):
@@ -1222,7 +1235,7 @@ class PTDisplay:
             event.current_buffer.insert_text(" ")
 
         @kb.add(*keys.get_key_args("permission_next"), eager=True,
-                filter=Condition(lambda: not self._budget_panel.is_visible))
+                filter=Condition(lambda: not self._budget_captures_keys()))
         def handle_permission_next(event):
             """Handle TAB - cycle to next permission option, or complete in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1244,7 +1257,7 @@ class PTDisplay:
                     buff.start_completion()
 
         @kb.add(*keys.get_key_args("permission_prev"), eager=True,
-                filter=Condition(lambda: not self._budget_panel.is_visible))
+                filter=Condition(lambda: not self._budget_captures_keys()))
         def handle_permission_prev(event):
             """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1376,8 +1389,8 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - scroll popup, tool nav, or history/completion."""
-            # Budget panel takes priority when visible (it's an overlay)
-            if self._budget_panel.is_visible:
+            # Budget panel takes priority when visible AND input is empty
+            if self._budget_captures_keys():
                 self._budget_panel.scroll_up()
                 self._app.invalidate()
                 return
@@ -1406,8 +1419,8 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
             """Handle Down arrow - scroll popup, tool nav, or history/completion."""
-            # Budget panel takes priority when visible (it's an overlay)
-            if self._budget_panel.is_visible:
+            # Budget panel takes priority when visible AND input is empty
+            if self._budget_captures_keys():
                 self._budget_panel.scroll_down()
                 self._app.invalidate()
                 return
@@ -1448,19 +1461,19 @@ class PTDisplay:
             self._app.invalidate()
 
         # Budget panel navigation (only active when budget panel is visible)
-        @kb.add("tab", filter=Condition(lambda: self._budget_panel.is_visible))
+        @kb.add("tab", filter=Condition(lambda: self._budget_captures_keys()))
         def handle_budget_tab(event):
             """Handle TAB in budget panel - cycle to next agent."""
             self._budget_panel.cycle_agent(forward=True)
             self._app.invalidate()
 
-        @kb.add("s-tab", filter=Condition(lambda: self._budget_panel.is_visible))
+        @kb.add("s-tab", filter=Condition(lambda: self._budget_captures_keys()))
         def handle_budget_shift_tab(event):
             """Handle Shift+TAB in budget panel - cycle to previous agent."""
             self._budget_panel.cycle_agent(forward=False)
             self._app.invalidate()
 
-        @kb.add("escape", filter=Condition(lambda: self._budget_panel.is_visible))
+        @kb.add("escape", filter=Condition(lambda: self._budget_captures_keys()))
         def handle_budget_escape(event):
             """Handle ESC in budget panel - drill up or close."""
             if not self._budget_panel.drill_up():
@@ -1468,7 +1481,7 @@ class PTDisplay:
                 self._budget_panel.hide()
             self._app.invalidate()
 
-        @kb.add("enter", filter=Condition(lambda: self._budget_panel.is_visible))
+        @kb.add("enter", filter=Condition(lambda: self._budget_captures_keys()))
         def handle_budget_enter(event):
             """Handle Enter in budget panel - drill down into selected source."""
             self._budget_panel.drill_down()

@@ -787,6 +787,24 @@ class JaatoServer:
         if "main" in self._agents and gc_threshold is not None:
             self._agents["main"].gc_threshold = gc_threshold
             self._agents["main"].gc_strategy = gc_strategy
+
+        # Emit initial context update so toolbar shows correct usage at startup
+        # This must happen after _create_main_agent() so client has the agent registered
+        if self._jaato:
+            usage = self._jaato.get_context_usage()
+            self.emit(ContextUpdatedEvent(
+                agent_id="main",
+                total_tokens=usage.get('total_tokens', 0),
+                prompt_tokens=usage.get('prompt_tokens', 0),
+                output_tokens=usage.get('output_tokens', 0),
+                context_limit=usage.get('context_limit', 128000),
+                percent_used=usage.get('percent_used', 0.0),
+                tokens_remaining=usage.get('tokens_remaining', 128000),
+                turns=usage.get('turns', 0),
+                gc_threshold=gc_threshold,
+                gc_strategy=gc_strategy,
+            ))
+
         self._emit_init_progress("Setting up session", "done", 6, total_steps)
 
         self.emit(SystemMessageEvent(
@@ -2190,6 +2208,27 @@ class JaatoServer:
                     gc_strategy = getattr(gc_plugin, 'name', 'gc')
                     if gc_strategy.startswith('gc_'):
                         gc_strategy = gc_strategy[3:]
+
+                # Set up instruction budget callback and emit initial events
+                session = self._jaato.get_session()
+                if session:
+                    server = self
+
+                    def instruction_budget_callback(snapshot: dict):
+                        server.emit(InstructionBudgetEvent(
+                            agent_id=snapshot.get('agent_id', 'main'),
+                            budget_snapshot=snapshot,
+                        ))
+
+                    session.set_instruction_budget_callback(instruction_budget_callback)
+
+                    # Emit initial budget snapshot
+                    if session.instruction_budget:
+                        self.emit(InstructionBudgetEvent(
+                            agent_id=session.agent_id,
+                            budget_snapshot=session.instruction_budget.snapshot(),
+                        ))
+
                 self._emit_init_progress("Configuring tools", "done", 5, 6)
 
                 # Step 6: Set up session
@@ -2205,6 +2244,23 @@ class JaatoServer:
                 if "main" in self._agents and gc_threshold is not None:
                     self._agents["main"].gc_threshold = gc_threshold
                     self._agents["main"].gc_strategy = gc_strategy
+
+                # Emit initial context update so toolbar shows correct usage
+                if self._jaato:
+                    usage = self._jaato.get_context_usage()
+                    self.emit(ContextUpdatedEvent(
+                        agent_id="main",
+                        total_tokens=usage.get('total_tokens', 0),
+                        prompt_tokens=usage.get('prompt_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        context_limit=usage.get('context_limit', 128000),
+                        percent_used=usage.get('percent_used', 0.0),
+                        tokens_remaining=usage.get('tokens_remaining', 128000),
+                        turns=usage.get('turns', 0),
+                        gc_threshold=gc_threshold,
+                        gc_strategy=gc_strategy,
+                    ))
+
                 self._emit_init_progress("Setting up session", "done", 6, 6)
 
                 self.emit(SystemMessageEvent(
