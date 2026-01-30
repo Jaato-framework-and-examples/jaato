@@ -2039,6 +2039,10 @@ class JaatoSession:
                         llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
+            # Emit turn progress after initial response
+            pending_calls = len([p for p in response.parts if p.function_call])
+            self._emit_turn_progress(turn_data, pending_tool_calls=pending_calls)
+
             # Emit thinking content if present (extended thinking from providers)
             if on_output and response.thinking:
                 self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
@@ -3311,6 +3315,10 @@ class JaatoSession:
                 if response.usage.reasoning_tokens is not None:
                     llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
 
+            # Emit turn progress after tool result handling
+            pending_calls = len([p for p in response.parts if p.function_call])
+            self._emit_turn_progress(turn_data, pending_tool_calls=pending_calls)
+
             return response
 
     def _check_and_handle_mid_turn_prompt(
@@ -3594,6 +3602,25 @@ class JaatoSession:
             turn_tokens['prompt'] = response.usage.prompt_tokens
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
+
+    def _emit_turn_progress(self, turn_data: Dict[str, Any], pending_tool_calls: int) -> None:
+        """Emit turn progress event with current token state.
+
+        Called after each model response within a turn to provide real-time
+        token tracking before the turn completes.
+        """
+        if not self._ui_hooks:
+            return
+
+        context_usage = self.get_context_usage()
+        self._ui_hooks.on_turn_progress(
+            agent_id=self._agent_id,
+            total_tokens=turn_data.get('total', 0),
+            prompt_tokens=turn_data.get('prompt', 0),
+            output_tokens=turn_data.get('output', 0),
+            percent_used=context_usage.get('percent_used', 0.0),
+            pending_tool_calls=pending_tool_calls,
+        )
 
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""

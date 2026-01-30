@@ -69,6 +69,7 @@ class EventType(str, Enum):
     # Context/token updates (Server -> Client)
     CONTEXT_UPDATED = "context.updated"
     TURN_COMPLETED = "turn.completed"
+    TURN_PROGRESS = "turn.progress"
     INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
 
     # Instruction budget (Client <-> Server)
@@ -472,6 +473,24 @@ class TurnCompletedEvent(Event):
 
 
 @dataclass
+class TurnProgressEvent(Event):
+    """Incremental progress during turn execution.
+
+    Emitted after each model response within a turn, enabling real-time
+    token tracking before the turn completes.
+    """
+    type: EventType = field(default=EventType.TURN_PROGRESS)
+    agent_id: str = ""
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    context_limit: int = 0
+    percent_used: float = 0.0
+    tokens_remaining: int = 0
+    pending_tool_calls: int = 0  # How many tool calls remain
+
+
+@dataclass
 class SystemMessageEvent(Event):
     """System message (info, warning, status)."""
     type: EventType = field(default=EventType.SYSTEM_MESSAGE)
@@ -854,6 +873,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
     EventType.INSTRUCTION_BUDGET_UPDATED.value: InstructionBudgetEvent,
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
+    EventType.TURN_PROGRESS.value: TurnProgressEvent,
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.INIT_PROGRESS.value: InitProgressEvent,
     EventType.ERROR.value: ErrorEvent,

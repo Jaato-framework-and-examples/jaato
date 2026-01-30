@@ -337,3 +337,71 @@ class TestJaatoSessionGenerate:
         result = session.generate("Hello")
 
         assert result == "Generated text"
+
+
+class TestJaatoSessionTurnProgress:
+    """Tests for JaatoSession._emit_turn_progress()."""
+
+    def test_emit_turn_progress_calls_ui_hooks(self):
+        """Test that _emit_turn_progress calls ui_hooks.on_turn_progress."""
+        mock_runtime = MagicMock()
+        mock_ui_hooks = MagicMock()
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session._ui_hooks = mock_ui_hooks
+        session._agent_id = "main"
+
+        # Mock get_context_usage to return a percent_used value
+        session.get_context_usage = MagicMock(return_value={
+            'percent_used': 25.5,
+            'total_tokens': 1000,
+        })
+
+        turn_data = {'prompt': 800, 'output': 200, 'total': 1000}
+        session._emit_turn_progress(turn_data, pending_tool_calls=3)
+
+        mock_ui_hooks.on_turn_progress.assert_called_once_with(
+            agent_id="main",
+            total_tokens=1000,
+            prompt_tokens=800,
+            output_tokens=200,
+            percent_used=25.5,
+            pending_tool_calls=3,
+        )
+
+    def test_emit_turn_progress_no_hooks_no_error(self):
+        """Test that _emit_turn_progress does nothing when no ui_hooks set."""
+        mock_runtime = MagicMock()
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session._ui_hooks = None
+
+        turn_data = {'prompt': 100, 'output': 50, 'total': 150}
+        # Should not raise any error
+        session._emit_turn_progress(turn_data, pending_tool_calls=0)
+
+    def test_emit_turn_progress_handles_missing_turn_data(self):
+        """Test that _emit_turn_progress handles missing keys in turn_data."""
+        mock_runtime = MagicMock()
+        mock_ui_hooks = MagicMock()
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session._ui_hooks = mock_ui_hooks
+        session._agent_id = "test"
+
+        session.get_context_usage = MagicMock(return_value={
+            'percent_used': 10.0,
+        })
+
+        # Empty turn_data - should use defaults of 0
+        turn_data = {}
+        session._emit_turn_progress(turn_data, pending_tool_calls=1)
+
+        mock_ui_hooks.on_turn_progress.assert_called_once_with(
+            agent_id="test",
+            total_tokens=0,
+            prompt_tokens=0,
+            output_tokens=0,
+            percent_used=10.0,
+            pending_tool_calls=1,
+        )
