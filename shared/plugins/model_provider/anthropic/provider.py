@@ -220,10 +220,10 @@ class AnthropicProvider:
 
         # Set workspace path from config.extra if provided
         # This ensures token resolution can find workspace-specific OAuth tokens
-        # even when JAATO_WORKSPACE_PATH env var isn't set (e.g., subagent spawning)
+        # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
         workspace_path = config.extra.get('workspace_path')
-        if workspace_path and not os.environ.get('JAATO_WORKSPACE_PATH'):
-            os.environ['JAATO_WORKSPACE_PATH'] = workspace_path
+        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
+            os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
 
         # Resolve credentials in priority order:
         # 1. PKCE OAuth tokens (from interactive login, stored in config dir)

@@ -1585,19 +1585,19 @@ class SubagentPlugin:
         # Get workspace path - priority order:
         # 1. Directly set path (from server registry broadcast)
         # 2. Runtime registry (for JaatoClient mode)
-        # 3. JAATO_WORKSPACE_PATH env var (if set by server context)
+        # 3. JAATO_WORKSPACE_ROOT env var (if set by server context)
         # 4. os.getcwd() as last resort
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         if workspace_path is None:
-            workspace_path = os.environ.get("JAATO_WORKSPACE_PATH")
+            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
         parent_cwd = workspace_path or os.getcwd()
         logger.debug(
             "SubagentPlugin.spawn_subagent: workspace resolution: "
             f"self._workspace_path={self._workspace_path}, "
             f"registry={self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None}, "
-            f"env={os.environ.get('JAATO_WORKSPACE_PATH')}, "
+            f"env={os.environ.get('JAATO_WORKSPACE_ROOT')}, "
             f"cwd={os.getcwd()}, "
             f"result={parent_cwd}"
         )
@@ -1649,12 +1649,11 @@ class SubagentPlugin:
                     f"instead of parent_cwd {parent_cwd}"
                 )
 
-        # Set workspace path for thread-safe token resolution
-        # os.chdir() is process-wide and racy, so we also set env vars that
-        # various components can use deterministically
-        # - JAATO_WORKSPACE_PATH: Used by OAuth token storage (github_models, anthropic, antigravity)
-        # - JAATO_WORKSPACE_ROOT: Used by tool plugins (file_edit, cli) for sandboxing
-        os.environ["JAATO_WORKSPACE_PATH"] = workspace_path
+        # Set workspace path for thread-safe operations
+        # os.chdir() is process-wide and racy, so we also set an env var that
+        # various components can use deterministically:
+        # - OAuth token storage (github_models, anthropic, antigravity)
+        # - Tool plugins (file_edit, cli) for path sandboxing
         os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
 
         # Change to parent's working directory so relative paths resolve correctly
