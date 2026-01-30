@@ -1184,6 +1184,32 @@ class JaatoSession:
         except Exception as e:
             logger.warning(f"Failed to emit instruction budget update: {e}")
 
+    def _has_framework_enrichment(self, text: str) -> bool:
+        """Detect if text contains framework-injected enrichment content.
+
+        Framework enrichments are automatically injected by plugins and include:
+        - System reminders (<system-reminder> tags)
+        - Multimodal insertions, GC notices, session markers ([System: ...])
+        - Memory injection (💡 **Available Memories**)
+        - Waypoint markers (<hidden> tags)
+
+        Args:
+            text: The text content to check.
+
+        Returns:
+            True if the text contains framework enrichment patterns.
+        """
+        if not text:
+            return False
+
+        enrichment_patterns = [
+            "<system-reminder>",
+            "[System:",
+            "💡 **Available Memories**",
+            "<hidden>",
+        ]
+        return any(pattern in text for pattern in enrichment_patterns)
+
     def _update_conversation_budget(self) -> None:
         """Update CONVERSATION entry in instruction budget from current history."""
         if not self._instruction_budget:
@@ -1221,15 +1247,26 @@ class JaatoSession:
             if msg.role == Role.USER:
                 current_turn += 1
 
-            # Count tokens for this message
+            # Count tokens for this message and detect content types
             msg_tokens = 0
+            has_tool_result = False
+            has_text = False
+            text_content = ""
             for part in msg.parts:
                 if hasattr(part, 'text') and part.text:
                     msg_tokens += self._count_tokens(part.text)
+                    has_text = True
+                    text_content += part.text
                 elif hasattr(part, 'tool_result') and part.tool_result:
                     # Tool results can be large
                     result_text = str(part.tool_result.content) if part.tool_result.content else ''
                     msg_tokens += self._count_tokens(result_text)
+                    has_tool_result = True
+                elif hasattr(part, 'function_response') and part.function_response:
+                    # Alternative tool result field
+                    result_text = str(part.function_response.content) if part.function_response.content else ''
+                    msg_tokens += self._count_tokens(result_text)
+                    has_tool_result = True
 
             conversation_tokens += msg_tokens
 
@@ -1247,14 +1284,27 @@ class JaatoSession:
                     # Everything else is working output - EPHEMERAL
                     turn_type = ConversationTurnType.WORKING
                 gc_policy = DEFAULT_TURN_POLICIES[turn_type]
-                role_str = msg.role.value if msg.role else 'unknown'
+
+                # Determine descriptive label based on role and content type
+                if msg.role == Role.MODEL:
+                    role_label = "output (model)"
+                elif msg.role == Role.USER:
+                    if has_tool_result:
+                        role_label = "input (tool output)"
+                    elif self._has_framework_enrichment(text_content):
+                        role_label = "input (framework)"
+                    else:
+                        role_label = "input (external)"
+                else:
+                    role_label = msg.role.value if msg.role else "unknown"
+
                 # Use message index i for unique key, but display actual turn number
                 self._instruction_budget.add_child(
                     InstructionSource.CONVERSATION,
                     f"msg_{i}",  # Unique key using message index
                     msg_tokens,
                     gc_policy,
-                    label=f"turn_{current_turn} ({role_str})",  # Display turn number
+                    label=f"turn_{current_turn} {role_label}",  # Display turn number and type
                 )
 
         self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, conversation_tokens)

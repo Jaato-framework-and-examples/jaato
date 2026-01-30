@@ -415,3 +415,55 @@ class TestJaatoSessionTurnProgress:
             percent_used=10.0,
             pending_tool_calls=1,
         )
+
+
+class TestJaatoSessionFrameworkEnrichment:
+    """Tests for JaatoSession._has_framework_enrichment()."""
+
+    def test_detects_system_reminder_tag(self):
+        """Test that system reminder tags are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "Some text <system-reminder>Remember this</system-reminder> more text"
+        assert session._has_framework_enrichment(text) is True
+
+    def test_detects_system_prefix(self):
+        """Test that [System: ...] prefix is detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "[System: Image analysis complete] The image shows..."
+        assert session._has_framework_enrichment(text) is True
+
+    def test_detects_memory_injection(self):
+        """Test that memory injection marker is detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "💡 **Available Memories**\n- Memory 1\n- Memory 2"
+        assert session._has_framework_enrichment(text) is True
+
+    def test_detects_hidden_tags(self):
+        """Test that hidden waypoint tags are detected."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "<hidden>waypoint marker</hidden>"
+        assert session._has_framework_enrichment(text) is True
+
+    def test_no_enrichment_in_plain_text(self):
+        """Test that plain user text is not flagged as enrichment."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        text = "Please help me fix this bug in my Python code"
+        assert session._has_framework_enrichment(text) is False
+
+    def test_empty_text_not_enrichment(self):
+        """Test that empty text is not flagged as enrichment."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        assert session._has_framework_enrichment("") is False
+        assert session._has_framework_enrichment(None) is False
