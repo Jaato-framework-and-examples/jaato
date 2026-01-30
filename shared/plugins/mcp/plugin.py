@@ -1515,12 +1515,34 @@ Examples:
             if status == 'error':
                 return {'error': result}
 
+            # Extract content from MCP result
+            content_list = [getattr(c, 'text', None) for c in getattr(result, 'content', [])]
+            structured_content = getattr(result, 'structuredContent', None)
+
+            # Build result dict - only include structured if content is empty
+            # to avoid duplication (many MCPs return data in both fields)
             out = {
                 'tool': toolname,
                 'isError': getattr(result, 'isError', False),
-                'structured': getattr(result, 'structuredContent', None),
-                'content': [getattr(c, 'text', None) for c in getattr(result, 'content', [])],
+                'content': content_list,
             }
+
+            # Only include structured content if text content is empty
+            # This prevents duplication when MCP returns same data in both fields
+            if not content_list or all(c is None or c == '' for c in content_list):
+                if structured_content is not None:
+                    out['structured'] = structured_content
+
+            # Estimate size and log warning for large results
+            result_str = json.dumps(out)
+            estimated_tokens = len(result_str) / 4  # ~4 chars per token
+            if estimated_tokens > 50000:
+                self._log_event(
+                    LOG_WARN,
+                    f"Large MCP result: {toolname}",
+                    details=f"~{int(estimated_tokens):,} tokens ({len(result_str):,} chars)"
+                )
+
             return {'result': out}
 
         except queue.Empty:
