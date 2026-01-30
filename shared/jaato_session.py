@@ -381,6 +381,11 @@ class JaatoSession:
         self._ui_hooks = hooks
         self._agent_id = agent_id
 
+        # Update instruction budget's agent_id if it was already created
+        # (configure() creates the budget with default "main" agent_id)
+        if self._instruction_budget:
+            self._instruction_budget.agent_id = agent_id
+
     def set_retry_callback(self, callback: Optional[RetryCallback]) -> None:
         """Set callback for retry notifications.
 
