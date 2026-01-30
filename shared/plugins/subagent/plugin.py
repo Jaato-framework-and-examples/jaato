@@ -1722,9 +1722,11 @@ class SubagentPlugin:
                 )
 
             # Expand variables in plugin_configs
+            # Pass workspace_path as override to ensure ${workspaceRoot} expands correctly
+            # (fixes predefined profiles which have plugin_configs with workspace variables)
             expansion_context = {}
             raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
-            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
+            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context, workspace_path)
 
             # Inject agent_name and workspace-aware configs into each plugin
             effective_plugin_configs = expanded_configs
