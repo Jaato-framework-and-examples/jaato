@@ -1184,31 +1184,62 @@ class JaatoSession:
         except Exception as e:
             logger.warning(f"Failed to emit instruction budget update: {e}")
 
-    def _has_framework_enrichment(self, text: str) -> bool:
-        """Detect if text contains framework-injected enrichment content.
+    def _get_framework_enrichments(self, text: str) -> list[str]:
+        """Detect and identify framework-injected enrichment content.
 
         Framework enrichments are automatically injected by plugins and include:
-        - System reminders (<system-reminder> tags)
-        - Multimodal insertions, GC notices, session markers ([System: ...])
-        - Memory injection (💡 **Available Memories**)
-        - Waypoint markers (<hidden> tags)
+        - System reminders (<system-reminder> tags) - external (Claude CLI)
+        - System notices ([System: ...]) - gc, cancellation, multimodal, session
+        - Memory injection (💡 **Available Memories**) - memory plugin
+        - Hidden content (<hidden> tags) - streaming, waypoint, nudge
 
         Args:
             text: The text content to check.
 
         Returns:
-            True if the text contains framework enrichment patterns.
+            List of enrichment type names found in the text.
         """
         if not text:
-            return False
+            return []
 
-        enrichment_patterns = [
-            "<system-reminder>",
-            "[System:",
-            "💡 **Available Memories**",
-            "<hidden>",
-        ]
-        return any(pattern in text for pattern in enrichment_patterns)
+        enrichments = []
+
+        # Check for system-reminder (external, e.g., Claude CLI)
+        if "<system-reminder>" in text:
+            enrichments.append("system-reminder")
+
+        # Check for [System: ...] notices - identify specific source
+        if "[System:" in text:
+            # Extract content after [System: to identify source
+            if "cancelled" in text or "canceled" in text:
+                enrichments.append("cancellation")
+            elif "image files" in text or "viewImage" in text:
+                enrichments.append("multimodal")
+            elif "conversation has been ongoing" in text or "session_describe" in text:
+                enrichments.append("session")
+            else:
+                enrichments.append("gc")
+
+        # Check for memory injection
+        if "💡 **Available Memories**" in text:
+            enrichments.append("memory")
+
+        # Check for hidden content - identify specific source by inner content
+        if "<hidden>" in text:
+            # Extract content inside <hidden> tags to identify source
+            import re
+            hidden_matches = re.findall(r'<hidden>(.*?)</hidden>', text, re.DOTALL)
+            hidden_types_found = set()
+            for hidden_content in hidden_matches:
+                if "<streaming_updates>" in hidden_content or hidden_content.startswith("["):
+                    hidden_types_found.add("streaming")
+                elif "<waypoint-restore>" in hidden_content:
+                    hidden_types_found.add("waypoint")
+                else:
+                    hidden_types_found.add("nudge")
+            enrichments.extend(sorted(hidden_types_found))
+
+        return enrichments
 
     def _update_conversation_budget(self) -> None:
         """Update CONVERSATION entry in instruction budget from current history."""
@@ -1295,8 +1326,10 @@ class JaatoSession:
                     else:
                         role_label = "input (tool)"
                 elif msg.role == Role.USER:
-                    if self._has_framework_enrichment(text_content):
-                        role_label = "input (framework)"
+                    enrichments = self._get_framework_enrichments(text_content)
+                    if enrichments:
+                        enrichments_str = ", ".join(enrichments)
+                        role_label = f"input (framework = {enrichments_str})"
                     else:
                         role_label = "input (external)"
                 else:
