@@ -611,6 +611,13 @@ class PluginRegistry:
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' re-wired with registry")
+            # Re-broadcast workspace path after re-initialization
+            if self._workspace_path and hasattr(plugin, 'set_workspace_path'):
+                try:
+                    plugin.set_workspace_path(self._workspace_path)
+                    _trace(f" Plugin '{name}' workspace path restored")
+                except Exception as exc:
+                    _trace(f" Plugin '{name}' workspace path restore failed: {exc}")
 
         return True
 
