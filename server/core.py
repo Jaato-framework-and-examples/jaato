@@ -81,6 +81,7 @@ from .events import (
     ContextUpdatedEvent,
     InstructionBudgetEvent,
     TurnCompletedEvent,
+    TurnProgressEvent,
     SystemMessageEvent,
     InitProgressEvent,
     ErrorEvent,
@@ -1244,6 +1245,20 @@ class JaatoServer:
                 server.emit(InstructionBudgetEvent(
                     agent_id=agent_id,
                     budget_snapshot=budget_snapshot,
+                ))
+
+            def on_turn_progress(self, agent_id, total_tokens, prompt_tokens,
+                                 output_tokens, percent_used, pending_tool_calls):
+                context_limit = server._jaato.get_context_limit() if server._jaato else 0
+                server.emit(TurnProgressEvent(
+                    agent_id=agent_id,
+                    total_tokens=total_tokens,
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens,
+                    context_limit=context_limit,
+                    percent_used=percent_used,
+                    tokens_remaining=max(0, context_limit - total_tokens),
+                    pending_tool_calls=pending_tool_calls,
                 ))
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")

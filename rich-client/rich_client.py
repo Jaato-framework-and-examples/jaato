@@ -3087,6 +3087,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ContextUpdatedEvent,
         InstructionBudgetEvent,
         TurnCompletedEvent,
+        TurnProgressEvent,
         SystemMessageEvent,
         InitProgressEvent,
         ErrorEvent,
@@ -3583,6 +3584,28 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         "percent_used": budget.get('utilization_percent', 0),
                     }
                     display.update_context_usage(usage)
+
+            elif isinstance(event, TurnProgressEvent):
+                # Update context usage with incremental progress during turn
+                agent_id = event.agent_id or agent_registry.get_selected_agent_id()
+                if agent_id and agent_registry:
+                    agent_registry.update_context_usage(
+                        agent_id=agent_id,
+                        total_tokens=event.total_tokens,
+                        prompt_tokens=event.prompt_tokens,
+                        output_tokens=event.output_tokens,
+                        turns=0,  # Not updated during turn
+                        percent_used=event.percent_used,
+                    )
+                # Update display status bar
+                usage = {
+                    "prompt_tokens": event.prompt_tokens,
+                    "output_tokens": event.output_tokens,
+                    "total_tokens": event.total_tokens,
+                    "context_size": event.context_limit,
+                    "percent_used": event.percent_used,
+                }
+                display.update_context_usage(usage)
 
             elif isinstance(event, TurnCompletedEvent):
                 # Flush the output buffer to ensure all pending content from this turn

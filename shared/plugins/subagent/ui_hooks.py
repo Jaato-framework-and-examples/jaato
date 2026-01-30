@@ -159,6 +159,30 @@ class AgentUIHooks(Protocol):
         """
         ...
 
+    def on_turn_progress(
+        self,
+        agent_id: str,
+        total_tokens: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        percent_used: float,
+        pending_tool_calls: int
+    ) -> None:
+        """Called with incremental progress during turn execution.
+
+        Fires after each model response within a turn, enabling real-time
+        token tracking before the turn completes.
+
+        Args:
+            agent_id: Which agent is progressing.
+            total_tokens: Current total tokens used.
+            prompt_tokens: Current prompt tokens.
+            output_tokens: Current output tokens.
+            percent_used: Percentage of context window used.
+            pending_tool_calls: Number of tool calls pending execution.
+        """
+        ...
+
     def on_agent_gc_config(
         self,
         agent_id: str,
