@@ -461,6 +461,9 @@ class PTDisplay:
         self._plan_panel.set_theme(self._theme)
         self._budget_panel = BudgetPanel(toggle_key=self._keybinding_config.toggle_budget)
         self._budget_panel.set_theme(self._theme)
+        # Cache for rendered budget popup to avoid double rendering per frame
+        self._budget_render_cache: Optional[str] = None
+        self._budget_render_cache_key: Optional[tuple] = None
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
@@ -876,14 +879,30 @@ class PTDisplay:
         # Scroll by half the visible content area
         return max(3, (available_height - 4) // 2)
 
-    def _get_budget_popup_content(self):
-        """Get rendered budget popup content as ANSI for prompt_toolkit."""
-        # Calculate popup dimensions based on terminal size
+    def _get_budget_rendered_string(self) -> str:
+        """Get rendered budget popup as string, with caching to avoid double render per frame."""
         popup_width = max(50, min(90, int(self._width * 0.7)))
         popup_height = max(10, min(20, int(self._height * 0.5)))
 
+        # Check if cache is valid (same dimensions and panel cache is valid)
+        cache_key = (popup_width, popup_height, self._budget_panel._render_cache_key)
+        if self._budget_render_cache is not None and self._budget_render_cache_key == cache_key:
+            return self._budget_render_cache
+
+        # Render fresh
         rendered = self._budget_panel.render(popup_height, popup_width)
-        return to_formatted_text(ANSI(self._renderer.render(rendered)))
+        rendered_str = self._renderer.render(rendered)
+
+        # Cache result
+        self._budget_render_cache = rendered_str
+        self._budget_render_cache_key = cache_key
+
+        return rendered_str
+
+    def _get_budget_popup_content(self):
+        """Get rendered budget popup content as ANSI for prompt_toolkit."""
+        rendered_str = self._get_budget_rendered_string()
+        return to_formatted_text(ANSI(rendered_str))
 
     def _get_plan_popup_content(self):
         """Get rendered plan popup content as ANSI for prompt_toolkit."""
@@ -1734,17 +1753,12 @@ class PTDisplay:
 
         # Budget popup (floating overlay, toggled with Ctrl+B)
         def get_budget_popup_height():
-            """Calculate budget popup height by rendering content and counting lines."""
+            """Calculate budget popup height using cached rendered content."""
             if not self._budget_panel.has_data():
                 return 4  # Minimal height for "no data" message
 
-            # Render the popup to get actual line count
-            popup_width = max(50, min(90, int(self._width * 0.7)))
-            popup_height = max(10, min(20, int(self._height * 0.5)))
-            rendered = self._budget_panel.render(popup_height, popup_width)
-
-            # Render to string and count lines
-            rendered_str = self._renderer.render(rendered)
+            # Use cached rendered string (shared with _get_budget_popup_content)
+            rendered_str = self._get_budget_rendered_string()
             line_count = rendered_str.count('\n') + 1
 
             # Cap at available screen height

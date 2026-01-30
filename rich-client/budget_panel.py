@@ -47,9 +47,19 @@ class BudgetPanel:
         self._selected_row: int = 0  # Currently selected row in the table
         self._source_order: List[str] = ["system", "plugin", "enrichment", "conversation"]
 
+        # Render cache to avoid double rendering per frame
+        self._render_cache: Optional[Panel] = None
+        self._render_cache_key: Optional[tuple] = None  # (width, height) that was used
+
     def set_theme(self, theme: "ThemeConfig") -> None:
         """Set the theme configuration for styling."""
         self._theme = theme
+        self._invalidate_cache()
+
+    def _invalidate_cache(self) -> None:
+        """Invalidate the render cache, forcing re-render on next access."""
+        self._render_cache = None
+        self._render_cache_key = None
 
     def _style(self, semantic_name: str) -> str:
         """Get a Rich style string from the theme."""
@@ -87,10 +97,12 @@ class BudgetPanel:
             # Reset to top-level view when opening
             self._drill_down_source = None
             self._selected_row = 0
+        self._invalidate_cache()
 
     def hide(self) -> None:
         """Hide the panel."""
         self._visible = False
+        self._invalidate_cache()
 
     def update_budget(self, agent_id: str, budget_snapshot: Dict[str, Any]) -> None:
         """Update budget data for an agent.
@@ -101,12 +113,14 @@ class BudgetPanel:
         """
         self._budgets[agent_id] = budget_snapshot
         self._rebuild_agent_order()
+        self._invalidate_cache()
 
     def clear_budget(self, agent_id: str) -> None:
         """Remove budget data for an agent."""
         if agent_id in self._budgets:
             del self._budgets[agent_id]
             self._rebuild_agent_order()
+            self._invalidate_cache()
 
     def _rebuild_agent_order(self) -> None:
         """Rebuild the agent order list for tab navigation."""
@@ -136,6 +150,7 @@ class BudgetPanel:
         # Reset view state when switching agents
         self._drill_down_source = None
         self._selected_row = 0
+        self._invalidate_cache()
 
     def drill_down(self) -> bool:
         """Enter drill-down view for the selected source.
@@ -164,6 +179,7 @@ class BudgetPanel:
             if children:
                 self._drill_down_source = selected_source
                 self._selected_row = 0  # Reset row selection for drill-down view
+                self._invalidate_cache()
                 return True
         return False
 
@@ -176,6 +192,7 @@ class BudgetPanel:
         if self._drill_down_source:
             self._drill_down_source = None
             self._selected_row = 0  # Reset to first row
+            self._invalidate_cache()
             return True
         return False
 
@@ -183,12 +200,14 @@ class BudgetPanel:
         """Navigate to previous row."""
         if self._selected_row > 0:
             self._selected_row -= 1
+            self._invalidate_cache()
 
     def nav_down(self) -> None:
         """Navigate to next row."""
         max_row = self._get_max_row()
         if self._selected_row < max_row:
             self._selected_row += 1
+            self._invalidate_cache()
 
     def _get_selected_source(self) -> Optional[str]:
         """Get the source name at the currently selected row."""
@@ -297,6 +316,32 @@ class BudgetPanel:
 
     def render(self, available_height: int, available_width: int) -> Panel:
         """Render the budget panel.
+
+        Uses caching to avoid expensive re-renders when state hasn't changed.
+
+        Args:
+            available_height: Maximum height in lines.
+            available_width: Maximum width in characters.
+
+        Returns:
+            Rich Panel containing the budget display.
+        """
+        # Check cache - return cached content if dimensions match and cache is valid
+        cache_key = (available_width, available_height)
+        if self._render_cache is not None and self._render_cache_key == cache_key:
+            return self._render_cache
+
+        # Render fresh content
+        panel = self._render_fresh(available_height, available_width)
+
+        # Cache the result
+        self._render_cache = panel
+        self._render_cache_key = cache_key
+
+        return panel
+
+    def _render_fresh(self, available_height: int, available_width: int) -> Panel:
+        """Render fresh budget panel content (uncached).
 
         Args:
             available_height: Maximum height in lines.
