@@ -908,7 +908,7 @@ class SubagentPlugin:
             path: Absolute path to the workspace root directory.
         """
         self._workspace_path = path
-        logger.info("SubagentPlugin.set_workspace_path: %s", path)
+        logger.debug("SubagentPlugin: workspace path set to %s", path)
 
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
