@@ -908,7 +908,7 @@ class SubagentPlugin:
             path: Absolute path to the workspace root directory.
         """
         self._workspace_path = path
-        logger.debug("SubagentPlugin: workspace path set to %s", path)
+        logger.info("SubagentPlugin.set_workspace_path: %s", path)
 
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
@@ -1588,6 +1588,13 @@ class SubagentPlugin:
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         parent_cwd = workspace_path or os.getcwd()
+
+        # Debug logging for workspace path tracing
+        registry_path = self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None
+        logger.info(
+            "_spawn_subagent workspace: self._workspace_path=%s, registry=%s, cwd=%s, using=%s",
+            self._workspace_path, registry_path, os.getcwd(), parent_cwd
+        )
 
         # Submit to thread pool (always async)
         self._executor.submit(
