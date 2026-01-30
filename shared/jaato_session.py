@@ -3627,8 +3627,9 @@ class JaatoSession:
             pending_tool_calls=pending_tool_calls,
         )
 
-        # Also emit instruction budget update for budget panel
-        self._emit_instruction_budget_update()
+        # Update conversation budget and emit for budget panel
+        # This ensures the budget snapshot includes current turn's conversation tokens
+        self._update_conversation_budget()
 
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""

@@ -357,8 +357,9 @@ class TestJaatoSessionTurnProgress:
             'total_tokens': 1000,
         })
 
-        # Mock _emit_instruction_budget_update to avoid side effects
-        session._emit_instruction_budget_update = MagicMock()
+        # Mock _update_conversation_budget to avoid side effects
+        # (it updates conversation tokens and emits instruction budget)
+        session._update_conversation_budget = MagicMock()
 
         turn_data = {'prompt': 800, 'output': 200, 'total': 1000}
         session._emit_turn_progress(turn_data, pending_tool_calls=3)
@@ -372,8 +373,8 @@ class TestJaatoSessionTurnProgress:
             pending_tool_calls=3,
         )
 
-        # Verify instruction budget update is also emitted for budget panel
-        session._emit_instruction_budget_update.assert_called_once()
+        # Verify conversation budget is updated (which also emits instruction budget)
+        session._update_conversation_budget.assert_called_once()
 
     def test_emit_turn_progress_no_hooks_no_error(self):
         """Test that _emit_turn_progress does nothing when no ui_hooks set."""
@@ -399,8 +400,8 @@ class TestJaatoSessionTurnProgress:
             'percent_used': 10.0,
         })
 
-        # Mock _emit_instruction_budget_update to avoid side effects
-        session._emit_instruction_budget_update = MagicMock()
+        # Mock _update_conversation_budget to avoid side effects
+        session._update_conversation_budget = MagicMock()
 
         # Empty turn_data - should use defaults of 0
         turn_data = {}
