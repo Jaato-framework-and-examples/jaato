@@ -1259,12 +1259,12 @@ class JaatoSession:
                     text_content += part.text
                 elif hasattr(part, 'tool_result') and part.tool_result:
                     # Tool results can be large
-                    result_text = str(part.tool_result.content) if part.tool_result.content else ''
+                    result_text = str(part.tool_result.result) if part.tool_result.result else ''
                     msg_tokens += self._count_tokens(result_text)
                     has_tool_result = True
                 elif hasattr(part, 'function_response') and part.function_response:
                     # Alternative tool result field
-                    result_text = str(part.function_response.content) if part.function_response.content else ''
+                    result_text = str(part.function_response.result) if part.function_response.result else ''
                     msg_tokens += self._count_tokens(result_text)
                     has_tool_result = True
 
