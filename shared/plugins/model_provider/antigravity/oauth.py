@@ -610,6 +610,10 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
     1. Project .jaato/ first (project-specific auth)
     2. Home ~/.jaato/ second (user-level default)
 
+    Uses JAATO_WORKSPACE_PATH env var if set (for subagents), otherwise Path.cwd().
+    This avoids race conditions when subagents run in thread pools with
+    process-wide CWD changes.
+
     Args:
         for_write: If True, returns the path to write to (prefers project dir
                    if it exists, otherwise home). If False, returns the first
@@ -618,7 +622,10 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
     Returns:
         Path to token storage file.
     """
-    project_path = Path.cwd() / ".jaato" / "antigravity_accounts.json"
+    # Use explicit workspace path if set (thread-safe for subagents)
+    # Falls back to CWD for main agent
+    workspace = os.environ.get("JAATO_WORKSPACE_PATH") or os.getcwd()
+    project_path = Path(workspace) / ".jaato" / "antigravity_accounts.json"
     home_path = Path.home() / ".jaato" / "antigravity_accounts.json"
 
     if for_write:
