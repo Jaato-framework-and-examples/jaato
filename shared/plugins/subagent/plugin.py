@@ -1650,9 +1650,12 @@ class SubagentPlugin:
                 )
 
         # Set workspace path for thread-safe token resolution
-        # os.chdir() is process-wide and racy, so we also set an env var that
-        # token storage functions can use deterministically
+        # os.chdir() is process-wide and racy, so we also set env vars that
+        # various components can use deterministically
+        # - JAATO_WORKSPACE_PATH: Used by OAuth token storage (github_models, anthropic, antigravity)
+        # - JAATO_WORKSPACE_ROOT: Used by tool plugins (file_edit, cli) for sandboxing
         os.environ["JAATO_WORKSPACE_PATH"] = workspace_path
+        os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
 
         # Change to parent's working directory so relative paths resolve correctly
         # This ensures trace logs, workspaceRoot, etc. work the same as parent
