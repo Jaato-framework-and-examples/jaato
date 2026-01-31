@@ -1279,17 +1279,17 @@ description: {description}
                         completions.append(CommandCompletion(name, desc))
                 return completions
 
-            # After source type, show destination options if user types --
-            last_arg = args[-1] if args else ""
-            if last_arg.startswith("--"):
-                prefix = last_arg[2:]
+            # Show destination options as last argument
+            last_arg = args[-1].lower() if args else ""
+            if last_arg in ("", "p", "pr", "pro", "proj", "proje", "projec", "project",
+                           "u", "us", "use", "user"):
                 options = [
-                    ("--project", "Save to .jaato/prompts/ (default)"),
-                    ("--user", "Save to ~/.jaato/prompts/"),
+                    ("project", "Save to .jaato/prompts/ (default)"),
+                    ("user", "Save to ~/.jaato/prompts/"),
                 ]
                 completions = []
                 for name, desc in options:
-                    if not prefix or name[2:].startswith(prefix):
+                    if not last_arg or name.startswith(last_arg):
                         completions.append(CommandCompletion(name, desc))
                 return completions
 
@@ -1331,7 +1331,7 @@ description: {description}
             prompt                              - List available prompts
             prompt <name> [args...]             - Use a prompt
             prompt fetch <type> <params...>     - Fetch prompts from external source
-            prompt fetch <type> <params...> --user  - Fetch to user directory
+            prompt fetch <type> <params...> user  - Fetch to user directory
 
         Returns:
             String with prompt content or listing.
@@ -1383,7 +1383,7 @@ description: {description}
             lines.append(f"  {name}{source_tag}")
             lines.append(f"    {info.description[:70]}")
         lines.append(f"\nUse: prompt <name> [args...]")
-        lines.append("     prompt fetch <type> <params...> [--user]")
+        lines.append("     prompt fetch <type> <params...> [user]")
         return "\n".join(lines)
 
     def _handle_fetch_subcommand(self, args: List[str]) -> str:
@@ -1393,17 +1393,17 @@ description: {description}
             args: Arguments after 'fetch', e.g., ['npx', 'molthub@latest', 'moltbook']
 
         Syntax:
-            prompt fetch <source_type> <source_params...> [--project|--user]
+            prompt fetch <source_type> <source_params...> [project|user]
 
         Examples:
             prompt fetch npx molthub@latest moltbook
             prompt fetch git https://github.com/user/prompts
             prompt fetch github user/prompts
             prompt fetch url https://example.com/review.md
-            prompt fetch npx some-package --user
+            prompt fetch npx some-package user
         """
         if not args:
-            return """Usage: prompt fetch <source_type> <source_params...> [--project|--user]
+            return """Usage: prompt fetch <source_type> <source_params...> [project|user]
 
 Source types:
   npx <package> [args...]   - Run npx command to fetch prompts
@@ -1411,22 +1411,22 @@ Source types:
   github <owner/repo>       - Fetch from GitHub (shorthand)
   url <url>                 - Fetch single prompt from URL
 
-Options:
-  --project   Save to .jaato/prompts/ (default)
-  --user      Save to ~/.jaato/prompts/
+Destination (optional, default: project):
+  project   Save to .jaato/prompts/
+  user      Save to ~/.jaato/prompts/
 
 Examples:
   prompt fetch npx molthub@latest moltbook
   prompt fetch github anthropics/prompt-library
-  prompt fetch url https://example.com/review.md --user"""
+  prompt fetch url https://example.com/review.md user"""
 
-        # Parse destination flag
+        # Parse destination - check if last arg is 'project' or 'user'
         destination = "project"
         source_params = []
         for arg in args[1:]:
-            if arg == "--user":
+            if arg.lower() == "user":
                 destination = "user"
-            elif arg == "--project":
+            elif arg.lower() == "project":
                 destination = "project"
             else:
                 source_params.append(arg)
