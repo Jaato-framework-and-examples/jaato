@@ -3065,7 +3065,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     load_dotenv(env_file)
 
     import asyncio
+    from pathlib import Path
     from ipc_client import IPCClient
+    from ipc_recovery import (
+        IPCRecoveryClient,
+        ConnectionState,
+        ConnectionStatus,
+        ReconnectingError,
+        ConnectionClosedError,
+    )
+    from client_config import get_recovery_config
     from server.events import (
         Event,
         EventType,
@@ -3129,11 +3138,91 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         server_formatted=True,
     )
 
-    # Create IPC client
-    client = IPCClient(
+    # Load recovery config
+    workspace_path = Path.cwd()
+    recovery_config = get_recovery_config(workspace_path)
+
+    # Connection status tracking for UI
+    connection_status_message: Optional[str] = None
+    is_reconnecting: bool = False  # Track if we're in a reconnection (to suppress init messages)
+    pending_history_request: bool = False  # Request history after reconnect completes
+
+    def on_connection_status(status: ConnectionStatus):
+        """Handle connection status changes from recovery client."""
+        nonlocal connection_status_message, is_reconnecting, pending_history_request
+
+        if status.state == ConnectionState.RECONNECTING:
+            is_reconnecting = True
+            if status.next_retry_in is not None:
+                msg = f"Connection lost. Reconnecting in {status.next_retry_in:.0f}s... (attempt {status.attempt}/{status.max_attempts})"
+            else:
+                msg = f"Reconnecting... (attempt {status.attempt}/{status.max_attempts})"
+            connection_status_message = msg
+            # Update display if available
+            try:
+                display.set_connection_status(msg, style="warning")
+            except Exception:
+                pass  # Display may not be ready yet
+
+        elif status.state == ConnectionState.CONNECTED:
+            # Note: We do NOT clear is_reconnecting here - it stays True to suppress
+            # init progress events until SessionInfoEvent arrives (which signals
+            # session attachment complete). The "Session restored!" message is also
+            # deferred to the SessionInfoEvent handler.
+            if is_reconnecting:
+                # Show "Reestablishing session..." while waiting for full restoration
+                connection_status_message = "Reestablishing session..."
+                try:
+                    display.set_connection_status("Reestablishing session...", style="info")
+                except Exception:
+                    pass
+            else:
+                # Initial connection - just clear the status
+                connection_status_message = None
+                try:
+                    display.set_connection_status(None)
+                except Exception:
+                    pass
+
+        elif status.state == ConnectionState.DISCONNECTED:
+            # Disconnected without reconnection (e.g., auto-reconnect disabled)
+            connection_status_message = status.message or "Disconnected"
+            try:
+                if status.message:
+                    display.add_system_message(status.message, style="system_warning")
+                display.set_connection_status("Disconnected", style="warning")
+            except Exception:
+                pass
+
+        elif status.state == ConnectionState.CLOSED:
+            msg = f"Connection lost permanently: {status.last_error or 'Max retries exceeded'}"
+            connection_status_message = msg
+            try:
+                display.add_system_message(msg, style="system_error_bold")
+                display.set_connection_status("Disconnected", style="error")
+            except Exception:
+                pass
+
+        # Display any additional message from the status
+        if status.message and status.state not in (ConnectionState.DISCONNECTED,):
+            try:
+                style = {
+                    "info": "system",
+                    "warning": "system_warning",
+                    "error": "system_error_bold",
+                }.get(status.message_level, "system")
+                display.add_system_message(status.message, style=style)
+            except Exception:
+                pass
+
+    # Create IPC client with recovery support
+    client: IPCRecoveryClient = IPCRecoveryClient(
         socket_path=socket_path,
+        config=recovery_config,
         auto_start=auto_start,
         env_file=env_file,
+        workspace_path=workspace_path,
+        on_status_change=on_connection_status,
     )
 
     # State tracking
@@ -3244,7 +3333,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal pending_workspace_mismatch_request
-        nonlocal model_running, should_exit
+        nonlocal model_running, should_exit, is_reconnecting
         nonlocal init_shown_header, init_current_step
 
         ipc_trace("Event handler starting")
@@ -3257,6 +3346,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 break
 
             if isinstance(event, InitProgressEvent):
+                # Suppress init progress messages during reconnection
+                # The session is being restored, not created fresh - don't spam the output
+                if is_reconnecting:
+                    continue
+
                 # Handle initialization progress with in-place updates
                 step_name = event.step
                 status = event.status
@@ -3322,7 +3416,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     icon_lines=event.icon_lines,
                 )
                 # Show welcome messages when main agent is created (now in correct buffer)
-                if event.agent_id == "main":
+                # Skip during reconnection - these are init-only messages
+                if event.agent_id == "main" and not is_reconnecting:
                     display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
@@ -3385,14 +3480,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, PermissionResolvedEvent):
-                pending_permission_request = None
-                display.set_waiting_for_channel_input(False)
-                # Update tool tree with permission result
-                # Route to the agent whose permission was resolved, not the selected agent
-                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
-                if buffer:
-                    buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
-                    display.refresh()
+                # Check if this is a "session restored" clear event
+                if event.method == "session_restored":
+                    # Only show message if we actually had a pending request
+                    if pending_permission_request:
+                        ipc_trace("Clearing stale permission request after session restore")
+                        display.set_waiting_for_channel_input(False)
+                        display.add_system_message(
+                            "Tool execution interrupted due to session recovery. "
+                            "Send a message to continue.",
+                            style="system_warning"
+                        )
+                    pending_permission_request = None
+                else:
+                    pending_permission_request = None
+                    display.set_waiting_for_channel_input(False)
+                    # Update tool tree with permission result
+                    # Route to the agent whose permission was resolved, not the selected agent
+                    buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
+                    if buffer:
+                        buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
+                        display.refresh()
 
             elif isinstance(event, ClarificationInputModeEvent):
                 # New unified flow: content already emitted via AgentOutputEvent,
@@ -3412,15 +3520,28 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, ClarificationResolvedEvent):
                 ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}, qa_pairs={len(event.qa_pairs)}")
-                # Update tool tree with resolution (same as direct mode)
-                # Route to the agent whose clarification was resolved, not the selected agent
-                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
-                if buffer:
-                    # Convert [[q, a], ...] back to [(q, a), ...] for compatibility
-                    qa_pairs = [(q, a) for q, a in event.qa_pairs] if event.qa_pairs else None
-                    buffer.set_tool_clarification_resolved(event.tool_name, qa_pairs)
-                    display.refresh()
-                pending_clarification_request = None
+                # Check if this is a "session restored" clear event (empty request_id and tool_name)
+                if not event.request_id and not event.tool_name:
+                    # Only show message if we actually had a pending request
+                    if pending_clarification_request:
+                        ipc_trace("Clearing stale clarification request after session restore")
+                        display.set_waiting_for_channel_input(False)
+                        display.add_system_message(
+                            "Tool execution interrupted due to session recovery. "
+                            "Send a message to continue.",
+                            style="system_warning"
+                        )
+                    pending_clarification_request = None
+                else:
+                    # Update tool tree with resolution (same as direct mode)
+                    # Route to the agent whose clarification was resolved, not the selected agent
+                    buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
+                    if buffer:
+                        # Convert [[q, a], ...] back to [(q, a), ...] for compatibility
+                        qa_pairs = [(q, a) for q, a in event.qa_pairs] if event.qa_pairs else None
+                        buffer.set_tool_clarification_resolved(event.tool_name, qa_pairs)
+                        display.refresh()
+                    pending_clarification_request = None
                 display.set_waiting_for_channel_input(False)
 
             elif isinstance(event, ReferenceSelectionRequestedEvent):
@@ -3443,8 +3564,21 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, ReferenceSelectionResolvedEvent):
                 ipc_trace(f"  ReferenceSelectionResolvedEvent: tool={event.tool_name}, selected={event.selected_ids}")
-                pending_reference_selection_request = None
-                display.set_waiting_for_channel_input(False)
+                # Check if this is a "session restored" clear event (empty request_id and tool_name)
+                if not event.request_id and not event.tool_name:
+                    # Only show message if we actually had a pending request
+                    if pending_reference_selection_request:
+                        ipc_trace("Clearing stale reference selection request after session restore")
+                        display.set_waiting_for_channel_input(False)
+                        display.add_system_message(
+                            "Tool execution interrupted due to session recovery. "
+                            "Send a message to continue.",
+                            style="system_warning"
+                        )
+                    pending_reference_selection_request = None
+                else:
+                    pending_reference_selection_request = None
+                    display.set_waiting_for_channel_input(False)
 
             elif isinstance(event, PlanUpdatedEvent):
                 # Update plan display - convert event steps to dict format expected by PlanPanel
@@ -3736,6 +3870,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_tools = event.tools
                 if event.models:
                     available_models = event.models
+
+                # Track session ID for recovery reattachment
+                if event.session_id:
+                    client.set_session_id(event.session_id)
+
+                # If we were reconnecting, session attachment is now complete
+                if is_reconnecting:
+                    is_reconnecting = False
+                    connection_status_message = None
+                    try:
+                        display.set_connection_status(None)  # Clear "Reestablishing session..."
+                        display.add_system_message("Session restored!", style="system_success")
+                    except Exception:
+                        pass
+
+                # Restore command history for prompt up/down arrow navigation
+                if event.user_inputs:
+                    for user_input in event.user_inputs:
+                        display.add_to_history(user_input)
+                    ipc_trace(f"  Restored {len(event.user_inputs)} inputs to prompt history")
+
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
                 # Update session bar with current session info
@@ -3908,17 +4063,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal model_running, should_exit
         pending_exit_confirmation = False
 
+        ipc_trace("Input handler starting")
+
         # Yield control to let handle_events() start listening before we trigger session init
         await asyncio.sleep(0)
 
+        ipc_trace("Input handler: requesting session")
         # Request session - new or default
-        if new_session:
-            await client.create_session()
-        else:
-            await client.get_default_session()
+        try:
+            if new_session:
+                await client.create_session()
+            else:
+                await client.get_default_session()
+            ipc_trace("Input handler: session requested")
+        except Exception as e:
+            ipc_trace(f"Input handler: session request failed: {e}")
+            raise
 
         # Request available commands for tab completion
+        ipc_trace("Input handler: requesting command list")
         await client.request_command_list()
+        ipc_trace("Input handler: command list requested")
 
         # Note: Session data (sessions, tools, models) is received via
         # SessionInfoEvent on connect - no separate request needed
@@ -4237,6 +4402,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             except asyncio.CancelledError:
                 break
+            except ReconnectingError:
+                display.add_system_message(
+                    "Cannot send message while reconnecting. Please wait...",
+                    style="system_warning"
+                )
+            except ConnectionClosedError:
+                display.add_system_message(
+                    "Connection is closed. Please restart the client.",
+                    style="system_error_bold"
+                )
             except Exception as e:
                 display.add_system_message(f"Error: {e}", style="system_error_bold")
 

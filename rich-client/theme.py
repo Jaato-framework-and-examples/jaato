@@ -288,6 +288,7 @@ DEFAULT_SEMANTIC_STYLES = {
     "status_bar_value": StyleSpec(fg="text", bg="surface", bold=True),
     "status_bar_separator": StyleSpec(fg="#555555", bg="surface"),
     "status_bar_warning": StyleSpec(fg="warning"),
+    "status_bar_error": StyleSpec(fg="error"),
 
     # Output panel
     "output_panel_bg": StyleSpec(bg="background"),
@@ -741,6 +742,7 @@ class ThemeConfig:
             "status-bar.value": "status_bar_value",
             "status-bar.separator": "status_bar_separator",
             "status-bar.warning": "status_bar_warning",
+            "status-bar.error": "status_bar_error",
             # Output panel
             "output-panel": "output_panel_bg",
             # Plan symbols

@@ -532,6 +532,10 @@ class PTDisplay:
         self._status_message: Optional[str] = None
         self._status_message_expires: float = 0.0
 
+        # Persistent connection status (for IPC reconnection state)
+        self._connection_status: Optional[str] = None
+        self._connection_status_style: str = "warning"  # "warning" or "error"
+
         # Initialization progress tracking
         self._init_progress_lines: List[Tuple[str, str]] = []  # [(line, style), ...]
 
@@ -789,6 +793,15 @@ class PTDisplay:
         elif self._status_message:
             # Message expired, clear it
             self._status_message = None
+
+        # Check for persistent connection status (IPC reconnection)
+        if self._connection_status:
+            style_class = "class:status-bar.warning" if self._connection_status_style == "warning" else "class:status-bar.error"
+            return [
+                ("class:status-bar.label", " "),
+                (style_class + " bold", self._connection_status),
+                ("class:status-bar", " "),
+            ]
 
         provider = self._model_provider or "—"
         model = self._model_name or "—"
@@ -1063,6 +1076,25 @@ class PTDisplay:
         """
         self._status_message = message
         self._status_message_expires = time.time() + timeout
+        if self._app:
+            self._app.invalidate()
+
+    def set_connection_status(
+        self,
+        message: Optional[str],
+        style: str = "warning",
+    ) -> None:
+        """Set persistent connection status message.
+
+        Unlike set_status_message, this persists until explicitly cleared.
+        Used to show IPC reconnection status.
+
+        Args:
+            message: The message to display, or None to clear.
+            style: Style to use ("warning" for reconnecting, "error" for failed).
+        """
+        self._connection_status = message
+        self._connection_status_style = style
         if self._app:
             self._app.invalidate()
 

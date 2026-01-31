@@ -209,14 +209,44 @@ class IPCClient:
         return self._connected and self._writer is not None
 
     @property
+    def connection_state(self) -> str:
+        """Get detailed connection state.
+
+        Returns:
+            One of: "connected", "closing", "disconnected"
+        """
+        if self._connected and self._writer:
+            return "connected"
+        elif self._writer:
+            return "closing"
+        else:
+            return "disconnected"
+
+    @property
     def session_id(self) -> Optional[str]:
         """Get the current session ID."""
         return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: Optional[str]) -> None:
+        """Set the session ID (used by recovery client)."""
+        self._session_id = value
 
     @property
     def client_id(self) -> Optional[str]:
         """Get the client ID assigned by server."""
         return self._client_id
+
+    def supports_reconnection(self) -> bool:
+        """Check if this client supports reconnection.
+
+        Returns True if we have enough state to attempt reconnection
+        (i.e., we have a session ID to reattach to).
+
+        Returns:
+            True if reconnection is possible.
+        """
+        return self._session_id is not None
 
     def set_event_callback(self, callback: Callable[[Event], None]) -> None:
         """Set callback for received events.
@@ -709,6 +739,14 @@ class IPCClient:
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.
 
+        Yields events from the server until the connection is closed or
+        an error occurs. When the connection is lost, the iterator exits
+        cleanly (stops yielding) rather than raising an exception.
+
+        Connection loss can be detected by:
+        1. The iterator stopping (connection closed cleanly)
+        2. Receiving an ErrorEvent (error during read)
+
         Yields:
             Events from the server.
         """
@@ -717,7 +755,9 @@ class IPCClient:
             try:
                 message = await self._read_message()
                 if message is None:
-                    logger.debug("events(): received None message, breaking")
+                    # Connection closed cleanly (server shutdown, network loss)
+                    logger.debug("events(): connection closed (received None)")
+                    self._connected = False
                     break
 
                 event = deserialize_event(message)
@@ -729,9 +769,22 @@ class IPCClient:
 
                 yield event
 
+            except asyncio.IncompleteReadError:
+                # Connection lost mid-message
+                logger.debug("events(): incomplete read, connection lost")
+                self._connected = False
+                break
+
+            except ConnectionResetError:
+                # Connection reset by peer
+                logger.debug("events(): connection reset by peer")
+                self._connected = False
+                break
+
             except asyncio.CancelledError:
                 logger.debug("events(): cancelled")
-                break
+                raise
+
             except Exception as e:
                 logger.error(f"events(): error: {e}")
                 yield ErrorEvent(

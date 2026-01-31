@@ -11,8 +11,12 @@ Usage:
     # Direct mode (non-IPC)
     backend = DirectBackend(jaato_client)
 
-    # IPC mode
-    backend = IPCBackend(ipc_client)
+    # IPC mode (with automatic recovery)
+    backend = IPCBackend(
+        ipc_client,
+        workspace_path=Path.cwd(),
+        on_connection_status=lambda status: print(status.state),
+    )
 
     # RichClient uses backend uniformly (async)
     await backend.send_message("Hello")
@@ -22,7 +26,11 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ipc_recovery import ConnectionStatus, StatusCallback
 
 logger = logging.getLogger(__name__)
 
@@ -450,18 +458,38 @@ class DirectBackend(Backend):
 
 
 class IPCBackend(Backend):
-    """Backend that wraps an IPCClient for IPC mode.
+    """Backend that wraps an IPCClient or IPCRecoveryClient for IPC mode.
 
     Uses native async event-based communication with the server.
+    When use_recovery=True (default), wraps the client with IPCRecoveryClient
+    for automatic reconnection on connection loss.
     """
 
-    def __init__(self, ipc_client: Any):
+    def __init__(
+        self,
+        ipc_client: Any,
+        use_recovery: bool = True,
+        workspace_path: Optional[Path] = None,
+        on_connection_status: Optional["StatusCallback"] = None,
+    ):
         """Initialize with an IPCClient instance.
 
         Args:
             ipc_client: The IPCClient to wrap.
+            use_recovery: Whether to use automatic recovery (default: True).
+                When True, wraps the client with IPCRecoveryClient.
+            workspace_path: Workspace path for loading recovery config.
+                Only used when use_recovery=True.
+            on_connection_status: Callback for connection status changes.
+                Only used when use_recovery=True.
         """
-        self._client = ipc_client
+        self._raw_client = ipc_client
+        self._client = ipc_client  # May be replaced with recovery client
+        self._use_recovery = use_recovery
+        self._workspace_path = workspace_path
+        self._on_connection_status = on_connection_status
+        self._recovery_client: Optional[Any] = None  # IPCRecoveryClient if used
+
         self._model_name = ""
         self._provider_name = ""
         self._is_processing = False
@@ -489,7 +517,27 @@ class IPCBackend(Backend):
 
     @property
     def is_connected(self) -> bool:
+        if self._recovery_client:
+            return self._recovery_client.is_connected
         return self._client.is_connected if self._client else False
+
+    @property
+    def is_reconnecting(self) -> bool:
+        """Check if the client is currently reconnecting."""
+        if self._recovery_client:
+            return self._recovery_client.is_reconnecting
+        return False
+
+    @property
+    def connection_status(self) -> Optional["ConnectionStatus"]:
+        """Get current connection status for UI display.
+
+        Returns:
+            ConnectionStatus if using recovery client, None otherwise.
+        """
+        if self._recovery_client:
+            return self._recovery_client.get_status()
+        return None
 
     def update_model_info(self, provider: str, model: str) -> None:
         """Update model info from server event."""
@@ -525,10 +573,28 @@ class IPCBackend(Backend):
         location: Optional[str] = None,
         model: Optional[str] = None,
     ) -> None:
-        await self._client.connect()
+        if self._use_recovery:
+            # Import here to avoid circular imports
+            from ipc_recovery import IPCRecoveryClient
+
+            # Create recovery client wrapping the raw client's socket path
+            self._recovery_client = IPCRecoveryClient(
+                socket_path=self._raw_client.socket_path,
+                auto_start=self._raw_client.auto_start,
+                env_file=self._raw_client.env_file,
+                workspace_path=self._workspace_path,
+                on_status_change=self._on_connection_status,
+            )
+            self._client = self._recovery_client
+            await self._recovery_client.connect()
+        else:
+            await self._client.connect()
 
     async def disconnect(self) -> None:
-        await self._client.disconnect()
+        if self._recovery_client:
+            await self._recovery_client.close()
+        else:
+            await self._client.disconnect()
 
     async def send_message(
         self,
@@ -614,7 +680,32 @@ class IPCBackend(Backend):
         return None  # IPC mode doesn't have direct session access
 
     def get_client(self) -> Optional[Any]:
+        """Get the underlying client.
+
+        Returns:
+            IPCRecoveryClient if recovery is enabled, IPCClient otherwise.
+        """
         return self._client
+
+    def get_raw_client(self) -> Optional[Any]:
+        """Get the raw IPCClient (without recovery wrapper).
+
+        Returns:
+            The original IPCClient instance.
+        """
+        return self._raw_client
+
+    def set_session_id(self, session_id: str) -> None:
+        """Set the session ID for recovery reattachment.
+
+        Should be called when a session is attached so the recovery client
+        knows which session to reattach to after reconnection.
+
+        Args:
+            session_id: The session ID to track.
+        """
+        if self._recovery_client:
+            self._recovery_client.set_session_id(session_id)
 
     def set_retry_callback(self, callback: Optional[Callable]) -> None:
         pass  # IPC mode handles retries via events
