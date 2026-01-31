@@ -1473,9 +1473,9 @@ class PTDisplay:
             self._budget_panel.cycle_agent(forward=False)
             self._app.invalidate()
 
-        @kb.add("escape", filter=Condition(lambda: self._budget_captures_keys()))
+        @kb.add("escape", "left", filter=Condition(lambda: self._budget_captures_keys()))
         def handle_budget_escape(event):
-            """Handle ESC in budget panel - drill up or close."""
+            """Handle ESC+left in budget panel - drill up or close."""
             if not self._budget_panel.drill_up():
                 # Already at top level, close the panel
                 self._budget_panel.hide()

@@ -420,7 +420,7 @@ class BudgetPanel:
         hint = Text("↑↓ navigate  ", style="dim")
         hint.append("Enter", style="dim bold")
         hint.append(" drill down  ", style="dim")
-        hint.append("ESC", style="dim bold")
+        hint.append("Esc←", style="dim bold")
         hint.append(" close", style="dim")
         table.add_row(hint, "", "", "")
 
@@ -496,7 +496,7 @@ class BudgetPanel:
         hint = Text("Sorted by token count (0-token entries hidden)  ", style="dim italic")
         table.add_row(hint, "", "", "")
         nav_hint = Text("↑↓ navigate  ", style="dim")
-        nav_hint.append("ESC", style="dim bold")
+        nav_hint.append("Esc←", style="dim bold")
         nav_hint.append(" back", style="dim")
         table.add_row(nav_hint, "", "", "")
 
