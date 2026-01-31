@@ -176,6 +176,27 @@ class TableFormatterPlugin:
         """Execution priority (25 = structural formatting, after diff)."""
         return self._priority
 
+    def _looks_like_table_content(self, text: str) -> bool:
+        """Check if text could potentially be part of a table.
+
+        Used during streaming to determine whether to buffer partial lines.
+        Only buffers when content has table-like characteristics to avoid
+        blocking regular text output during streaming.
+
+        Args:
+            text: Text to check (may be incomplete line).
+
+        Returns:
+            True if text contains table-like patterns.
+        """
+        # Check for pipe character (markdown table cells)
+        if "|" in text:
+            return True
+        # Check for ASCII grid table border start
+        if text.lstrip().startswith("+"):
+            return True
+        return False
+
     def process_chunk(self, chunk: str) -> Iterator[str]:
         """Process a chunk, buffering table lines for complete rendering.
 
@@ -183,7 +204,9 @@ class TableFormatterPlugin:
         the table is complete (detected by a non-table line or flush).
 
         Handles partial lines from streaming by buffering until a
-        complete line (ending with newline) is received.
+        complete line (ending with newline) is received - but ONLY
+        when the content looks like potential table content. Regular
+        text is passed through immediately to support streaming output.
 
         Args:
             chunk: Incoming text chunk.
@@ -195,18 +218,33 @@ class TableFormatterPlugin:
         text = self._line_buffer + chunk
         self._line_buffer = ""
 
+        # Track non-table incomplete content to yield after complete lines
+        trailing_non_table: Optional[str] = None
+
         # Check if the last part is incomplete (no trailing newline)
         if text and not text.endswith("\n"):
             # Find the last newline
             last_newline = text.rfind("\n")
             if last_newline == -1:
-                # No complete lines yet, buffer everything
-                self._line_buffer = text
-                return
+                # No complete lines yet
+                # Only buffer if it looks like potential table content
+                if self._in_table or self._looks_like_table_content(text):
+                    self._line_buffer = text
+                    return
+                else:
+                    # Pass through non-table content immediately for streaming
+                    yield text
+                    return
             else:
-                # Buffer the incomplete part, process complete lines
-                self._line_buffer = text[last_newline + 1:]
+                # We have some complete lines and an incomplete part
+                incomplete_part = text[last_newline + 1:]
                 text = text[:last_newline + 1]
+                # Only buffer incomplete part if it looks like table content
+                if self._in_table or self._looks_like_table_content(incomplete_part):
+                    self._line_buffer = incomplete_part
+                else:
+                    # Yield after processing complete lines
+                    trailing_non_table = incomplete_part
 
         # Process complete lines
         lines = text.split("\n")
@@ -233,6 +271,10 @@ class TableFormatterPlugin:
 
                 # Pass through non-table content with newline
                 yield line + "\n"
+
+        # Yield any non-table incomplete content that wasn't buffered
+        if trailing_non_table:
+            yield trailing_non_table
 
     def _classify_line(self, line: str) -> Optional[str]:
         """Classify a line as table content or not.
