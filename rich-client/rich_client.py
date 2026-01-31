@@ -3065,7 +3065,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     load_dotenv(env_file)
 
     import asyncio
+    from pathlib import Path
     from ipc_client import IPCClient
+    from ipc_recovery import IPCRecoveryClient, ConnectionState, ConnectionStatus
+    from client_config import get_recovery_config
     from server.events import (
         Event,
         EventType,
@@ -3129,11 +3132,56 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         server_formatted=True,
     )
 
-    # Create IPC client
-    client = IPCClient(
+    # Load recovery config
+    workspace_path = Path.cwd()
+    recovery_config = get_recovery_config(workspace_path)
+
+    # Connection status tracking for UI
+    connection_status_message: Optional[str] = None
+
+    def on_connection_status(status: ConnectionStatus):
+        """Handle connection status changes from recovery client."""
+        nonlocal connection_status_message
+
+        if status.state == ConnectionState.RECONNECTING:
+            if status.next_retry_in is not None:
+                msg = f"Connection lost. Reconnecting in {status.next_retry_in:.0f}s... (attempt {status.attempt}/{status.max_attempts})"
+            else:
+                msg = f"Reconnecting... (attempt {status.attempt}/{status.max_attempts})"
+            connection_status_message = msg
+            # Update display if available
+            try:
+                display.set_connection_status(msg, style="warning")
+            except Exception:
+                pass  # Display may not be ready yet
+
+        elif status.state == ConnectionState.CONNECTED:
+            connection_status_message = None
+            if status.attempt > 0:
+                # This was a reconnection
+                try:
+                    display.add_system_message("Connection restored!", style="system_success")
+                    display.set_connection_status(None)
+                except Exception:
+                    pass
+
+        elif status.state == ConnectionState.CLOSED:
+            msg = f"Connection lost permanently: {status.last_error or 'Max retries exceeded'}"
+            connection_status_message = msg
+            try:
+                display.add_system_message(msg, style="system_error_bold")
+                display.set_connection_status("Disconnected", style="error")
+            except Exception:
+                pass
+
+    # Create IPC client with recovery support
+    client: IPCRecoveryClient = IPCRecoveryClient(
         socket_path=socket_path,
+        config=recovery_config,
         auto_start=auto_start,
         env_file=env_file,
+        workspace_path=workspace_path,
+        on_status_change=on_connection_status,
     )
 
     # State tracking
@@ -3736,6 +3784,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_tools = event.tools
                 if event.models:
                     available_models = event.models
+
+                # Track session ID for recovery reattachment
+                if event.session_id:
+                    client.set_session_id(event.session_id)
+
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
                 # Update session bar with current session info
