@@ -1,0 +1,29 @@
+{
+  "_comment": "Jaato rich client configuration",
+  "_docs": "Copy this file to .jaato/client.json (project) or ~/.jaato/client.json (user)",
+
+  "recovery": {
+    "_comment": "IPC connection recovery settings - used when server becomes unavailable",
+
+    "enabled": true,
+    "_enabled_comment": "Enable automatic reconnection when server drops (default: true)",
+
+    "max_attempts": 10,
+    "_max_attempts_comment": "Maximum reconnection attempts before giving up (default: 10)",
+
+    "base_delay": 1.0,
+    "_base_delay_comment": "Initial backoff delay in seconds (default: 1.0)",
+
+    "max_delay": 60.0,
+    "_max_delay_comment": "Maximum backoff delay in seconds (default: 60.0)",
+
+    "jitter_factor": 0.3,
+    "_jitter_factor_comment": "Random jitter range, 0.3 = ±30% variation (default: 0.3)",
+
+    "connection_timeout": 5.0,
+    "_connection_timeout_comment": "Timeout for each connection attempt in seconds (default: 5.0)",
+
+    "reattach_session": true,
+    "_reattach_session_comment": "Auto-reattach to previous session after reconnect (default: true)"
+  }
+}

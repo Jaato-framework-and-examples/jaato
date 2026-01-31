@@ -385,7 +385,8 @@ class JaatoServer:
     def emit_current_state(
         self,
         emit_fn: Optional[EventCallback] = None,
-        skip_session_info: bool = False
+        skip_session_info: bool = False,
+        clear_stale_pending_requests: bool = False
     ) -> None:
         """Emit current agent state to a specific client or all clients.
 
@@ -396,6 +397,9 @@ class JaatoServer:
             emit_fn: Optional callback to emit to a specific client.
                      If None, uses the default event callback (broadcast).
             skip_session_info: If True, skip emitting SessionInfoEvent (caller will send it).
+            clear_stale_pending_requests: If True, emit "resolved" events for permission/
+                clarification if no request is pending on the server. This clears stale
+                client state after session recovery.
         """
         logger.info(f"emit_current_state called, emit_fn={emit_fn is not None}, agents={list(self._agents.keys())}")
         emit = emit_fn or self._on_event
@@ -441,6 +445,12 @@ class JaatoServer:
         # This handles subagents that were restored from persistence but not yet
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
         self._emit_subagent_state(emit)
+
+        # Clear stale pending requests on client if requested
+        # This is used after session recovery when the server has no pending requests
+        # but the client might still have stale UI state from before the crash
+        if clear_stale_pending_requests:
+            self._emit_clear_stale_requests(emit)
 
     def _emit_subagent_state(self, emit: EventCallback) -> None:
         """Emit state for subagents from SubagentPlugin._active_sessions.
@@ -501,6 +511,49 @@ class JaatoServer:
                         agent_id=agent_id,
                         budget_snapshot=session.instruction_budget.snapshot(),
                     ))
+
+    def _emit_clear_stale_requests(self, emit: EventCallback) -> None:
+        """Emit "resolved" events to clear stale pending requests on clients.
+
+        After session recovery, the client might still have UI state for a pending
+        permission or clarification request that no longer exists on the server.
+        This method emits resolved events with method="session_restored" to tell
+        clients to clear their stale state.
+
+        Args:
+            emit: Event callback to use for emission.
+        """
+        # If no permission request is pending on server, emit a clear event
+        # The client will ignore this if it has no pending request
+        if not self._pending_permission_request_id:
+            emit(PermissionResolvedEvent(
+                agent_id="main",
+                request_id="",  # Empty - client clears any pending request
+                tool_name="",
+                granted=False,
+                method="session_restored",  # Special method indicating recovery
+            ))
+            logger.debug("Emitted PermissionResolvedEvent to clear stale client state")
+
+        # Same for clarification requests
+        if not self._pending_clarification_request_id:
+            emit(ClarificationResolvedEvent(
+                agent_id="main",
+                request_id="",
+                tool_name="",
+                qa_pairs=[],
+            ))
+            logger.debug("Emitted ClarificationResolvedEvent to clear stale client state")
+
+        # Same for reference selection requests
+        if not self._pending_reference_selection_request_id:
+            emit(ReferenceSelectionResolvedEvent(
+                agent_id="main",
+                request_id="",
+                tool_name="",
+                selected_ids=[],
+            ))
+            logger.debug("Emitted ReferenceSelectionResolvedEvent to clear stale client state")
 
     # =========================================================================
     # Initialization

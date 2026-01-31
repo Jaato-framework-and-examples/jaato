@@ -49,6 +49,12 @@ from .events import (
     SessionDescriptionUpdatedEvent,
     ContextUpdatedEvent,
     AgentCreatedEvent,
+    InstructionBudgetEvent,
+    InterruptedTurnRecoveredEvent,
+    ToolCallStartEvent,
+    ToolCallEndEvent,
+    TurnCompletedEvent,
+    AgentStatusChangedEvent,
 )
 
 
@@ -84,6 +90,8 @@ class Session:
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
     workspace_path: Optional[str] = None  # Client's working directory
+    user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
+    interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
 
 
 class SessionManager:
@@ -183,6 +191,9 @@ class SessionManager:
                         session.is_dirty = True
                         logger.debug(f"Updated session {session_id} description: {event.description}")
 
+                # Handle turn tracking for interrupted tool recovery
+                self._handle_turn_tracking_event(session, event)
+
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
 
@@ -255,6 +266,78 @@ class SessionManager:
             server.workspace_path = config['working_dir']
             logger.debug(f"Applied workspace_path={config['working_dir']} to server for client {client_id}")
 
+    def _handle_turn_tracking_event(self, session: Session, event: Event) -> None:
+        """Handle events for turn tracking (interrupted tool recovery).
+
+        Tracks tool execution state so that if the server crashes during tool
+        execution, we can recover by injecting synthetic error results.
+
+        Args:
+            session: The session being tracked.
+            event: The event to process.
+        """
+        # Track when agent becomes active (turn starts)
+        if isinstance(event, AgentStatusChangedEvent):
+            if event.status == "active" and event.agent_id == "main":
+                # Main agent starting a turn - initialize tracking
+                # Note: We don't have user_prompt here, but we can still track tool calls
+                if not session.interrupted_turn:
+                    session.interrupted_turn = {
+                        "agent_id": event.agent_id,
+                        "pending_tool_calls": [],
+                        "user_prompt": "",  # Not available at this point
+                        "started_at": datetime.utcnow().isoformat(),
+                    }
+                    session.is_dirty = True
+                    logger.debug(f"Started turn tracking for session {session.session_id}")
+            elif event.status == "done":
+                # Agent finished - clear tracking
+                if session.interrupted_turn:
+                    session.interrupted_turn = None
+                    session.is_dirty = True
+                    logger.debug(f"Cleared turn tracking for session {session.session_id} (agent done)")
+
+        # Track tool calls as they start
+        elif isinstance(event, ToolCallStartEvent):
+            if session.interrupted_turn and event.agent_id == session.interrupted_turn.get("agent_id"):
+                # Add this tool call to pending list
+                pending = session.interrupted_turn.get("pending_tool_calls", [])
+                pending.append({
+                    "id": event.call_id or "",
+                    "name": event.tool_name,
+                    "args": event.tool_args,
+                })
+                session.interrupted_turn["pending_tool_calls"] = pending
+                session.is_dirty = True
+                # Incremental save to persist pending tool calls before execution
+                self._save_session(session)
+                logger.debug(
+                    f"Updated pending tool calls for session {session.session_id}: "
+                    f"{len(pending)} call(s), saving incrementally"
+                )
+
+        # Remove completed tool calls from pending list
+        elif isinstance(event, ToolCallEndEvent):
+            if session.interrupted_turn and event.agent_id == session.interrupted_turn.get("agent_id"):
+                pending = session.interrupted_turn.get("pending_tool_calls", [])
+                # Remove the completed tool call by matching call_id
+                original_count = len(pending)
+                pending = [p for p in pending if p.get("id") != event.call_id]
+                if len(pending) < original_count:
+                    session.interrupted_turn["pending_tool_calls"] = pending
+                    session.is_dirty = True
+                    logger.debug(
+                        f"Tool {event.tool_name} completed, {len(pending)} pending call(s) remain "
+                        f"for session {session.session_id}"
+                    )
+
+        # Clear tracking when turn completes
+        elif isinstance(event, TurnCompletedEvent):
+            if session.interrupted_turn:
+                session.interrupted_turn = None
+                session.is_dirty = True
+                logger.debug(f"Cleared turn tracking for session {session.session_id} (turn completed)")
+
     # =========================================================================
     # Session Lifecycle
     # =========================================================================
@@ -322,6 +405,10 @@ class SessionManager:
 
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
+
+        # Configure TODO plugin with session-scoped storage
+        session_dir = pathlib.Path(self._session_config.storage_path) / session_id
+        self._configure_todo_storage(server, session_dir)
 
         # Apply client-specific config (e.g., terminal_width)
         self._apply_client_config_to_server(client_id, server)
@@ -503,6 +590,14 @@ class SessionManager:
                 lambda e: self._emit_to_client(client_id, e),
                 skip_session_info=True
             )
+        else:
+            # Session was loaded from disk - clear any stale pending requests
+            # the client might have from before the session was saved/restored
+            session.server.emit_current_state(
+                lambda e: self._emit_to_client(client_id, e),
+                skip_session_info=True,
+                clear_stale_pending_requests=True
+            )
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
@@ -592,6 +687,10 @@ class SessionManager:
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
+        # Configure TODO plugin with session-scoped storage
+        session_dir = pathlib.Path(self._session_config.storage_path) / session_id
+        self._configure_todo_storage(server, session_dir)
+
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
             server._jaato.reset_session(state.history)
@@ -626,6 +725,19 @@ class SessionManager:
                     ))
                     logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
 
+        # Restore conversation budget if present (other budget sources are
+        # automatically populated during session recreation)
+        if state.budget_state and server._jaato:
+            jaato_session = server._jaato.get_session()
+            if jaato_session and jaato_session.instruction_budget:
+                jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)
+                logger.debug(f"Restored conversation budget for session {session_id}")
+                # Emit budget event so clients show correct budget
+                server.emit(InstructionBudgetEvent(
+                    agent_id=jaato_session.agent_id,
+                    budget_snapshot=jaato_session.instruction_budget.snapshot(),
+                ))
+
         # Restore subagent state if present in metadata
         if state.metadata.get('subagents') and server._jaato:
             self._restore_subagent_states(
@@ -634,6 +746,20 @@ class SessionManager:
                 server
             )
 
+        # Restore TODO plugin state (agent-plan mapping, blocked steps)
+        self._load_todo_state(server, session_dir)
+
+        # Check for and recover from interrupted turn
+        recovered_count = 0
+        if state.interrupted_turn:
+            recovered_count = self._recover_interrupted_turn(
+                session_id,
+                state.interrupted_turn,
+                server
+            )
+            if recovered_count > 0:
+                logger.info(f"Recovered {recovered_count} interrupted tool calls for session {session_id}")
+
         session = Session(
             session_id=session_id,
             name=state.description or f"Session {session_id}",
@@ -641,8 +767,9 @@ class SessionManager:
             created_at=state.created_at.isoformat(),
             last_activity=state.updated_at.isoformat(),
             description=state.description,
-            is_dirty=False,
+            is_dirty=recovered_count > 0,  # Mark dirty if recovery happened
             workspace_path=state.workspace_path,
+            user_inputs=state.user_inputs or [],  # Command history for prompt restoration
         )
 
         logger.info(f"Loaded session from disk: {session_id}")
@@ -737,6 +864,118 @@ class SessionManager:
         logger.info(f"Restored {restored} subagents for session {session_id}")
         return restored
 
+    def _recover_interrupted_turn(
+        self,
+        session_id: str,
+        interrupted_state: Dict[str, Any],
+        server: JaatoServer
+    ) -> int:
+        """Recover from an interrupted turn by injecting synthetic tool results.
+
+        When a session is loaded with pending tool calls (from an interrupted turn),
+        this method injects synthetic error results for each pending call. This
+        completes the function_call/response pairs so the model sees what happened
+        and can decide whether to retry.
+
+        Args:
+            session_id: The session ID being recovered.
+            interrupted_state: The interrupted_turn dict from SessionState containing:
+                - agent_id: Which agent was executing
+                - pending_tool_calls: List of {id, name, args}
+                - user_prompt: Original user prompt
+                - started_at: When the turn started
+            server: The JaatoServer to inject results into.
+
+        Returns:
+            Number of pending tool calls recovered.
+        """
+        from shared.plugins.model_provider.types import Part, Message, Role, ToolResult
+
+        pending_calls = interrupted_state.get('pending_tool_calls', [])
+        if not pending_calls:
+            logger.debug(f"No pending tool calls to recover for session {session_id}")
+            return 0
+
+        agent_id = interrupted_state.get('agent_id', 'main')
+
+        # Build synthetic tool results for each pending call
+        synthetic_parts = []
+        for call in pending_calls:
+            call_id = call.get('id', '')
+            tool_name = call.get('name', 'unknown')
+
+            synthetic_result = ToolResult(
+                call_id=call_id,
+                name=tool_name,
+                result={
+                    "error": "tool_interrupted",
+                    "reason": "server_restart",
+                    "message": f"Tool '{tool_name}' was interrupted by server restart. "
+                               "You may retry this operation if appropriate."
+                },
+                is_error=True
+            )
+            synthetic_parts.append(Part.from_function_response(synthetic_result))
+
+        # Create a TOOL message with all synthetic results
+        synthetic_message = Message(role=Role.TOOL, parts=synthetic_parts)
+
+        # Inject into history based on which agent was executing
+        if agent_id == 'main':
+            if server._jaato:
+                jaato_session = server._jaato.get_session()
+                if jaato_session:
+                    # Append the synthetic tool message to history using proper API
+                    current_history = jaato_session.get_history()
+                    current_history.append(synthetic_message)
+                    jaato_session.reset_session(current_history)
+                    logger.info(
+                        f"Recovered {len(pending_calls)} interrupted tool call(s) "
+                        f"for main agent in session {session_id}"
+                    )
+        else:
+            # Subagent recovery - find the subagent session
+            if server.registry:
+                subagent_plugin = server.registry.get_plugin("subagent")
+                if subagent_plugin and hasattr(subagent_plugin, '_active_sessions'):
+                    session_info = subagent_plugin._active_sessions.get(agent_id)
+                    if session_info:
+                        subagent_session = session_info.get('session')
+                        if subagent_session:
+                            # Append the synthetic tool message to history using proper API
+                            current_history = subagent_session.get_history()
+                            current_history.append(synthetic_message)
+                            subagent_session.reset_session(current_history)
+                            logger.info(
+                                f"Recovered {len(pending_calls)} interrupted tool call(s) "
+                                f"for subagent {agent_id} in session {session_id}"
+                            )
+
+        # Emit recovery event so clients know what happened
+        server.emit(InterruptedTurnRecoveredEvent(
+            session_id=session_id,
+            agent_id=agent_id,
+            recovered_calls=len(pending_calls),
+            action_taken="synthetic_error",
+        ))
+
+        # Also emit a system message for user visibility
+        tool_names = [call.get('name', 'unknown') for call in pending_calls]
+        server.emit(SystemMessageEvent(
+            message=f"Recovered from interrupted turn: {len(pending_calls)} tool call(s) "
+                    f"({', '.join(tool_names)}) were interrupted by server restart.",
+            style="warning",
+        ))
+
+        # Signal that the interrupted turn is now complete (agent is done)
+        # This tells the client to stop showing the "thinking" spinner
+        server.emit(AgentStatusChangedEvent(
+            agent_id=agent_id,
+            status="done",
+        ))
+
+        return len(pending_calls)
+
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
 
@@ -747,8 +986,11 @@ class SessionManager:
             True if saved successfully.
         """
         try:
-            # Get history from server
-            history = session.server.get_history() if session.server else []
+            # Get history directly from JaatoClient to ensure we capture
+            # in-progress turns (the agent state cache is only updated at turn end)
+            history = []
+            if session.server and session.server._jaato:
+                history = session.server._jaato.get_history()
             turn_accounting = []
 
             if session.server and "main" in session.server._agents:
@@ -770,6 +1012,19 @@ class SessionManager:
                             subagent_registry.get('agents', [])
                         )
 
+            # Save TODO plugin state
+            session_dir = pathlib.Path(self._session_config.storage_path) / session.session_id
+            if session.server:
+                self._save_todo_state(session.server, session_dir)
+
+            # Get conversation budget for persistence (other budget sources are
+            # automatically recreated when the session is restored)
+            budget_state = None
+            if session.server and session.server._jaato:
+                jaato_session = session.server._jaato.get_session()
+                if jaato_session and jaato_session.instruction_budget:
+                    budget_state = jaato_session.instruction_budget.get_conversation_snapshot()
+
             # Create SessionState
             state = SessionState(
                 session_id=session.session_id,
@@ -779,9 +1034,12 @@ class SessionManager:
                 description=session.description or session.name,
                 turn_count=len(history) // 2,  # Approximate
                 turn_accounting=turn_accounting,
+                user_inputs=session.user_inputs,  # Command history for prompt restoration
                 model=session.server.model_name if session.server else None,
                 workspace_path=session.workspace_path,
                 metadata=subagent_metadata,
+                budget_state=budget_state,
+                interrupted_turn=session.interrupted_turn,  # For recovery on restart
             )
 
             self._session_plugin.save(state)
@@ -793,6 +1051,86 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to save session {session.session_id}: {e}")
             return False
+
+    def _get_todo_plugin(self, server: JaatoServer) -> Optional[Any]:
+        """Get the TODO plugin from a server's registry.
+
+        Args:
+            server: The JaatoServer instance.
+
+        Returns:
+            The TodoPlugin instance, or None if not available.
+        """
+        if not server or not server.registry:
+            return None
+        return server.registry.get_plugin("todo")
+
+    def _configure_todo_storage(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+        """Configure TODO plugin with session-scoped file storage.
+
+        Args:
+            server: The JaatoServer instance.
+            session_dir: The session's storage directory.
+        """
+        todo_plugin = self._get_todo_plugin(server)
+        if not todo_plugin:
+            return
+
+        plans_dir = session_dir / "plans"
+        todo_plugin.initialize({
+            "storage_type": "file",
+            "storage_path": str(plans_dir),
+            "storage_use_directory": True,  # One file per plan
+        })
+        logger.debug(f"Configured TODO storage at: {plans_dir}")
+
+    def _save_todo_state(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+        """Save TODO plugin state (agent-plan mapping, blocked steps).
+
+        Args:
+            server: The JaatoServer instance.
+            session_dir: The session's storage directory.
+        """
+        todo_plugin = self._get_todo_plugin(server)
+        if not todo_plugin or not hasattr(todo_plugin, 'get_persistence_state'):
+            return
+
+        state = todo_plugin.get_persistence_state()
+        if not state.get('agent_plan_ids'):
+            # No plans to save
+            return
+
+        state_path = session_dir / "plans" / "_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+            logger.debug(f"Saved TODO state: {state_path}")
+        except Exception as e:
+            logger.error(f"Failed to save TODO state: {e}")
+
+    def _load_todo_state(self, server: JaatoServer, session_dir: pathlib.Path) -> None:
+        """Load TODO plugin state from disk.
+
+        Args:
+            server: The JaatoServer instance.
+            session_dir: The session's storage directory.
+        """
+        state_path = session_dir / "plans" / "_state.json"
+        if not state_path.exists():
+            return
+
+        todo_plugin = self._get_todo_plugin(server)
+        if not todo_plugin or not hasattr(todo_plugin, 'restore_persistence_state'):
+            return
+
+        try:
+            with open(state_path, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            todo_plugin.restore_persistence_state(state)
+            logger.debug(f"Loaded TODO state: {state_path}")
+        except Exception as e:
+            logger.error(f"Failed to load TODO state: {e}")
 
     def _save_subagent_states(
         self,
@@ -1114,6 +1452,7 @@ class SessionManager:
             sessions=sessions_data,
             tools=tools_data,
             models=models_data,
+            user_inputs=session.user_inputs,  # Command history for prompt restoration
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:
@@ -1128,6 +1467,79 @@ class SessionManager:
             if session_id:
                 return self._sessions.get(session_id)
         return None
+
+    # =========================================================================
+    # Turn Tracking for Recovery
+    # =========================================================================
+
+    def start_turn_tracking(
+        self,
+        session_id: str,
+        user_prompt: str,
+        agent_id: str = "main"
+    ) -> None:
+        """Mark a turn as in-progress for recovery purposes.
+
+        Call this when a turn starts (user sends message) to enable recovery
+        if the server crashes during tool execution.
+
+        Args:
+            session_id: The session ID.
+            user_prompt: The user's original prompt.
+            agent_id: Which agent is executing ("main" or subagent ID).
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.interrupted_turn = {
+                    "agent_id": agent_id,
+                    "pending_tool_calls": [],
+                    "user_prompt": user_prompt,
+                    "started_at": datetime.utcnow().isoformat(),
+                }
+                session.is_dirty = True
+                logger.debug(f"Started turn tracking for session {session_id}, agent {agent_id}")
+
+    def update_pending_tool_calls(
+        self,
+        session_id: str,
+        function_calls: List[Dict[str, Any]]
+    ) -> None:
+        """Update pending tool calls after model response.
+
+        Call this after the model returns function calls, before tool execution.
+        This triggers an incremental save so the pending calls are persisted.
+
+        Args:
+            session_id: The session ID.
+            function_calls: List of {id, name, args} dicts from model response.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session and session.interrupted_turn:
+                session.interrupted_turn["pending_tool_calls"] = function_calls
+                session.is_dirty = True
+                # Incremental save to persist pending tool calls before execution
+                self._save_session(session)
+                logger.debug(
+                    f"Updated pending tool calls for session {session_id}: "
+                    f"{len(function_calls)} call(s)"
+                )
+
+    def clear_turn_tracking(self, session_id: str) -> None:
+        """Clear turn tracking on successful completion.
+
+        Call this when a turn completes successfully (no more function calls).
+
+        Args:
+            session_id: The session ID.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.interrupted_turn = None
+                session.is_dirty = True
+                logger.debug(f"Cleared turn tracking for session {session_id}")
 
     # =========================================================================
     # Request Routing
@@ -1180,6 +1592,11 @@ class SessionManager:
         )
 
         if isinstance(event, SendMessageRequest):
+            # Track user input for command history restoration
+            if event.text and event.text.strip():
+                session.user_inputs.append(event.text)
+                session.is_dirty = True
+
             # Run in thread to not block
             def run_message():
                 server.send_message(
