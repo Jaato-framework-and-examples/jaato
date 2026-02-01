@@ -23,6 +23,8 @@ Template syntax:
 - $ARGUMENTS - Claude Code compatibility (becomes {{$0}})
 """
 
+import base64
+import json
 import os
 import re
 import shutil
@@ -40,7 +42,10 @@ if TYPE_CHECKING:
 
 from ..model_provider.types import ToolSchema
 from ..base import UserCommand, CommandCompletion
+from .validation import PromptValidator, format_validation_error
 
+# Type alias for output callback: (source, text, mode) -> None
+OutputCallback = Callable[[str, str, str], None]
 
 # Entry point filename for directory-based prompts
 PROMPT_ENTRY_FILE = "PROMPT.md"
@@ -122,7 +127,11 @@ class PromptLibraryPlugin:
         # Confirmation callback for interactive prompts (set by client)
         self._confirm_callback: Optional[Callable[[str, List[str]], Optional[str]]] = None
         # Output callback for progress messages
-        self._output_callback: Optional[Callable[[str], None]] = None
+        self._output_callback: Optional[OutputCallback] = None
+        # Plugin registry reference (for tool change notifications)
+        self._plugin_registry: Optional[Any] = None
+        # Callback for notifying when prompts change (tools added/removed)
+        self._on_tools_changed: Optional[Callable[[List[str]], None]] = None
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -157,7 +166,10 @@ class PromptLibraryPlugin:
         if 'workspace_path' in config:
             self._workspace_path = config['workspace_path']
         self._initialized = True
-        self._trace(f"initialize: workspace={self._workspace_path}")
+
+        # Pre-discover prompts so they're available as tools immediately
+        self._discover_prompts()
+        self._trace(f"initialize: workspace={self._workspace_path}, discovered {len(self._prompt_cache)} prompts")
 
     def shutdown(self) -> None:
         """Shutdown the prompt library plugin."""
@@ -182,14 +194,44 @@ class PromptLibraryPlugin:
         """
         self._confirm_callback = callback
 
-    def set_output_callback(self, callback: Callable[[str], None]) -> None:
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set callback for output/progress messages."""
         self._output_callback = callback
 
-    def _emit(self, message: str) -> None:
+    def set_plugin_registry(self, registry: Any) -> None:
+        """Set the plugin registry reference (called during expose_tool).
+
+        This allows the plugin to notify the registry when tools change
+        (e.g., after fetching new prompts).
+        """
+        self._plugin_registry = registry
+        self._trace(f"set_plugin_registry: {type(registry).__name__}")
+
+    def set_on_tools_changed(self, callback: Callable[[List[str]], None]) -> None:
+        """Set callback for when prompt tools are added or removed.
+
+        Args:
+            callback: Function called with list of new tool names after fetch.
+                     The TUI can use this to refresh completions and tool caches.
+        """
+        self._on_tools_changed = callback
+
+    def _notify_tools_changed(self, new_tools: List[str]) -> None:
+        """Notify that prompt tools have changed (new prompts fetched).
+
+        This refreshes the prompt cache and notifies subscribers.
+        """
+        self._trace(f"_notify_tools_changed: {new_tools}")
+        # Refresh the cache
+        self._discover_prompts()
+        # Notify callback if set
+        if self._on_tools_changed:
+            self._on_tools_changed(new_tools)
+
+    def _emit(self, message: str, mode: str = "write") -> None:
         """Emit a message via output callback or print."""
         if self._output_callback:
-            self._output_callback(message)
+            self._output_callback("prompt_library", message, mode)
         else:
             print(message)
 
@@ -215,7 +257,7 @@ class PromptLibraryPlugin:
         home = Path.home()
 
         sources = [
-            # Jaato native (writable)
+            # Jaato native prompts (writable)
             PromptSource(
                 path=workspace / ".jaato" / "prompts",
                 source_name="project",
@@ -226,6 +268,19 @@ class PromptLibraryPlugin:
                 path=home / ".jaato" / "prompts",
                 source_name="global",
                 entry_file=PROMPT_ENTRY_FILE,
+                writable=True,
+            ),
+            # Jaato skills (writable, for ClawdHub installs)
+            PromptSource(
+                path=workspace / ".jaato" / "skills",
+                source_name="project-skills",
+                entry_file=SKILL_ENTRY_FILE,
+                writable=True,
+            ),
+            PromptSource(
+                path=home / ".jaato" / "skills",
+                source_name="global-skills",
+                entry_file=SKILL_ENTRY_FILE,
                 writable=True,
             ),
             # Claude Code interop (read-only)
@@ -562,116 +617,102 @@ class PromptLibraryPlugin:
         args: List[str],
         dest_dir: Path
     ) -> FetchResult:
-        """Fetch prompts by running an npx command.
+        """Fetch skills by running an npx command (e.g., ClawdHub).
 
-        The npx command should output prompt files to a temp directory,
-        which we then copy to the destination.
+        Runs the npx command in the .jaato/ directory. Tools like ClawdHub
+        create a skills/ subdirectory automatically, matching Claude's pattern.
         """
         self._trace(f"fetch npx: {package} {args}")
 
-        # Create temp directory for npx output
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
+        # Run in .jaato/ parent directory - ClawdHub creates skills/ subdirectory
+        # dest_dir is .jaato/prompts/, we want .jaato/ as working dir
+        jaato_dir = dest_dir.parent
+        skills_dir = jaato_dir / "skills"
 
-            # Run npx command
-            cmd = ["npx", "-y", package] + args + ["--output", str(tmpdir_path)]
-            self._emit(f"Running: npx {package} {' '.join(args)}...")
+        # Track existing skills to detect new ones
+        existing_skills = set()
+        if skills_dir.exists():
+            existing_skills = {d.name for d in skills_dir.iterdir() if d.is_dir()}
 
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,  # 2 minute timeout
-                    cwd=str(self._get_workspace())
+        # Ensure .jaato/ directory exists
+        jaato_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = ["npx", "-y", package] + args
+        self._emit(f"Running: npx {package} {' '.join(args)}...")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # 2 minute timeout
+                cwd=str(jaato_dir)
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                return FetchResult(
+                    success=False,
+                    error=f"npx command failed: {error_msg}",
+                    source_type="npx",
+                    source_params=f"{package} {' '.join(args)}"
                 )
 
-                if result.returncode != 0:
-                    error_msg = result.stderr or result.stdout or "Unknown error"
-                    return FetchResult(
-                        success=False,
-                        error=f"npx command failed: {error_msg}",
-                        source_type="npx",
-                        source_params=f"{package} {' '.join(args)}"
-                    )
+            # Find newly installed skills
+            prompts_fetched = []
+            validator = PromptValidator()
 
-                # Look for prompt files in temp directory
-                prompts_fetched = []
-                for item in tmpdir_path.iterdir():
-                    if item.is_file() and item.suffix in ('.md', '.yaml', '.yml'):
-                        # Read and add provenance
-                        content = item.read_text(encoding='utf-8')
-                        content = self._add_provenance(
-                            content, "npx", f"{package} {' '.join(args)}"
-                        )
-
-                        # Handle conflict
-                        dest_path = dest_dir / item.name
-                        proceed, actual_path = self._handle_conflict(
-                            item.stem, dest_path, content
-                        )
-
-                        if proceed and actual_path:
-                            dest_dir.mkdir(parents=True, exist_ok=True)
-                            actual_path.write_text(content, encoding='utf-8')
-                            prompts_fetched.append(actual_path.stem)
-
-                    elif item.is_dir():
-                        # Directory-based prompt
-                        entry_file = item / PROMPT_ENTRY_FILE
+            if skills_dir.exists():
+                for skill_dir in skills_dir.iterdir():
+                    if skill_dir.is_dir() and skill_dir.name not in existing_skills:
+                        # New skill installed
+                        entry_file = skill_dir / SKILL_ENTRY_FILE
                         if not entry_file.exists():
-                            entry_file = item / SKILL_ENTRY_FILE
+                            entry_file = skill_dir / PROMPT_ENTRY_FILE
 
                         if entry_file.exists():
-                            # Handle conflict
-                            dest_path = dest_dir / item.name
-                            proceed, actual_path = self._handle_conflict(
-                                item.name, dest_path, ""
+                            content = entry_file.read_text(encoding='utf-8')
+
+                            # Validate content (log warning but don't reject npx installs)
+                            validation = validator.validate(content)
+                            if not validation.valid:
+                                self._trace(f"Warning: npx skill {skill_dir.name} has validation issues: {validation.errors}")
+
+                            # Add provenance to entry file
+                            content = self._add_provenance(
+                                content, "npx", f"{package} {' '.join(args)}"
                             )
+                            entry_file.write_text(content, encoding='utf-8')
+                            prompts_fetched.append(skill_dir.name)
 
-                            if proceed and actual_path:
-                                # Copy entire directory
-                                if actual_path.exists():
-                                    shutil.rmtree(actual_path)
-                                shutil.copytree(item, actual_path)
+            return FetchResult(
+                success=True,
+                prompts_fetched=prompts_fetched,
+                source_type="npx",
+                source_params=f"{package} {' '.join(args)}"
+            )
 
-                                # Add provenance to entry file
-                                entry_in_dest = actual_path / entry_file.name
-                                content = entry_in_dest.read_text(encoding='utf-8')
-                                content = self._add_provenance(
-                                    content, "npx", f"{package} {' '.join(args)}"
-                                )
-                                entry_in_dest.write_text(content, encoding='utf-8')
-                                prompts_fetched.append(actual_path.name)
-
-                return FetchResult(
-                    success=True,
-                    prompts_fetched=prompts_fetched,
-                    source_type="npx",
-                    source_params=f"{package} {' '.join(args)}"
-                )
-
-            except subprocess.TimeoutExpired:
-                return FetchResult(
-                    success=False,
-                    error="npx command timed out after 120 seconds",
-                    source_type="npx",
-                    source_params=f"{package} {' '.join(args)}"
-                )
-            except FileNotFoundError:
-                return FetchResult(
-                    success=False,
-                    error="npx not found. Please install Node.js.",
-                    source_type="npx",
-                    source_params=f"{package} {' '.join(args)}"
-                )
-            except Exception as e:
-                return FetchResult(
-                    success=False,
-                    error=str(e),
-                    source_type="npx",
-                    source_params=f"{package} {' '.join(args)}"
-                )
+        except subprocess.TimeoutExpired:
+            return FetchResult(
+                success=False,
+                error="npx command timed out after 120 seconds",
+                source_type="npx",
+                source_params=f"{package} {' '.join(args)}"
+            )
+        except FileNotFoundError:
+            return FetchResult(
+                success=False,
+                error="npx not found. Please install Node.js.",
+                source_type="npx",
+                source_params=f"{package} {' '.join(args)}"
+            )
+        except Exception as e:
+            return FetchResult(
+                success=False,
+                error=str(e),
+                source_type="npx",
+                source_params=f"{package} {' '.join(args)}"
+            )
 
     def _fetch_from_git(self, repo_url: str, dest_dir: Path) -> FetchResult:
         """Fetch prompts from a git repository."""
@@ -710,6 +751,9 @@ class PromptLibraryPlugin:
                 ]
 
                 prompts_fetched = []
+                skipped_invalid = []
+                validator = PromptValidator()
+
                 for prompt_dir in prompt_dirs:
                     if not prompt_dir.exists():
                         continue
@@ -720,6 +764,14 @@ class PromptLibraryPlugin:
 
                         if item.is_file() and item.suffix in ('.md', '.yaml', '.yml'):
                             content = item.read_text(encoding='utf-8')
+
+                            # Validate content before saving
+                            validation = validator.validate(content)
+                            if not validation.valid:
+                                self._trace(f"Skipping invalid prompt {item.name}: {validation.errors}")
+                                skipped_invalid.append(item.name)
+                                continue
+
                             content = self._add_provenance(content, "git", repo_url)
 
                             dest_path = dest_dir / item.name
@@ -740,6 +792,14 @@ class PromptLibraryPlugin:
                                     break
 
                             if entry_file:
+                                # Validate directory-based prompt entry file
+                                content = entry_file.read_text(encoding='utf-8')
+                                validation = validator.validate(content)
+                                if not validation.valid:
+                                    self._trace(f"Skipping invalid prompt dir {item.name}: {validation.errors}")
+                                    skipped_invalid.append(item.name)
+                                    continue
+
                                 dest_path = dest_dir / item.name
                                 proceed, actual_path = self._handle_conflict(
                                     item.name, dest_path, ""
@@ -798,6 +858,30 @@ class PromptLibraryPlugin:
                     source_params=repo_url
                 )
 
+    def _validate_content(self, content: str, source_url: str = "") -> FetchResult:
+        """Validate fetched content is a valid prompt/skill.
+
+        Args:
+            content: The content to validate
+            source_url: URL for error hint (e.g., GitHub blob URL hint)
+
+        Returns:
+            FetchResult with success=False if validation fails, None otherwise
+        """
+        validator = PromptValidator()
+        result = validator.validate(content, source_hint=source_url)
+
+        if not result.valid:
+            error_msg = format_validation_error(result, source_url)
+            return FetchResult(
+                success=False,
+                error=error_msg,
+                source_type="url" if source_url else "",
+                source_params=source_url
+            )
+
+        return None  # Validation passed
+
     def _fetch_from_url(self, url: str, dest_dir: Path) -> FetchResult:
         """Fetch a single prompt from a URL."""
         self._trace(f"fetch url: {url}")
@@ -818,6 +902,11 @@ class PromptLibraryPlugin:
             req = urllib.request.Request(url, headers={'User-Agent': 'jaato-prompt-fetch/1.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
                 content = response.read().decode('utf-8')
+
+            # Validate content before saving
+            validation_error = self._validate_content(content, source_url=url)
+            if validation_error:
+                return validation_error
 
             # Add provenance
             content = self._add_provenance(content, "url", url)
@@ -870,8 +959,8 @@ class PromptLibraryPlugin:
         """Fetch prompts from a GitHub repository (shorthand).
 
         repo_spec can be:
-        - owner/repo
-        - owner/repo/path/to/prompts
+        - owner/repo (fetches all prompts from standard locations via git clone)
+        - owner/repo/path/to/skill (fetches specific skill via gh CLI)
         """
         self._trace(f"fetch github: {repo_spec}")
 
@@ -886,9 +975,272 @@ class PromptLibraryPlugin:
 
         owner = parts[0]
         repo = parts[1]
-        repo_url = f"https://github.com/{owner}/{repo}.git"
+        path = '/'.join(parts[2:]) if len(parts) > 2 else None
 
+        # If specific path requested, try gh CLI first
+        if path:
+            result = self._fetch_github_path(owner, repo, path, dest_dir)
+            if result is not None:
+                return result
+            # Fall through to git clone if gh not available
+
+        # Fall back to git clone for whole repo
+        repo_url = f"https://github.com/{owner}/{repo}.git"
         return self._fetch_from_git(repo_url, dest_dir)
+
+    def _fetch_github_path(
+        self, owner: str, repo: str, path: str, dest_dir: Path
+    ) -> Optional[FetchResult]:
+        """Fetch a specific path from GitHub using gh CLI.
+
+        Returns None if gh CLI is not available (caller should fall back to git).
+        """
+        # Check if gh is available
+        try:
+            subprocess.run(
+                ["gh", "--version"],
+                capture_output=True,
+                check=True,
+                timeout=10
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            self._trace("gh CLI not available, falling back to git clone")
+            return None
+
+        self._emit(f"Fetching: {owner}/{repo}/{path}...")
+        source_ref = f"{owner}/{repo}/{path}"
+
+        try:
+            # Get contents at path
+            result = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/contents/{path}"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                return FetchResult(
+                    success=False,
+                    error=f"GitHub API error: {error_msg.strip()}",
+                    source_type="github",
+                    source_params=source_ref
+                )
+
+            contents = json.loads(result.stdout)
+
+            # Determine if this is a file or directory
+            if isinstance(contents, list):
+                # Directory - fetch as a skill to .jaato/skills/
+                return self._fetch_github_directory(
+                    owner, repo, path, contents, dest_dir.parent / "skills"
+                )
+            else:
+                # Single file - fetch to prompts/
+                return self._fetch_github_file(contents, dest_dir, source_ref)
+
+        except subprocess.TimeoutExpired:
+            return FetchResult(
+                success=False,
+                error="GitHub API request timed out",
+                source_type="github",
+                source_params=source_ref
+            )
+        except json.JSONDecodeError as e:
+            return FetchResult(
+                success=False,
+                error=f"Invalid JSON response from GitHub: {e}",
+                source_type="github",
+                source_params=source_ref
+            )
+        except Exception as e:
+            return FetchResult(
+                success=False,
+                error=str(e),
+                source_type="github",
+                source_params=source_ref
+            )
+
+    def _fetch_github_directory(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        contents: List[Dict[str, Any]],
+        dest_dir: Path
+    ) -> FetchResult:
+        """Fetch a directory from GitHub as a skill."""
+        source_ref = f"{owner}/{repo}/{path}"
+        skill_name = path.rstrip('/').split('/')[-1]
+
+        # Handle conflict
+        skill_dest = dest_dir / skill_name
+        proceed, actual_path = self._handle_conflict(skill_name, skill_dest, "")
+        if not proceed or not actual_path:
+            return FetchResult(
+                success=True,
+                prompts_fetched=[],
+                source_type="github",
+                source_params=source_ref
+            )
+
+        skill_dest = actual_path
+        skill_dest.mkdir(parents=True, exist_ok=True)
+
+        # Download directory contents recursively
+        self._download_github_contents(contents, owner, repo, path, skill_dest)
+
+        # Validate entry file if present
+        validator = PromptValidator()
+        entry_file = None
+        for ef in [SKILL_ENTRY_FILE, PROMPT_ENTRY_FILE]:
+            if (skill_dest / ef).exists():
+                entry_file = skill_dest / ef
+                break
+
+        if entry_file:
+            content = entry_file.read_text(encoding='utf-8')
+            validation = validator.validate(content)
+            if not validation.valid:
+                shutil.rmtree(skill_dest)
+                return FetchResult(
+                    success=False,
+                    error=format_validation_error(validation, f"github:{source_ref}"),
+                    source_type="github",
+                    source_params=source_ref
+                )
+
+            content = self._add_provenance(content, "github", source_ref)
+            entry_file.write_text(content, encoding='utf-8')
+
+        return FetchResult(
+            success=True,
+            prompts_fetched=[skill_name],
+            source_type="github",
+            source_params=source_ref
+        )
+
+    def _fetch_github_file(
+        self, file_info: Dict[str, Any], dest_dir: Path, source_ref: str
+    ) -> FetchResult:
+        """Fetch a single file from GitHub."""
+        filename = file_info.get('name', 'fetched-prompt.md')
+        if not filename.endswith('.md'):
+            return FetchResult(
+                success=False,
+                error=f"Expected .md file, got: {filename}",
+                source_type="github",
+                source_params=source_ref
+            )
+
+        # Download the file content
+        content = self._get_github_file_content(file_info)
+        if content is None:
+            return FetchResult(
+                success=False,
+                error="Could not download file content",
+                source_type="github",
+                source_params=source_ref
+            )
+
+        # Validate content
+        validation_error = self._validate_content(content, source_url=source_ref)
+        if validation_error:
+            return validation_error
+
+        # Add provenance
+        content = self._add_provenance(content, "github", source_ref)
+
+        # Handle conflict
+        name = Path(filename).stem
+        dest_path = dest_dir / filename
+        proceed, actual_path = self._handle_conflict(name, dest_path, content)
+
+        if proceed and actual_path:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            actual_path.write_text(content, encoding='utf-8')
+            return FetchResult(
+                success=True,
+                prompts_fetched=[actual_path.stem],
+                source_type="github",
+                source_params=source_ref
+            )
+        else:
+            return FetchResult(
+                success=True,
+                prompts_fetched=[],
+                source_type="github",
+                source_params=source_ref
+            )
+
+    def _download_github_contents(
+        self,
+        contents: List[Dict[str, Any]],
+        owner: str,
+        repo: str,
+        base_path: str,
+        dest: Path
+    ) -> None:
+        """Recursively download GitHub directory contents."""
+        for item in contents:
+            item_name = item.get('name', '')
+            item_type = item.get('type', '')
+            item_path = f"{base_path}/{item_name}"
+
+            if item_type == 'file':
+                content = self._get_github_file_content(item)
+                if content is not None:
+                    (dest / item_name).write_text(content, encoding='utf-8')
+            elif item_type == 'dir':
+                # Recurse into subdirectory
+                subdir = dest / item_name
+                subdir.mkdir(exist_ok=True)
+                try:
+                    result = subprocess.run(
+                        ["gh", "api", f"repos/{owner}/{repo}/contents/{item_path}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if result.returncode == 0:
+                        sub_contents = json.loads(result.stdout)
+                        if isinstance(sub_contents, list):
+                            self._download_github_contents(
+                                sub_contents, owner, repo, item_path, subdir
+                            )
+                except (subprocess.TimeoutExpired, json.JSONDecodeError):
+                    self._trace(f"Failed to fetch subdirectory: {item_path}")
+
+    def _get_github_file_content(self, file_info: Dict[str, Any]) -> Optional[str]:
+        """Get file content from GitHub file info.
+
+        Tries download_url first, falls back to base64-encoded content.
+        """
+        import urllib.request
+        import urllib.error
+
+        # Try download_url first
+        download_url = file_info.get('download_url')
+        if download_url:
+            try:
+                req = urllib.request.Request(
+                    download_url,
+                    headers={'User-Agent': 'jaato-prompt-fetch/1.0'}
+                )
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    return response.read().decode('utf-8')
+            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                self._trace(f"Failed to download from {download_url}: {e}")
+
+        # Fall back to base64-encoded content
+        if 'content' in file_info:
+            try:
+                return base64.b64decode(file_info['content']).decode('utf-8')
+            except Exception as e:
+                self._trace(f"Failed to decode base64 content: {e}")
+
+        return None
 
     def _execute_fetch(
         self,
@@ -939,75 +1291,87 @@ class PromptLibraryPlugin:
         # Format result message
         if result.success:
             if result.prompts_fetched:
+                # Notify that new prompt tools are available
+                new_tools = [f"prompt.{name}" for name in result.prompts_fetched]
+                self._notify_tools_changed(new_tools)
+
                 prompts_list = ", ".join(result.prompts_fetched)
-                return f"Fetched {len(result.prompts_fetched)} prompt(s): {prompts_list}\nDestination: {dest_dir}"
+                # npx and github path fetches install to skills/ subdirectory
+                is_github_path = (
+                    source_type == "github" and
+                    len(source_params[0].split('/')) > 2
+                )
+                uses_skills_dir = source_type == "npx" or is_github_path
+                actual_dest = dest_dir.parent / "skills" if uses_skills_dir else dest_dir
+                return f"Fetched {len(result.prompts_fetched)} prompt(s): {prompts_list}\nDestination: {actual_dest}"
             else:
                 return f"No prompts were fetched (all skipped or no prompts found)"
         else:
             return f"Fetch failed: {result.error}"
 
+    # ==================== Prompt-to-Tool Conversion ====================
+
+    def _params_to_json_schema(self, params: Dict[str, PromptParam]) -> Dict[str, Any]:
+        """Convert prompt template params to JSON Schema.
+
+        Args:
+            params: Dict of PromptParam objects from the prompt
+
+        Returns:
+            JSON Schema dict for tool parameters
+        """
+        properties = {}
+        required = []
+
+        for name, param in params.items():
+            prop: Dict[str, Any] = {
+                "type": "string",
+                "description": param.description or f"Parameter: {name}"
+            }
+            if param.default is not None:
+                prop["default"] = param.default
+            if param.enum:
+                prop["enum"] = param.enum
+            properties[name] = prop
+
+            if param.required:
+                required.append(name)
+
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
+    def _prompt_to_tool_schema(self, info: PromptInfo) -> ToolSchema:
+        """Convert a PromptInfo to a discoverable ToolSchema.
+
+        Args:
+            info: The prompt info to convert
+
+        Returns:
+            ToolSchema with 'prompt.' prefix namespace
+        """
+        return ToolSchema(
+            name=f"prompt.{info.name}",
+            description=info.description or f"Prompt: {info.name}",
+            parameters=self._params_to_json_schema(info.params),
+            category="prompt",
+            discoverability="discoverable",
+        )
+
     # ==================== Model Tools ====================
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool schemas for model access."""
-        return [
-            ToolSchema(
-                name='listPrompts',
-                description=(
-                    'List available prompts from the prompt library.\n\n'
-                    'Returns prompts from:\n'
-                    '- .jaato/prompts/ (project)\n'
-                    '- ~/.jaato/prompts/ (global)\n'
-                    '- .claude/skills/ (Claude Code interop)\n\n'
-                    'Use this to discover reusable prompts before using them.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "tag": {
-                            "type": "string",
-                            "description": "Filter prompts by tag"
-                        },
-                        "search": {
-                            "type": "string",
-                            "description": "Search prompts by name or description"
-                        }
-                    },
-                    "required": []
-                },
-                category="introspection",
-                discoverability="discoverable",
-            ),
-            ToolSchema(
-                name='usePrompt',
-                description=(
-                    'Retrieve and expand a prompt from the library.\n\n'
-                    'The prompt content is returned with parameters substituted.\n'
-                    'Follow the instructions in the returned content.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the prompt to use"
-                        },
-                        "params": {
-                            "type": "object",
-                            "description": "Named parameters to substitute (e.g., {\"file\": \"main.py\"})",
-                            "additionalProperties": {"type": "string"}
-                        },
-                        "args": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Positional arguments for {{$1}}, {{$2}}, etc."
-                        }
-                    },
-                    "required": ["name"]
-                },
-                category="system",
-                discoverability="discoverable",
-            ),
+        """Return tool schemas for model access.
+
+        Returns:
+            - savePrompt tool for creating new prompts
+            - Virtual tools for each discovered prompt (prompt.name)
+        """
+        schemas = [
+            # Only savePrompt remains - listPrompts/usePrompt are redundant
+            # since prompts are now first-class tools discoverable via list_tools
             ToolSchema(
                 name='savePrompt',
                 description=(
@@ -1043,97 +1407,99 @@ class PromptLibraryPlugin:
                     },
                     "required": ["name", "content", "description"]
                 },
-                category="system",
+                category="prompt",
                 discoverability="discoverable",
             ),
         ]
 
+        # Add virtual tools for each discovered prompt
+        for info in self._discover_prompts().values():
+            schemas.append(self._prompt_to_tool_schema(info))
+
+        return schemas
+
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mapping for model tools and user commands."""
-        return {
-            'listPrompts': self._execute_list_prompts,
-            'usePrompt': self._execute_use_prompt,
+        """Return executor mapping for model tools and user commands.
+
+        Returns mapping for:
+        - savePrompt: Create new prompts
+        - prompt: User command
+        - prompt.<name>: Dynamic executors for each discovered prompt
+        """
+        executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {
             'savePrompt': self._execute_save_prompt,
             'prompt': self._execute_prompt_command,
         }
 
-    def _execute_list_prompts(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute listPrompts tool."""
-        tag_filter = args.get('tag')
-        search_query = args.get('search', '').lower()
+        # Add dynamic executors for each prompt tool
+        for name in self._discover_prompts():
+            executors[f"prompt.{name}"] = self._make_prompt_executor(name)
 
-        self._trace(f"listPrompts: tag={tag_filter}, search={search_query}")
+        return executors
+
+    def _make_prompt_executor(self, prompt_name: str) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+        """Factory for prompt tool executors.
+
+        Args:
+            prompt_name: Name of the prompt to create executor for
+
+        Returns:
+            Executor function for the prompt tool
+        """
+        def executor(args: Dict[str, Any]) -> Dict[str, Any]:
+            return self._execute_prompt_tool(prompt_name, args)
+        return executor
+
+    def _execute_prompt_tool(self, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a prompt tool by name with given params.
+
+        Args:
+            name: The prompt name (without 'prompt.' prefix)
+            params: Parameters to substitute in the prompt
+
+        Returns:
+            Dict with 'content' on success, 'error' on failure
+        """
+        self._trace(f"execute prompt.{name} with params={params}")
 
         prompts = self._discover_prompts()
-
-        results = []
-        for info in prompts.values():
-            # Apply tag filter
-            if tag_filter and tag_filter not in info.tags:
-                continue
-
-            # Apply search filter
-            if search_query:
-                if (search_query not in info.name.lower() and
-                    search_query not in info.description.lower()):
-                    continue
-
-            results.append({
-                "name": info.name,
-                "description": info.description,
-                "source": info.source,
-                "tags": info.tags,
-                "params": {
-                    name: {
-                        "required": p.required,
-                        "default": p.default,
-                        "description": p.description,
-                    }
-                    for name, p in info.params.items()
-                } if info.params else None,
-            })
-
-        return {
-            "prompts": results,
-            "total": len(results),
-        }
-
-    def _execute_use_prompt(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute usePrompt tool."""
-        name = args.get('name', '').strip()
-        named_params = args.get('params', {}) or {}
-        positional_args = args.get('args', []) or []
-
-        self._trace(f"usePrompt: name={name}, params={named_params}, args={positional_args}")
-
-        if not name:
-            return {
-                'error': 'No prompt name provided',
-                'hint': 'Use listPrompts() to see available prompts'
-            }
-
-        # Refresh cache and find prompt
-        prompts = self._discover_prompts()
-
         if name not in prompts:
             available = list(prompts.keys())
             return {
                 'error': f'Prompt not found: {name}',
                 'available': available[:10],
-                'hint': f'Available prompts: {", ".join(available[:5])}{"..." if len(available) > 5 else ""}'
+                'hint': f'Use list_tools(category="prompt") to see available prompts'
             }
 
         info = prompts[name]
 
         try:
             content = self._get_prompt_content(info)
-            substituted, missing = self._substitute_params(content, named_params, positional_args)
+            # Params from tool call are named params
+            substituted, missing = self._substitute_params(content, params, [])
+
+            # Determine the skill's root path for relative path resolution
+            if info.is_directory:
+                skill_root = str(info.path)
+            else:
+                skill_root = str(info.path.parent)
 
             result = {
                 'name': name,
                 'content': substituted,
                 'source': info.source,
-                'path': str(info.path),
+                'skill_path': skill_root,
+                'instruction': (
+                    'Execute the instructions in the content above. '
+                    f'Relative paths are relative to: {skill_root}\n\n'
+                    'EXECUTION BEHAVIOR:\n'
+                    '- Execute silently. Do not narrate steps, explain what you are doing, or summarize the prompt.\n'
+                    '- Only involve the user when necessary: missing information (use clarification tool), '
+                    'or unrecoverable failures not addressed by the prompt.\n'
+                    '- If a tool fails and the prompt provides fallback/recovery instructions, follow them silently.\n'
+                    '- If a tool fails with no fallback in the prompt, report the error and stop.\n'
+                    '- When complete, provide only the final result or outcome the user needs.'
+                ),
             }
 
             if missing:
@@ -1243,12 +1609,14 @@ description: {description}
             prefix = args[0].lower() if args else ""
             completions = []
 
-            # Add 'fetch' subcommand
-            if not prefix or "fetch".startswith(prefix):
-                completions.append(CommandCompletion(
-                    "fetch",
-                    "Fetch prompts from external source"
-                ))
+            # Add subcommands
+            subcommands = [
+                ("fetch", "Fetch prompts from external source"),
+                ("remove", "Remove a prompt from the library"),
+            ]
+            for name, desc in subcommands:
+                if not prefix or name.startswith(prefix):
+                    completions.append(CommandCompletion(name, desc))
 
             # Add available prompts
             prompts = self._discover_prompts()
@@ -1261,6 +1629,27 @@ description: {description}
                 ))
 
             return completions
+
+        # Handle 'remove' subcommand completions
+        if args[0].lower() == "remove":
+            if len(args) == 2:
+                # Show removable prompts (only from writable sources)
+                prefix = args[1].lower() if len(args) > 1 else ""
+                writable_sources = {"project", "global", "project-skills", "global-skills"}
+                prompts = self._discover_prompts()
+                completions = []
+                for name, info in sorted(prompts.items()):
+                    if info.source not in writable_sources:
+                        continue  # Skip read-only prompts
+                    if prefix and not name.lower().startswith(prefix):
+                        continue
+                    source_tag = f" [{info.source}]"
+                    completions.append(CommandCompletion(
+                        name,
+                        info.description[:50] + source_tag
+                    ))
+                return completions
+            return []
 
         # Handle 'fetch' subcommand completions
         if args[0].lower() == "fetch":
@@ -1332,6 +1721,7 @@ description: {description}
             prompt <name> [args...]             - Use a prompt
             prompt fetch <type> <params...>     - Fetch prompts from external source
             prompt fetch <type> <params...> user  - Fetch to user directory
+            prompt remove <name>                - Remove a prompt from the library
 
         Returns:
             String with prompt content or listing.
@@ -1348,28 +1738,35 @@ description: {description}
         if first_arg == "fetch":
             return self._handle_fetch_subcommand(positional_args[1:])
 
+        # Handle 'remove' subcommand
+        if first_arg == "remove":
+            return self._handle_remove_subcommand(positional_args[1:])
+
         # Otherwise, first arg is prompt name
         prompt_name = positional_args[0]
         prompt_args = positional_args[1:]
 
-        # Use the usePrompt executor
-        result = self._execute_use_prompt({
-            'name': prompt_name,
-            'args': prompt_args,
-        })
+        # Get the prompt and substitute parameters
+        prompts = self._discover_prompts()
+        if prompt_name not in prompts:
+            available = list(prompts.keys())
+            hint = f'Available prompts: {", ".join(available[:5])}{"..." if len(available) > 5 else ""}'
+            return f'Prompt not found: {prompt_name}\n{hint}'
 
-        if 'error' in result:
-            error_msg = result['error']
-            if 'hint' in result:
-                error_msg += f"\n{result['hint']}"
-            return error_msg
+        info = prompts[prompt_name]
 
-        # Return the content for the model to process
-        content = result.get('content', '')
-        if result.get('missing_params'):
-            content += f"\n\n[Note: Missing parameters: {', '.join(result['missing_params'])}]"
+        try:
+            content = self._get_prompt_content(info)
+            # User command uses positional args
+            substituted, missing = self._substitute_params(content, {}, prompt_args)
 
-        return content
+            if missing:
+                substituted += f"\n\n[Note: Missing parameters: {', '.join(missing)}]"
+
+            return substituted
+
+        except Exception as e:
+            return f'Failed to read prompt: {e}'
 
     def _list_prompts_formatted(self) -> str:
         """List available prompts in formatted output."""
@@ -1384,40 +1781,44 @@ description: {description}
             lines.append(f"    {info.description[:70]}")
         lines.append(f"\nUse: prompt <name> [args...]")
         lines.append("     prompt fetch <type> <params...> [user]")
+        lines.append("     prompt remove <name>")
         return "\n".join(lines)
 
     def _handle_fetch_subcommand(self, args: List[str]) -> str:
         """Handle the 'prompt fetch' subcommand.
 
         Args:
-            args: Arguments after 'fetch', e.g., ['npx', 'molthub@latest', 'moltbook']
+            args: Arguments after 'fetch', e.g., ['npx', 'clawdhub@latest', 'install', 'skill']
 
         Syntax:
             prompt fetch <source_type> <source_params...> [project|user]
 
         Examples:
-            prompt fetch npx molthub@latest moltbook
+            prompt fetch npx clawdhub@latest install some-skill
             prompt fetch git https://github.com/user/prompts
             prompt fetch github user/prompts
+            prompt fetch github user/skills-repo/my-skill
             prompt fetch url https://example.com/review.md
-            prompt fetch npx some-package user
+            prompt fetch npx clawdhub@latest install some-skill user
         """
         if not args:
             return """Usage: prompt fetch <source_type> <source_params...> [project|user]
 
 Source types:
-  npx <package> [args...]   - Run npx command to fetch prompts
-  git <repo_url>            - Clone git repository
-  github <owner/repo>       - Fetch from GitHub (shorthand)
-  url <url>                 - Fetch single prompt from URL
+  npx <package> [args...]       - Install skills via npx (to skills/)
+  git <repo_url>                - Clone git repository
+  github <owner/repo>           - Fetch all prompts from GitHub repo
+  github <owner/repo/path>      - Fetch specific skill from GitHub (to skills/)
+  url <url>                     - Fetch single prompt from URL
 
 Destination (optional, default: project):
-  project   Save to .jaato/prompts/
-  user      Save to ~/.jaato/prompts/
+  project   skills: .jaato/skills/    prompts: .jaato/prompts/
+  user      skills: ~/.jaato/skills/  prompts: ~/.jaato/prompts/
 
 Examples:
-  prompt fetch npx molthub@latest moltbook
   prompt fetch github anthropics/prompt-library
+  prompt fetch github mkdev-me/claude-skills/gemini-image-generator
+  prompt fetch npx clawdhub@latest install some-skill
   prompt fetch url https://example.com/review.md user"""
 
         # Parse destination - check if last arg is 'project' or 'user'
@@ -1444,56 +1845,134 @@ Examples:
         # Execute fetch with permission check
         return self._execute_fetch(source_type, source_params, destination)
 
+    def _handle_remove_subcommand(self, args: List[str]) -> str:
+        """Handle the 'prompt remove' subcommand.
+
+        Args:
+            args: Arguments after 'remove', e.g., ['my-prompt']
+
+        Syntax:
+            prompt remove <name>
+
+        Examples:
+            prompt remove old-review
+            prompt remove gemini-image-generator
+        """
+        if not args:
+            return """Usage: prompt remove <name>
+
+Removes a prompt from the library.
+
+Only prompts in writable locations can be removed:
+  - .jaato/prompts/
+  - .jaato/skills/
+  - ~/.jaato/prompts/
+  - ~/.jaato/skills/
+
+Read-only locations (.claude/) cannot be modified.
+
+Examples:
+  prompt remove old-review
+  prompt remove gemini-image-generator"""
+
+        prompt_name = args[0]
+        self._trace(f"remove: name={prompt_name}")
+
+        # Find the prompt
+        prompts = self._discover_prompts()
+        if prompt_name not in prompts:
+            available = list(prompts.keys())
+            hint = f'Available prompts: {", ".join(available[:5])}{"..." if len(available) > 5 else ""}'
+            return f'Prompt not found: {prompt_name}\n{hint}'
+
+        info = prompts[prompt_name]
+
+        # Check if the source is writable
+        writable_sources = {"project", "global", "project-skills", "global-skills"}
+        if info.source not in writable_sources:
+            return f"Cannot remove '{prompt_name}': it's in a read-only location ({info.source}).\n" \
+                   f"Path: {info.path}"
+
+        # Confirm with user
+        if info.is_directory:
+            message = f"Remove prompt directory '{prompt_name}' and all its contents?"
+        else:
+            message = f"Remove prompt file '{prompt_name}'?"
+        message += f"\nPath: {info.path}"
+
+        confirmation = self._confirm(message, ["yes", "no"])
+        if confirmation != "yes":
+            return "Removal cancelled."
+
+        # Perform the deletion
+        try:
+            if info.is_directory:
+                shutil.rmtree(info.path)
+            else:
+                info.path.unlink()
+
+            self._trace(f"Removed prompt: {prompt_name} from {info.path}")
+
+            # Notify that tools changed (prompt removed)
+            self._notify_tools_changed([f"prompt.{prompt_name}"])
+
+            return f"Removed prompt '{prompt_name}' from {info.path}"
+
+        except PermissionError:
+            return f"Permission denied: cannot remove {info.path}"
+        except Exception as e:
+            return f"Failed to remove prompt: {e}"
+
     def get_auto_approved_tools(self) -> List[str]:
-        """Return tools that should be auto-approved."""
-        # listPrompts and usePrompt are read-only, safe to auto-approve
-        # savePrompt creates files, so it should require permission
-        return ['listPrompts', 'usePrompt', 'prompt']
+        """Return tools that should be auto-approved.
+
+        Prompt tools (prompt.*) are read-only and safe to auto-approve.
+        savePrompt creates files, so it requires permission.
+        """
+        auto_approved = ['prompt']  # User command
+
+        # Auto-approve all prompt.* tools (read-only)
+        for name in self._discover_prompts():
+            auto_approved.append(f"prompt.{name}")
+
+        return auto_approved
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for prompt library."""
         prompts = self._discover_prompts()
         if not prompts:
-            prompt_list = "(no prompts available yet)"
-        else:
-            prompt_list = ", ".join(sorted(prompts.keys())[:10])
-            if len(prompts) > 10:
-                prompt_list += f", ... ({len(prompts)} total)"
+            return None  # No instructions if no prompts
 
-        return f"""You have access to a prompt library via listPrompts, usePrompt, and savePrompt tools.
+        prompt_tools = [f"prompt.{name}" for name in sorted(prompts.keys())[:10]]
+        more_indicator = f"... ({len(prompts)} total)" if len(prompts) > 10 else ""
 
-Available prompts: {prompt_list}
+        return f"""## Prompt Tools (category: prompt)
 
-## Using prompts
-- Use listPrompts() to discover available prompts with their parameters
-- Use usePrompt(name, params) to retrieve and expand a prompt, then follow its instructions
-- The user can invoke prompts directly with `prompt <name> [args...]`
+Reusable prompts are available as discoverable tools with 'prompt.' prefix.
+Available: {', '.join(prompt_tools)}{more_indicator}
 
-## Proactively suggest creating prompts
-When you notice the user performing similar tasks repeatedly, suggest saving it as a reusable prompt:
+### Discovery
+- list_tools(category="prompt") - see all prompt tools
+- get_tool_schemas(names=["prompt.code-review"]) - get parameters for a prompt
 
-Patterns to watch for:
-- User asks for the same type of review/analysis multiple times
-- User repeatedly gives similar formatting or style instructions
-- User describes a workflow they want to reuse
-- User mentions "like before" or "the same way" when giving instructions
+### Usage
+Call prompt tools directly with their parameters:
+  prompt.code-review(file="main.py", focus="security")
 
-When you notice a pattern (2-3 similar requests), proactively offer:
-"I've noticed you've asked me to [describe pattern] a few times. Would you like me to save this as a reusable prompt? You could then use `prompt <suggested-name>` to invoke it."
+**IMPORTANT**: When a prompt tool returns content, treat it as a user request and execute the instructions immediately. Use your available tools (CLI, file operations, etc.) to carry out what the prompt describes.
 
-If the user agrees, use savePrompt() with:
+### Creating Prompts
+Use savePrompt(name, content, description) to create new reusable prompts.
+The user can also invoke prompts with `prompt <name> [args...]`
+
+### Proactively suggest creating prompts
+When you notice the user performing similar tasks repeatedly (2-3 times), suggest saving it as a reusable prompt:
+"I've noticed you've asked me to [pattern]. Would you like me to save this as a reusable prompt?"
+
+If they agree, use savePrompt() with:
 - A descriptive name (lowercase, hyphens)
-- Clear instructions that capture their preferences
-- Parameter placeholders for variable parts (e.g., {{{{file}}}}, {{{{focus}}}})
-
-Example:
-```
-savePrompt(
-  name="security-review",
-  description="Review code for security vulnerabilities",
-  content="Review {{{{file}}}} for security issues:\\n\\n1. Check for injection vulnerabilities\\n2. Look for authentication/authorization issues\\n3. Identify data exposure risks\\n\\nProvide specific line numbers and remediation suggestions."
-)
-```"""
+- Clear instructions capturing their preferences
+- Parameter placeholders: {{{{file}}}}, {{{{focus}}}}"""
 
 
 def create_plugin() -> PromptLibraryPlugin:
