@@ -2303,8 +2303,19 @@ class PTDisplay:
 
         return result
 
-    def update_last_system_message(self, message: str, style: str = "system_info") -> bool:
+    def update_last_system_message(
+        self,
+        message: str,
+        style: str = "system_info",
+        prefix: Optional[str] = None
+    ) -> bool:
         """Update the last system message in the output.
+
+        Args:
+            message: The new message text.
+            style: Rich style for the message.
+            prefix: If provided, only update a system message that starts with
+                this prefix.
 
         Returns:
             True if updated, False if no system message found.
@@ -2317,7 +2328,7 @@ class PTDisplay:
         else:
             buffer = self._output_buffer
 
-        result = buffer.update_last_system_message(message, style)
+        result = buffer.update_last_system_message(message, style, prefix)
         if result:
             self.refresh()
         return result
