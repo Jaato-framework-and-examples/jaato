@@ -26,12 +26,13 @@ except ImportError:
 
 # Try to import file completer
 try:
-    from file_completer import CombinedCompleter, FileReferenceProcessor
+    from file_completer import CombinedCompleter, FileReferenceProcessor, PromptReferenceProcessor
     HAS_FILE_COMPLETER = True
 except ImportError:
     HAS_FILE_COMPLETER = False
     CombinedCompleter = None
     FileReferenceProcessor = None
+    PromptReferenceProcessor = None
 
 
 class InputHandler:
@@ -55,6 +56,7 @@ class InputHandler:
         else:
             self._completer = None
         self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
+        self._prompt_processor = PromptReferenceProcessor() if HAS_FILE_COMPLETER and PromptReferenceProcessor else None
 
         # Prompt style for completion menu and status bar
         self._pt_style = Style.from_dict({
@@ -146,6 +148,39 @@ class InputHandler:
         if not self._file_processor:
             return text
         return self._file_processor.expand_references(text)
+
+    def expand_prompt_references(self, text: str) -> str:
+        """Expand %prompt references to include prompt contents.
+
+        Args:
+            text: Input text that may contain %prompt references.
+
+        Returns:
+            Text with prompt contents appended, or original text if no references.
+        """
+        if not self._prompt_processor:
+            return text
+        return self._prompt_processor.expand_references(text)
+
+    def set_prompt_provider(self, provider: Callable[[], List]) -> None:
+        """Set the prompt provider for %prompt completion.
+
+        Args:
+            provider: Callable that returns list of prompt info objects.
+                     Each object should have 'name' and 'description' attributes.
+        """
+        if self._completer:
+            self._completer.set_prompt_provider(provider)
+
+    def set_prompt_expander(self, expander: Callable[[str, dict], Optional[str]]) -> None:
+        """Set the prompt expander for %prompt reference processing.
+
+        Args:
+            expander: Callable that takes (prompt_name, params) and returns
+                     the expanded prompt content, or None if not found.
+        """
+        if self._prompt_processor:
+            self._prompt_processor.set_prompt_expander(expander)
 
     def add_to_history(self, text: str) -> None:
         """Add text to input history.

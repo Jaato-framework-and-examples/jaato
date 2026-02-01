@@ -1132,6 +1132,9 @@ class RichClient:
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
 
+        # Subscribe to prompt library changes for dynamic tool refresh
+        self._setup_prompt_library_subscription()
+
     def _setup_command_completion_provider(self) -> None:
         """Set up the provider for plugin command argument completions."""
         if not self.registry:
@@ -1198,6 +1201,63 @@ class RichClient:
             completion_provider,
             commands_with_completions
         )
+
+    def _setup_prompt_library_subscription(self) -> None:
+        """Subscribe to prompt library changes for dynamic tool refresh.
+
+        When new prompts are fetched, this ensures:
+        1. Command completions are refreshed to include new prompts
+        2. Tool schemas are available for model calls
+        """
+        if not self.registry:
+            return
+
+        prompt_library = self.registry.get_plugin('prompt_library')
+        if not prompt_library or not hasattr(prompt_library, 'set_on_tools_changed'):
+            return
+
+        def on_prompts_changed(new_tools: list) -> None:
+            """Handle notification that new prompts were fetched."""
+            self._trace(f"Prompt library tools changed: {new_tools}")
+
+            # Refresh command completion provider to pick up new prompts
+            self._setup_command_completion_provider()
+
+            # Log for user visibility
+            if self._output_buffer and new_tools:
+                tool_names = [t.replace('prompt.', '') for t in new_tools]
+                self._output_buffer.append(
+                    "system",
+                    f"New prompt(s) available: {', '.join(tool_names)}",
+                    "info"
+                )
+
+        prompt_library.set_on_tools_changed(on_prompts_changed)
+        self._trace("Subscribed to prompt library tool changes")
+
+        # Set up prompt provider for %prompt completion
+        def get_prompts_for_completion():
+            """Return list of prompts for completion dropdown."""
+            try:
+                prompts = prompt_library._discover_prompts()
+                return list(prompts.values())
+            except Exception:
+                return []
+
+        self._input_handler.set_prompt_provider(get_prompts_for_completion)
+
+        # Set up prompt expander for %prompt reference processing
+        def expand_prompt(name: str, params: dict) -> str:
+            """Expand a prompt reference to its content."""
+            try:
+                result = prompt_library._execute_prompt_tool(name, params)
+                if 'content' in result:
+                    return result['content']
+                return None
+            except Exception:
+                return None
+
+        self._input_handler.set_prompt_expander(expand_prompt)
 
     def run_prompt(self, prompt: str) -> str:
         """Execute a prompt synchronously and return the response.
@@ -1591,8 +1651,9 @@ class RichClient:
                 status="active"
             )
 
-        # Expand file references
+        # Expand file references (@file) and prompt references (%prompt)
         expanded_prompt = self._input_handler.expand_file_references(user_input)
+        expanded_prompt = self._input_handler.expand_prompt_references(expanded_prompt)
 
         # Inject any pending system hints (e.g., screenshot paths) - hidden from user
         if self._pending_system_hints:
@@ -3257,6 +3318,35 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     # Set up session provider for completion
     input_handler.set_session_provider(get_sessions_for_completion)
+
+    # Set up prompt provider for %prompt completion (local prompt discovery)
+    try:
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        _prompt_lib = PromptLibraryPlugin()
+        _prompt_lib.set_workspace_path(str(workspace_path))
+
+        def get_prompts_for_completion():
+            """Return list of prompts for completion dropdown."""
+            try:
+                prompts = _prompt_lib._discover_prompts()
+                return list(prompts.values())
+            except Exception:
+                return []
+
+        def expand_prompt(name: str, params: dict) -> str:
+            """Expand a prompt reference to its content."""
+            try:
+                result = _prompt_lib._execute_prompt_tool(name, params)
+                if 'content' in result:
+                    return result['content']
+                return None
+            except Exception:
+                return None
+
+        input_handler.set_prompt_provider(get_prompts_for_completion)
+        input_handler.set_prompt_expander(expand_prompt)
+    except ImportError:
+        pass  # Prompt library not available
 
     # Set up command completion provider for model command
     def model_completion_provider(command: str, args: list) -> list:
