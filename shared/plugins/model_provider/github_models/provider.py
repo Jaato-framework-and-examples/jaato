@@ -64,9 +64,13 @@ from ..types import (
     TokenUsage,
 )
 from .converters import (
+    clear_tool_name_mapping,
+    get_original_tool_name,
     history_from_sdk,
     history_to_sdk,
+    register_tool_name_mapping,
     response_from_sdk,
+    sanitize_tool_name,
     serialize_history,
     deserialize_history,
     tool_results_to_sdk,
@@ -731,6 +735,9 @@ class GitHubModelsProvider:
         self._tools = tools
         self._history = list(history) if history else []
 
+        # Clear tool name mapping when tools change
+        clear_tool_name_mapping()
+
     def get_history(self) -> List[Message]:
         """Get the current conversation history.
 
@@ -1093,9 +1100,12 @@ class GitHubModelsProvider:
                     args = json.loads(item.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                # Restore original tool name from sanitized version
+                sanitized_name = item.name or ""
+                original_name = get_original_tool_name(sanitized_name)
                 fc = FunctionCall(
                     id=item.call_id,
-                    name=item.name or "",
+                    name=original_name,
                     args=args,
                 )
                 parts.append(Part.from_function_call(fc))
@@ -1115,7 +1125,10 @@ class GitHubModelsProvider:
         )
 
     def _build_copilot_messages(self) -> List[Dict[str, Any]]:
-        """Build messages list for Copilot API (OpenAI format)."""
+        """Build messages list for Copilot API (OpenAI format).
+
+        Tool names in history are sanitized to match OpenAI's pattern.
+        """
         messages = []
 
         # Add system instruction if present
@@ -1133,11 +1146,13 @@ class GitHubModelsProvider:
                 tool_calls = []
                 for part in msg.parts:
                     if part.function_call:
+                        # Sanitize tool name for API compatibility
+                        sanitized_name = sanitize_tool_name(part.function_call.name)
                         tool_calls.append({
-                            "id": part.function_call.id or f"call_{part.function_call.name}",
+                            "id": part.function_call.id or f"call_{sanitized_name}",
                             "type": "function",
                             "function": {
-                                "name": part.function_call.name,
+                                "name": sanitized_name,
                                 "arguments": json.dumps(part.function_call.args or {}),
                             }
                         })
@@ -1153,9 +1168,11 @@ class GitHubModelsProvider:
                             content = json.dumps(result)
                         else:
                             content = str(result) if result is not None else ""
+                        # Sanitize tool name for tool_call_id generation
+                        sanitized_name = sanitize_tool_name(part.function_response.name)
                         messages.append({
                             "role": "tool",
-                            "tool_call_id": part.function_response.call_id or f"call_{part.function_response.name}",
+                            "tool_call_id": part.function_response.call_id or f"call_{sanitized_name}",
                             "content": content,
                         })
 
@@ -1178,16 +1195,23 @@ class GitHubModelsProvider:
         return messages
 
     def _build_copilot_tools(self) -> Optional[List[Dict[str, Any]]]:
-        """Build tools list for Copilot API (OpenAI format)."""
+        """Build tools list for Copilot API (OpenAI format).
+
+        Tool names are sanitized to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
+        """
         if not self._tools:
             return None
 
         tools = []
         for tool in self._tools:
+            # Sanitize tool name for OpenAI-compatible API
+            sanitized_name = sanitize_tool_name(tool.name)
+            register_tool_name_mapping(sanitized_name, tool.name)
+
             tool_dict = {
                 "type": "function",
                 "function": {
-                    "name": tool.name,
+                    "name": sanitized_name,
                     "description": tool.description or "",
                 }
             }
@@ -1217,9 +1241,12 @@ class GitHubModelsProvider:
                         args = json.loads(tc.get("function", {}).get("arguments", "{}"))
                     except json.JSONDecodeError:
                         args = {}
+                    # Restore original tool name from sanitized version
+                    sanitized_name = tc.get("function", {}).get("name", "")
+                    original_name = get_original_tool_name(sanitized_name)
                     fc = FunctionCall(
                         id=tc.get("id"),
-                        name=tc.get("function", {}).get("name", ""),
+                        name=original_name,
                         args=args,
                     )
                     parts.append(Part.from_function_call(fc))
@@ -1508,11 +1535,14 @@ class GitHubModelsProvider:
                     # OpenAI/Copilot API should always return an ID for tool calls.
                     # If missing, log for investigation - this indicates a parsing issue.
                     tool_id = tc.get("id")
+                    # Restore original tool name from sanitized version
+                    sanitized_name = tc["function"]["name"]
+                    original_name = get_original_tool_name(sanitized_name)
                     if not tool_id:
-                        self._trace(f"ERROR: Missing tool call ID from API for {tc['function']['name']} - this will cause 400 errors")
+                        self._trace(f"ERROR: Missing tool call ID from API for {sanitized_name} - this will cause 400 errors")
                     fc = FunctionCall(
                         id=tool_id,  # May be None - will cause API error, which is correct
-                        name=tc["function"]["name"],
+                        name=original_name,
                         args=args,
                     )
                     parts.append(Part.from_function_call(fc))
@@ -1666,9 +1696,12 @@ class GitHubModelsProvider:
                         args = json.loads(event.get("arguments", "{}"))
                     except json.JSONDecodeError:
                         args = {}
+                    # Restore original tool name from sanitized version
+                    sanitized_name = event.get("name", "")
+                    original_name = get_original_tool_name(sanitized_name)
                     fc = FunctionCall(
                         id=event.get("call_id"),
-                        name=event.get("name", ""),
+                        name=original_name,
                         args=args,
                     )
                     parts.append(Part.from_function_call(fc))

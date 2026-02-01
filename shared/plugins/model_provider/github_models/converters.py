@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -42,6 +43,65 @@ from ..types import (
 )
 
 
+# ==================== Tool Name Sanitization ====================
+
+# OpenAI/Azure API requires function names to match ^[a-zA-Z0-9_-]{1,64}$
+# (no dots, colons, or other special characters)
+_OPENAI_TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+
+# Module-level mapping from sanitized names back to original names
+# This allows reverse lookup when receiving function calls from the API
+_tool_name_mapping: Dict[str, str] = {}
+
+
+def sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
+
+    Replaces invalid characters (like dots, colons, spaces) with underscores
+    and truncates to 64 characters if needed.
+
+    Args:
+        name: Original tool name.
+
+    Returns:
+        Sanitized tool name safe for OpenAI-compatible APIs.
+    """
+    if _OPENAI_TOOL_NAME_PATTERN.match(name):
+        return name
+    # Replace invalid characters with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Truncate to 64 characters max (OpenAI limit)
+    return sanitized[:64]
+
+
+def get_original_tool_name(sanitized_name: str) -> str:
+    """Get the original tool name from a sanitized name.
+
+    Args:
+        sanitized_name: The sanitized tool name received from the API.
+
+    Returns:
+        Original tool name if mapping exists, otherwise returns the input unchanged.
+    """
+    return _tool_name_mapping.get(sanitized_name, sanitized_name)
+
+
+def clear_tool_name_mapping() -> None:
+    """Clear the tool name mapping. Call when tools are reconfigured."""
+    _tool_name_mapping.clear()
+
+
+def register_tool_name_mapping(sanitized: str, original: str) -> None:
+    """Register a mapping from sanitized to original tool name.
+
+    Args:
+        sanitized: The sanitized tool name sent to the API.
+        original: The original tool name used internally.
+    """
+    if sanitized != original:
+        _tool_name_mapping[sanitized] = original
+
+
 # ==================== Role Conversion ====================
 
 def role_to_sdk(role: Role) -> str:
@@ -68,10 +128,17 @@ def role_from_sdk(role: str) -> Role:
 # ==================== ToolSchema Conversion ====================
 
 def tool_schema_to_sdk(schema: ToolSchema) -> ChatCompletionsToolDefinition:
-    """Convert ToolSchema to SDK ChatCompletionsToolDefinition."""
+    """Convert ToolSchema to SDK ChatCompletionsToolDefinition.
+
+    Tool names are sanitized to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
+    A mapping from sanitized to original names is maintained for reverse lookup.
+    """
+    sanitized_name = sanitize_tool_name(schema.name)
+    register_tool_name_mapping(sanitized_name, schema.name)
+
     return get_models().ChatCompletionsToolDefinition(
         function=get_models().FunctionDefinition(
-            name=schema.name,
+            name=sanitized_name,
             description=schema.description,
             parameters=schema.parameters,
         )
