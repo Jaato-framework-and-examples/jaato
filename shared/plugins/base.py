@@ -649,3 +649,55 @@ class ToolPlugin(Protocol):
     #             self._sandbox.set_allowed_root(path)
     #     """
     #     ...
+    #
+    # Session Persistence:
+    #
+    # Plugins that maintain state across turns (e.g., plans, task tracking)
+    # can implement these methods to persist and restore their state when
+    # sessions are saved/loaded. The session_manager calls these via hasattr()
+    # checks, so they are optional.
+    #
+    # def get_persistence_state(self) -> Dict[str, Any]:
+    #     """Return plugin state for session persistence.
+    #
+    #     Called by session_manager when saving a session. Return a dict
+    #     containing all state that should survive session restart.
+    #
+    #     The returned dict must be JSON-serializable. Avoid including:
+    #     - Callbacks or function references
+    #     - File handles or connections
+    #     - Thread-local data
+    #
+    #     Returns:
+    #         Dict with JSON-serializable state.
+    #
+    #     Example:
+    #         def get_persistence_state(self) -> Dict[str, Any]:
+    #             return {
+    #                 "agent_plan_ids": self._current_plan_ids,
+    #                 "version": 1,  # For future migrations
+    #             }
+    #     """
+    #     ...
+    #
+    # def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+    #     """Restore plugin state from session persistence.
+    #
+    #     Called by session_manager when loading a session. The state dict
+    #     is exactly what was returned by get_persistence_state().
+    #
+    #     Plugins should:
+    #     - Restore internal data structures
+    #     - Re-register any dynamic hooks/callbacks that were lost
+    #     - Handle version migrations if state format has changed
+    #
+    #     Args:
+    #         state: State dict from get_persistence_state().
+    #
+    #     Example:
+    #         def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+    #             self._current_plan_ids = state.get("agent_plan_ids", {})
+    #             # Re-register callbacks that can't be serialized
+    #             self._setup_hooks()
+    #     """
+    #     ...
