@@ -327,6 +327,46 @@ class InstructionBudget:
             },
         }
 
+    def get_conversation_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Get serializable snapshot of conversation budget for persistence.
+
+        Only saves the CONVERSATION source, as other sources (SYSTEM, PLUGIN,
+        ENRICHMENT) are automatically recreated when the session is restored.
+        """
+        conv_entry = self.entries.get(InstructionSource.CONVERSATION)
+        if not conv_entry:
+            return None
+        return conv_entry.to_dict()
+
+    def restore_conversation_from_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Restore conversation budget from a saved snapshot.
+
+        Recreates the CONVERSATION source entry with its children (turn entries)
+        from a previously saved snapshot.
+        """
+        if not snapshot:
+            return
+
+        def parse_entry(data: Dict[str, Any]) -> SourceEntry:
+            """Recursively parse a SourceEntry from serialized dict."""
+            gc_policy = GCPolicy(data.get("gc_policy", "ephemeral"))
+            children: Dict[str, SourceEntry] = {}
+            if "children" in data:
+                for child_key, child_data in data["children"].items():
+                    children[child_key] = parse_entry(child_data)
+            return SourceEntry(
+                source=InstructionSource.CONVERSATION,
+                tokens=data.get("tokens", 0),
+                gc_policy=gc_policy,
+                label=data.get("label"),
+                children=children,
+                metadata=data.get("metadata", {}),
+            )
+
+        # Parse and restore the conversation entry
+        entry = parse_entry(snapshot)
+        self.entries[InstructionSource.CONVERSATION] = entry
+
     # --- Convenience Factories ---
 
     @classmethod

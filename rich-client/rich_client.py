@@ -3064,6 +3064,25 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Load env vars for client-side components (OutputBuffer tracing, etc.)
     load_dotenv(env_file)
 
+    # Configure logging to NOT output to stderr (breaks TUI).
+    # Redirect to trace file if JAATO_TRACE_LOG is set, otherwise suppress.
+    import logging
+    trace_log_path = os.environ.get("JAATO_TRACE_LOG")
+    if trace_log_path:
+        # Redirect logs to trace file
+        file_handler = logging.FileHandler(trace_log_path)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        # Configure root logger to use file handler only
+        root_logger = logging.getLogger()
+        root_logger.handlers = [file_handler]
+        root_logger.setLevel(logging.DEBUG)
+    else:
+        # Suppress all logging to console (would break TUI)
+        logging.getLogger().handlers = [logging.NullHandler()]
+        logging.getLogger().setLevel(logging.CRITICAL + 1)  # Suppress all
+
     import asyncio
     from pathlib import Path
     from ipc_client import IPCClient
@@ -3165,20 +3184,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 pass  # Display may not be ready yet
 
         elif status.state == ConnectionState.CONNECTED:
-            # Note: We do NOT clear is_reconnecting here - it stays True to suppress
-            # init progress events until SessionInfoEvent arrives (which signals
-            # session attachment complete). The "Session restored!" message is also
-            # deferred to the SessionInfoEvent handler.
-            if is_reconnecting:
+            # Only show "Reestablishing session..." if we were reconnecting AND
+            # there's actually a session to restore. If session_id is None, this
+            # is effectively a fresh connection (nothing to reestablish).
+            if is_reconnecting and status.session_id:
                 # Show "Reestablishing session..." while waiting for full restoration
                 connection_status_message = "Reestablishing session..."
                 try:
-                    display.set_connection_status("Reestablishing session...", style="info")
+                    display.set_connection_status("Reestablishing session...", style="warning")
                 except Exception:
                     pass
             else:
-                # Initial connection - just clear the status
+                # Initial connection or no session to restore - clear status
                 connection_status_message = None
+                is_reconnecting = False  # Reset - nothing to reestablish
                 try:
                     display.set_connection_status(None)
                 except Exception:

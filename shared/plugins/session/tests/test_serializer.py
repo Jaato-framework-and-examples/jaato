@@ -182,7 +182,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.0"
+        assert data["version"] == "2.1"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
