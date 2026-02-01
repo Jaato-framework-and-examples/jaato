@@ -1771,6 +1771,69 @@ class TodoPlugin:
 
     # === Event publishing helpers ===
 
+    def get_persistence_state(self) -> Dict[str, Any]:
+        """Get plugin state for session persistence.
+
+        Returns a dict with:
+        - agent_plan_ids: Mapping of agent names to their current plan IDs
+
+        This state is saved by session_manager and restored on session load.
+        """
+        # Convert None keys to sentinel for JSON serialization
+        agent_plan_ids = {}
+        for agent_name, plan_id in self._current_plan_ids.items():
+            key = "__none__" if agent_name is None else agent_name
+            agent_plan_ids[key] = plan_id
+
+        return {
+            "agent_plan_ids": agent_plan_ids,
+        }
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Restore plugin state from session persistence.
+
+        Args:
+            state: State dict from get_persistence_state().
+
+        This method:
+        1. Restores the agent-to-plan mapping
+        2. Re-registers pending dependencies for BLOCKED steps
+        """
+        # Restore agent-plan mapping
+        agent_plan_ids = state.get("agent_plan_ids", {})
+        self._current_plan_ids.clear()
+        for key, plan_id in agent_plan_ids.items():
+            agent_name = None if key == "__none__" else key
+            self._current_plan_ids[agent_name] = plan_id
+
+        self._trace(f"restore_persistence_state: restored {len(self._current_plan_ids)} agent-plan mappings")
+
+        # Re-register pending dependencies for BLOCKED steps
+        # The event bus singleton may have been reset, so we need to re-register
+        if not self._storage or not self._event_bus:
+            return
+
+        dependency_count = 0
+        for agent_name, plan_id in self._current_plan_ids.items():
+            plan = self._storage.get_plan(plan_id)
+            if not plan:
+                continue
+
+            for step in plan.steps:
+                # Only re-register dependencies for steps that are still blocked
+                if step.status == StepStatus.BLOCKED and step.blocked_by:
+                    for dep_ref in step.blocked_by:
+                        self._event_bus.register_dependency(
+                            dependency_ref=dep_ref,
+                            waiting_agent=agent_name or "main",
+                            waiting_plan_id=plan.plan_id,
+                            waiting_step_id=step.step_id
+                        )
+                        dependency_count += 1
+
+        if dependency_count > 0:
+            self._trace(f"restore_persistence_state: re-registered {dependency_count} pending dependencies")
+
     def _publish_event(
         self,
         event_type: TaskEventType,
