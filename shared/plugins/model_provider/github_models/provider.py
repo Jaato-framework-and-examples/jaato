@@ -801,6 +801,7 @@ class GitHubModelsProvider:
             ProviderResponse with text and/or function calls.
         """
         # Add user message to history first
+        self._trace(f"[SEND_MESSAGE] history_before_append={len(self._history)}")
         self._history.append(Message.from_text(Role.USER, message))
 
         if self._use_copilot_api:
@@ -808,6 +809,7 @@ class GitHubModelsProvider:
                 raise RuntimeError("No chat session. Call create_session() first.")
 
             # Build messages for Copilot API
+            self._trace(f"[SEND_MESSAGE] Building messages, history_len={len(self._history)}")
             messages = self._build_copilot_messages()
             tools = self._build_copilot_tools()
 

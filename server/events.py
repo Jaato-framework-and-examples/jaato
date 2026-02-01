@@ -573,6 +573,8 @@ class SessionInfoEvent(Event):
     # ^ [{name, description, enabled, plugin}, ...]
     models: List[str] = field(default_factory=list)
     # ^ ["gemini-2.5-flash", "gemini-2.5-pro", ...]
+    user_inputs: List[str] = field(default_factory=list)
+    # ^ Command history for prompt restoration on reconnect
 
 
 @dataclass

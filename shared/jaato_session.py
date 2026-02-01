@@ -1010,6 +1010,11 @@ class JaatoSession:
         uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
         tools_to_pass = self._tools if uses_external else []
 
+        if history:
+            logger.debug(f"[session:{self._agent_id}] _create_provider_session: restoring {len(history)} messages")
+        else:
+            logger.debug(f"[session:{self._agent_id}] _create_provider_session: no history to restore")
+
         self._provider.create_session(
             system_instruction=self._system_instruction,
             tools=tools_to_pass,
@@ -3785,6 +3790,10 @@ class JaatoSession:
         Args:
             history: Optional initial history for the new session.
         """
+        if history:
+            logger.info(f"[session:{self._agent_id}] reset_session: restoring {len(history)} messages")
+        else:
+            logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
         self._turn_accounting = []
         self._create_provider_session(history)
 

@@ -61,6 +61,12 @@ class SessionState:
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
+    budget_state: Optional[Dict[str, Any]] = None
+    """Serialized conversation budget for restoration."""
+
+    interrupted_turn: Optional[Dict[str, Any]] = None
+    """State of an interrupted turn for recovery on restart."""
+
 
 @dataclass
 class SessionInfo:
