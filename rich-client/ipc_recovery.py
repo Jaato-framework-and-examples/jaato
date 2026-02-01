@@ -393,6 +393,28 @@ class IPCRecoveryClient:
             return True
         return False
 
+    async def create_session(self, name: Optional[str] = None) -> Optional[str]:
+        """Create a new session.
+
+        Args:
+            name: Optional name for the session.
+
+        Returns:
+            Session ID if created, None otherwise.
+
+        Raises:
+            ReconnectingError: If currently reconnecting.
+            ConnectionClosedError: If connection is closed.
+        """
+        self._check_can_send()
+
+        if self._client:
+            session_id = await self._client.create_session(name)
+            if session_id:
+                self._session_id = session_id
+            return session_id
+        return None
+
     async def get_default_session(self) -> None:
         """Get or create the default session."""
         self._check_can_send()
