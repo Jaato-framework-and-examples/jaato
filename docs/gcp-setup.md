@@ -214,11 +214,8 @@ python3 -m venv .venv
 ### 2. Install dependencies
 
 ```bash
-.venv/bin/pip install -r requirements.txt
-
-# Or install via pyproject.toml
-.venv/bin/pip install .            # base dependencies
-.venv/bin/pip install ".[all]"     # all optional dependencies
+# Install all three packages in development mode
+.venv/bin/pip install -e jaato-sdk/ -e . -e rich-client/
 ```
 
 This installs `google-genai`, the recommended SDK for Google's generative models.

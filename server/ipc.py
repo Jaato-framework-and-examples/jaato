@@ -72,7 +72,7 @@ def _get_display_path(path: str) -> str:
         return f"{WINDOWS_PIPE_PREFIX}{path}"
     return path
 
-from .events import (
+from jaato_sdk.events import (
     Event,
     EventType,
     ConnectedEvent,

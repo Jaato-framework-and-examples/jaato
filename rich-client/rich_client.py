@@ -66,7 +66,7 @@ from keybindings import load_keybindings, detect_terminal, list_available_profil
 from theme import load_theme, list_available_themes
 
 # Backend abstraction for mode-agnostic operation
-from backend import Backend, DirectBackend, IPCBackend
+from backend import Backend, IPCBackend
 
 
 def _capture_vision(
@@ -478,15 +478,16 @@ class RichClient:
     def initialize(self) -> bool:
         """Initialize the client.
 
-        For direct mode: Creates JaatoClient and DirectBackend.
-        For IPC mode: Uses provided backend (server handles plugins).
+        IPC mode only: Uses provided backend (server handles plugins).
+        Direct/embedded mode has been removed - use server daemon instead.
         """
-        # IPC mode - backend already provided, minimal local setup
-        if self._is_ipc_mode:
-            return self._initialize_ipc_mode()
-
-        # Direct mode - full local initialization
-        return self._initialize_direct_mode()
+        if not self._is_ipc_mode:
+            raise RuntimeError(
+                "Direct mode is no longer supported. "
+                "Use 'python -m server --daemon' to start the server, "
+                "then connect with '--connect <socket>'."
+            )
+        return self._initialize_ipc_mode()
 
     def _initialize_ipc_mode(self) -> bool:
         """Initialize for IPC mode (server connection)."""
@@ -503,136 +504,6 @@ class RichClient:
         # We just need to set up local UI components
         self._model_name = self._backend.model_name
         self._model_provider = self._backend.provider_name
-
-        return True
-
-    def _initialize_direct_mode(self) -> bool:
-        """Initialize for direct mode (local JaatoClient)."""
-        # Load environment from CWD or explicit --env-file path
-        load_dotenv(self.env_file)
-
-        # Check CA bundle
-        active_bundle = active_cert_bundle(verbose=False)
-
-        # Check required vars - MODEL_NAME always required
-        model_name = os.environ.get("MODEL_NAME")
-        if not model_name:
-            print("Error: Missing required environment variable: MODEL_NAME")
-            return False
-
-        # Check auth method: API key (AI Studio) or Vertex AI
-        api_key = os.environ.get("GOOGLE_GENAI_API_KEY")
-        project_id = os.environ.get("PROJECT_ID")
-        location = os.environ.get("LOCATION")
-
-        if not api_key and (not project_id or not location):
-            print("Error: Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI")
-            return False
-
-        # Initialize JaatoClient with optional provider override
-        try:
-            self._jaato = JaatoClient(provider_name=self._provider)
-            if api_key:
-                # AI Studio mode - just need model
-                self._jaato.connect(model=model_name)
-            else:
-                # Vertex AI mode
-                self._jaato.connect(project_id, location, model_name)
-        except Exception as e:
-            print(f"Error: Failed to connect: {e}")
-            return False
-
-        # Create DirectBackend wrapping the JaatoClient
-        self._backend = DirectBackend(self._jaato)
-
-        # Store model info for status bar (from jaato client)
-        self._model_name = self._jaato.model_name or model_name
-        self._model_provider = self._jaato.provider_name
-
-        # Initialize plugin registry
-        self.registry = PluginRegistry(model_name=model_name)
-        self.registry.discover()
-
-        # We'll configure the todo reporter after display is created
-        # For now, use memory storage
-        # Note: clarification and permission channels use "queue" type for TUI integration
-        plugin_configs = {
-            "todo": {
-                "reporter_type": "console",  # Temporary, will be replaced
-                "storage_type": "memory",
-            },
-            "references": {
-                "channel_type": "queue",
-                # Callbacks will be set after display is created
-            },
-            "clarification": {
-                "channel_type": "queue",
-                # Callbacks will be set after display is created
-            },
-        }
-        self.registry.expose_all(plugin_configs)
-        self.todo_plugin = self.registry.get_plugin("todo")
-
-        # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
-        # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
-
-        # Initialize permission plugin with queue channel for TUI integration
-        self.permission_plugin = PermissionPlugin()
-        self.permission_plugin.initialize({
-            "channel_type": "queue",
-            "channel_config": {
-                "use_colors": True,  # Enable ANSI colors for diff coloring
-            },
-            "policy": {
-                "defaultPolicy": "ask",
-                "whitelist": {"tools": [], "patterns": []},
-                "blacklist": {"tools": [], "patterns": []},
-            }
-        })
-
-        # Verify authentication before loading tools
-        # For providers that support interactive login (like Anthropic OAuth),
-        # this will trigger the login flow if credentials are not found
-        self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
-
-        def auth_message(msg: str) -> None:
-            self._trace(f"[auth] {msg}")
-            print(msg, flush=True)
-
-        try:
-            if not self._backend.verify_auth(allow_interactive=True, on_message=auth_message):
-                print("Error: Authentication failed or was cancelled", flush=True)
-                return False
-        except Exception as e:
-            print(f"Error: Authentication failed: {e}", flush=True)
-            return False
-
-        self._trace("[auth] verify_auth completed successfully")
-
-        # Configure tools (only after auth is verified)
-        self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
-
-        # Load GC configuration from .jaato/gc.json if present
-        gc_result = load_gc_from_file(agent_name="main")
-        if gc_result:
-            gc_plugin, gc_config = gc_result
-            self._backend.set_gc_plugin(gc_plugin, gc_config)
-            # Store threshold and strategy for status bar display
-            self._gc_threshold = gc_config.threshold_percent
-            self._gc_target_percent = gc_config.target_percent
-            self._gc_continuous_mode = gc_config.continuous_mode
-            # Get strategy name from plugin (e.g., "gc_truncate" -> "truncate")
-            plugin_name = getattr(gc_plugin, 'name', 'gc')
-            self._gc_strategy = plugin_name.replace('gc_', '') if plugin_name.startswith('gc_') else plugin_name
-
-        # Note: Plugins with set_session() are auto-wired during session.configure()
-        # This includes thinking plugin, etc. No manual wiring needed.
-
-        # Setup session plugin
-        self._setup_session_plugin()
-
-        # Register plugin commands for completion
-        self._register_plugin_commands()
 
         return True
 
@@ -3486,16 +3357,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     import asyncio
     from pathlib import Path
-    from ipc_client import IPCClient
-    from ipc_recovery import (
+    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.client.recovery import (
         IPCRecoveryClient,
         ConnectionState,
         ConnectionStatus,
         ReconnectingError,
         ConnectionClosedError,
     )
-    from client_config import get_recovery_config
-    from server.events import (
+    from jaato_sdk.client.config import get_recovery_config
+    from jaato_sdk.events import (
         Event,
         EventType,
         AgentOutputEvent,

@@ -618,7 +618,7 @@ For bulk processing. Not needed for interactive sessions.
 ## Dependencies
 
 ```
-# requirements.txt addition
+# pyproject.toml dependency
 anthropic>=0.40.0
 ```
 

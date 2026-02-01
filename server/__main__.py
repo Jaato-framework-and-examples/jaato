@@ -53,7 +53,7 @@ from server.session_logging import (
     set_logging_context,
     clear_logging_context,
 )
-from server.events import Event
+from jaato_sdk.events import Event
 
 
 # Default paths (use platform-appropriate temp directory)
@@ -360,7 +360,7 @@ class JaatoDaemon:
     ) -> None:
         """Inner handler with logging context already set."""
         # Handle tool disable request (direct registry call, no response events)
-        from server.events import ToolDisableRequest
+        from jaato_sdk.events import ToolDisableRequest
         if isinstance(event, ToolDisableRequest):
             session = self._session_manager.get_client_session(client_id)
             if session and session.server and session.server.registry:
@@ -368,7 +368,7 @@ class JaatoDaemon:
             return
 
         # Handle session management commands
-        from server.events import CommandRequest
+        from jaato_sdk.events import CommandRequest
 
         if isinstance(event, CommandRequest):
             cmd = event.command.lower()
@@ -428,7 +428,7 @@ class JaatoDaemon:
                             "session_workspace": session_workspace,
                             "client_workspace": client_workspace,
                         }
-                        from server.events import WorkspaceMismatchRequestedEvent
+                        from jaato_sdk.events import WorkspaceMismatchRequestedEvent
                         self._route_event(client_id, WorkspaceMismatchRequestedEvent(
                             request_id=request_id,
                             session_id=target_session_id,
@@ -473,7 +473,7 @@ class JaatoDaemon:
 
             elif cmd == "session.list":
                 sessions = self._session_manager.list_sessions()
-                from server.events import SessionListEvent
+                from jaato_sdk.events import SessionListEvent
 
                 # Get client's current session to mark it in the list
                 current_session_id = session_id  # From the event
@@ -519,7 +519,7 @@ class JaatoDaemon:
                 if session and session.server:
                     session.server.stop()
                 # Signal termination to all clients attached to this session
-                from server.events import SystemMessageEvent
+                from jaato_sdk.events import SystemMessageEvent
                 self._session_manager._emit_to_session(
                     session_id,
                     SystemMessageEvent(message="[SESSION_TERMINATED]", style="system")
@@ -530,13 +530,13 @@ class JaatoDaemon:
                 if event.args:
                     session_id_to_delete = event.args[0]
                     if self._session_manager.delete_session(session_id_to_delete):
-                        from server.events import SystemMessageEvent
+                        from jaato_sdk.events import SystemMessageEvent
                         self._route_event(client_id, SystemMessageEvent(
                             message=f"Session '{session_id_to_delete}' deleted.",
                             style="info",
                         ))
                     else:
-                        from server.events import SystemMessageEvent
+                        from jaato_sdk.events import SystemMessageEvent
                         self._route_event(client_id, SystemMessageEvent(
                             message=f"Session '{session_id_to_delete}' not found.",
                             style="warning",
@@ -544,7 +544,7 @@ class JaatoDaemon:
                 return
 
             elif cmd == "session.help":
-                from server.events import HelpTextEvent
+                from jaato_sdk.events import HelpTextEvent
                 help_lines = [
                     ("Session Command", "bold"),
                     ("", ""),
@@ -605,7 +605,7 @@ class JaatoDaemon:
                 # Get the client's session
                 session = self._session_manager.get_client_session(client_id)
                 if not session or not session.server:
-                    from server.events import SystemMessageEvent
+                    from jaato_sdk.events import SystemMessageEvent
                     self._route_event(client_id, SystemMessageEvent(
                         message="No active session. Use 'session attach' first.",
                         style="warning",
@@ -613,7 +613,7 @@ class JaatoDaemon:
                     return
 
                 tools_subcmd = cmd.split(".", 1)[1] if "." in cmd else "list"
-                from server.events import ToolStatusEvent
+                from jaato_sdk.events import ToolStatusEvent
 
                 if tools_subcmd == "list":
                     # Get tool status from session's server - send structured data
@@ -628,7 +628,7 @@ class JaatoDaemon:
                     tools = self._get_tool_status(session.server)
                     self._route_event(client_id, ToolStatusEvent(tools=tools, message=result))
                 elif tools_subcmd == "help":
-                    from server.events import HelpTextEvent
+                    from jaato_sdk.events import HelpTextEvent
                     help_lines = [
                         ("Tools Command", "bold"),
                         ("", ""),
@@ -664,7 +664,7 @@ class JaatoDaemon:
                     ]
                     self._route_event(client_id, HelpTextEvent(lines=help_lines))
                 else:
-                    from server.events import SystemMessageEvent
+                    from jaato_sdk.events import SystemMessageEvent
                     self._route_event(client_id, SystemMessageEvent(
                         message="Usage: tools list | tools enable <name> | tools disable <name> | tools help",
                         style="dim",
@@ -672,7 +672,7 @@ class JaatoDaemon:
                 return
 
         # Handle WorkspaceMismatchResponseRequest
-        from server.events import WorkspaceMismatchResponseRequest, WorkspaceMismatchResolvedEvent
+        from jaato_sdk.events import WorkspaceMismatchResponseRequest, WorkspaceMismatchResolvedEvent
         if isinstance(event, WorkspaceMismatchResponseRequest):
             pending = self._pending_workspace_mismatch.pop(client_id, None)
             if not pending or pending["request_id"] != event.request_id:
@@ -695,7 +695,7 @@ class JaatoDaemon:
                         session_id=target_session_id,
                         action="switch",
                     ))
-                    from server.events import SystemMessageEvent
+                    from jaato_sdk.events import SystemMessageEvent
                     self._route_event(client_id, SystemMessageEvent(
                         message=f"Attached to session. Working directory: {session_workspace}",
                         style="info",
@@ -708,7 +708,7 @@ class JaatoDaemon:
                     session_id=target_session_id,
                     action="cancel",
                 ))
-                from server.events import SystemMessageEvent
+                from jaato_sdk.events import SystemMessageEvent
                 self._route_event(client_id, SystemMessageEvent(
                     message="Attach cancelled.",
                     style="dim",
@@ -716,7 +716,7 @@ class JaatoDaemon:
             return
 
         # Handle HistoryRequest
-        from server.events import HistoryRequest, HistoryEvent
+        from jaato_sdk.events import HistoryRequest, HistoryEvent
         if isinstance(event, HistoryRequest):
             session = self._session_manager.get_client_session(client_id)
             if session and session.server:
@@ -749,7 +749,7 @@ class JaatoDaemon:
                 return
 
         # Handle post-auth setup response
-        from server.events import PostAuthSetupResponse
+        from jaato_sdk.events import PostAuthSetupResponse
         if isinstance(event, PostAuthSetupResponse):
             self._handle_post_auth_response(client_id, event)
             return
@@ -827,7 +827,7 @@ class JaatoDaemon:
             command: The command name.
             args: Raw argument list from the client.
         """
-        from server.events import HelpTextEvent, SystemMessageEvent
+        from jaato_sdk.events import HelpTextEvent, SystemMessageEvent
         from shared.plugins.base import parse_command_args, HelpLines
 
         # Buffer plugin._emit() output — daemon commands run outside any agent
@@ -884,7 +884,7 @@ class JaatoDaemon:
     def _offer_post_auth_setup(self, client_id: str, plugin) -> None:
         """Emit PostAuthSetupEvent to offer session creation after auth success."""
         import uuid
-        from server.events import PostAuthSetupEvent
+        from jaato_sdk.events import PostAuthSetupEvent
 
         provider_name = getattr(plugin, 'provider_name', '')
         if not provider_name:
@@ -931,7 +931,7 @@ class JaatoDaemon:
 
         Creates/reconfigures session and optionally writes .env file.
         """
-        from server.events import SystemMessageEvent
+        from jaato_sdk.events import SystemMessageEvent
 
         pending = self._pending_post_auth.pop(client_id, None)
         if not pending or pending["request_id"] != event.request_id:

@@ -35,8 +35,8 @@ async def run_command_mode(
     """
     load_dotenv(env_file)
 
-    from ipc_recovery import IPCRecoveryClient
-    from server.events import (
+    from jaato_sdk.client.recovery import IPCRecoveryClient
+    from jaato_sdk.events import (
         SystemMessageEvent,
         ErrorEvent,
         ToolStatusEvent,

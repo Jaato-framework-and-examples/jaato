@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Environment Setup
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e jaato-sdk/ -e . -e rich-client/
 ```
 
 ### Running the Server (Multi-Client Mode)

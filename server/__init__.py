@@ -18,7 +18,7 @@ Usage:
     python -m server --ipc-socket /tmp/jaato.sock --daemon
 """
 
-from .events import (
+from jaato_sdk.events import (
     # Base
     Event,
     EventType,

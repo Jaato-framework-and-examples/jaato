@@ -4,7 +4,7 @@ This module provides a client for connecting to the Jaato server
 via Unix domain socket (Unix/Linux/macOS) or named pipe (Windows).
 
 Usage:
-    from ipc_client import IPCClient
+    from jaato_sdk.client import IPCClient
 
     # On Unix:
     client = IPCClient("/tmp/jaato.sock")
@@ -35,12 +35,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Add project root to path
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from server.events import (
+from jaato_sdk.events import (
     Event,
     EventType,
     serialize_event,
@@ -796,7 +791,7 @@ class IPCClient:
         Args:
             tool_name: Name of the tool to disable.
         """
-        from server.events import ToolDisableRequest
+        from jaato_sdk.events import ToolDisableRequest
         await self._send_event(ToolDisableRequest(tool_name=tool_name))
 
     async def request_command_list(self) -> None:

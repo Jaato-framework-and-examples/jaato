@@ -11,8 +11,8 @@ Features:
 - Configurable retry behavior via RecoveryConfig
 
 Usage:
-    from ipc_recovery import IPCRecoveryClient, ConnectionState
-    from client_config import get_recovery_config
+    from jaato_sdk.client import IPCRecoveryClient, ConnectionState
+    from jaato_sdk.client.config import get_recovery_config
 
     config = get_recovery_config()
 
@@ -36,21 +36,14 @@ Usage:
 import asyncio
 import logging
 import random
-import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional
 
-# Add project root to path
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from client_config import RecoveryConfig
-from ipc_client import IPCClient
-
-from server.events import (
+from jaato_sdk.client.config import RecoveryConfig
+from jaato_sdk.client.ipc import IPCClient
+from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
     Event,
@@ -180,7 +173,7 @@ class IPCRecoveryClient:
 
         # Load config if not provided
         if config is None:
-            from client_config import get_recovery_config
+            from jaato_sdk.client.config import get_recovery_config
             config = get_recovery_config(workspace_path)
         self._config = config
 
@@ -506,7 +499,7 @@ class IPCRecoveryClient:
         self._check_can_send()
 
         if self._client:
-            from server.events import PostAuthSetupResponse
+            from jaato_sdk.events import PostAuthSetupResponse
             await self._client._send_event(PostAuthSetupResponse(
                 request_id=request_id,
                 connect=connect,

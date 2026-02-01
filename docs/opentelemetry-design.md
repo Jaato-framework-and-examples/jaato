@@ -912,17 +912,11 @@ opentelemetry-exporter-otlp>=1.20.0
 ### Optional Installation
 
 ```bash
-# Install without telemetry (default)
-pip install -r requirements.txt
+# Install all packages in development mode
+pip install -e jaato-sdk/ -e . -e rich-client/
 
-# Install with telemetry
-pip install -r requirements.txt -r requirements-telemetry.txt
-
-# Or via extras
+# Install with telemetry extras
 pip install -e ".[telemetry]"
-
-# All optional dependencies (dev, ast, kaggle, vision, etc.)
-pip install -e ".[all]"
 ```
 
 ## 12. Backend-Specific Notes

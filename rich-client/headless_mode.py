@@ -69,8 +69,8 @@ async def run_headless_mode(
         root_logger.handlers = [file_handler]
         root_logger.setLevel(logging.DEBUG)
 
-    from ipc_recovery import IPCRecoveryClient
-    from server.events import (
+    from jaato_sdk.client.recovery import IPCRecoveryClient
+    from jaato_sdk.events import (
         AgentOutputEvent,
         AgentCreatedEvent,
         AgentStatusChangedEvent,

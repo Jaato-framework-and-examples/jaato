@@ -1,16 +1,9 @@
 """Backend abstraction for RichClient.
 
-This module provides an async abstraction layer that allows RichClient to work
-with either a direct JaatoClient connection or an IPC server connection.
-
-All operations are async to support both:
-- Direct mode: sync JaatoClient calls wrapped with asyncio.to_thread
-- IPC mode: native async event-based communication
+This module provides an async abstraction layer for RichClient to communicate
+with the Jaato server via IPC.
 
 Usage:
-    # Direct mode (non-IPC)
-    backend = DirectBackend(jaato_client)
-
     # IPC mode (with automatic recovery)
     backend = IPCBackend(
         ipc_client,
@@ -18,7 +11,7 @@ Usage:
         on_connection_status=lambda status: print(status.state),
     )
 
-    # RichClient uses backend uniformly (async)
+    # RichClient uses backend (async)
     await backend.send_message("Hello")
 """
 
@@ -30,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ipc_recovery import ConnectionStatus, StatusCallback
+    from jaato_sdk.client.recovery import ConnectionStatus, StatusCallback
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +38,8 @@ class CommandInfo:
 class Backend(ABC):
     """Abstract async backend for RichClient communication.
 
-    This abstraction allows RichClient to work identically with:
-    - Direct JaatoClient (non-IPC mode) - sync calls wrapped as async
-    - IPC server connection (IPC mode) - native async
+    This abstraction provides a consistent interface for RichClient
+    to communicate with the Jaato server via IPC.
     """
 
     # =========================================================================
@@ -264,7 +256,7 @@ class Backend(ABC):
         """Get the underlying session if available.
 
         Returns:
-            JaatoSession for DirectBackend, None for IPCBackend.
+            None for IPCBackend (session is on server side).
         """
         ...
 
@@ -273,7 +265,7 @@ class Backend(ABC):
         """Get the underlying client if available.
 
         Returns:
-            JaatoClient for DirectBackend, IPCClient for IPCBackend.
+            IPCClient or IPCRecoveryClient for IPCBackend.
         """
         ...
 
@@ -281,180 +273,6 @@ class Backend(ABC):
     def set_retry_callback(self, callback: Optional[Callable]) -> None:
         """Set callback for retry notifications."""
         ...
-
-
-class DirectBackend(Backend):
-    """Backend that wraps a JaatoClient for direct (non-IPC) mode.
-
-    Sync JaatoClient calls are wrapped with asyncio.to_thread to make them async.
-    """
-
-    def __init__(self, jaato_client: Any):
-        """Initialize with a JaatoClient instance.
-
-        Args:
-            jaato_client: The JaatoClient to wrap.
-        """
-        self._jaato = jaato_client
-        self._model_name = ""
-        self._provider_name = ""
-
-    @property
-    def model_name(self) -> str:
-        return self._jaato.model_name or self._model_name if self._jaato else self._model_name
-
-    @property
-    def provider_name(self) -> str:
-        return self._jaato.provider_name or self._provider_name if self._jaato else self._provider_name
-
-    @property
-    def is_processing(self) -> bool:
-        return self._jaato.is_processing if self._jaato else False
-
-    @property
-    def is_connected(self) -> bool:
-        return self._jaato is not None
-
-    async def connect(
-        self,
-        project_id: Optional[str] = None,
-        location: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> None:
-        def _connect():
-            if project_id and location:
-                self._jaato.connect(project_id, location, model)
-            else:
-                self._jaato.connect(model=model)
-
-        await asyncio.to_thread(_connect)
-        self._model_name = self._jaato.model_name or model or ""
-        self._provider_name = self._jaato.provider_name or ""
-
-    async def disconnect(self) -> None:
-        pass  # Direct mode doesn't need explicit disconnect
-
-    async def send_message(
-        self,
-        text: str,
-        on_output: Optional[Callable[[str, str, str], None]] = None,
-        attachments: Optional[List[str]] = None,
-    ) -> Optional[str]:
-        def _send():
-            return self._jaato.send_message(text, on_output=on_output)
-
-        return await asyncio.to_thread(_send)
-
-    async def stop(self) -> bool:
-        if self._jaato:
-            return self._jaato.stop()
-        return False
-
-    async def get_user_commands(self) -> Dict[str, Any]:
-        if not self._jaato:
-            return {}
-        return self._jaato.get_user_commands()
-
-    async def execute_user_command(
-        self,
-        command_name: str,
-        args: Optional[Dict[str, Any]] = None,
-    ) -> tuple[Any, bool]:
-        def _execute():
-            return self._jaato.execute_user_command(command_name, args)
-
-        return await asyncio.to_thread(_execute)
-
-    async def get_model_completions(self, args: List[str]) -> List[Any]:
-        if not self._jaato:
-            return []
-        return self._jaato.get_model_completions(args)
-
-    async def get_history(self) -> List[Any]:
-        if not self._jaato:
-            return []
-        return self._jaato.get_history()
-
-    async def get_context_usage(self) -> Dict[str, Any]:
-        if not self._jaato:
-            return {}
-        return self._jaato.get_context_usage()
-
-    async def get_context_limit(self) -> int:
-        if not self._jaato:
-            return 0
-        return self._jaato.get_context_limit()
-
-    async def get_turn_boundaries(self) -> List[int]:
-        if not self._jaato:
-            return []
-        return self._jaato.get_turn_boundaries()
-
-    async def reset_session(self) -> None:
-        if self._jaato:
-            self._jaato.reset_session()
-
-    def set_ui_hooks(self, hooks: Any) -> None:
-        if self._jaato:
-            self._jaato.set_ui_hooks(hooks)
-
-    def verify_auth(
-        self,
-        allow_interactive: bool = False,
-        on_message: Optional[Callable[[str], None]] = None
-    ) -> bool:
-        """Verify authentication before loading tools.
-
-        Args:
-            allow_interactive: If True, allow interactive login if needed.
-            on_message: Optional callback for status messages.
-
-        Returns:
-            True if authentication is configured.
-        """
-        if self._jaato:
-            return self._jaato.verify_auth(allow_interactive, on_message)
-        return False
-
-    def configure_tools(
-        self,
-        registry: Any,
-        permission_plugin: Any,
-        ledger: Any,
-    ) -> None:
-        if self._jaato:
-            self._jaato.configure_tools(registry, permission_plugin, ledger)
-
-    def set_gc_plugin(self, gc_plugin: Any, gc_config: Any) -> None:
-        if self._jaato:
-            self._jaato.set_gc_plugin(gc_plugin, gc_config)
-
-    def set_session_plugin(self, plugin: Any, config: Any) -> None:
-        if self._jaato:
-            self._jaato.set_session_plugin(plugin, config)
-
-    def get_session_plugin(self) -> Optional[Any]:
-        if self._jaato and hasattr(self._jaato, '_session_plugin'):
-            return self._jaato._session_plugin
-        return None
-
-    async def refresh_tools(self) -> None:
-        if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
-            self._jaato._session.refresh_tools()
-
-    def get_session(self) -> Optional[Any]:
-        if self._jaato:
-            return self._jaato.get_session()
-        return None
-
-    def get_client(self) -> Optional[Any]:
-        return self._jaato
-
-    def set_retry_callback(self, callback: Optional[Callable]) -> None:
-        if self._jaato:
-            session = self._jaato.get_session()
-            if session:
-                session.set_retry_callback(callback)
 
 
 class IPCBackend(Backend):
@@ -575,7 +393,7 @@ class IPCBackend(Backend):
     ) -> None:
         if self._use_recovery:
             # Import here to avoid circular imports
-            from ipc_recovery import IPCRecoveryClient
+            from jaato_sdk.client.recovery import IPCRecoveryClient
 
             # Create recovery client wrapping the raw client's socket path
             self._recovery_client = IPCRecoveryClient(

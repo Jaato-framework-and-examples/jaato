@@ -12,7 +12,7 @@ Configuration precedence (highest wins):
 4. Built-in defaults
 
 Usage:
-    from client_config import load_client_config, get_recovery_config
+    from jaato_sdk.client.config import load_client_config, get_recovery_config
 
     # Load full client config
     config = load_client_config(workspace_path=Path.cwd())

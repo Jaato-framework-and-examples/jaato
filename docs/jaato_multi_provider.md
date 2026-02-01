@@ -327,7 +327,7 @@ Failed imports are tracked rather than swallowed, enabling actionable error mess
 
 ```
 Provider 'anthropic' failed to load: No module named 'anthropic'
-Hint: Run 'pip install -r requirements.txt' to install dependencies.
+Hint: Run 'pip install -e jaato-sdk/ -e . -e rich-client/' to install dependencies.
 ```
 
 ---

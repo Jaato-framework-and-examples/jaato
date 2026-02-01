@@ -131,11 +131,8 @@ cd jaato
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Or install via pyproject.toml with all extras
-pip install -e ".[all]"
+# Install all packages in development mode
+pip install -e jaato-sdk/ -e . -e rich-client/
 
 # Run tests
 pytest
@@ -159,11 +156,11 @@ pytest
 
           <h3>Install Development Dependencies</h3>
           <p>
-            The project uses <code>pytest</code> for testing and includes several
-            development dependencies defined in <code>requirements.txt</code>.
-            Optional extras (dev tools, vision/PNG support, AST search) are defined
-            in <code>pyproject.toml</code> and can be installed with
-            <code>pip install -e ".[all]"</code>.
+            The project uses <code>pytest</code> for testing. Install all three
+            packages (SDK, server, TUI) in development mode with
+            <code>pip install -e jaato-sdk/ -e . -e rich-client/</code>.
+            Optional extras (vision/PNG support, AST search) are defined in
+            <code>pyproject.toml</code>.
           </p>
 
           <h3>Verify Your Setup</h3>
