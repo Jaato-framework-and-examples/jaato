@@ -110,6 +110,9 @@ class EventType(str, Enum):
     MID_TURN_PROMPT_INJECTED = "mid_turn_prompt.injected"
     MID_TURN_INTERRUPT = "mid_turn_prompt.interrupt"  # Streaming interrupted for user prompt
 
+    # Session recovery (Server -> Client)
+    INTERRUPTED_TURN_RECOVERED = "session.interrupted_turn_recovered"  # Turn recovered after reconnect
+
     # Workspace management (Client <-> Server)
     WORKSPACE_LIST_REQUEST = "workspace.list"  # Client -> Server
     WORKSPACE_LIST = "workspace.list_response"  # Server -> Client
@@ -841,6 +844,21 @@ class MidTurnInterruptEvent(Event):
     user_prompt_preview: str = ""  # First 100 chars of the user's prompt
 
 
+@dataclass
+class InterruptedTurnRecoveredEvent(Event):
+    """Sent when the server recovers from an interrupted turn after reconnection.
+
+    This event notifies the client that a turn was interrupted (e.g., by server
+    restart) and has been recovered with synthetic error responses injected
+    for any pending tool calls.
+    """
+    type: EventType = field(default=EventType.INTERRUPTED_TURN_RECOVERED)
+    session_id: str = ""
+    agent_id: str = ""
+    recovered_calls: int = 0  # Number of tool calls that were recovered
+    action_taken: str = ""  # What action was taken (e.g., "synthetic_error")
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -896,6 +914,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
+    EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management
     EventType.WORKSPACE_LIST_REQUEST.value: WorkspaceListRequest,
     EventType.WORKSPACE_LIST.value: WorkspaceListEvent,
