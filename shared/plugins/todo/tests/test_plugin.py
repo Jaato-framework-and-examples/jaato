@@ -702,3 +702,78 @@ class TestTodoPluginWorkflow:
         assert result["status"] == "failed"
         assert result["progress"]["completed"] == 1
         assert result["progress"]["failed"] == 1
+
+
+class TestPersistence:
+    """Tests for plugin state persistence."""
+
+    def test_get_persistence_state_empty(self):
+        """Test get_persistence_state with no plans."""
+        plugin = TodoPlugin()
+        plugin.initialize({"storage_type": "memory"})
+
+        state = plugin.get_persistence_state()
+        assert state == {"agent_plan_ids": {}}
+
+    def test_get_persistence_state_with_plans(self):
+        """Test get_persistence_state with active plans."""
+        plugin = TodoPlugin()
+        plugin.initialize({"storage_type": "memory"})
+
+        # Create a plan
+        executors = plugin.get_executors()
+        result = executors["createPlan"]({
+            "title": "Test Plan",
+            "steps": ["Step 1", "Step 2"]
+        })
+        plan_id = result["plan_id"]
+
+        state = plugin.get_persistence_state()
+        # None key becomes "__none__" in serialization
+        assert "__none__" in state["agent_plan_ids"] or "main" in state["agent_plan_ids"]
+
+    def test_restore_persistence_state(self):
+        """Test restoring plugin state."""
+        plugin = TodoPlugin()
+        plugin.initialize({"storage_type": "memory"})
+
+        # Create a plan
+        executors = plugin.get_executors()
+        result = executors["createPlan"]({
+            "title": "Test Plan",
+            "steps": ["Step 1", "Step 2"]
+        })
+        plan_id = result["plan_id"]
+
+        # Get state and clear plugin
+        state = plugin.get_persistence_state()
+        plugin._current_plan_ids.clear()
+
+        # Restore
+        plugin.restore_persistence_state(state)
+
+        # Verify plan mapping restored
+        assert len(plugin._current_plan_ids) > 0
+
+    def test_persistence_state_roundtrip_json(self):
+        """Test that persistence state survives JSON serialization."""
+        plugin = TodoPlugin()
+        plugin.initialize({"storage_type": "memory"})
+
+        executors = plugin.get_executors()
+        executors["createPlan"]({
+            "title": "Test Plan",
+            "steps": ["Step 1"]
+        })
+
+        # Serialize and deserialize
+        state = plugin.get_persistence_state()
+        json_str = json.dumps(state)
+        restored_state = json.loads(json_str)
+
+        # Clear and restore
+        plugin._current_plan_ids.clear()
+        plugin.restore_persistence_state(restored_state)
+
+        # Should have restored the plan mapping
+        assert len(plugin._current_plan_ids) > 0
