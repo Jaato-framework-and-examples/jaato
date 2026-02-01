@@ -57,8 +57,8 @@ from input_handler import InputHandler
 # Reuse plan reporter from rich-client (already generic with callbacks)
 from plan_reporter import create_live_reporter
 
-# Import events
-from .events import (
+# Import events from SDK
+from jaato_sdk.events import (
     Event,
     EventType,
     ConnectedEvent,

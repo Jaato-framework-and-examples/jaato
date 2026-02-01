@@ -540,11 +540,8 @@ cd jaato
 python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Or install via pyproject.toml with all extras
-pip install -e ".[all]"
+# Install all three packages in development mode
+pip install -e jaato-sdk/ -e . -e rich-client/
 
 # Run tests to verify setup
 pytest</code></pre>

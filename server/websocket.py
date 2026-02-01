@@ -29,7 +29,7 @@ except ImportError:
 
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context
-from .events import (
+from jaato_sdk.events import (
     Event,
     EventType,
     ConnectedEvent,

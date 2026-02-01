@@ -41,7 +41,7 @@ from shared.plugins.session import (
 
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
-from .events import (
+from jaato_sdk.events import (
     Event,
     EventType,
     SystemMessageEvent,
@@ -1743,7 +1743,7 @@ class SessionManager:
             session_id: The target session.
             event: The request event.
         """
-        from .events import ClientConfigRequest
+        from jaato_sdk.events import ClientConfigRequest
 
         # Handle client config before session lookup (doesn't require session)
         if isinstance(event, ClientConfigRequest):
@@ -1775,7 +1775,7 @@ class SessionManager:
             session_env=session_env,
         )
 
-        from .events import (
+        from jaato_sdk.events import (
             SendMessageRequest,
             PermissionResponseRequest,
             ClarificationResponseRequest,

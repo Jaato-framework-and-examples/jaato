@@ -106,12 +106,22 @@ For plugin development, see [shared/plugins/README.md](shared/plugins/README.md)
 
 ### Installation
 
+jaato consists of three packages:
+- **jaato-sdk** - Lightweight client library for building custom clients
+- **jaato-server** - Runtime daemon with all plugins and providers
+- **jaato-tui** - Terminal user interface client
+
 ```bash
 git clone https://github.com/apanoia/jaato.git
 cd jaato
-pip install .
 
-# With optional extras
+# For contributors: install all packages in development mode
+pip install -e jaato-sdk/ -e . -e rich-client/
+
+# For SDK users: just the lightweight client library
+pip install jaato-sdk/
+
+# With optional extras (for server)
 pip install ".[vision]"       # PNG screenshots (requires libcairo2-dev on Linux)
 pip install ".[dev]"          # pytest and dev tools
 pip install ".[all]"          # all optional dependencies
@@ -131,17 +141,21 @@ jaato uses environment variables and configuration files for setup:
 
 ## Usage
 
-The primary way to use jaato is through the **Interactive Client**, which provides a full-featured conversational interface for interacting with LLMs and tools.
+jaato uses a server-client architecture. Start the server daemon, then connect with the TUI client:
 
 ```bash
-# Start interactive session
-.venv/bin/python simple-client/interactive_client.py
+# Start server daemon
+.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
 
-# Start with an initial prompt, then continue interactively
-.venv/bin/python simple-client/interactive_client.py -i "List files in current directory"
+# Connect TUI client
+.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock
+```
 
-# Run a single prompt and exit (non-interactive)
-.venv/bin/python simple-client/interactive_client.py -p "What time is it?"
+Or use headless mode for scripting:
+
+```bash
+# Single prompt, non-interactive
+.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
 ```
 
 ### Features

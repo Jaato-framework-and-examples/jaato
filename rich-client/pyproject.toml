@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaato-tui"
+version = "0.1.0"
+description = "Jaato TUI - Terminal user interface for jaato server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "apanoia"}
+]
+keywords = ["jaato", "tui", "terminal", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "jaato-sdk",
+    "jaato-server",  # For shared.* modules (formatters, ui_utils, client_commands)
+    "prompt_toolkit>=3.0.0",
+    "rich>=13.0.0",
+    "python-dotenv",
+    "pyte>=0.8.0",  # Terminal emulator for tool output processing
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*"]
