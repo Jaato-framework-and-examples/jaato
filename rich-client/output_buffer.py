@@ -824,7 +824,12 @@ class OutputBuffer:
         for line in message.split('\n'):
             self._add_line("system", line, style)
 
-    def update_last_system_message(self, message: str, style: str = "system_info") -> bool:
+    def update_last_system_message(
+        self,
+        message: str,
+        style: str = "system_info",
+        prefix: Optional[str] = None
+    ) -> bool:
         """Update the last system message in the buffer.
 
         Used for progressive updates like init progress that show "..." then "OK".
@@ -832,13 +837,20 @@ class OutputBuffer:
         Args:
             message: The new message text.
             style: Rich style for the message.
+            prefix: If provided, only update a system message that starts with
+                this prefix. This prevents updating the wrong message when other
+                system messages are inserted between "running" and "done" states.
 
         Returns:
             True if a system message was found and updated, False otherwise.
         """
-        # Search backwards for the last system message
+        # Search backwards for the last system message (optionally matching prefix)
         for i in range(len(self._lines) - 1, -1, -1):
-            if self._lines[i].source == "system":
+            line = self._lines[i]
+            if line.source == "system":
+                # If prefix specified, check if this line starts with it
+                if prefix is not None and not line.text.startswith(prefix):
+                    continue
                 # Update the line
                 display_lines = self._measure_display_lines("system", message, False)
                 self._lines[i] = OutputLine(

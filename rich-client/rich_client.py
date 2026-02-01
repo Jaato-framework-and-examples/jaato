@@ -3368,26 +3368,34 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Format step name with fixed width
                 padded_name = step_name.ljust(init_step_max_len)
 
+                # Prefix for matching the "running" message when updating
+                step_prefix = f"   {padded_name}"
+
                 if status == "running":
                     # Show step in progress
-                    display.add_system_message(f"   {padded_name} ...", style="system_progress")
+                    display.add_system_message(f"{step_prefix} ...", style="system_progress")
                     init_current_step = step_name
                 elif status == "done":
                     # Update the same line to show completion
                     if init_current_step == step_name:
-                        # Update in place
-                        display.update_last_system_message(f"   {padded_name} OK", style="system_info")
+                        # Update in place - use prefix to find the correct message
+                        # even if other system messages were added in between
+                        display.update_last_system_message(
+                            f"{step_prefix} OK", style="system_info", prefix=step_prefix
+                        )
                     else:
                         # Step mismatch (shouldn't happen), add new line
-                        display.add_system_message(f"   {padded_name} OK", style="system_info")
+                        display.add_system_message(f"{step_prefix} OK", style="system_info")
                     init_current_step = None
                 elif status == "error":
                     # Show error
                     msg = event.message or "ERROR"
                     if init_current_step == step_name:
-                        display.update_last_system_message(f"   {padded_name} {msg}", style="system_init_error")
+                        display.update_last_system_message(
+                            f"{step_prefix} {msg}", style="system_init_error", prefix=step_prefix
+                        )
                     else:
-                        display.add_system_message(f"   {padded_name} {msg}", style="system_init_error")
+                        display.add_system_message(f"{step_prefix} {msg}", style="system_init_error")
                     init_current_step = None
                 elif status == "pending":
                     # Show pending status (e.g., waiting for auth)
