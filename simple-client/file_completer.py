@@ -419,6 +419,120 @@ class AtFileCompleter(Completer):
         return type_map.get(ext, 'file')
 
 
+class PercentPromptCompleter(Completer):
+    """Complete prompt/skill names after % symbol.
+
+    Triggers completion when user types %, providing:
+    - Prompt/skill suggestions from the prompt library
+    - Visual dropdown with arrow key navigation
+    - Prompt descriptions as metadata
+
+    Example usage:
+        "Review @src/main.py using %code-review"
+        "Generate an image with %gemini-image-generator"
+    """
+
+    def __init__(
+        self,
+        prompt_provider: Optional[Callable[[], list]] = None,
+    ):
+        """Initialize the completer.
+
+        Args:
+            prompt_provider: Callback that returns list of prompt info objects.
+                           Each should have 'name' and 'description' attributes.
+        """
+        self._prompt_provider = prompt_provider
+
+    def set_prompt_provider(self, provider: Callable[[], list]) -> None:
+        """Set the prompt provider callback.
+
+        Args:
+            provider: Callback that returns list of prompt info objects.
+        """
+        self._prompt_provider = provider
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions for the current document.
+
+        Looks for % patterns and provides prompt name completions.
+        """
+        text = document.text_before_cursor
+
+        # Find the last % symbol that starts a prompt reference
+        percent_pos = self._find_percent_position(text)
+        if percent_pos == -1:
+            return
+
+        # Extract the prompt name portion after %
+        prompt_text = text[percent_pos + 1:]
+
+        # Skip if there's a space after % (not a prompt reference)
+        if prompt_text and prompt_text[0] == ' ':
+            return
+
+        # Get available prompts
+        if not self._prompt_provider:
+            return
+
+        try:
+            prompts = self._prompt_provider()
+        except Exception:
+            return
+
+        if not prompts:
+            return
+
+        # Filter prompts that match the typed text
+        prompt_lower = prompt_text.lower()
+        for prompt_info in prompts:
+            # Handle both dict and object
+            if isinstance(prompt_info, dict):
+                name = prompt_info.get('name', '')
+                description = prompt_info.get('description', 'prompt')
+            else:
+                name = getattr(prompt_info, 'name', '')
+                description = getattr(prompt_info, 'description', 'prompt')
+
+            if name.lower().startswith(prompt_lower):
+                # Truncate long descriptions
+                if len(description) > 50:
+                    description = description[:47] + "..."
+
+                yield Completion(
+                    name,
+                    start_position=-len(prompt_text),
+                    display=f"%{name}",
+                    display_meta=description,
+                )
+
+    def _find_percent_position(self, text: str) -> int:
+        """Find the position of % that starts a prompt reference.
+
+        Returns -1 if no valid % reference is found.
+        A valid % is one that:
+        - Is at start of string, or preceded by whitespace/punctuation
+        - Is not preceded by alphanumeric (which would indicate 100%done pattern)
+        """
+        # Find the last % in the text
+        percent_pos = text.rfind('%')
+        if percent_pos == -1:
+            return -1
+
+        # Check if this % looks like a prompt reference
+        # Valid: "%prompt", " %prompt", "(%prompt", "%c" (user typing prompt name)
+        # Invalid: "100%done" (alphanumeric before %)
+        if percent_pos > 0:
+            prev_char = text[percent_pos - 1]
+            # If preceded by alphanumeric -> likely not a prompt ref
+            if prev_char.isalnum():
+                return -1
+
+        return percent_pos
+
+
 class SlashCommandCompleter(Completer):
     """Complete slash commands from .jaato/commands/ directory.
 
@@ -725,6 +839,124 @@ class FileReferenceProcessor:
             return []
 
 
+class PromptReferenceProcessor:
+    """Process %prompt references in user input.
+
+    Expands prompt references to include the prompt content when sending
+    messages to the model. Works similarly to FileReferenceProcessor for @files.
+
+    Example:
+        Input: "Review @src/main.py using %code-review"
+        Output: "Review @src/main.py using [expanded code-review prompt content]"
+    """
+
+    def __init__(
+        self,
+        prompt_expander: Optional[Callable[[str, dict], Optional[str]]] = None,
+    ):
+        """Initialize the processor.
+
+        Args:
+            prompt_expander: Callback that takes (prompt_name, params) and returns
+                           the expanded prompt content, or None if not found.
+        """
+        self._prompt_expander = prompt_expander
+
+    def set_prompt_expander(self, expander: Callable[[str, dict], Optional[str]]) -> None:
+        """Set the prompt expander callback.
+
+        Args:
+            expander: Callback (prompt_name, params) -> expanded content or None
+        """
+        self._prompt_expander = expander
+
+    def find_references(self, text: str) -> list[dict]:
+        """Find all %prompt references in text.
+
+        Args:
+            text: User input potentially containing %prompt references
+
+        Returns:
+            List of dicts with reference info: {'reference', 'name', 'start', 'end'}
+        """
+        import re
+
+        # Pattern to match %prompt references
+        # Matches % followed by a valid prompt name (letters, numbers, hyphens, underscores)
+        # Stops at whitespace, punctuation, or end of string
+        pattern = r'%([a-zA-Z][a-zA-Z0-9_-]*)'
+
+        references = []
+        for match in re.finditer(pattern, text):
+            # Skip if preceded by alphanumeric (not a valid prompt reference)
+            if match.start() > 0 and text[match.start() - 1].isalnum():
+                continue
+
+            references.append({
+                'reference': match.group(0),  # %prompt-name
+                'name': match.group(1),       # prompt-name
+                'start': match.start(),
+                'end': match.end(),
+            })
+
+        return references
+
+    def expand_references(self, text: str) -> str:
+        """Expand %prompt references to include prompt content.
+
+        Args:
+            text: User input with %prompt references
+
+        Returns:
+            Text with prompt references expanded, or original text if no references
+            or no expander configured.
+        """
+        if not self._prompt_expander:
+            return text
+
+        references = self.find_references(text)
+        if not references:
+            return text
+
+        # Process references in reverse order to preserve positions
+        result = text
+        expanded_prompts = []
+
+        for ref in reversed(references):
+            prompt_name = ref['name']
+
+            # Try to expand the prompt
+            try:
+                content = self._prompt_expander(prompt_name, {})
+            except Exception:
+                content = None
+
+            if content:
+                # Replace %prompt with just the prompt name (reference removed)
+                result = result[:ref['start']] + prompt_name + result[ref['end']:]
+                expanded_prompts.append({
+                    'name': prompt_name,
+                    'content': content,
+                })
+            else:
+                # Unknown prompt - leave reference but strip %
+                result = result[:ref['start']] + prompt_name + result[ref['end']:]
+
+        # If we expanded any prompts, append their content
+        if expanded_prompts:
+            # Reverse to maintain original order
+            expanded_prompts.reverse()
+
+            parts = [result, "\n\n--- Referenced Prompts ---\n"]
+            for prompt in expanded_prompts:
+                parts.append(f"\n[Prompt: {prompt['name']}]\n")
+                parts.append(f"{prompt['content']}\n")
+
+            return ''.join(parts)
+
+        return result
+
+
 class PermissionResponseCompleter(Completer):
     """Complete permission response options.
 
@@ -1007,12 +1239,13 @@ class PluginCommandCompleter(Completer):
 
 
 class CombinedCompleter(Completer):
-    """Combined completer for commands, file references, slash commands, and plugin commands.
+    """Combined completer for commands, file references, prompts, slash commands, and plugin commands.
 
-    Merges CommandCompleter, AtFileCompleter, SlashCommandCompleter,
+    Merges CommandCompleter, AtFileCompleter, PercentPromptCompleter, SlashCommandCompleter,
     SessionIdCompleter, and PluginCommandCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
+    - Prompt/skill completion after % symbols
     - Slash command completion after / symbols (from .jaato/commands/)
     - Session ID completion after session commands (delete-session, resume)
     - Plugin command argument completion (via get_command_completions protocol)
@@ -1057,6 +1290,7 @@ class CombinedCompleter(Completer):
         )
         self._session_completer = SessionIdCompleter(session_provider)
         self._plugin_command_completer = PluginCommandCompleter()
+        self._prompt_completer = PercentPromptCompleter()
         self._permission_completer = PermissionResponseCompleter()
         self._permission_mode: bool = False
 
@@ -1081,6 +1315,15 @@ class CombinedCompleter(Completer):
             provider: Callback that returns list of session info objects.
         """
         self._session_completer.set_session_provider(provider)
+
+    def set_prompt_provider(self, provider: Callable[[], list]) -> None:
+        """Set the prompt provider callback for %prompt completion.
+
+        Args:
+            provider: Callback that returns list of prompt info objects.
+                     Each object should have 'name' and 'description' attributes.
+        """
+        self._prompt_completer.set_prompt_provider(provider)
 
     def add_commands(self, commands: list[tuple[str, str]]) -> None:
         """Add commands dynamically (e.g., from plugins).
@@ -1161,11 +1404,13 @@ class CombinedCompleter(Completer):
         # Normal mode: yield completions from all sources
         # CommandCompleter will only yield if appropriate (single word, no @ or /)
         # AtFileCompleter will only yield if @ is present
+        # PercentPromptCompleter will only yield if % is present
         # SlashCommandCompleter will only yield if / is present at start of word
         # SessionIdCompleter will only yield after session commands (delete-session, resume)
         # PluginCommandCompleter will yield for plugin commands with completions
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
+        yield from self._prompt_completer.get_completions(document, complete_event)
         yield from self._slash_completer.get_completions(document, complete_event)
         yield from self._session_completer.get_completions(document, complete_event)
         yield from self._plugin_command_completer.get_completions(document, complete_event)
