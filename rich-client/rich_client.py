@@ -3186,10 +3186,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
         elif status.state == ConnectionState.DISCONNECTED:
             # Disconnected without reconnection (e.g., auto-reconnect disabled)
-            connection_status_message = status.message or "Disconnected"
+            connection_status_message = "Disconnected"
             try:
-                if status.message:
-                    display.add_system_message(status.message, style="system_warning")
                 display.set_connection_status("Disconnected", style="warning")
             except Exception:
                 pass
@@ -3200,18 +3198,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             try:
                 display.add_system_message(msg, style="system_error_bold")
                 display.set_connection_status("Disconnected", style="error")
-            except Exception:
-                pass
-
-        # Display any additional message from the status
-        if status.message and status.state not in (ConnectionState.DISCONNECTED,):
-            try:
-                style = {
-                    "info": "system",
-                    "warning": "system_warning",
-                    "error": "system_error_bold",
-                }.get(status.message_level, "system")
-                display.add_system_message(status.message, style=style)
             except Exception:
                 pass
 
