@@ -1076,7 +1076,9 @@ class SessionManager:
         if not todo_plugin:
             return
 
-        plans_dir = session_dir / "plans"
+        # Resolve to absolute path to avoid issues with CWD changes
+        # (e.g., when subagents call os.chdir() in background threads)
+        plans_dir = (session_dir / "plans").resolve()
         todo_plugin.initialize({
             "storage_type": "file",
             "storage_path": str(plans_dir),
@@ -1100,7 +1102,8 @@ class SessionManager:
             # No plans to save
             return
 
-        state_path = session_dir / "plans" / "_state.json"
+        # Resolve to absolute path to avoid CWD issues
+        state_path = (session_dir / "plans" / "_state.json").resolve()
         state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(state_path, 'w', encoding='utf-8') as f:
@@ -1116,7 +1119,8 @@ class SessionManager:
             server: The JaatoServer instance.
             session_dir: The session's storage directory.
         """
-        state_path = session_dir / "plans" / "_state.json"
+        # Resolve to absolute path to avoid CWD issues
+        state_path = (session_dir / "plans" / "_state.json").resolve()
         if not state_path.exists():
             return
 
