@@ -200,6 +200,29 @@ class ReliabilityPlugin:
                         CommandCompletion("workspace", "Clear workspace settings"),
                         CommandCompletion("session", "Clear session overrides"),
                     ]
+            elif subcommand == "model":
+                arg = command_parts[2]
+                if arg == "status":
+                    # Return list of tracked models
+                    models = set(m for (m, _) in self._model_profiles.keys())
+                    if self._current_model:
+                        models.add(self._current_model)
+                    return [
+                        CommandCompletion(m, f"Show reliability for {m}")
+                        for m in sorted(models)
+                    ]
+                elif arg in ("suggest", "auto", "disabled"):
+                    return [
+                        CommandCompletion("save", "Save strategy setting"),
+                    ]
+
+        if len(command_parts) == 4:
+            subcommand = command_parts[1]
+            if subcommand == "model" and command_parts[2] in ("suggest", "auto", "disabled") and command_parts[3] == "save":
+                return [
+                    CommandCompletion("workspace", "Save to workspace"),
+                    CommandCompletion("user", "Save as user default"),
+                ]
 
         return []
 
@@ -1295,20 +1318,50 @@ class ReliabilityPlugin:
         elif parts[0] == "suggest":
             self._model_switch_config.strategy = ModelSwitchStrategy.SUGGEST
             self._session_settings.model_switch_strategy = "suggest"
-            return "Model switching set to SUGGEST: Will suggest better models on failure"
+            result = "Model switching set to SUGGEST: Will suggest better models on failure"
+            if len(parts) >= 3 and parts[1] == "save":
+                save_result = self._save_model_strategy(parts[2])
+                return f"{result}\n{save_result}"
+            return result
         elif parts[0] == "auto":
             self._model_switch_config.strategy = ModelSwitchStrategy.AUTO
             self._session_settings.model_switch_strategy = "auto"
-            return "Model switching set to AUTO: Will automatically switch to better models"
+            result = "Model switching set to AUTO: Will automatically switch to better models"
+            if len(parts) >= 3 and parts[1] == "save":
+                save_result = self._save_model_strategy(parts[2])
+                return f"{result}\n{save_result}"
+            return result
         elif parts[0] == "disabled":
             self._model_switch_config.strategy = ModelSwitchStrategy.DISABLED
             self._session_settings.model_switch_strategy = "disabled"
-            return "Model switching DISABLED"
+            result = "Model switching DISABLED"
+            if len(parts) >= 3 and parts[1] == "save":
+                save_result = self._save_model_strategy(parts[2])
+                return f"{result}\n{save_result}"
+            return result
         else:
             return (
                 f"Unknown model subcommand: {parts[0]}\n"
                 "Usage: reliability model [status|compare|suggest|auto|disabled]"
             )
+
+    def _save_model_strategy(self, level: str) -> str:
+        """Save model switch strategy to workspace or user level."""
+        if not self._persistence:
+            return "Error: Persistence not initialized (no workspace set)"
+
+        strategy = self._model_switch_config.strategy.value
+
+        if level == "workspace":
+            if self._persistence.save_setting_to_workspace("model_switch_strategy", strategy):
+                return f"Model strategy '{strategy}' saved to workspace"
+            return "Error: Failed to save to workspace"
+        elif level == "user":
+            if self._persistence.save_setting_to_user("model_switch_strategy", strategy):
+                return f"Model strategy '{strategy}' saved as user default"
+            return "Error: Failed to save to user"
+        else:
+            return f"Unknown level: {level}. Use 'workspace' or 'user'"
 
     def _model_status(self, model_name: Optional[str] = None) -> str:
         """Show model reliability status."""
