@@ -316,6 +316,10 @@ class RichClient:
             )
             self._display_command_result(command.name, result, shared)
 
+            # Update permission status in session bar if permissions command was executed
+            if command.name.lower() == "permissions":
+                self._update_permission_status_display()
+
             # Update status bar if model was changed
             if command.name.lower() == "model" and isinstance(result, dict):
                 if result.get("success") and result.get("current_model"):
@@ -923,6 +927,23 @@ class RichClient:
             if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
                 subagent_plugin.set_ui_hooks(hooks)
 
+    def _update_permission_status_display(self) -> None:
+        """Update the session bar permission status from the permission plugin.
+
+        Should be called:
+        - After initial setup
+        - After any permission response that may change status (t/i/a responses)
+        - After permission commands (suspend/resume/default)
+        """
+        if not self.permission_plugin or not self._display:
+            return
+
+        status = self.permission_plugin.get_permission_status()
+        self._display.set_permission_status(
+            effective_default=status.get("effective_default", "ask"),
+            suspension_scope=status.get("suspension_scope"),
+        )
+
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks for UI integration.
 
@@ -937,6 +958,7 @@ class RichClient:
 
         registry = self._agent_registry
         display = self._display
+        update_status = self._update_permission_status_display
 
         def on_permission_requested(tool_name: str, request_id: str, tool_args: dict, response_options: list):
             """Called when permission prompt is shown.
@@ -1002,6 +1024,9 @@ class RichClient:
                 buffer.set_tool_permission_resolved(tool_name, granted, method)
                 if display:
                     display.refresh()
+
+            # Update permission status in session bar (may have changed due to t/i/a responses)
+            update_status()
 
         self.permission_plugin.set_permission_hooks(
             on_requested=on_permission_requested,
@@ -1714,6 +1739,9 @@ class RichClient:
 
         # Set up permission hooks for inline permission display in tool tree
         self._setup_permission_hooks()
+
+        # Set initial permission status in session bar
+        self._update_permission_status_display()
 
         # Set up clarification hooks for inline clarification display in tool tree
         self._setup_clarification_hooks()

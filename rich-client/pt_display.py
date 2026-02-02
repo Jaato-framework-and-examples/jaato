@@ -528,6 +528,10 @@ class PTDisplay:
         self._session_description: str = ""
         self._session_workspace: str = ""
 
+        # Permission status for session bar display
+        self._permission_default: str = "ask"  # "allow", "deny", or "ask"
+        self._permission_suspension: Optional[str] = None  # "turn", "idle", "session", or None
+
         # Temporary status message (for copy feedback, etc.)
         self._status_message: Optional[str] = None
         self._status_message_expires: float = 0.0
@@ -773,10 +777,33 @@ class PTDisplay:
         tools_indicator = "▼ expanded" if tools_expanded else "▶ collapsed"
         result.extend([
             ("class:session-bar.separator", "  │  "),
-            ("class:session-bar.label", "Toolblocks visualization: "),
+            ("class:session-bar.label", "Toolblocks: "),
             ("class:session-bar.value", tools_indicator),
             ("class:session-bar.dim", " [Ctrl+T]"),
         ])
+
+        # Add permission status indicator
+        result.extend([
+            ("class:session-bar.separator", "  │  "),
+            ("class:session-bar.label", "Permissions: "),
+        ])
+
+        if self._permission_suspension:
+            # Suspended - show "allow" with scope in parentheses
+            result.extend([
+                ("class:session-bar.value", "allow"),
+                ("class:session-bar.dim", f" ({self._permission_suspension})"),
+            ])
+        else:
+            # Normal mode - show the effective default policy
+            # Use different style classes for different modes
+            policy = self._permission_default
+            if policy == "allow":
+                result.append(("class:session-bar.value", "allow"))
+            elif policy == "deny":
+                result.append(("class:session-bar.warning", "deny"))
+            else:  # "ask"
+                result.append(("class:session-bar.value", "ask"))
 
         result.append(("class:session-bar", " "))
         return result
@@ -2015,6 +2042,21 @@ class PTDisplay:
             if workspace.startswith(home):
                 workspace = "~" + workspace[len(home):]
         self._session_workspace = workspace
+        self.refresh()
+
+    def set_permission_status(
+        self,
+        effective_default: str,
+        suspension_scope: Optional[str] = None
+    ) -> None:
+        """Set the permission status for the session bar.
+
+        Args:
+            effective_default: The effective default policy ("allow", "deny", or "ask").
+            suspension_scope: Optional suspension scope ("turn", "idle", "session", or None).
+        """
+        self._permission_default = effective_default
+        self._permission_suspension = suspension_scope
         self.refresh()
 
     def set_stop_callbacks(
