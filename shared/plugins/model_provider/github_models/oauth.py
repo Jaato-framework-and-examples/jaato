@@ -589,7 +589,7 @@ def get_stored_access_token() -> Optional[str]:
     copilot_token = load_copilot_token()
     _oauth_trace(f"get_stored_access_token: copilot_token={bool(copilot_token)}")
 
-    if copilot_token and not copilot_token.is_expired():
+    if copilot_token and not copilot_token.needs_refresh():
         _oauth_trace("get_stored_access_token: returning existing valid token")
         return copilot_token.token
 

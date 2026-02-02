@@ -166,14 +166,22 @@ class CopilotClient:
         to be refreshed and updates self._token if a new token is obtained.
         """
         try:
-            from .oauth import get_stored_access_token
+            from .oauth import get_stored_access_token, _oauth_trace
+            _oauth_trace("_ensure_valid_token: checking if token needs refresh")
             fresh_token = get_stored_access_token()
             if fresh_token and fresh_token != self._token:
+                _oauth_trace("_ensure_valid_token: token refreshed")
                 self._token = fresh_token
-        except Exception:
-            # If refresh fails, continue with existing token
+            elif not fresh_token:
+                _oauth_trace("_ensure_valid_token: get_stored_access_token returned None")
+        except Exception as e:
+            # Log the error for debugging but continue with existing token
             # The API call will fail with a clear error if token is invalid
-            pass
+            try:
+                from .oauth import _oauth_trace
+                _oauth_trace(f"_ensure_valid_token: refresh failed: {e}")
+            except Exception:
+                pass
 
     def _force_token_refresh(self) -> None:
         """Force a token refresh by clearing cached token and re-exchanging.
@@ -182,16 +190,25 @@ class CopilotClient:
         even if it appeared valid according to expiry time.
         """
         try:
-            from .oauth import clear_copilot_token, get_stored_access_token
+            from .oauth import clear_copilot_token, get_stored_access_token, _oauth_trace
+            _oauth_trace("_force_token_refresh: clearing cached Copilot token")
             # Clear the cached Copilot token to force re-exchange
             clear_copilot_token()
             # Get fresh token (will exchange OAuth token for new Copilot token)
+            _oauth_trace("_force_token_refresh: exchanging OAuth for new Copilot token")
             fresh_token = get_stored_access_token()
             if fresh_token:
+                _oauth_trace("_force_token_refresh: token refreshed successfully")
                 self._token = fresh_token
-        except Exception:
-            # If refresh fails, keep existing token
-            pass
+            else:
+                _oauth_trace("_force_token_refresh: get_stored_access_token returned None - OAuth token may be invalid")
+        except Exception as e:
+            # Log the error for debugging but keep existing token for retry
+            try:
+                from .oauth import _oauth_trace
+                _oauth_trace(f"_force_token_refresh: refresh failed: {e}")
+            except Exception:
+                pass
 
     def _create_session(self) -> requests.Session:
         """Create requests session with appropriate proxy configuration.
