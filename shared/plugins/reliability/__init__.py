@@ -23,6 +23,7 @@ from .types import (
     TrustState,
     classify_failure,
     # Model reliability types
+    ModelBehavioralProfile,
     ModelSwitchConfig,
     ModelSwitchStrategy,
     ModelSwitchSuggestion,
@@ -66,6 +67,7 @@ __all__ = [
     "TrustState",
     "classify_failure",
     # Model reliability types
+    "ModelBehavioralProfile",
     "ModelSwitchConfig",
     "ModelSwitchStrategy",
     "ModelSwitchSuggestion",

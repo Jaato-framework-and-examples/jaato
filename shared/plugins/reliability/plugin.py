@@ -14,11 +14,13 @@ from ..base import (
 from ..model_provider.types import ToolSchema
 from .types import (
     BehavioralPattern,
+    BehavioralPatternType,
     EscalationInfo,
     EscalationRule,
     FailureKey,
     FailureRecord,
     FailureSeverity,
+    ModelBehavioralProfile,
     ModelSwitchConfig,
     ModelSwitchStrategy,
     ModelSwitchSuggestion,
@@ -104,6 +106,9 @@ class ReliabilityPlugin:
         # on_nudge_injected: (nudge) -> None
         self._on_nudge_injected: Optional[Callable[[Nudge], None]] = None
 
+        # Model behavioral profiles
+        self._behavioral_profiles: Dict[str, ModelBehavioralProfile] = {}  # model_name -> profile
+
     @property
     def name(self) -> str:
         return "reliability"
@@ -171,6 +176,7 @@ class ReliabilityPlugin:
                 CommandCompletion("model", "Model-specific reliability tracking"),
                 CommandCompletion("patterns", "Behavioral pattern detection"),
                 CommandCompletion("nudge", "Nudge injection settings"),
+                CommandCompletion("behavior", "Model behavioral profiles"),
             ]
 
         if len(command_parts) == 2:
@@ -219,6 +225,12 @@ class ReliabilityPlugin:
                     CommandCompletion("full", "All nudges including interrupts"),
                     CommandCompletion("history", "Show nudge history"),
                 ]
+            elif subcommand == "behavior":
+                return [
+                    CommandCompletion("status", "Show behavioral profile summary"),
+                    CommandCompletion("compare", "Compare behavioral profiles"),
+                    CommandCompletion("patterns", "Show pattern breakdown by model"),
+                ]
 
         if len(command_parts) == 3:
             subcommand = command_parts[1]
@@ -253,6 +265,17 @@ class ReliabilityPlugin:
                 elif arg in ("suggest", "auto", "disabled"):
                     return [
                         CommandCompletion("save", "Save strategy setting"),
+                    ]
+            elif subcommand == "behavior":
+                arg = command_parts[2]
+                if arg in ("status", "compare", "patterns"):
+                    # Return list of tracked behavioral profiles
+                    models = set(self._behavioral_profiles.keys())
+                    if self._current_model:
+                        models.add(self._current_model)
+                    return [
+                        CommandCompletion(m, f"Show behavioral profile for {m}")
+                        for m in sorted(models)
                     ]
 
         if len(command_parts) == 4:
@@ -401,9 +424,18 @@ class ReliabilityPlugin:
 
     def _handle_pattern_detected(self, pattern: BehavioralPattern) -> None:
         """Internal handler for detected patterns. Triggers nudges and user callback."""
+        # Record to behavioral profile
+        self._record_pattern_to_profile(pattern)
+
         # Inject nudge if injector is enabled
         if self._nudge_injector:
-            self._nudge_injector.on_pattern_detected(pattern)
+            nudge = self._nudge_injector.on_pattern_detected(pattern)
+            # Record nudge to behavioral profile if it was actually sent
+            if nudge:
+                self._record_nudge_to_profile(nudge)
+                # Call nudge hook
+                if self._on_nudge_injected:
+                    self._on_nudge_injected(nudge)
 
         # Call user's pattern hook if set
         if self._on_pattern_detected:
@@ -432,6 +464,11 @@ class ReliabilityPlugin:
         self._turn_index = turn_index
         if self._pattern_detector:
             self._pattern_detector.on_turn_start(turn_index)
+
+        # Record turn start to behavioral profile
+        if self._current_model:
+            profile = self.get_behavioral_profile(self._current_model)
+            profile.record_turn_start()
 
     def on_turn_end(self) -> Optional[BehavioralPattern]:
         """Called when a turn ends. Checks for announce-no-action patterns.
@@ -592,6 +629,24 @@ class ReliabilityPlugin:
         if self._nudge_injector:
             return self._nudge_injector.get_nudge_summary()
         return {"total": 0, "effective": 0, "by_type": {}, "enabled": False}
+
+    def mark_last_nudge_effective(self, effective: bool = True) -> None:
+        """Mark the most recent nudge as effective (pattern stopped).
+
+        Call this when a pattern stops after a nudge was sent.
+        Updates both the nudge injector and behavioral profile.
+
+        Args:
+            effective: Whether the nudge was effective
+        """
+        if self._nudge_injector:
+            # Get the nudge before marking (to access pattern info)
+            recent_nudges = self._nudge_injector.get_recent_nudges(1)
+            if recent_nudges and effective:
+                nudge = recent_nudges[-1]
+                self._record_nudge_effective_to_profile(nudge)
+
+            self._nudge_injector.mark_last_nudge_effective(effective)
 
     # -------------------------------------------------------------------------
     # Core Failure Tracking
@@ -1347,8 +1402,10 @@ class ReliabilityPlugin:
             return self._cmd_patterns(args)
         elif subcommand == "nudge":
             return self._cmd_nudge(args)
+        elif subcommand == "behavior":
+            return self._cmd_behavior(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns, nudge"
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns, nudge, behavior"
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -1886,6 +1943,239 @@ class ReliabilityPlugin:
             lines.append(f"    Message: {nudge.message[:60]}...")
             lines.append("")
 
+        return "\n".join(lines)
+
+    # -------------------------------------------------------------------------
+    # Model Behavioral Profile Methods
+    # -------------------------------------------------------------------------
+
+    def get_behavioral_profile(self, model_name: str) -> ModelBehavioralProfile:
+        """Get or create behavioral profile for a model."""
+        if model_name not in self._behavioral_profiles:
+            self._behavioral_profiles[model_name] = ModelBehavioralProfile(model_name=model_name)
+        return self._behavioral_profiles[model_name]
+
+    def get_all_behavioral_profiles(self) -> Dict[str, ModelBehavioralProfile]:
+        """Get all behavioral profiles."""
+        return self._behavioral_profiles.copy()
+
+    def get_behavioral_summary(self, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """Get behavioral summary for a model or all models."""
+        if model_name:
+            if model_name not in self._behavioral_profiles:
+                return {"error": f"No behavioral profile for model: {model_name}"}
+            return self._behavioral_profiles[model_name].get_summary()
+
+        # Aggregate summary for all models
+        summaries = []
+        for name, profile in self._behavioral_profiles.items():
+            summaries.append(profile.get_summary())
+
+        total_turns = sum(p.total_turns for p in self._behavioral_profiles.values())
+        total_stalled = sum(p.stalled_turns for p in self._behavioral_profiles.values())
+        total_patterns = sum(p.total_patterns for p in self._behavioral_profiles.values())
+        total_nudges = sum(p.nudges_sent for p in self._behavioral_profiles.values())
+        total_effective = sum(p.nudges_effective for p in self._behavioral_profiles.values())
+
+        return {
+            "models_tracked": len(self._behavioral_profiles),
+            "total_turns": total_turns,
+            "total_stalled_turns": total_stalled,
+            "overall_stall_rate": total_stalled / total_turns if total_turns > 0 else 0.0,
+            "total_patterns": total_patterns,
+            "total_nudges": total_nudges,
+            "total_nudges_effective": total_effective,
+            "overall_nudge_effectiveness": total_effective / total_nudges if total_nudges > 0 else 1.0,
+            "models": summaries,
+        }
+
+    def compare_behavioral_profiles(self, model1: str, model2: str) -> Optional[Dict[str, Any]]:
+        """Compare behavioral profiles of two models."""
+        if model1 not in self._behavioral_profiles:
+            return {"error": f"No behavioral profile for model: {model1}"}
+        if model2 not in self._behavioral_profiles:
+            return {"error": f"No behavioral profile for model: {model2}"}
+
+        profile1 = self._behavioral_profiles[model1]
+        profile2 = self._behavioral_profiles[model2]
+        return profile1.compare_to(profile2)
+
+    def _record_pattern_to_profile(self, pattern: BehavioralPattern) -> None:
+        """Record a detected pattern to the model's behavioral profile."""
+        model = pattern.model_name or self._current_model
+        if not model:
+            return
+
+        profile = self.get_behavioral_profile(model)
+        profile.record_pattern(pattern)
+        profile.record_turn_stalled()
+
+    def _record_nudge_to_profile(self, nudge: Nudge) -> None:
+        """Record a nudge sent to the model's behavioral profile."""
+        model = nudge.pattern.model_name or self._current_model
+        if not model:
+            return
+
+        profile = self.get_behavioral_profile(model)
+        profile.record_nudge_sent()
+
+    def _record_nudge_effective_to_profile(self, nudge: Nudge) -> None:
+        """Record that a nudge was effective to the model's behavioral profile."""
+        model = nudge.pattern.model_name or self._current_model
+        if not model:
+            return
+
+        profile = self.get_behavioral_profile(model)
+        profile.record_nudge_effective()
+
+    def _cmd_behavior(self, args: str) -> str:
+        """Handle behavioral profile commands."""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "status":
+            model = parts[1] if len(parts) > 1 else None
+            return self._behavior_status(model)
+        elif parts[0] == "compare":
+            if len(parts) < 2:
+                return "Usage: reliability behavior compare <model1> [model2]"
+            model1 = parts[1]
+            model2 = parts[2] if len(parts) > 2 else self._current_model
+            if not model2:
+                return "Cannot compare: specify a second model or set current model context"
+            return self._behavior_compare(model1, model2)
+        elif parts[0] == "patterns":
+            model = parts[1] if len(parts) > 1 else None
+            return self._behavior_patterns(model)
+        else:
+            return (
+                f"Unknown behavior subcommand: {parts[0]}\n"
+                "Usage: reliability behavior [status|compare|patterns] [model]"
+            )
+
+    def _behavior_status(self, model: Optional[str] = None) -> str:
+        """Show behavioral profile status."""
+        if not self._behavioral_profiles:
+            return "No behavioral profiles tracked yet.\nEnable pattern detection with 'reliability patterns enable'."
+
+        if model:
+            if model not in self._behavioral_profiles:
+                return f"No behavioral profile for model: {model}"
+
+            profile = self._behavioral_profiles[model]
+            lines = [
+                f"Behavioral Profile: {model}",
+                "-" * 60,
+                f"  Total turns: {profile.total_turns}",
+                f"  Stalled turns: {profile.stalled_turns} ({profile.stall_rate:.1%})",
+                "",
+                f"  Total patterns: {profile.total_patterns}",
+            ]
+
+            if profile.most_common_pattern():
+                lines.append(f"  Most common: {profile.most_common_pattern().value}")
+
+            lines.extend([
+                "",
+                f"  Nudges sent: {profile.nudges_sent}",
+                f"  Nudges effective: {profile.nudges_effective} ({profile.nudge_effectiveness:.1%})",
+            ])
+
+            if profile.first_seen:
+                lines.append(f"  First seen: {profile.first_seen.strftime('%Y-%m-%d %H:%M')}")
+            if profile.last_seen:
+                lines.append(f"  Last seen: {profile.last_seen.strftime('%Y-%m-%d %H:%M')}")
+
+            lines.append("-" * 60)
+            return "\n".join(lines)
+
+        # Summary of all models
+        summary = self.get_behavioral_summary()
+        lines = [
+            "Behavioral Profile Summary",
+            "-" * 60,
+            f"  Models tracked: {summary['models_tracked']}",
+            f"  Total turns: {summary['total_turns']}",
+            f"  Overall stall rate: {summary['overall_stall_rate']:.1%}",
+            f"  Total patterns: {summary['total_patterns']}",
+            f"  Overall nudge effectiveness: {summary['overall_nudge_effectiveness']:.1%}",
+            "",
+            "  Per-model summary:",
+        ]
+
+        for model_summary in summary.get('models', []):
+            name = model_summary['model']
+            stall = model_summary['stall_rate']
+            nudge_eff = model_summary['nudge_effectiveness']
+            lines.append(f"    {name}: stall={stall:.1%}, nudge_eff={nudge_eff:.1%}")
+
+        lines.append("-" * 60)
+        return "\n".join(lines)
+
+    def _behavior_compare(self, model1: str, model2: str) -> str:
+        """Compare two models' behavioral profiles."""
+        result = self.compare_behavioral_profiles(model1, model2)
+
+        if "error" in result:
+            return result["error"]
+
+        lines = [
+            f"Behavioral Comparison: {model1} vs {model2}",
+            "-" * 60,
+        ]
+
+        # Get both profiles for detailed comparison
+        p1 = self._behavioral_profiles[model1]
+        p2 = self._behavioral_profiles[model2]
+
+        lines.extend([
+            f"  Stall rate:",
+            f"    {model1}: {p1.stall_rate:.1%} ({p1.stalled_turns}/{p1.total_turns} turns)",
+            f"    {model2}: {p2.stall_rate:.1%} ({p2.stalled_turns}/{p2.total_turns} turns)",
+            "",
+            f"  Nudge effectiveness:",
+            f"    {model1}: {p1.nudge_effectiveness:.1%} ({p1.nudges_effective}/{p1.nudges_sent} nudges)",
+            f"    {model2}: {p2.nudge_effectiveness:.1%} ({p2.nudges_effective}/{p2.nudges_sent} nudges)",
+            "",
+            f"  Pattern count:",
+            f"    {model1}: {p1.total_patterns}",
+            f"    {model2}: {p2.total_patterns}",
+            "",
+            f"  Recommendation: {result['recommendation']}",
+            "-" * 60,
+        ])
+
+        return "\n".join(lines)
+
+    def _behavior_patterns(self, model: Optional[str] = None) -> str:
+        """Show pattern breakdown by model."""
+        if not self._behavioral_profiles:
+            return "No behavioral profiles tracked yet."
+
+        models = [model] if model else list(self._behavioral_profiles.keys())
+        lines = ["Pattern Breakdown by Model", "-" * 60]
+
+        for m in models:
+            if m not in self._behavioral_profiles:
+                continue
+
+            profile = self._behavioral_profiles[m]
+            lines.append(f"  {m}:")
+
+            if not profile.pattern_counts:
+                lines.append("    No patterns detected")
+            else:
+                for ptype, count in sorted(
+                    profile.pattern_counts.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                ):
+                    avg_sev = profile.average_severity(ptype)
+                    sev_str = f" (avg severity: {avg_sev:.1f})" if avg_sev else ""
+                    lines.append(f"    {ptype.value}: {count}{sev_str}")
+
+            lines.append("")
+
+        lines.append("-" * 60)
         return "\n".join(lines)
 
 

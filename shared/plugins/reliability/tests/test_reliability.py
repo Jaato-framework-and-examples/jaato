@@ -1830,3 +1830,300 @@ class TestPluginNudgeIntegration:
         nudge = plugin.inject_nudge_for_pattern(pattern)
 
         assert nudge is not None
+
+
+class TestModelBehavioralProfile:
+    """Tests for ModelBehavioralProfile dataclass."""
+
+    def test_profile_creation(self):
+        """Test creating a behavioral profile."""
+        from ..types import ModelBehavioralProfile
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        assert profile.model_name == "gpt-4"
+        assert profile.total_turns == 0
+        assert profile.stalled_turns == 0
+        assert profile.stall_rate == 0.0
+        assert profile.nudge_effectiveness == 1.0
+
+    def test_record_turn_start(self):
+        """Test recording turn starts."""
+        from ..types import ModelBehavioralProfile
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        profile.record_turn_start()
+
+        assert profile.total_turns == 1
+        assert profile.first_seen is not None
+        assert profile.last_seen is not None
+
+    def test_record_pattern(self):
+        """Test recording patterns."""
+        from ..types import ModelBehavioralProfile, BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+        profile.record_pattern(pattern)
+
+        assert profile.pattern_counts[BehavioralPatternType.REPETITIVE_CALLS] == 1
+        assert profile.total_patterns == 1
+        assert profile.most_common_pattern() == BehavioralPatternType.REPETITIVE_CALLS
+
+    def test_stall_rate(self):
+        """Test stall rate calculation."""
+        from ..types import ModelBehavioralProfile
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        profile.record_turn_start()
+        profile.record_turn_start()
+        profile.record_turn_stalled()  # 1 stalled of 2 turns
+
+        assert profile.stall_rate == 0.5
+
+    def test_nudge_effectiveness(self):
+        """Test nudge effectiveness tracking."""
+        from ..types import ModelBehavioralProfile
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        profile.record_nudge_sent()
+        profile.record_nudge_sent()
+        profile.record_nudge_effective()
+
+        assert profile.nudges_sent == 2
+        assert profile.nudges_effective == 1
+        assert profile.nudge_effectiveness == 0.5
+
+    def test_average_severity(self):
+        """Test average severity calculation."""
+        from ..types import ModelBehavioralProfile, BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+
+        # Add MINOR pattern (severity = 1)
+        profile.record_pattern(BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        ))
+
+        # Add MODERATE pattern (severity = 2)
+        profile.record_pattern(BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=2,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=5,
+            duration_seconds=10.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MODERATE,
+        ))
+
+        # Average should be 1.5
+        assert profile.average_severity(BehavioralPatternType.REPETITIVE_CALLS) == 1.5
+
+    def test_serialization(self):
+        """Test profile serialization and deserialization."""
+        from ..types import ModelBehavioralProfile, BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        profile.record_turn_start()
+        profile.record_nudge_sent()
+        profile.record_nudge_effective()
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+        profile.record_pattern(pattern)
+
+        data = profile.to_dict()
+        restored = ModelBehavioralProfile.from_dict(data)
+
+        assert restored.model_name == profile.model_name
+        assert restored.total_turns == profile.total_turns
+        assert restored.nudges_sent == profile.nudges_sent
+        assert restored.nudges_effective == profile.nudges_effective
+        assert BehavioralPatternType.REPETITIVE_CALLS in restored.pattern_counts
+
+    def test_compare_to(self):
+        """Test comparing two profiles."""
+        from ..types import ModelBehavioralProfile
+
+        profile1 = ModelBehavioralProfile(model_name="gpt-4")
+        profile1.record_turn_start()
+        profile1.record_turn_stalled()  # 100% stall rate
+
+        profile2 = ModelBehavioralProfile(model_name="claude-3")
+        profile2.record_turn_start()
+        profile2.record_turn_start()
+        # 0% stall rate
+
+        comparison = profile1.compare_to(profile2)
+
+        assert comparison["this_model"] == "gpt-4"
+        assert comparison["other_model"] == "claude-3"
+        assert comparison["stall_rate_diff"] > 0
+        assert comparison["this_better_stall"] == False
+
+    def test_get_summary(self):
+        """Test getting profile summary."""
+        from ..types import ModelBehavioralProfile, BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        profile = ModelBehavioralProfile(model_name="gpt-4")
+        profile.record_turn_start()
+        profile.record_nudge_sent()
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+        profile.record_pattern(pattern)
+
+        summary = profile.get_summary()
+
+        assert summary["model"] == "gpt-4"
+        assert summary["total_turns"] == 1
+        assert summary["nudges_sent"] == 1
+        assert "repetitive_calls" in summary["pattern_breakdown"]
+
+
+class TestPluginBehavioralIntegration:
+    """Tests for behavioral profile integration with the reliability plugin."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with behavioral tracking enabled."""
+        from ..types import PatternDetectionConfig, NudgeConfig, NudgeLevel
+
+        plugin = ReliabilityPlugin()
+        plugin.set_model_context("gpt-4", ["gpt-4", "claude-3"])
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            enabled=True,
+            repetitive_call_threshold=3,
+        ))
+        plugin.enable_pattern_detection(True)
+        plugin.set_nudge_config(NudgeConfig(level=NudgeLevel.FULL, cooldown_seconds=0))
+        plugin.enable_nudge_injection(True)
+        return plugin
+
+    def test_patterns_update_behavioral_profile(self, plugin):
+        """Test that detected patterns update behavioral profiles."""
+        plugin.on_turn_start(1)
+
+        # Generate repetitive calls to trigger pattern
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        profile = plugin.get_behavioral_profile("gpt-4")
+        assert profile.total_turns == 1
+        assert profile.total_patterns >= 1
+
+    def test_nudges_update_behavioral_profile(self, plugin):
+        """Test that nudges update behavioral profiles."""
+        plugin.on_turn_start(1)
+
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        profile = plugin.get_behavioral_profile("gpt-4")
+        assert profile.nudges_sent >= 1
+
+    def test_behavior_status_command(self, plugin):
+        """Test behavior status command."""
+        plugin.on_turn_start(1)
+
+        output = plugin.handle_command("behavior", "status")
+
+        assert "gpt-4" in output
+
+    def test_behavior_compare_command(self, plugin):
+        """Test behavior compare command."""
+        plugin.on_turn_start(1)
+
+        # Add second model
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        plugin.on_turn_start(2)
+
+        output = plugin.handle_command("behavior", "compare gpt-4 claude-3")
+
+        assert "Comparison" in output
+        assert "gpt-4" in output
+        assert "claude-3" in output
+
+    def test_behavior_patterns_command(self, plugin):
+        """Test behavior patterns command."""
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        output = plugin.handle_command("behavior", "patterns")
+
+        assert "Pattern Breakdown" in output
+
+    def test_mark_last_nudge_effective(self, plugin):
+        """Test marking nudges as effective."""
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        initial_effective = plugin.get_behavioral_profile("gpt-4").nudges_effective
+        plugin.mark_last_nudge_effective(True)
+        final_effective = plugin.get_behavioral_profile("gpt-4").nudges_effective
+
+        assert final_effective >= initial_effective
+
+    def test_get_behavioral_summary(self, plugin):
+        """Test getting behavioral summary for all models."""
+        plugin.on_turn_start(1)
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        plugin.on_turn_start(2)
+
+        summary = plugin.get_behavioral_summary()
+
+        assert "models_tracked" in summary
+        assert summary["models_tracked"] >= 1
+
+    def test_compare_behavioral_profiles(self, plugin):
+        """Test comparing behavioral profiles."""
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        plugin.on_turn_start(2)
+
+        result = plugin.compare_behavioral_profiles("gpt-4", "claude-3")
+
+        assert "recommendation" in result

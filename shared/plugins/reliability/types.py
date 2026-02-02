@@ -827,3 +827,261 @@ class NudgeConfig:
     # Auto-escalation
     escalate_on_ignore: bool = True  # Escalate severity if nudge is ignored
     escalation_threshold: int = 2    # How many ignored nudges before escalation
+
+
+# -----------------------------------------------------------------------------
+# Model Behavioral Profile Types
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class ModelBehavioralProfile:
+    """Tracks a model's behavioral patterns and nudge responsiveness.
+
+    This profile combines pattern detection data with nudge effectiveness
+    to create a complete picture of how a model behaves and responds to
+    guidance. Used for:
+    - Comparing model behavior across different tools/tasks
+    - Optimizing nudge strategies per model
+    - Informing model switching decisions
+    """
+
+    model_name: str
+
+    # Pattern tracking
+    pattern_counts: Dict[BehavioralPatternType, int] = field(default_factory=dict)
+    pattern_severities: Dict[BehavioralPatternType, List[PatternSeverity]] = field(default_factory=dict)
+
+    # Nudge effectiveness
+    nudges_sent: int = 0
+    nudges_acknowledged: int = 0
+    nudges_effective: int = 0  # Pattern stopped after nudge
+
+    # Turn tracking for stall rate
+    total_turns: int = 0
+    stalled_turns: int = 0  # Turns with detected patterns
+    turn_start_time: Optional[datetime] = None
+
+    # First/last activity
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+
+    @property
+    def stall_rate(self) -> float:
+        """Calculate what fraction of turns have stalled (0.0 to 1.0)."""
+        if self.total_turns == 0:
+            return 0.0
+        return self.stalled_turns / self.total_turns
+
+    @property
+    def nudge_effectiveness(self) -> float:
+        """Calculate how often nudges resolve patterns (0.0 to 1.0).
+
+        Returns 1.0 if no nudges have been sent (assume effective until proven).
+        """
+        if self.nudges_sent == 0:
+            return 1.0
+        return self.nudges_effective / self.nudges_sent
+
+    @property
+    def nudge_acknowledgment_rate(self) -> float:
+        """Calculate how often the model acknowledges nudges (0.0 to 1.0)."""
+        if self.nudges_sent == 0:
+            return 1.0
+        return self.nudges_acknowledged / self.nudges_sent
+
+    @property
+    def total_patterns(self) -> int:
+        """Total number of patterns detected for this model."""
+        return sum(self.pattern_counts.values())
+
+    def most_common_pattern(self) -> Optional[BehavioralPatternType]:
+        """Return the most frequently occurring pattern type."""
+        if not self.pattern_counts:
+            return None
+        return max(self.pattern_counts.items(), key=lambda x: x[1])[0]
+
+    def average_severity(self, pattern_type: BehavioralPatternType) -> Optional[float]:
+        """Calculate average severity for a pattern type.
+
+        Returns None if no patterns of this type recorded.
+        Severity values: MINOR=1, MODERATE=2, SEVERE=3
+        """
+        severities = self.pattern_severities.get(pattern_type, [])
+        if not severities:
+            return None
+
+        severity_values = {
+            PatternSeverity.MINOR: 1,
+            PatternSeverity.MODERATE: 2,
+            PatternSeverity.SEVERE: 3,
+        }
+        total = sum(severity_values.get(s, 1) for s in severities)
+        return total / len(severities)
+
+    def record_pattern(self, pattern: BehavioralPattern) -> None:
+        """Record a detected pattern for this model."""
+        ptype = pattern.pattern_type
+
+        # Update count
+        self.pattern_counts[ptype] = self.pattern_counts.get(ptype, 0) + 1
+
+        # Track severity
+        if ptype not in self.pattern_severities:
+            self.pattern_severities[ptype] = []
+        self.pattern_severities[ptype].append(pattern.severity)
+
+        # Keep severity list bounded (last 100)
+        if len(self.pattern_severities[ptype]) > 100:
+            self.pattern_severities[ptype] = self.pattern_severities[ptype][-100:]
+
+        # Update timestamps
+        now = datetime.now()
+        if self.first_seen is None:
+            self.first_seen = now
+        self.last_seen = now
+
+    def record_nudge_sent(self) -> None:
+        """Record that a nudge was sent to this model."""
+        self.nudges_sent += 1
+        now = datetime.now()
+        if self.first_seen is None:
+            self.first_seen = now
+        self.last_seen = now
+
+    def record_nudge_acknowledged(self) -> None:
+        """Record that the model acknowledged a nudge."""
+        self.nudges_acknowledged += 1
+
+    def record_nudge_effective(self) -> None:
+        """Record that a nudge was effective (pattern stopped)."""
+        self.nudges_effective += 1
+        self.nudges_acknowledged += 1  # Effective implies acknowledged
+
+    def record_turn_start(self) -> None:
+        """Record the start of a new turn."""
+        self.total_turns += 1
+        self.turn_start_time = datetime.now()
+        now = datetime.now()
+        if self.first_seen is None:
+            self.first_seen = now
+        self.last_seen = now
+
+    def record_turn_stalled(self) -> None:
+        """Record that the current turn has stalled."""
+        self.stalled_turns += 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "model_name": self.model_name,
+            "pattern_counts": {k.value: v for k, v in self.pattern_counts.items()},
+            "pattern_severities": {
+                k.value: [s.value for s in v]
+                for k, v in self.pattern_severities.items()
+            },
+            "nudges_sent": self.nudges_sent,
+            "nudges_acknowledged": self.nudges_acknowledged,
+            "nudges_effective": self.nudges_effective,
+            "total_turns": self.total_turns,
+            "stalled_turns": self.stalled_turns,
+            "first_seen": self.first_seen.isoformat() if self.first_seen else None,
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelBehavioralProfile":
+        """Deserialize from dictionary."""
+        profile = cls(model_name=data["model_name"])
+
+        # Restore pattern counts
+        for ptype_str, count in data.get("pattern_counts", {}).items():
+            try:
+                ptype = BehavioralPatternType(ptype_str)
+                profile.pattern_counts[ptype] = count
+            except ValueError:
+                pass  # Skip unknown pattern types
+
+        # Restore severity history
+        for ptype_str, severities in data.get("pattern_severities", {}).items():
+            try:
+                ptype = BehavioralPatternType(ptype_str)
+                profile.pattern_severities[ptype] = [
+                    PatternSeverity(s) for s in severities
+                ]
+            except ValueError:
+                pass  # Skip unknown types
+
+        profile.nudges_sent = data.get("nudges_sent", 0)
+        profile.nudges_acknowledged = data.get("nudges_acknowledged", 0)
+        profile.nudges_effective = data.get("nudges_effective", 0)
+        profile.total_turns = data.get("total_turns", 0)
+        profile.stalled_turns = data.get("stalled_turns", 0)
+
+        if data.get("first_seen"):
+            profile.first_seen = datetime.fromisoformat(data["first_seen"])
+        if data.get("last_seen"):
+            profile.last_seen = datetime.fromisoformat(data["last_seen"])
+
+        return profile
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Get summary statistics for display."""
+        return {
+            "model": self.model_name,
+            "total_turns": self.total_turns,
+            "stalled_turns": self.stalled_turns,
+            "stall_rate": self.stall_rate,
+            "total_patterns": self.total_patterns,
+            "most_common_pattern": self.most_common_pattern().value if self.most_common_pattern() else None,
+            "nudges_sent": self.nudges_sent,
+            "nudges_effective": self.nudges_effective,
+            "nudge_effectiveness": self.nudge_effectiveness,
+            "pattern_breakdown": {k.value: v for k, v in self.pattern_counts.items()},
+        }
+
+    def compare_to(self, other: "ModelBehavioralProfile") -> Dict[str, Any]:
+        """Compare this profile to another model's profile.
+
+        Returns dict with comparison metrics useful for model switching decisions.
+        """
+        return {
+            "this_model": self.model_name,
+            "other_model": other.model_name,
+            "stall_rate_diff": self.stall_rate - other.stall_rate,  # Negative = this is better
+            "nudge_effectiveness_diff": self.nudge_effectiveness - other.nudge_effectiveness,  # Positive = this is better
+            "total_patterns_diff": self.total_patterns - other.total_patterns,  # Negative = this is better
+            "this_better_stall": self.stall_rate < other.stall_rate,
+            "this_better_nudge": self.nudge_effectiveness > other.nudge_effectiveness,
+            "recommendation": self._get_recommendation(other),
+        }
+
+    def _get_recommendation(self, other: "ModelBehavioralProfile") -> str:
+        """Generate recommendation based on comparison."""
+        this_score = 0
+        other_score = 0
+
+        # Lower stall rate is better
+        if self.stall_rate < other.stall_rate:
+            this_score += 1
+        elif other.stall_rate < self.stall_rate:
+            other_score += 1
+
+        # Higher nudge effectiveness is better
+        if self.nudge_effectiveness > other.nudge_effectiveness:
+            this_score += 1
+        elif other.nudge_effectiveness > self.nudge_effectiveness:
+            other_score += 1
+
+        # Fewer total patterns is better
+        if self.total_patterns < other.total_patterns:
+            this_score += 1
+        elif other.total_patterns < self.total_patterns:
+            other_score += 1
+
+        if this_score > other_score:
+            return f"{self.model_name} appears better behaved"
+        elif other_score > this_score:
+            return f"{other.model_name} appears better behaved"
+        else:
+            return "Similar behavioral profiles"
