@@ -2439,3 +2439,98 @@ class TestObservabilitySummary:
             assert "stall_rate" in model_summary
             assert "nudge_effectiveness" in model_summary
             assert "turns" in model_summary
+
+
+# =============================================================================
+# ToolExecutor Integration Tests
+# =============================================================================
+
+class TestToolExecutorIntegration:
+    """Tests for ToolExecutor integration with reliability plugin."""
+
+    @pytest.fixture
+    def reliability_plugin(self):
+        """Create a reliability plugin."""
+        config = ReliabilityConfig()
+        plugin = ReliabilityPlugin(config)
+        plugin.set_session_context("test-session")
+        plugin.set_model_context("gpt-4", ["gpt-4"])
+        plugin.enable_pattern_detection()
+        return plugin
+
+    def test_tool_executor_set_reliability_plugin(self, reliability_plugin):
+        """Test that ToolExecutor accepts reliability plugin."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+        executor.set_reliability_plugin(reliability_plugin)
+
+        assert executor._reliability_plugin is reliability_plugin
+
+    def test_tool_executor_tracks_success(self, reliability_plugin):
+        """Test that ToolExecutor notifies reliability plugin on success."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+        executor.set_reliability_plugin(reliability_plugin)
+
+        # Register a simple tool
+        def simple_tool(args):
+            return {"result": "ok"}
+
+        executor.register("simple_tool", simple_tool)
+
+        # Execute the tool
+        success, result = executor.execute("simple_tool", {})
+
+        assert success is True
+        assert result == {"result": "ok"}
+
+    def test_tool_executor_tracks_failure(self, reliability_plugin):
+        """Test that ToolExecutor notifies reliability plugin on failure."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+        executor.set_reliability_plugin(reliability_plugin)
+
+        # Register a failing tool
+        def failing_tool(args):
+            raise ValueError("Test error")
+
+        executor.register("failing_tool", failing_tool)
+
+        # Execute the tool
+        success, result = executor.execute("failing_tool", {})
+
+        assert success is False
+        assert "error" in result
+
+        # Check that reliability plugin tracked the failure
+        states = reliability_plugin.get_all_states()
+        assert len(states) > 0
+
+    def test_tool_executor_records_pattern_on_repetition(self, reliability_plugin):
+        """Test that repeated tool calls trigger pattern detection."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+        executor.set_reliability_plugin(reliability_plugin)
+
+        # Register a simple tool
+        def read_tool(args):
+            return {"content": "file content"}
+
+        executor.register("readFile", read_tool)
+
+        # Start a turn
+        reliability_plugin.on_turn_start(1)
+
+        # Execute the tool multiple times
+        for _ in range(3):
+            success, result = executor.execute("readFile", {"path": "/tmp/test.txt"})
+            assert success is True
+
+        # Check that a pattern was detected
+        if reliability_plugin._pattern_detector:
+            patterns = reliability_plugin._pattern_detector.get_detected_patterns()
+            assert len(patterns) > 0
