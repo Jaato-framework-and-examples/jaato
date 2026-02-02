@@ -2309,20 +2309,20 @@ reliability status <failure_key>    # Show detailed status for specific key
 reliability recovery auto           # Enable automatic recovery
 reliability recovery ask            # Require confirmation for recovery
 reliability reset <failure_key>     # Manually reset a tool to TRUSTED
-reliability reset --all             # Reset all tools (requires confirmation)
-reliability history [--limit N]     # Show recent failure history
+reliability reset all               # Reset all tools (requires confirmation)
+reliability history [limit N]       # Show recent failure history
 reliability config                  # Show current configuration
 
 # Settings management
 reliability nudge gentle|direct|off # Set nudge level for this session
-reliability nudge --save workspace  # Save current nudge setting to workspace
-reliability nudge --save user       # Save current nudge setting as user default
+reliability nudge save workspace    # Save current nudge setting to workspace
+reliability nudge save user         # Save current nudge setting as user default
 
 reliability settings                # Show effective settings (merged view)
-reliability settings --save workspace  # Save all current settings to workspace
-reliability settings --save user       # Save all current settings as user defaults
-reliability settings --clear workspace # Clear workspace overrides (inherit from user)
-reliability settings --clear session   # Clear session overrides (inherit from workspace)
+reliability settings save workspace # Save all current settings to workspace
+reliability settings save user      # Save all current settings as user defaults
+reliability settings clear workspace # Clear workspace overrides (inherit from user)
+reliability settings clear session  # Clear session overrides (inherit from workspace)
 ```
 
 ### Command Output Examples
@@ -2363,18 +2363,18 @@ Reliability Settings (effective):
 > reliability nudge gentle
 ✓ Nudge level set to 'gentle' for this session
 
-> reliability nudge --save workspace
+> reliability nudge save workspace
 ✓ Nudge level 'gentle' saved to workspace (.jaato/reliability.json)
   Future sessions in this workspace will use this setting.
 
-> reliability settings --save user
+> reliability settings save user
 ✓ Current settings saved as user defaults (~/.jaato/reliability.json)
   Settings saved:
     - nudge_level: gentle
     - recovery_mode: ask
     - model_switch_strategy: suggest
 
-> reliability settings --clear session
+> reliability settings clear session
 ✓ Session overrides cleared. Now inheriting from workspace/user settings.
 ```
 
