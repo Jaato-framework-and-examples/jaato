@@ -40,21 +40,16 @@ class PermissionPlugin:
     requests and enforces access policies. It can:
     - Block tools via blacklist rules
     - Allow tools via whitelist rules
-    - Prompt an channel for approval when policy is ambiguous
+    - Prompt a channel for approval when policy is ambiguous
 
-    The plugin has two distinct roles that are controlled independently:
+    Key principle: The model calls tools directly, and the permission middleware
+    intercepts the call to check policy and prompt for approval if needed.
+    This avoids confusion where models call askPermission instead of actual tools.
 
-    1. Permission enforcement (middleware):
-       - Enabled via: executor.set_permission_plugin(plugin)
-       - Wraps ToolExecutor.execute() to check permissions before any tool runs
-
-    2. Proactive check tool (askPermission):
-       - Enabled via: registry.expose_tool("permission")
-       - Exposes askPermission tool for model to query permissions proactively
-
-    Usage patterns:
-    - Enforcement only: set_permission_plugin() without expose_tool()
-    - Enforcement + proactive: set_permission_plugin() AND expose_tool()
+    Usage:
+    - Enable enforcement via: executor.set_permission_plugin(plugin)
+    - Expose user commands via: registry.expose_tool("permission")
+    - The middleware automatically prompts for permission when tools are called
     """
 
     # Thread-local storage for per-session channels
@@ -327,46 +322,19 @@ class PermissionPlugin:
         return None
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return function declarations for the askPermission tool.
+        """Return function declarations for permission tools.
 
-        The askPermission tool allows the model to proactively check if a tool
-        is allowed before execution. Exposure is controlled via the registry:
+        Note: The askPermission tool is NOT exposed by default. The model should
+        call tools directly, and the permission middleware (set via
+        executor.set_permission_plugin()) will prompt for approval when needed.
 
-        - registry.expose_tool("permission") -> askPermission available to model
-        - Permission enforcement via executor.set_permission_plugin() is separate
-
-        This separation allows:
-        - Enforcement only: set_permission_plugin() without expose_tool()
-        - Enforcement + proactive checks: both set_permission_plugin() and expose_tool()
+        Exposing askPermission to the model causes confusion - models tend to
+        call askPermission instead of the actual tool, creating a redundant
+        permission flow.
         """
-        return [
-            ToolSchema(
-                name="askPermission",
-                description="Request permission to execute a tool or proceed with an action. "
-                           "This is the ONLY valid way to ask for user approval - never ask in plain text. "
-                           "You MUST explain your intent - what you are trying to achieve or discover.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "tool_name": {
-                            "type": "string",
-                            "description": "Name of the tool to check permission for"
-                        },
-                        "arguments": {
-                            "type": "object",
-                            "description": "Arguments that would be passed to the tool"
-                        },
-                        "intent": {
-                            "type": "string",
-                            "description": "Why you need to execute this tool - what you intend to achieve or discover"
-                        }
-                    },
-                    "required": ["tool_name", "intent"]
-                },
-                category="system",
-                discoverability="discoverable",
-            )
-        ]
+        # Return empty list - askPermission is not exposed to the model
+        # Permission enforcement happens via middleware, not via model tool calls
+        return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return executors for model tools and user commands.
@@ -381,30 +349,9 @@ class PermissionPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""
-        return """Tool execution is controlled by a permission system.
-
-CRITICAL: When you need user approval or permission to proceed, you MUST use the `askPermission` tool.
-DO NOT ask for permission in plain text like "Do you approve?" or "Please confirm".
-Plain text permission requests are NOT valid and will NOT be processed by the permission system.
-
-WRONG (never do this):
-- "Please review the plan. Do you approve?"
-- "Should I proceed with this implementation?"
-- "Do I have your permission to continue?"
-
-CORRECT (always use the tool):
-- Call `askPermission` with tool_name, intent, and optional arguments
-
-The askPermission tool takes:
-- tool_name: Name of the tool or action to check permission for
-- intent: (REQUIRED) A clear explanation of what you intend to achieve or discover
-- arguments: (optional) Arguments or details about the specific action
-
-You MUST always provide an intent explaining WHY you need to execute the tool.
-The intent should describe what you are trying to accomplish, not just repeat the command.
-
-It returns whether the action is allowed and the reason for the decision.
-If permission is denied, do not attempt to proceed with that action."""
+        # No system instructions needed - the model should just call tools directly.
+        # The permission middleware will prompt for approval when needed.
+        return None
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.

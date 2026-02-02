@@ -80,24 +80,21 @@ class TestPermissionPluginInitialization:
 
 
 class TestPermissionPluginFunctionDeclarations:
-    """Tests for function declarations."""
+    """Tests for function declarations.
 
-    def test_get_tool_schemas(self):
+    Note: askPermission is no longer exposed as a model-callable tool.
+    The model should call tools directly and the permission middleware handles
+    approval prompts. This prevents models from calling askPermission instead
+    of the actual tool they want to execute.
+    """
+
+    def test_get_tool_schemas_returns_empty(self):
+        """Test that get_tool_schemas returns empty list (askPermission not exposed)."""
         plugin = PermissionPlugin()
         declarations = plugin.get_tool_schemas()
 
-        assert len(declarations) == 1
-        assert declarations[0].name == "askPermission"
-
-    def test_askPermission_schema(self):
-        plugin = PermissionPlugin()
-        schemas = plugin.get_tool_schemas()
-        schema = schemas[0].parameters
-
-        assert schema["type"] == "object"
-        assert "tool_name" in schema["properties"]
-        assert "arguments" in schema["properties"]
-        assert "tool_name" in schema["required"]
+        # askPermission is no longer exposed to prevent model confusion
+        assert len(declarations) == 0
 
 
 class TestPermissionPluginExecutors:
