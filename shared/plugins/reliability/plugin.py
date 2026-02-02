@@ -18,6 +18,10 @@ from .types import (
     FailureKey,
     FailureRecord,
     FailureSeverity,
+    ModelSwitchConfig,
+    ModelSwitchStrategy,
+    ModelSwitchSuggestion,
+    ModelToolProfile,
     ReliabilityConfig,
     ToolReliabilityState,
     TrustState,
@@ -71,6 +75,14 @@ class ReliabilityPlugin:
         self._on_recovered: Optional[Callable[[str, TrustState], None]] = None
         # on_blocked: (failure_key, reason) -> None
         self._on_blocked: Optional[Callable[[str, str], None]] = None
+        # on_model_switch_suggested: (suggestion) -> None
+        self._on_model_switch_suggested: Optional[Callable[[ModelSwitchSuggestion], None]] = None
+
+        # Model reliability tracking
+        self._model_profiles: Dict[Tuple[str, str], ModelToolProfile] = {}  # (model, failure_key) -> profile
+        self._current_model: str = ""
+        self._model_switch_config = ModelSwitchConfig()
+        self._available_models: List[str] = []
 
     @property
     def name(self) -> str:
@@ -136,6 +148,7 @@ class ReliabilityPlugin:
                 CommandCompletion("history", "Show recent failure history"),
                 CommandCompletion("config", "Show current configuration"),
                 CommandCompletion("settings", "Show or save settings"),
+                CommandCompletion("model", "Model-specific reliability tracking"),
             ]
 
         if len(command_parts) == 2:
@@ -158,6 +171,14 @@ class ReliabilityPlugin:
                     CommandCompletion("show", "Show effective settings"),
                     CommandCompletion("save", "Save settings to workspace or user"),
                     CommandCompletion("clear", "Clear settings at a level"),
+                ]
+            elif subcommand == "model":
+                return [
+                    CommandCompletion("status", "Show model reliability summary"),
+                    CommandCompletion("compare", "Compare model reliability"),
+                    CommandCompletion("suggest", "Enable model switch suggestions"),
+                    CommandCompletion("auto", "Enable automatic model switching"),
+                    CommandCompletion("disabled", "Disable model switching"),
                 ]
 
         if len(command_parts) == 3:
@@ -245,6 +266,7 @@ class ReliabilityPlugin:
         on_escalated: Optional[Callable[[str, TrustState, str], None]] = None,
         on_recovered: Optional[Callable[[str, TrustState], None]] = None,
         on_blocked: Optional[Callable[[str, str], None]] = None,
+        on_model_switch_suggested: Optional[Callable[[ModelSwitchSuggestion], None]] = None,
     ) -> None:
         """Set hooks for reliability lifecycle events.
 
@@ -258,10 +280,32 @@ class ReliabilityPlugin:
                 Signature: (failure_key, state) -> None
             on_blocked: Called when a tool is blocked due to security concern.
                 Signature: (failure_key, reason) -> None
+            on_model_switch_suggested: Called when a model switch might improve reliability.
+                Signature: (suggestion: ModelSwitchSuggestion) -> None
         """
         self._on_escalated = on_escalated
         self._on_recovered = on_recovered
         self._on_blocked = on_blocked
+        self._on_model_switch_suggested = on_model_switch_suggested
+
+    def set_model_context(
+        self,
+        current_model: str,
+        available_models: Optional[List[str]] = None,
+    ) -> None:
+        """Set model context for model-specific reliability tracking.
+
+        Args:
+            current_model: Name of the currently active model
+            available_models: List of models that can be switched to
+        """
+        self._current_model = current_model
+        if available_models is not None:
+            self._available_models = available_models
+
+    def set_model_switch_config(self, config: ModelSwitchConfig) -> None:
+        """Set model switch configuration."""
+        self._model_switch_config = config
 
     # -------------------------------------------------------------------------
     # Core Failure Tracking
@@ -295,6 +339,10 @@ class ReliabilityPlugin:
 
         # Determine if this is actually a failure
         is_failure = not success or self._is_error_result(result)
+
+        # Track model-specific reliability if model context is set
+        if self._current_model:
+            self._track_model_attempt(key_str, tool_name, is_failure)
 
         # Get or create state
         state = self._get_or_create_state(key_str, tool_name)
@@ -484,6 +532,211 @@ class ReliabilityPlugin:
                 return state
 
         return None  # No significant state change
+
+    # -------------------------------------------------------------------------
+    # Model-Specific Reliability Tracking
+    # -------------------------------------------------------------------------
+
+    def _track_model_attempt(self, failure_key: str, tool_name: str, is_failure: bool) -> None:
+        """Track a model-specific tool attempt."""
+        profile_key = (self._current_model, failure_key)
+
+        # Get or create profile
+        if profile_key not in self._model_profiles:
+            self._model_profiles[profile_key] = ModelToolProfile(
+                model_name=self._current_model,
+                failure_key=failure_key,
+            )
+
+        profile = self._model_profiles[profile_key]
+        profile.record_attempt(success=not is_failure)
+
+        # Check for model switch suggestion on failure
+        if is_failure and self._model_switch_config.strategy != ModelSwitchStrategy.DISABLED:
+            self._check_model_switch_suggestion(failure_key, tool_name)
+
+    def _check_model_switch_suggestion(self, failure_key: str, tool_name: str) -> None:
+        """Check if switching models might improve reliability for this tool."""
+        config = self._model_switch_config
+
+        # Get current model's profile
+        current_profile = self._model_profiles.get((self._current_model, failure_key))
+        if not current_profile:
+            return
+
+        # Only suggest after reaching failure threshold
+        if current_profile.failures < config.failure_threshold:
+            return
+
+        # Find better model from available models
+        best_suggestion: Optional[ModelSwitchSuggestion] = None
+
+        for model_name in self._available_models:
+            if model_name == self._current_model:
+                continue
+
+            other_profile = self._model_profiles.get((model_name, failure_key))
+            if not other_profile:
+                # No data for this model - might be worth trying if preferred
+                if model_name in config.preferred_models:
+                    suggestion = ModelSwitchSuggestion(
+                        current_model=self._current_model,
+                        suggested_model=model_name,
+                        failure_key=failure_key,
+                        tool_name=tool_name,
+                        current_success_rate=current_profile.success_rate,
+                        suggested_success_rate=1.0,  # Unknown, assume good
+                        improvement=1.0 - current_profile.success_rate,
+                        reason=f"Preferred model with no failure history for this tool",
+                        confidence="low",
+                    )
+                    if not best_suggestion or suggestion.improvement > best_suggestion.improvement:
+                        best_suggestion = suggestion
+                continue
+
+            # Need minimum attempts for comparison
+            if other_profile.total_attempts < config.min_attempts:
+                continue
+
+            # Calculate improvement
+            improvement = other_profile.success_rate - current_profile.success_rate
+
+            if improvement >= config.min_success_rate_diff:
+                # Determine confidence based on sample size
+                if other_profile.total_attempts >= 10:
+                    confidence = "high"
+                elif other_profile.total_attempts >= 5:
+                    confidence = "medium"
+                else:
+                    confidence = "low"
+
+                suggestion = ModelSwitchSuggestion(
+                    current_model=self._current_model,
+                    suggested_model=model_name,
+                    failure_key=failure_key,
+                    tool_name=tool_name,
+                    current_success_rate=current_profile.success_rate,
+                    suggested_success_rate=other_profile.success_rate,
+                    improvement=improvement,
+                    reason=f"{other_profile.success_rate:.0%} success vs {current_profile.success_rate:.0%}",
+                    confidence=confidence,
+                )
+
+                if not best_suggestion or suggestion.improvement > best_suggestion.improvement:
+                    best_suggestion = suggestion
+
+        # Emit suggestion if found
+        if best_suggestion and self._on_model_switch_suggested:
+            self._on_model_switch_suggested(best_suggestion)
+
+    def get_model_profile(
+        self, model_name: str, failure_key: str
+    ) -> Optional[ModelToolProfile]:
+        """Get reliability profile for a model+tool combination."""
+        return self._model_profiles.get((model_name, failure_key))
+
+    def get_all_model_profiles(self) -> Dict[Tuple[str, str], ModelToolProfile]:
+        """Get all model reliability profiles."""
+        return dict(self._model_profiles)
+
+    def get_model_reliability_summary(
+        self, model_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get summary of model reliability across all tools.
+
+        Args:
+            model_name: Specific model to summarize, or None for current model
+
+        Returns:
+            Summary dict with total_attempts, success_rate, tools_tracked, etc.
+        """
+        target_model = model_name or self._current_model
+        if not target_model:
+            return {"error": "No model context set"}
+
+        profiles = [
+            p for (m, _), p in self._model_profiles.items()
+            if m == target_model
+        ]
+
+        if not profiles:
+            return {
+                "model": target_model,
+                "total_attempts": 0,
+                "total_failures": 0,
+                "success_rate": 1.0,
+                "tools_tracked": 0,
+            }
+
+        total_attempts = sum(p.total_attempts for p in profiles)
+        total_failures = sum(p.failures for p in profiles)
+
+        return {
+            "model": target_model,
+            "total_attempts": total_attempts,
+            "total_failures": total_failures,
+            "success_rate": 1.0 - (total_failures / total_attempts) if total_attempts > 0 else 1.0,
+            "tools_tracked": len(profiles),
+            "problematic_tools": [
+                p.failure_key for p in profiles
+                if p.success_rate < 0.7 and p.total_attempts >= 3
+            ],
+        }
+
+    def get_model_switch_suggestion(
+        self, tool_name: str, args: Dict[str, Any]
+    ) -> Optional[ModelSwitchSuggestion]:
+        """Manually check for model switch suggestion for a specific tool.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments (used to create failure key)
+
+        Returns:
+            ModelSwitchSuggestion if a better model is available, None otherwise
+        """
+        if not self._current_model or not self._available_models:
+            return None
+
+        failure_key = FailureKey.from_invocation(tool_name, args)
+        key_str = failure_key.to_string()
+        config = self._model_switch_config
+
+        current_profile = self._model_profiles.get((self._current_model, key_str))
+        if not current_profile or current_profile.failures < config.failure_threshold:
+            return None
+
+        best_suggestion: Optional[ModelSwitchSuggestion] = None
+
+        for model_name in self._available_models:
+            if model_name == self._current_model:
+                continue
+
+            other_profile = self._model_profiles.get((model_name, key_str))
+            if not other_profile or other_profile.total_attempts < config.min_attempts:
+                continue
+
+            improvement = other_profile.success_rate - current_profile.success_rate
+
+            if improvement >= config.min_success_rate_diff:
+                confidence = "high" if other_profile.total_attempts >= 10 else "medium" if other_profile.total_attempts >= 5 else "low"
+
+                suggestion = ModelSwitchSuggestion(
+                    current_model=self._current_model,
+                    suggested_model=model_name,
+                    failure_key=key_str,
+                    tool_name=tool_name,
+                    current_success_rate=current_profile.success_rate,
+                    suggested_success_rate=other_profile.success_rate,
+                    improvement=improvement,
+                    reason=f"{other_profile.success_rate:.0%} success vs {current_profile.success_rate:.0%}",
+                    confidence=confidence,
+                )
+
+                if not best_suggestion or suggestion.improvement > best_suggestion.improvement:
+                    best_suggestion = suggestion
+
+        return best_suggestion
 
     def _count_failures_in_window(
         self,
@@ -798,8 +1051,10 @@ class ReliabilityPlugin:
             return self._cmd_config()
         elif subcommand == "settings":
             return self._cmd_settings(args)
+        elif subcommand == "model":
+            return self._cmd_model(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings"
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model"
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -1028,6 +1283,98 @@ class ReliabilityPlugin:
             return "Workspace settings cleared. Now inheriting from user defaults."
         else:
             return f"Unknown level: {level}. Use 'workspace' or 'session'"
+
+    def _cmd_model(self, args: str) -> str:
+        """Handle model reliability commands."""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "status":
+            return self._model_status(parts[1] if len(parts) > 1 else None)
+        elif parts[0] == "compare":
+            return self._model_compare()
+        elif parts[0] == "suggest":
+            self._model_switch_config.strategy = ModelSwitchStrategy.SUGGEST
+            self._session_settings.model_switch_strategy = "suggest"
+            return "Model switching set to SUGGEST: Will suggest better models on failure"
+        elif parts[0] == "auto":
+            self._model_switch_config.strategy = ModelSwitchStrategy.AUTO
+            self._session_settings.model_switch_strategy = "auto"
+            return "Model switching set to AUTO: Will automatically switch to better models"
+        elif parts[0] == "disabled":
+            self._model_switch_config.strategy = ModelSwitchStrategy.DISABLED
+            self._session_settings.model_switch_strategy = "disabled"
+            return "Model switching DISABLED"
+        else:
+            return (
+                f"Unknown model subcommand: {parts[0]}\n"
+                "Usage: reliability model [status|compare|suggest|auto|disabled]"
+            )
+
+    def _model_status(self, model_name: Optional[str] = None) -> str:
+        """Show model reliability status."""
+        target = model_name or self._current_model
+
+        if not target:
+            return "No model context set. Use set_model_context() to track model reliability."
+
+        summary = self.get_model_reliability_summary(target)
+
+        lines = [
+            f"Model Reliability: {summary['model']}",
+            "-" * 60,
+            f"  Total attempts: {summary['total_attempts']}",
+            f"  Total failures: {summary['total_failures']}",
+            f"  Success rate: {summary['success_rate']:.1%}",
+            f"  Tools tracked: {summary['tools_tracked']}",
+        ]
+
+        if summary.get('problematic_tools'):
+            lines.append("")
+            lines.append("  Problematic tools (< 70% success):")
+            for tool in summary['problematic_tools'][:5]:
+                profile = self._model_profiles.get((target, tool))
+                if profile:
+                    lines.append(f"    - {tool}: {profile.success_rate:.0%} ({profile.total_attempts} attempts)")
+
+        lines.append("-" * 60)
+        lines.append(f"Strategy: {self._model_switch_config.strategy.value}")
+
+        return "\n".join(lines)
+
+    def _model_compare(self) -> str:
+        """Compare reliability across models."""
+        if not self._model_profiles:
+            return "No model reliability data collected yet."
+
+        # Group by model
+        model_stats: Dict[str, Dict[str, Any]] = {}
+        for (model, _), profile in self._model_profiles.items():
+            if model not in model_stats:
+                model_stats[model] = {
+                    "attempts": 0,
+                    "failures": 0,
+                    "tools": 0,
+                }
+            model_stats[model]["attempts"] += profile.total_attempts
+            model_stats[model]["failures"] += profile.failures
+            model_stats[model]["tools"] += 1
+
+        lines = [
+            "Model Reliability Comparison",
+            "-" * 60,
+            f"  {'Model':<30} {'Success':<10} {'Attempts':<10} {'Tools':<6}",
+            "-" * 60,
+        ]
+
+        for model, stats in sorted(model_stats.items()):
+            success_rate = 1.0 - (stats["failures"] / stats["attempts"]) if stats["attempts"] > 0 else 1.0
+            current = " (current)" if model == self._current_model else ""
+            lines.append(
+                f"  {model:<30} {success_rate:>7.0%}   {stats['attempts']:<10} {stats['tools']:<6}{current}"
+            )
+
+        lines.append("-" * 60)
+        return "\n".join(lines)
 
 
 def create_plugin(config: Optional[Dict[str, Any]] = None) -> ReliabilityPlugin:

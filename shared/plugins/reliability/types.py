@@ -464,3 +464,117 @@ def classify_failure(tool_name: str, error: Dict[str, Any]) -> Tuple[FailureSeve
 
     # Default to server error for unknown failures
     return (FailureSeverity.SERVER_ERROR, 1.0)
+
+
+# -----------------------------------------------------------------------------
+# Model Reliability Types
+# -----------------------------------------------------------------------------
+
+
+class ModelSwitchStrategy(Enum):
+    """Strategy for model switching suggestions."""
+
+    DISABLED = "disabled"   # Never suggest model switches
+    SUGGEST = "suggest"     # Notify user when switch might help
+    AUTO = "auto"           # Automatically switch on threshold
+
+
+@dataclass
+class ModelToolProfile:
+    """Tracks a model's reliability with a specific tool."""
+
+    model_name: str
+    failure_key: str
+    total_attempts: int = 0
+    failures: int = 0
+    last_failure: Optional[datetime] = None
+    last_success: Optional[datetime] = None
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate (0.0 to 1.0)."""
+        if self.total_attempts == 0:
+            return 1.0
+        return 1.0 - (self.failures / self.total_attempts)
+
+    @property
+    def failure_rate(self) -> float:
+        """Calculate failure rate (0.0 to 1.0)."""
+        if self.total_attempts == 0:
+            return 0.0
+        return self.failures / self.total_attempts
+
+    def record_attempt(self, success: bool) -> None:
+        """Record an attempt with this tool."""
+        self.total_attempts += 1
+        if success:
+            self.last_success = datetime.now()
+        else:
+            self.failures += 1
+            self.last_failure = datetime.now()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "model_name": self.model_name,
+            "failure_key": self.failure_key,
+            "total_attempts": self.total_attempts,
+            "failures": self.failures,
+            "last_failure": self.last_failure.isoformat() if self.last_failure else None,
+            "last_success": self.last_success.isoformat() if self.last_success else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelToolProfile":
+        """Deserialize from dictionary."""
+        return cls(
+            model_name=data["model_name"],
+            failure_key=data["failure_key"],
+            total_attempts=data.get("total_attempts", 0),
+            failures=data.get("failures", 0),
+            last_failure=datetime.fromisoformat(data["last_failure"]) if data.get("last_failure") else None,
+            last_success=datetime.fromisoformat(data["last_success"]) if data.get("last_success") else None,
+        )
+
+
+@dataclass
+class ModelSwitchSuggestion:
+    """Suggestion to switch models for better reliability."""
+
+    current_model: str
+    suggested_model: str
+    failure_key: str
+    tool_name: str
+
+    # Comparison data
+    current_success_rate: float
+    suggested_success_rate: float
+    improvement: float  # Absolute improvement (0.0 to 1.0)
+
+    # Context
+    reason: str
+    confidence: str  # "low", "medium", "high" based on sample size
+
+    def to_display_lines(self) -> List[str]:
+        """Format suggestion for display."""
+        lines = [
+            f"Model switch suggested for '{self.tool_name}':",
+            f"  Current: {self.current_model} ({self.current_success_rate:.0%} success)",
+            f"  Better:  {self.suggested_model} ({self.suggested_success_rate:.0%} success)",
+            f"  Improvement: +{self.improvement:.0%}",
+            f"  Confidence: {self.confidence}",
+        ]
+        if self.reason:
+            lines.append(f"  Reason: {self.reason}")
+        return lines
+
+
+@dataclass
+class ModelSwitchConfig:
+    """Configuration for model switching behavior."""
+
+    strategy: ModelSwitchStrategy = ModelSwitchStrategy.SUGGEST
+    failure_threshold: int = 3              # Failures before suggesting switch
+    min_success_rate_diff: float = 0.3      # Min improvement to suggest (30%)
+    min_attempts: int = 3                   # Min attempts before comparing
+    preferred_models: List[str] = field(default_factory=list)  # Priority order

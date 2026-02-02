@@ -870,3 +870,376 @@ class TestPersistence:
         assert restored.session_id == "test-session"
         assert restored.settings.nudge_level == "gentle"
         assert restored.settings.recovery_mode == "ask"
+
+
+class TestModelReliability:
+    """Tests for model-specific reliability tracking."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with model context."""
+        config = ReliabilityConfig(
+            default_rule=EscalationRule(
+                count_threshold=3,
+                window_seconds=3600,
+            )
+        )
+        plugin = ReliabilityPlugin(config)
+        plugin.set_model_context(
+            current_model="gpt-4",
+            available_models=["gpt-4", "claude-3", "gemini-pro"]
+        )
+        return plugin
+
+    def test_model_attempt_tracking(self, plugin):
+        """Test that model attempts are tracked."""
+        from ..types import ModelToolProfile
+
+        plugin.on_tool_result(
+            tool_name="readFile",
+            args={"path": "/tmp/test.txt"},
+            success=True,
+            result={"content": "ok"},
+            call_id="1",
+        )
+
+        profile = plugin.get_model_profile("gpt-4", "readFile|path_prefix=/tmp")
+        assert profile is not None
+        assert profile.total_attempts == 1
+        assert profile.failures == 0
+        assert profile.success_rate == 1.0
+
+    def test_model_failure_tracking(self, plugin):
+        """Test that model failures are tracked."""
+        plugin.on_tool_result(
+            tool_name="http_request",
+            args={"url": "https://api.test.com/data"},
+            success=False,
+            result={"error": "Server error"},
+            call_id="1",
+        )
+
+        profile = plugin.get_model_profile("gpt-4", "http_request|domain=api.test.com|path_prefix=data")
+        assert profile is not None
+        assert profile.total_attempts == 1
+        assert profile.failures == 1
+        assert profile.success_rate == 0.0
+
+    def test_model_profile_success_rate(self, plugin):
+        """Test success rate calculation."""
+        key = "bash|command=ls"
+
+        # 3 successes, 1 failure = 75% success
+        for _ in range(3):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "ls /tmp"},
+                success=True,
+                result={"output": "files"},
+                call_id="ok",
+            )
+
+        plugin.on_tool_result(
+            tool_name="bash",
+            args={"command": "ls /fail"},
+            success=False,
+            result={"error": "No such file"},
+            call_id="fail",
+        )
+
+        profile = plugin.get_model_profile("gpt-4", key)
+        assert profile.total_attempts == 4
+        assert profile.failures == 1
+        assert profile.success_rate == 0.75
+
+    def test_model_reliability_summary(self, plugin):
+        """Test model reliability summary."""
+        # Add some results
+        for _ in range(5):
+            plugin.on_tool_result(
+                tool_name="readFile",
+                args={"path": "/tmp/test.txt"},
+                success=True,
+                result={"content": "ok"},
+                call_id="ok",
+            )
+
+        plugin.on_tool_result(
+            tool_name="http_request",
+            args={"url": "https://api.test.com/fail"},
+            success=False,
+            result={"error": "Error"},
+            call_id="fail",
+        )
+
+        summary = plugin.get_model_reliability_summary()
+
+        assert summary["model"] == "gpt-4"
+        assert summary["total_attempts"] == 6
+        assert summary["total_failures"] == 1
+        assert summary["tools_tracked"] == 2
+        assert summary["success_rate"] == pytest.approx(5/6)
+
+    def test_model_switch_suggestion_on_failure(self, plugin):
+        """Test that model switch is suggested after failures."""
+        from ..types import ModelSwitchConfig, ModelSwitchStrategy, ModelSwitchSuggestion
+
+        suggestions = []
+
+        def on_suggestion(suggestion):
+            suggestions.append(suggestion)
+
+        plugin.set_reliability_hooks(on_model_switch_suggested=on_suggestion)
+        plugin.set_model_switch_config(ModelSwitchConfig(
+            strategy=ModelSwitchStrategy.SUGGEST,
+            failure_threshold=3,
+            min_success_rate_diff=0.3,
+            min_attempts=2,
+        ))
+
+        # First, record good history for claude-3
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3", "gemini-pro"])
+        for _ in range(5):
+            plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://api.problem.com/endpoint"},
+                success=True,
+                result={"data": "ok"},
+                call_id="ok",
+            )
+
+        # Switch to gpt-4 and generate failures
+        plugin.set_model_context("gpt-4", ["gpt-4", "claude-3", "gemini-pro"])
+        for i in range(3):
+            plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://api.problem.com/endpoint"},
+                success=False,
+                result={"error": "gpt-4 fails at this"},
+                call_id=f"fail_{i}",
+            )
+
+        # Should have suggestion
+        assert len(suggestions) >= 1
+        suggestion = suggestions[-1]
+        assert suggestion.current_model == "gpt-4"
+        assert suggestion.suggested_model == "claude-3"
+        assert suggestion.improvement > 0.3
+
+    def test_model_switch_disabled(self, plugin):
+        """Test that disabled strategy prevents suggestions."""
+        from ..types import ModelSwitchConfig, ModelSwitchStrategy
+
+        suggestions = []
+
+        def on_suggestion(suggestion):
+            suggestions.append(suggestion)
+
+        plugin.set_reliability_hooks(on_model_switch_suggested=on_suggestion)
+        plugin.set_model_switch_config(ModelSwitchConfig(
+            strategy=ModelSwitchStrategy.DISABLED,
+        ))
+
+        # Generate failures - should not trigger suggestion
+        for i in range(5):
+            plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://api.test.com/fail"},
+                success=False,
+                result={"error": "Error"},
+                call_id=f"fail_{i}",
+            )
+
+        assert len(suggestions) == 0
+
+    def test_get_model_switch_suggestion_manual(self, plugin):
+        """Test manually checking for model switch suggestion."""
+        from ..types import ModelSwitchConfig, ModelSwitchStrategy
+
+        plugin.set_model_switch_config(ModelSwitchConfig(
+            strategy=ModelSwitchStrategy.SUGGEST,
+            failure_threshold=2,
+            min_success_rate_diff=0.2,
+            min_attempts=2,
+        ))
+
+        # Build history for gemini-pro (good)
+        plugin.set_model_context("gemini-pro", ["gpt-4", "claude-3", "gemini-pro"])
+        for _ in range(5):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "git status"},
+                success=True,
+                result={"output": "ok"},
+                call_id="ok",
+            )
+
+        # Build history for gpt-4 (bad)
+        plugin.set_model_context("gpt-4", ["gpt-4", "claude-3", "gemini-pro"])
+        for _ in range(3):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "git status"},
+                success=False,
+                result={"error": "Failed"},
+                call_id="fail",
+            )
+
+        # Manually check
+        suggestion = plugin.get_model_switch_suggestion("bash", {"command": "git status"})
+
+        assert suggestion is not None
+        assert suggestion.suggested_model == "gemini-pro"
+        assert suggestion.current_success_rate == 0.0
+        assert suggestion.suggested_success_rate == 1.0
+
+    def test_model_command_status(self, plugin):
+        """Test reliability model status command."""
+        # Add some data
+        for _ in range(3):
+            plugin.on_tool_result(
+                tool_name="readFile",
+                args={"path": "/tmp/test.txt"},
+                success=True,
+                result={"content": "ok"},
+                call_id="ok",
+            )
+
+        output = plugin.handle_command("model", "status")
+
+        assert "gpt-4" in output
+        assert "Success rate" in output
+        assert "3" in output  # total attempts
+
+    def test_model_command_compare(self, plugin):
+        """Test reliability model compare command."""
+        # Add data for gpt-4
+        for _ in range(3):
+            plugin.on_tool_result(
+                tool_name="readFile",
+                args={"path": "/tmp/test.txt"},
+                success=True,
+                result={"content": "ok"},
+                call_id="ok",
+            )
+
+        # Add data for claude-3
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        for _ in range(2):
+            plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://api.test.com/data"},
+                success=False,
+                result={"error": "Error"},
+                call_id="fail",
+            )
+
+        output = plugin.handle_command("model", "compare")
+
+        assert "Model" in output
+        assert "gpt-4" in output
+        assert "claude-3" in output
+        assert "Success" in output
+
+    def test_model_command_strategy_change(self, plugin):
+        """Test changing model switch strategy via command."""
+        from ..types import ModelSwitchStrategy
+
+        output = plugin.handle_command("model", "suggest")
+        assert "SUGGEST" in output
+        assert plugin._model_switch_config.strategy == ModelSwitchStrategy.SUGGEST
+
+        output = plugin.handle_command("model", "auto")
+        assert "AUTO" in output
+        assert plugin._model_switch_config.strategy == ModelSwitchStrategy.AUTO
+
+        output = plugin.handle_command("model", "disabled")
+        assert "DISABLED" in output
+        assert plugin._model_switch_config.strategy == ModelSwitchStrategy.DISABLED
+
+    def test_no_model_context_handling(self):
+        """Test graceful handling when no model context set."""
+        plugin = ReliabilityPlugin()
+
+        # Without model context, should not track model profiles
+        plugin.on_tool_result(
+            tool_name="readFile",
+            args={"path": "/tmp/test.txt"},
+            success=True,
+            result={"content": "ok"},
+            call_id="1",
+        )
+
+        assert len(plugin.get_all_model_profiles()) == 0
+
+        # Status command should handle gracefully
+        output = plugin.handle_command("model", "status")
+        assert "No model context" in output
+
+
+class TestModelToolProfile:
+    """Tests for ModelToolProfile dataclass."""
+
+    def test_record_attempt_success(self):
+        """Test recording successful attempts."""
+        from ..types import ModelToolProfile
+
+        profile = ModelToolProfile(
+            model_name="gpt-4",
+            failure_key="test_tool|param=value",
+        )
+
+        profile.record_attempt(success=True)
+
+        assert profile.total_attempts == 1
+        assert profile.failures == 0
+        assert profile.success_rate == 1.0
+        assert profile.last_success is not None
+        assert profile.last_failure is None
+
+    def test_record_attempt_failure(self):
+        """Test recording failed attempts."""
+        from ..types import ModelToolProfile
+
+        profile = ModelToolProfile(
+            model_name="gpt-4",
+            failure_key="test_tool|param=value",
+        )
+
+        profile.record_attempt(success=False)
+
+        assert profile.total_attempts == 1
+        assert profile.failures == 1
+        assert profile.success_rate == 0.0
+        assert profile.last_success is None
+        assert profile.last_failure is not None
+
+    def test_success_rate_empty(self):
+        """Test success rate when no attempts."""
+        from ..types import ModelToolProfile
+
+        profile = ModelToolProfile(
+            model_name="gpt-4",
+            failure_key="test_tool|param=value",
+        )
+
+        assert profile.success_rate == 1.0  # Assume good until proven otherwise
+
+    def test_success_rate_mixed(self):
+        """Test success rate with mixed results."""
+        from ..types import ModelToolProfile
+
+        profile = ModelToolProfile(
+            model_name="gpt-4",
+            failure_key="test_tool|param=value",
+        )
+
+        # 7 success, 3 failures = 70%
+        for _ in range(7):
+            profile.record_attempt(success=True)
+        for _ in range(3):
+            profile.record_attempt(success=False)
+
+        assert profile.total_attempts == 10
+        assert profile.failures == 3
+        assert profile.success_rate == pytest.approx(0.7)
