@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 from ..model_provider.types import ToolSchema
 from ..base import UserCommand, CommandCompletion
 from .validation import PromptValidator, format_validation_error
+from shared.http import get_url_opener
 
 # Type alias for output callback: (source, text, mode) -> None
 OutputCallback = Callable[[str, str, str], None]
@@ -898,9 +899,10 @@ class PromptLibraryPlugin:
             if not filename or not filename.endswith('.md'):
                 filename = "fetched-prompt.md"
 
-            # Fetch the content
+            # Fetch the content (with Kerberos proxy support)
             req = urllib.request.Request(url, headers={'User-Agent': 'jaato-prompt-fetch/1.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
+            opener = get_url_opener(url)
+            with opener.open(req, timeout=30) as response:
                 content = response.read().decode('utf-8')
 
             # Validate content before saving
@@ -1220,7 +1222,7 @@ class PromptLibraryPlugin:
         import urllib.request
         import urllib.error
 
-        # Try download_url first
+        # Try download_url first (with Kerberos proxy support)
         download_url = file_info.get('download_url')
         if download_url:
             try:
@@ -1228,7 +1230,8 @@ class PromptLibraryPlugin:
                     download_url,
                     headers={'User-Agent': 'jaato-prompt-fetch/1.0'}
                 )
-                with urllib.request.urlopen(req, timeout=30) as response:
+                opener = get_url_opener(download_url)
+                with opener.open(req, timeout=30) as response:
                     return response.read().decode('utf-8')
             except (urllib.error.URLError, urllib.error.HTTPError) as e:
                 self._trace(f"Failed to download from {download_url}: {e}")
