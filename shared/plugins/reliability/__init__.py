@@ -22,6 +22,13 @@ from .types import (
     TrustState,
     classify_failure,
 )
+from .persistence import (
+    ReliabilityPersistence,
+    SessionSettings,
+    SessionReliabilityState,
+    WorkspaceReliabilityData,
+    UserReliabilityData,
+)
 
 __all__ = [
     # Plugin
@@ -39,4 +46,10 @@ __all__ = [
     "ToolReliabilityState",
     "TrustState",
     "classify_failure",
+    # Persistence
+    "ReliabilityPersistence",
+    "SessionSettings",
+    "SessionReliabilityState",
+    "WorkspaceReliabilityData",
+    "UserReliabilityData",
 ]

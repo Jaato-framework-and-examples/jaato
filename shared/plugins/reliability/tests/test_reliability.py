@@ -733,3 +733,140 @@ class TestPermissionWrapper:
         # Should have reliability warning prepended
         assert any("ESCALATED" in line for line in lines)
         assert level == "warning"
+
+
+class TestPersistence:
+    """Tests for reliability persistence."""
+
+    @pytest.fixture
+    def temp_dir(self, tmp_path):
+        """Create a temporary directory for testing."""
+        return str(tmp_path)
+
+    def test_tool_state_persistence(self, temp_dir):
+        """Test saving and loading tool states."""
+        from ..persistence import ReliabilityPersistence
+
+        persist = ReliabilityPersistence(workspace_path=temp_dir)
+
+        # Create and save state
+        state = ToolReliabilityState(
+            failure_key="test_tool|param=value",
+            tool_name="test_tool",
+            state=TrustState.ESCALATED,
+            total_failures=5,
+            escalation_reason="test reason",
+        )
+        persist.save_tool_state(state)
+
+        # Reload and verify
+        persist.invalidate_cache()
+        states = persist.load_tool_states()
+
+        assert "test_tool|param=value" in states
+        loaded = states["test_tool|param=value"]
+        assert loaded.state == TrustState.ESCALATED
+        assert loaded.total_failures == 5
+        assert loaded.escalation_reason == "test reason"
+
+    def test_failure_history_persistence(self, temp_dir):
+        """Test saving and loading failure history."""
+        from ..persistence import ReliabilityPersistence
+
+        persist = ReliabilityPersistence(workspace_path=temp_dir)
+
+        # Create and save record
+        record = FailureRecord(
+            failure_key="test_tool|param=value",
+            tool_name="test_tool",
+            plugin_name="test",
+            timestamp=datetime.now(),
+            parameter_signature="param=value",
+            severity=FailureSeverity.SERVER_ERROR,
+            error_message="test error",
+        )
+        persist.append_failure(record)
+
+        # Reload and verify
+        persist.invalidate_cache()
+        history = persist.load_failure_history()
+
+        assert len(history) == 1
+        assert history[0].failure_key == "test_tool|param=value"
+        assert history[0].error_message == "test error"
+
+    def test_settings_hierarchy(self, temp_dir):
+        """Test settings merge hierarchy (session > workspace > user)."""
+        from ..persistence import ReliabilityPersistence, SessionSettings
+
+        persist = ReliabilityPersistence(workspace_path=temp_dir)
+
+        # Set user default
+        persist.save_setting_to_user("test_setting", "user_value")
+
+        # Without overrides, should get user value
+        persist.invalidate_cache()
+        assert persist.get_effective_setting("test_setting") == "user_value"
+
+        # Set workspace override
+        persist.save_setting_to_workspace("test_setting", "workspace_value")
+        persist.invalidate_cache()
+        assert persist.get_effective_setting("test_setting") == "workspace_value"
+
+        # Session override takes priority
+        session = SessionSettings()
+        # SessionSettings doesn't have arbitrary attributes, so test with known one
+        session.recovery_mode = "ask"
+        assert persist.get_effective_setting("recovery_mode", session) == "ask"
+
+    def test_trusted_states_not_persisted(self, temp_dir):
+        """Test that TRUSTED states are removed from persistence."""
+        from ..persistence import ReliabilityPersistence
+
+        persist = ReliabilityPersistence(workspace_path=temp_dir)
+
+        # Save escalated state
+        state = ToolReliabilityState(
+            failure_key="test_tool|param=value",
+            tool_name="test_tool",
+            state=TrustState.ESCALATED,
+        )
+        persist.save_tool_state(state)
+
+        # Verify it's saved
+        persist.invalidate_cache()
+        states = persist.load_tool_states()
+        assert "test_tool|param=value" in states
+
+        # Change to trusted and save
+        state.state = TrustState.TRUSTED
+        persist.save_tool_state(state)
+
+        # Should be removed from persistence
+        persist.invalidate_cache()
+        states = persist.load_tool_states()
+        assert "test_tool|param=value" not in states
+
+    def test_session_settings_serialization(self):
+        """Test SessionSettings serialization."""
+        from ..persistence import SessionSettings, SessionReliabilityState
+
+        settings = SessionSettings(
+            nudge_level="gentle",
+            recovery_mode="ask",
+        )
+
+        state = SessionReliabilityState(
+            session_id="test-session",
+            settings=settings,
+        )
+
+        # Serialize
+        data = state.serialize()
+        assert isinstance(data, bytes)
+
+        # Deserialize
+        restored = SessionReliabilityState.deserialize(data)
+        assert restored.session_id == "test-session"
+        assert restored.settings.nudge_level == "gentle"
+        assert restored.settings.recovery_mode == "ask"

@@ -23,6 +23,11 @@ from .types import (
     TrustState,
     classify_failure,
 )
+from .persistence import (
+    ReliabilityPersistence,
+    SessionSettings,
+    SessionReliabilityState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,10 @@ class ReliabilityPlugin:
         # Session context
         self._session_id: str = ""
         self._turn_index: int = 0
+        self._session_settings: SessionSettings = SessionSettings()
+
+        # Persistence
+        self._persistence: Optional[ReliabilityPersistence] = None
 
         # Callbacks
         self._output_callback: Optional[OutputCallback] = None
@@ -126,6 +135,7 @@ class ReliabilityPlugin:
                 CommandCompletion("reset", "Reset a tool to trusted state"),
                 CommandCompletion("history", "Show recent failure history"),
                 CommandCompletion("config", "Show current configuration"),
+                CommandCompletion("settings", "Show or save settings"),
             ]
 
         if len(command_parts) == 2:
@@ -134,6 +144,7 @@ class ReliabilityPlugin:
                 return [
                     CommandCompletion("auto", "Automatically recover tools after cooldown"),
                     CommandCompletion("ask", "Prompt before recovering tools"),
+                    CommandCompletion("save", "Save recovery setting"),
                 ]
             elif subcommand == "reset":
                 # Return list of escalated/blocked tools
@@ -142,6 +153,32 @@ class ReliabilityPlugin:
                     for key, state in self._tool_states.items()
                     if state.state in (TrustState.ESCALATED, TrustState.BLOCKED)
                 ]
+            elif subcommand == "settings":
+                return [
+                    CommandCompletion("show", "Show effective settings"),
+                    CommandCompletion("save", "Save settings to workspace or user"),
+                    CommandCompletion("clear", "Clear settings at a level"),
+                ]
+
+        if len(command_parts) == 3:
+            subcommand = command_parts[1]
+            if subcommand == "recovery" and command_parts[2] == "save":
+                return [
+                    CommandCompletion("workspace", "Save to workspace (.jaato/reliability.json)"),
+                    CommandCompletion("user", "Save as user default (~/.jaato/reliability.json)"),
+                ]
+            elif subcommand == "settings":
+                arg = command_parts[2]
+                if arg == "save":
+                    return [
+                        CommandCompletion("workspace", "Save to workspace"),
+                        CommandCompletion("user", "Save as user default"),
+                    ]
+                elif arg == "clear":
+                    return [
+                        CommandCompletion("workspace", "Clear workspace settings"),
+                        CommandCompletion("session", "Clear session overrides"),
+                    ]
 
         return []
 
@@ -170,9 +207,26 @@ class ReliabilityPlugin:
         self._registry = registry
 
     def set_workspace_path(self, path: str) -> None:
-        """Called when workspace path is set."""
+        """Called when workspace path is set. Loads persisted state."""
         self._workspace_path = path
-        # Could load persisted state here
+
+        # Initialize persistence
+        self._persistence = ReliabilityPersistence(workspace_path=path)
+
+        # Load persisted tool states
+        persisted_states = self._persistence.load_tool_states()
+        self._tool_states.update(persisted_states)
+
+        # Load persisted failure history
+        persisted_history = self._persistence.load_failure_history()
+        self._failure_history.extend(persisted_history)
+
+        # Load effective settings
+        recovery_mode = self._persistence.get_effective_setting("recovery_mode", self._session_settings)
+        if recovery_mode is not None:
+            self._config.enable_auto_recovery = recovery_mode == "auto"
+
+        logger.info(f"Loaded {len(persisted_states)} tool states and {len(persisted_history)} history records")
 
     def set_output_callback(self, callback: OutputCallback) -> None:
         """Set callback for output messages."""
@@ -742,8 +796,10 @@ class ReliabilityPlugin:
             return self._cmd_history(args)
         elif subcommand == "config":
             return self._cmd_config()
+        elif subcommand == "settings":
+            return self._cmd_settings(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config"
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings"
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -770,16 +826,54 @@ class ReliabilityPlugin:
 
     def _cmd_recovery(self, args: str) -> str:
         """Set recovery mode."""
-        mode = args.strip().lower() if args else ""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts:
+            current = "auto" if self._config.enable_auto_recovery else "ask"
+            return f"Current recovery mode: {current}\nUsage: reliability recovery auto|ask [save workspace|user]"
+
+        mode = parts[0]
         if mode == "auto":
             self._config.enable_auto_recovery = True
-            return "Recovery mode set to AUTO"
+            self._session_settings.recovery_mode = "auto"
+            result = "Recovery mode set to AUTO"
         elif mode == "ask":
             self._config.enable_auto_recovery = False
-            return "Recovery mode set to ASK"
+            self._session_settings.recovery_mode = "ask"
+            result = "Recovery mode set to ASK"
+        elif mode == "save":
+            # Handle "recovery save workspace|user"
+            if len(parts) < 2:
+                return "Usage: reliability recovery save workspace|user"
+            return self._save_recovery_setting(parts[1])
         else:
             current = "auto" if self._config.enable_auto_recovery else "ask"
-            return f"Current recovery mode: {current}\nUsage: reliability recovery auto|ask"
+            return f"Current recovery mode: {current}\nUsage: reliability recovery auto|ask [save workspace|user]"
+
+        # Check for save subcommand
+        if len(parts) >= 3 and parts[1] == "save":
+            save_result = self._save_recovery_setting(parts[2])
+            return f"{result}\n{save_result}"
+
+        return result
+
+    def _save_recovery_setting(self, level: str) -> str:
+        """Save recovery setting to workspace or user level."""
+        if not self._persistence:
+            return "Error: Persistence not initialized (no workspace set)"
+
+        mode = "auto" if self._config.enable_auto_recovery else "ask"
+
+        if level == "workspace":
+            if self._persistence.save_setting_to_workspace("recovery_mode", mode):
+                return f"Recovery mode '{mode}' saved to workspace"
+            return "Error: Failed to save to workspace"
+        elif level == "user":
+            if self._persistence.save_setting_to_user("recovery_mode", mode):
+                return f"Recovery mode '{mode}' saved as user default"
+            return "Error: Failed to save to user"
+        else:
+            return f"Unknown level: {level}. Use 'workspace' or 'user'"
 
     def _cmd_reset(self, args: str) -> str:
         """Reset a tool."""
@@ -833,6 +927,107 @@ class ReliabilityPlugin:
             f"  Auto recovery: {self._config.enable_auto_recovery}\n"
             f"  Max history: {self._config.max_history_entries}"
         )
+
+    def _cmd_settings(self, args: str) -> str:
+        """Show or manage settings."""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "show":
+            return self._show_settings()
+        elif parts[0] == "save":
+            if len(parts) < 2:
+                return "Usage: reliability settings save workspace|user"
+            return self._save_all_settings(parts[1])
+        elif parts[0] == "clear":
+            if len(parts) < 2:
+                return "Usage: reliability settings clear workspace|session"
+            return self._clear_settings(parts[1])
+        else:
+            return "Usage: reliability settings [show|save workspace|user|clear workspace|session]"
+
+    def _show_settings(self) -> str:
+        """Show effective settings with source info."""
+        lines = [
+            "Reliability Settings (effective):",
+            "-" * 60,
+            f"  {'Setting':<25} {'Value':<15} {'Source':<20}",
+            "-" * 60,
+        ]
+
+        settings = [
+            ("recovery_mode", "auto" if self._config.enable_auto_recovery else "ask"),
+            ("nudge_level", self._session_settings.nudge_level or "default"),
+            ("nudge_enabled", str(self._session_settings.nudge_enabled)),
+        ]
+
+        for key, value in settings:
+            source = self._get_setting_source(key)
+            lines.append(f"  {key:<25} {value:<15} {source:<20}")
+
+        lines.append("-" * 60)
+        return "\n".join(lines)
+
+    def _get_setting_source(self, key: str) -> str:
+        """Determine where a setting value comes from."""
+        # Check session
+        session_val = getattr(self._session_settings, key, None)
+        if session_val is not None:
+            return "session (override)"
+
+        # Check workspace
+        if self._persistence:
+            workspace = self._persistence.load_workspace()
+            if key in workspace.settings:
+                return "workspace"
+
+            # Check user
+            user = self._persistence.load_user()
+            if key in user.default_settings:
+                return "user (default)"
+
+        return "built-in default"
+
+    def _save_all_settings(self, level: str) -> str:
+        """Save all current settings to workspace or user level."""
+        if not self._persistence:
+            return "Error: Persistence not initialized (no workspace set)"
+
+        settings_to_save = {
+            "recovery_mode": "auto" if self._config.enable_auto_recovery else "ask",
+        }
+
+        if self._session_settings.nudge_level:
+            settings_to_save["nudge_level"] = self._session_settings.nudge_level
+
+        if level == "workspace":
+            for key, value in settings_to_save.items():
+                self._persistence.save_setting_to_workspace(key, value)
+            return f"Settings saved to workspace:\n  " + "\n  ".join(
+                f"{k}: {v}" for k, v in settings_to_save.items()
+            )
+        elif level == "user":
+            for key, value in settings_to_save.items():
+                self._persistence.save_setting_to_user(key, value)
+            return f"Settings saved as user defaults:\n  " + "\n  ".join(
+                f"{k}: {v}" for k, v in settings_to_save.items()
+            )
+        else:
+            return f"Unknown level: {level}. Use 'workspace' or 'user'"
+
+    def _clear_settings(self, level: str) -> str:
+        """Clear settings at a specific level."""
+        if level == "session":
+            self._session_settings = SessionSettings()
+            return "Session overrides cleared. Now inheriting from workspace/user."
+        elif level == "workspace":
+            if not self._persistence:
+                return "Error: Persistence not initialized"
+            workspace = self._persistence.load_workspace()
+            workspace.settings.clear()
+            self._persistence.save_workspace()
+            return "Workspace settings cleared. Now inheriting from user defaults."
+        else:
+            return f"Unknown level: {level}. Use 'workspace' or 'session'"
 
 
 def create_plugin(config: Optional[Dict[str, Any]] = None) -> ReliabilityPlugin:
