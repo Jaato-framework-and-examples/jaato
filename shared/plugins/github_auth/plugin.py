@@ -111,6 +111,7 @@ class GitHubAuthPlugin:
             CommandCompletion("poll", "Poll for authorization after entering code"),
             CommandCompletion("logout", "Clear stored OAuth tokens"),
             CommandCompletion("status", "Show current authentication status"),
+            CommandCompletion("help", "Show detailed help for this command"),
         ]
 
         if not args:
@@ -138,6 +139,8 @@ class GitHubAuthPlugin:
             return self._cmd_logout()
         elif action_lower == "status":
             return self._cmd_status()
+        elif action_lower == "help":
+            return self._cmd_help()
         else:
             self._emit(
                 f"Unknown action: '{raw_action}'\n\n"
@@ -146,8 +149,70 @@ class GitHubAuthPlugin:
                 "  poll    - Poll for authorization after entering code\n"
                 "  logout  - Clear stored OAuth tokens\n"
                 "  status  - Show current authentication status\n"
+                "  help    - Show detailed help\n"
             )
             return ""
+
+    def _cmd_help(self) -> str:
+        """Return detailed help text."""
+        help_text = """GitHub Auth Command
+
+Authenticate with GitHub using OAuth device code flow. This enables access
+to GitHub Models API without requiring a personal access token.
+
+USAGE
+    github-auth <action>
+
+ACTIONS
+    login             Start the device code OAuth flow
+                      Opens browser to github.com/login/device
+                      Polls automatically for authorization
+
+    poll              Manually poll for authorization
+                      Use if automatic polling was interrupted
+
+    logout            Clear stored OAuth tokens
+                      Removes credentials from keychain/keyring
+
+    status            Show current authentication status
+                      Displays token type and expiration
+
+    help              Show this help message
+
+AUTHENTICATION FLOW
+    1. Run 'github-auth login'
+    2. Browser opens to github.com/login/device
+    3. Enter the displayed code (e.g., ABCD-1234)
+    4. Authorize the application
+    5. Token is automatically saved
+
+EXAMPLES
+    github-auth login         Start OAuth login
+    github-auth status        Check if authenticated
+    github-auth logout        Clear credentials
+
+TOKEN STORAGE
+    Tokens are securely stored in your system keychain:
+    - macOS: Keychain Access
+    - Linux: Secret Service (GNOME Keyring, KWallet)
+    - Windows: Credential Manager
+
+ALTERNATIVE: PERSONAL ACCESS TOKEN
+    If OAuth doesn't work, you can use a PAT:
+    1. Go to github.com/settings/tokens
+    2. Create token with 'models:read' scope
+    3. Set GITHUB_TOKEN environment variable
+
+ENVIRONMENT VARIABLES
+    GITHUB_TOKEN                  Personal access token (alternative to OAuth)
+    JAATO_GITHUB_ORGANIZATION     Organization for billing attribution
+
+NOTES
+    - OAuth tokens expire and auto-refresh when needed
+    - Device code flow works without exposing secrets
+    - Uses GitHub Copilot's OAuth client ID"""
+        self._emit(help_text)
+        return ""
 
     def _cmd_login(self) -> str:
         """Handle the login command - start device code flow."""

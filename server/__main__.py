@@ -435,6 +435,63 @@ class JaatoDaemon:
                         ))
                 return
 
+            elif cmd == "session.help":
+                from server.events import HelpTextEvent
+                help_lines = [
+                    ("Session Command", "bold"),
+                    ("", ""),
+                    ("Manage multiple conversation sessions. Each session has its own", ""),
+                    ("conversation history, model state, and workspace.", ""),
+                    ("", ""),
+                    ("USAGE", "bold"),
+                    ("    session [subcommand] [args]", ""),
+                    ("", ""),
+                    ("SUBCOMMANDS", "bold"),
+                    ("    list              List all available sessions", "dim"),
+                    ("                      Shows ID, description, model, and status", "dim"),
+                    ("", ""),
+                    ("    new [name]        Create a new session", "dim"),
+                    ("                      Optional name for easier identification", "dim"),
+                    ("", ""),
+                    ("    attach <id>       Attach to an existing session", "dim"),
+                    ("                      Loads session from disk if not in memory", "dim"),
+                    ("", ""),
+                    ("    delete <id>       Delete a session permanently", "dim"),
+                    ("                      Removes both memory and disk state", "dim"),
+                    ("", ""),
+                    ("    help              Show this help message", "dim"),
+                    ("", ""),
+                    ("EXAMPLES", "bold"),
+                    ("    session list               List all sessions", "dim"),
+                    ("    session new                Create unnamed session", "dim"),
+                    ("    session new myproject      Create session named 'myproject'", "dim"),
+                    ("    session attach 20251207    Attach to session by ID", "dim"),
+                    ("    session delete 20251207    Delete session by ID", "dim"),
+                    ("", ""),
+                    ("SESSION STATES", "bold"),
+                    ("    Sessions can be in different states:", ""),
+                    ("    - Loaded: Currently in memory, ready for use", "dim"),
+                    ("    - On disk: Saved to disk, will be loaded on attach", "dim"),
+                    ("    - Processing: Currently running a model turn", "dim"),
+                    ("", ""),
+                    ("PERSISTENCE", "bold"),
+                    ("    Sessions are automatically saved to:", ""),
+                    ("        .jaato/sessions/<session_id>.json", "dim"),
+                    ("", ""),
+                    ("    Each session stores:", ""),
+                    ("    - Conversation history", "dim"),
+                    ("    - Model and provider settings", "dim"),
+                    ("    - Workspace path", "dim"),
+                    ("    - Session description (auto-generated)", "dim"),
+                    ("", ""),
+                    ("RELATED COMMANDS", "bold"),
+                    ("    save              Manually save current session", "dim"),
+                    ("    resume <id>       Resume a saved session (alias for attach)", "dim"),
+                    ("    reset             Clear current session history", "dim"),
+                ]
+                self._route_event(client_id, HelpTextEvent(lines=help_lines))
+                return
+
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
                 # Get the client's session
@@ -462,10 +519,46 @@ class JaatoDaemon:
                     result = self._tools_disable(session.server, event.args[0])
                     tools = self._get_tool_status(session.server)
                     self._route_event(client_id, ToolStatusEvent(tools=tools, message=result))
+                elif tools_subcmd == "help":
+                    from server.events import HelpTextEvent
+                    help_lines = [
+                        ("Tools Command", "bold"),
+                        ("", ""),
+                        ("Manage tools available to the model. Tools can be enabled or disabled", ""),
+                        ("to control what capabilities the model has access to.", ""),
+                        ("", ""),
+                        ("USAGE", "bold"),
+                        ("    tools [subcommand] [args]", ""),
+                        ("", ""),
+                        ("SUBCOMMANDS", "bold"),
+                        ("    list              List all tools with their enabled/disabled status", "dim"),
+                        ("                      (this is the default when no subcommand is given)", "dim"),
+                        ("", ""),
+                        ("    enable <name>     Enable a specific tool by name", "dim"),
+                        ("    enable all        Enable all tools at once", "dim"),
+                        ("", ""),
+                        ("    disable <name>    Disable a specific tool by name", "dim"),
+                        ("    disable all       Disable all tools at once", "dim"),
+                        ("", ""),
+                        ("    help              Show this help message", "dim"),
+                        ("", ""),
+                        ("EXAMPLES", "bold"),
+                        ("    tools                    Show all tools and their status", "dim"),
+                        ("    tools list               Same as above", "dim"),
+                        ("    tools enable Bash        Enable the Bash tool", "dim"),
+                        ("    tools disable web_search Disable web search", "dim"),
+                        ("    tools enable all         Enable all tools", "dim"),
+                        ("", ""),
+                        ("NOTES", "bold"),
+                        ("    - Tool names are case-sensitive", "dim"),
+                        ("    - Disabled tools will not be available for the model to use", "dim"),
+                        ("    - Use 'tools list' to see available tool names", "dim"),
+                    ]
+                    self._route_event(client_id, HelpTextEvent(lines=help_lines))
                 else:
                     from server.events import SystemMessageEvent
                     self._route_event(client_id, SystemMessageEvent(
-                        message="Usage: tools list | tools enable <name> | tools disable <name>",
+                        message="Usage: tools list | tools enable <name> | tools disable <name> | tools help",
                         style="dim",
                     ))
                 return

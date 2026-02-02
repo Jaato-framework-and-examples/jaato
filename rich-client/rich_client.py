@@ -1816,6 +1816,42 @@ class RichClient:
             self._show_tools_with_status()
             return
 
+        if subcommand == "help":
+            self._display.show_lines([
+                ("Tools Command", "bold"),
+                ("", ""),
+                ("Manage tools available to the model. Tools can be enabled or disabled", ""),
+                ("to control what capabilities the model has access to.", ""),
+                ("", ""),
+                ("USAGE", "bold"),
+                ("    tools [subcommand] [args]", ""),
+                ("", ""),
+                ("SUBCOMMANDS", "bold"),
+                ("    list              List all tools with their enabled/disabled status", "dim"),
+                ("                      (this is the default when no subcommand is given)", "dim"),
+                ("", ""),
+                ("    enable <name>     Enable a specific tool by name", "dim"),
+                ("    enable all        Enable all tools at once", "dim"),
+                ("", ""),
+                ("    disable <name>    Disable a specific tool by name", "dim"),
+                ("    disable all       Disable all tools at once", "dim"),
+                ("", ""),
+                ("    help              Show this help message", "dim"),
+                ("", ""),
+                ("EXAMPLES", "bold"),
+                ("    tools                    Show all tools and their status", "dim"),
+                ("    tools list               Same as above", "dim"),
+                ("    tools enable Bash        Enable the Bash tool", "dim"),
+                ("    tools disable web_search Disable web search", "dim"),
+                ("    tools enable all         Enable all tools", "dim"),
+                ("", ""),
+                ("NOTES", "bold"),
+                ("    - Tool names are case-sensitive", "dim"),
+                ("    - Disabled tools will not be available for the model to use", "dim"),
+                ("    - Use 'tools list' to see available tool names", "dim"),
+            ])
+            return
+
         if subcommand == "enable":
             if not args:
                 self._display.show_lines([
@@ -1983,17 +2019,63 @@ class RichClient:
         subcommand = parts[1] if len(parts) > 1 else ""
 
         if subcommand == 'help':
-            self._display.add_system_message("Screenshot - Capture TUI state", "bold")
-            self._display.add_system_message("")
-            self._display.add_system_message("Usage:")
-            self._display.add_system_message("  screenshot              Capture and send hint to model", "dim")
-            self._display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
-            self._display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
-            self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
-            self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
-            self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
-            self._display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
-            self._display.add_system_message("  screenshot help         Show this help", "dim")
+            self._display.show_lines([
+                ("Screenshot Command", "bold"),
+                ("", ""),
+                ("Capture the TUI state as an image for vision analysis or debugging.", ""),
+                ("Captures can be sent to the model as hints or saved for later use.", ""),
+                ("", ""),
+                ("USAGE", "bold"),
+                ("    screenshot [subcommand] [args]", ""),
+                ("", ""),
+                ("SUBCOMMANDS", "bold"),
+                ("    (none)            Capture TUI and send path hint to model", "dim"),
+                ("                      Model receives the path to read the image", "dim"),
+                ("", ""),
+                ("    nosend            Capture TUI without sending hint to model", "dim"),
+                ("                      Useful for manual inspection", "dim"),
+                ("", ""),
+                ("    copy              Capture and copy to clipboard as PNG", "dim"),
+                ("                      Requires clipboard support (xclip/pbcopy)", "dim"),
+                ("", ""),
+                ("    format [F]        Show or set output format", "dim"),
+                ("                      Available: svg, png, html", "dim"),
+                ("", ""),
+                ("    auto              Toggle auto-capture on turn end", "dim"),
+                ("                      Automatically captures after each model turn", "dim"),
+                ("", ""),
+                ("    interval <N>      Set periodic capture interval in ms", "dim"),
+                ("                      Use 0 to disable (default)", "dim"),
+                ("", ""),
+                ("    delay <N>         Capture once after N seconds", "dim"),
+                ("                      Default: 5 seconds", "dim"),
+                ("", ""),
+                ("    help              Show this help message", "dim"),
+                ("", ""),
+                ("EXAMPLES", "bold"),
+                ("    screenshot                    Capture and hint model", "dim"),
+                ("    screenshot nosend             Capture without hint", "dim"),
+                ("    screenshot copy               Capture to clipboard", "dim"),
+                ("    screenshot format png         Switch to PNG output", "dim"),
+                ("    screenshot auto               Toggle auto-capture", "dim"),
+                ("    screenshot interval 5000      Capture every 5 seconds", "dim"),
+                ("    screenshot delay 3            Capture in 3 seconds", "dim"),
+                ("", ""),
+                ("OUTPUT FORMATS", "bold"),
+                ("    svg               Scalable vector (default, best quality)", "dim"),
+                ("    png               Raster image (requires cairosvg)", "dim"),
+                ("    html              HTML with embedded styles", "dim"),
+                ("", ""),
+                ("OUTPUT DIRECTORY", "bold"),
+                ("    Captures are saved to $JAATO_VISION_DIR", ""),
+                ("    Default: /tmp/jaato_vision", "dim"),
+                ("", ""),
+                ("NOTES", "bold"),
+                ("    - SVG format preserves text and is searchable", "dim"),
+                ("    - PNG requires cairosvg package for conversion", "dim"),
+                ("    - Auto-capture helps debug streaming output", "dim"),
+                ("    - Hint includes <tui-screenshot> tag for model", "dim"),
+            ])
             return
 
         if subcommand == 'format':
@@ -2908,17 +2990,63 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
     subcommand = parts[1] if len(parts) > 1 else ""
 
     if subcommand == 'help':
-        display.add_system_message("Screenshot - Capture TUI state", "bold")
-        display.add_system_message("")
-        display.add_system_message("Usage:")
-        display.add_system_message("  screenshot              Capture and send hint to model", "dim")
-        display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
-        display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
-        display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
-        display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
-        display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
-        display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
-        display.add_system_message("  screenshot help         Show this help", "dim")
+        display.show_lines([
+            ("Screenshot Command", "bold"),
+            ("", ""),
+            ("Capture the TUI state as an image for vision analysis or debugging.", ""),
+            ("Captures can be sent to the model as hints or saved for later use.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    screenshot [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    (none)            Capture TUI and send path hint to model", "dim"),
+            ("                      Model receives the path to read the image", "dim"),
+            ("", ""),
+            ("    nosend            Capture TUI without sending hint to model", "dim"),
+            ("                      Useful for manual inspection", "dim"),
+            ("", ""),
+            ("    copy              Capture and copy to clipboard as PNG", "dim"),
+            ("                      Requires clipboard support (xclip/pbcopy)", "dim"),
+            ("", ""),
+            ("    format [F]        Show or set output format", "dim"),
+            ("                      Available: svg, png, html", "dim"),
+            ("", ""),
+            ("    auto              Toggle auto-capture on turn end", "dim"),
+            ("                      Automatically captures after each model turn", "dim"),
+            ("", ""),
+            ("    interval <N>      Set periodic capture interval in ms", "dim"),
+            ("                      Use 0 to disable (default)", "dim"),
+            ("", ""),
+            ("    delay <N>         Capture once after N seconds", "dim"),
+            ("                      Default: 5 seconds", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    screenshot                    Capture and hint model", "dim"),
+            ("    screenshot nosend             Capture without hint", "dim"),
+            ("    screenshot copy               Capture to clipboard", "dim"),
+            ("    screenshot format png         Switch to PNG output", "dim"),
+            ("    screenshot auto               Toggle auto-capture", "dim"),
+            ("    screenshot interval 5000      Capture every 5 seconds", "dim"),
+            ("    screenshot delay 3            Capture in 3 seconds", "dim"),
+            ("", ""),
+            ("OUTPUT FORMATS", "bold"),
+            ("    svg               Scalable vector (default, best quality)", "dim"),
+            ("    png               Raster image (requires cairosvg)", "dim"),
+            ("    html              HTML with embedded styles", "dim"),
+            ("", ""),
+            ("OUTPUT DIRECTORY", "bold"),
+            ("    Captures are saved to $JAATO_VISION_DIR", ""),
+            ("    Default: /tmp/jaato_vision", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - SVG format preserves text and is searchable", "dim"),
+            ("    - PNG requires cairosvg package for conversion", "dim"),
+            ("    - Auto-capture helps debug streaming output", "dim"),
+            ("    - Hint includes <tui-screenshot> tag for model", "dim"),
+        ])
         return
 
     if subcommand == 'format':
@@ -3206,6 +3334,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         TurnCompletedEvent,
         TurnProgressEvent,
         SystemMessageEvent,
+        HelpTextEvent,
         InitProgressEvent,
         ErrorEvent,
         RetryEvent,
@@ -3895,6 +4024,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     style = "system_highlight"
                 display.add_system_message(event.message, style=style)
 
+            elif isinstance(event, HelpTextEvent):
+                # Display help text using the pager
+                # Lines are (text, style) tuples
+                display.show_lines(event.lines)
+
             elif isinstance(event, ErrorEvent):
                 display.add_system_message(
                     f"Error: {event.error_type}: {event.error}",
@@ -4469,6 +4603,56 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         input_handler.set_available_themes(list_available_themes())
                         display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
                         display.add_system_message(f"Source: {new_theme.source_path}", "hint")
+                    elif subcmd == "help":
+                        display.show_lines([
+                            ("Theme Command", "bold"),
+                            ("", ""),
+                            ("Manage the visual theme of the client. Themes control colors,", ""),
+                            ("styles, and the overall appearance of the interface.", ""),
+                            ("", ""),
+                            ("USAGE", "bold"),
+                            ("    theme [subcommand]", ""),
+                            ("", ""),
+                            ("SUBCOMMANDS", "bold"),
+                            ("    (none)            Show current theme info and available commands", "dim"),
+                            ("", ""),
+                            ("    reload            Reload theme from configuration files", "dim"),
+                            ("                      Picks up changes from theme.json", "dim"),
+                            ("", ""),
+                            (f"    <preset>          Switch to a built-in theme preset", "dim"),
+                            (f"                      Available: {', '.join(sorted(available))}", "dim"),
+                            ("", ""),
+                            ("    help              Show this help message", "dim"),
+                            ("", ""),
+                            ("EXAMPLES", "bold"),
+                            ("    theme                   Show current theme and colors", "dim"),
+                            ("    theme dark              Switch to dark theme", "dim"),
+                            ("    theme light             Switch to light theme", "dim"),
+                            ("    theme high-contrast     Switch to high-contrast theme", "dim"),
+                            ("    theme reload            Reload from config files", "dim"),
+                            ("", ""),
+                            ("CUSTOM THEMES", "bold"),
+                            ("    Create a theme.json file in .jaato/ or ~/.jaato/ with:", ""),
+                            ("", ""),
+                            ('    {', "dim"),
+                            ('      "colors": {', "dim"),
+                            ('        "primary": "#007ACC",', "dim"),
+                            ('        "secondary": "#6C757D",', "dim"),
+                            ('        "success": "#28A745",', "dim"),
+                            ('        "warning": "#FFC107",', "dim"),
+                            ('        "error": "#DC3545",', "dim"),
+                            ('        "muted": "#6C757D",', "dim"),
+                            ('        "background": "#1E1E1E",', "dim"),
+                            ('        "surface": "#252526",', "dim"),
+                            ('        "text": "#D4D4D4",', "dim"),
+                            ('        "text_muted": "#808080"', "dim"),
+                            ('      }', "dim"),
+                            ('    }', "dim"),
+                            ("", ""),
+                            ("CONFIGURATION FILES", "bold"),
+                            ("    .jaato/theme.json       Project-level theme", "dim"),
+                            ("    ~/.jaato/theme.json     User-level theme", "dim"),
+                        ])
                     elif subcmd in BUILTIN_THEMES:
                         new_theme = BUILTIN_THEMES[subcmd].copy()
                         display.set_theme(new_theme)

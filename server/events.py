@@ -77,6 +77,7 @@ class EventType(str, Enum):
 
     # System messages (Server -> Client)
     SYSTEM_MESSAGE = "system.message"
+    HELP_TEXT = "help.text"  # Detailed help output for commands
     ERROR = "error"
     INIT_PROGRESS = "init.progress"  # Initialization step progress
     RETRY = "retry"  # API retry with exponential backoff
@@ -499,6 +500,17 @@ class SystemMessageEvent(Event):
     type: EventType = field(default=EventType.SYSTEM_MESSAGE)
     message: str = ""
     style: str = ""  # "info", "warning", "error", "success", "dim"
+
+
+@dataclass
+class HelpTextEvent(Event):
+    """Detailed help text for commands.
+
+    Sent in response to 'help' subcommands to display formatted help
+    using the pager. Each line is a (text, style) tuple.
+    """
+    type: EventType = field(default=EventType.HELP_TEXT)
+    lines: List[tuple] = field(default_factory=list)  # List of (text, style) tuples
 
 
 @dataclass

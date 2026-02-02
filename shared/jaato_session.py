@@ -1486,14 +1486,50 @@ class JaatoSession:
         subcommand = args.get("subcommand", "").lower()
         model_name = args.get("model_name")
 
-        # No subcommand - show help
+        # No subcommand - show current model and brief usage
         if not subcommand:
             return {
                 "current_model": self._model_name,
                 "subcommands": {
                     "list": "Show available models",
-                    "select <name>": "Switch to a different model"
+                    "select <name>": "Switch to a different model",
+                    "help": "Show detailed help"
                 }
+            }
+
+        # Help subcommand
+        if subcommand == "help":
+            return {
+                "help": """Model Command
+
+Switch between AI models during a session. The model command allows you to
+list available models and switch to a different one without losing context.
+
+USAGE
+    model [subcommand] [args]
+
+SUBCOMMANDS
+    (none)            Show current model and available subcommands
+
+    list              List all available models for the current provider
+                      Shows which model is currently active
+
+    select <name>     Switch to a different model
+                      Preserves conversation history
+
+    help              Show this help message
+
+EXAMPLES
+    model                         Show current model
+    model list                    List available models
+    model select gpt-4            Switch to gpt-4
+    model select claude-3-opus    Switch to Claude Opus
+
+NOTES
+    - Switching models preserves your conversation history
+    - Available models depend on your configured provider
+    - Some models may have different capabilities or costs
+    - Use 'model list' to see all available options"""
             }
 
         # List subcommand
@@ -1779,6 +1815,7 @@ class JaatoSession:
             return [
                 CommandCompletion(value="list", description="Show available models"),
                 CommandCompletion(value="select", description="Switch to a model"),
+                CommandCompletion(value="help", description="Show detailed help"),
             ]
 
         subcommand = args[0].lower() if args else ""
@@ -1788,6 +1825,7 @@ class JaatoSession:
             subcommands = [
                 ("list", "Show available models"),
                 ("select", "Switch to a model"),
+                ("help", "Show detailed help"),
             ]
             return [
                 CommandCompletion(value=cmd, description=desc)

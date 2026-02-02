@@ -1374,26 +1374,83 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             return f"Unknown subcommand: {subcommand}\n\n{self._cmd_help()}"
 
     def _cmd_help(self) -> str:
-        return """LSP Server Commands:
+        return """LSP Command
 
-  lsp list              - List all configured LSP servers
-  lsp status            - Show connection status of all servers
-  lsp connect <name>    - Connect to a configured server
-  lsp disconnect <name> - Disconnect from a running server
-  lsp reload            - Reload configuration from .lsp.json
-  lsp logs [clear]      - Show interaction logs
+Manage Language Server Protocol (LSP) servers. LSP servers provide language
+intelligence features like diagnostics, completions, and go-to-definition.
 
-Configuration file: .lsp.json
-Example:
-{
-  "languageServers": {
-    "python": {
-      "command": "pyright-langserver",
-      "args": ["--stdio"],
-      "languageId": "python"
+USAGE
+    lsp [subcommand] [args]
+
+SUBCOMMANDS
+    list              List all configured LSP servers with their status
+                      (this is the default when no subcommand is given)
+
+    status            Show detailed connection status of all servers
+                      Includes capabilities and error information
+
+    connect <name>    Connect to a configured but disconnected server
+                      Server must be defined in .lsp.json
+
+    disconnect <name> Disconnect from a running server
+                      Keeps configuration, just stops the connection
+
+    reload            Reload configuration from .lsp.json
+                      Picks up external changes to the config file
+
+    logs [clear]      Show interaction logs for debugging
+                      Use 'clear' to reset the log buffer
+
+    help              Show this help message
+
+EXAMPLES
+    lsp                       List all configured servers
+    lsp status                Show detailed server status
+    lsp connect python        Connect to Python language server
+    lsp disconnect python     Disconnect Python server
+    lsp reload                Reload .lsp.json config
+    lsp logs                  Show interaction logs
+    lsp logs clear            Clear all logs
+
+CONFIGURATION FILE
+    LSP servers are configured in .lsp.json:
+
+    {
+      "languageServers": {
+        "python": {
+          "command": "pyright-langserver",
+          "args": ["--stdio"],
+          "languageId": "python",
+          "rootUri": "${workspaceFolder}"
+        },
+        "typescript": {
+          "command": "typescript-language-server",
+          "args": ["--stdio"],
+          "languageId": "typescript"
+        }
+      }
     }
-  }
-}"""
+
+SERVER CONFIGURATION OPTIONS
+    command           Path or name of the language server executable
+    args              Command-line arguments (usually ["--stdio"])
+    languageId        Language identifier (e.g., "python", "typescript")
+    rootUri           Workspace root (default: ${workspaceFolder})
+    initializationOptions
+                      Server-specific initialization options
+
+COMMON LANGUAGE SERVERS
+    Python:           pyright-langserver, pylsp, python-lsp-server
+    TypeScript/JS:    typescript-language-server
+    Rust:             rust-analyzer
+    Go:               gopls
+    C/C++:            clangd
+
+NOTES
+    - Servers auto-connect on startup if configured in .lsp.json
+    - LSP provides diagnostics, hover info, and completions to the model
+    - Failed servers show error details in 'lsp status'
+    - Use 'lsp logs' to debug communication issues"""
 
     def _cmd_list(self) -> str:
         self._load_config_cache()

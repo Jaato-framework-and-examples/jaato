@@ -402,6 +402,62 @@ def handle_keybindings_command(user_input: str, display) -> None:
         handle_profile_command(parts[2:], display)
         return
 
+    if subcommand == "help":
+        display.show_lines([
+            ("Keybindings Command", "bold"),
+            ("", ""),
+            ("Manage keyboard shortcuts and terminal profiles. Keybindings can be", ""),
+            ("customized per-terminal and saved to configuration files.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    keybindings [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list              Show all current keybindings with their values", "dim"),
+            ("                      (this is the default when no subcommand is given)", "dim"),
+            ("", ""),
+            ("    set <action> <key> [--save]", "dim"),
+            ("                      Set a keybinding for an action", "dim"),
+            ("                      Use --save to persist to config file", "dim"),
+            ("", ""),
+            ("    profile           Show current terminal profile and available profiles", "dim"),
+            ("    profile <name>    Switch to a different keybinding profile", "dim"),
+            ("", ""),
+            ("    reload            Reload keybindings from configuration files", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    keybindings                      Show current keybindings", "dim"),
+            ("    keybindings set yank c-shift-y   Set yank to Ctrl+Shift+Y (session)", "dim"),
+            ("    keybindings set toggle_plan f1 --save", "dim"),
+            ("                                     Set toggle_plan to F1 and save", "dim"),
+            ("    keybindings set newline escape enter", "dim"),
+            ("                                     Set newline to Escape then Enter", "dim"),
+            ("    keybindings profile              Show available profiles", "dim"),
+            ("    keybindings profile kitty        Switch to kitty profile", "dim"),
+            ("    keybindings reload               Reload from config files", "dim"),
+            ("", ""),
+            ("KEY SYNTAX (prompt_toolkit format)", "bold"),
+            ("    c-x               Ctrl+X", "dim"),
+            ("    s-x               Shift+X (where applicable)", "dim"),
+            ("    c-s-x             Ctrl+Shift+X", "dim"),
+            ("    escape            Escape key", "dim"),
+            ("    enter             Enter key", "dim"),
+            ("    f1, f2, ...       Function keys", "dim"),
+            ("    pageup, pagedown  Page navigation keys", "dim"),
+            ("    escape enter      Multi-key sequence (Escape then Enter)", "dim"),
+            ("", ""),
+            ("CONFIGURATION FILES", "bold"),
+            ("    .jaato/keybindings.json           Base config (project)", "dim"),
+            ("    .jaato/keybindings.<term>.json    Terminal-specific config", "dim"),
+            ("    ~/.jaato/keybindings.json         User-level config", "dim"),
+            ("", ""),
+            ("ENVIRONMENT", "bold"),
+            ("    JAATO_KEYBINDING_PROFILE=<name>   Override profile selection", "dim"),
+        ])
+        return
+
     # Unknown subcommand - show help
     display.show_lines([
         (f"[Unknown subcommand: {subcommand}]", "yellow"),
@@ -412,6 +468,7 @@ def handle_keybindings_command(user_input: str, display) -> None:
         ("    keybindings profile           - Show current terminal profile", "dim"),
         ("    keybindings profile <name>    - Switch to a different profile", "dim"),
         ("    keybindings reload            - Reload keybindings from config", "dim"),
+        ("    keybindings help              - Show detailed help", "dim"),
     ])
 
 
