@@ -1816,6 +1816,42 @@ class RichClient:
             self._show_tools_with_status()
             return
 
+        if subcommand == "help":
+            self._display.show_lines([
+                ("Tools Command", "bold"),
+                ("", ""),
+                ("Manage tools available to the model. Tools can be enabled or disabled", ""),
+                ("to control what capabilities the model has access to.", ""),
+                ("", ""),
+                ("USAGE", "bold"),
+                ("    tools [subcommand] [args]", ""),
+                ("", ""),
+                ("SUBCOMMANDS", "bold"),
+                ("    list              List all tools with their enabled/disabled status", "dim"),
+                ("                      (this is the default when no subcommand is given)", "dim"),
+                ("", ""),
+                ("    enable <name>     Enable a specific tool by name", "dim"),
+                ("    enable all        Enable all tools at once", "dim"),
+                ("", ""),
+                ("    disable <name>    Disable a specific tool by name", "dim"),
+                ("    disable all       Disable all tools at once", "dim"),
+                ("", ""),
+                ("    help              Show this help message", "dim"),
+                ("", ""),
+                ("EXAMPLES", "bold"),
+                ("    tools                    Show all tools and their status", "dim"),
+                ("    tools list               Same as above", "dim"),
+                ("    tools enable Bash        Enable the Bash tool", "dim"),
+                ("    tools disable web_search Disable web search", "dim"),
+                ("    tools enable all         Enable all tools", "dim"),
+                ("", ""),
+                ("NOTES", "bold"),
+                ("    - Tool names are case-sensitive", "dim"),
+                ("    - Disabled tools will not be available for the model to use", "dim"),
+                ("    - Use 'tools list' to see available tool names", "dim"),
+            ])
+            return
+
         if subcommand == "enable":
             if not args:
                 self._display.show_lines([
@@ -3206,6 +3242,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         TurnCompletedEvent,
         TurnProgressEvent,
         SystemMessageEvent,
+        HelpTextEvent,
         InitProgressEvent,
         ErrorEvent,
         RetryEvent,
@@ -3895,6 +3932,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     style = "system_highlight"
                 display.add_system_message(event.message, style=style)
 
+            elif isinstance(event, HelpTextEvent):
+                # Display help text using the pager
+                # Lines are (text, style) tuples
+                display.show_lines(event.lines)
+
             elif isinstance(event, ErrorEvent):
                 display.add_system_message(
                     f"Error: {event.error_type}: {event.error}",
@@ -4469,6 +4511,56 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         input_handler.set_available_themes(list_available_themes())
                         display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
                         display.add_system_message(f"Source: {new_theme.source_path}", "hint")
+                    elif subcmd == "help":
+                        display.show_lines([
+                            ("Theme Command", "bold"),
+                            ("", ""),
+                            ("Manage the visual theme of the client. Themes control colors,", ""),
+                            ("styles, and the overall appearance of the interface.", ""),
+                            ("", ""),
+                            ("USAGE", "bold"),
+                            ("    theme [subcommand]", ""),
+                            ("", ""),
+                            ("SUBCOMMANDS", "bold"),
+                            ("    (none)            Show current theme info and available commands", "dim"),
+                            ("", ""),
+                            ("    reload            Reload theme from configuration files", "dim"),
+                            ("                      Picks up changes from theme.json", "dim"),
+                            ("", ""),
+                            (f"    <preset>          Switch to a built-in theme preset", "dim"),
+                            (f"                      Available: {', '.join(sorted(available))}", "dim"),
+                            ("", ""),
+                            ("    help              Show this help message", "dim"),
+                            ("", ""),
+                            ("EXAMPLES", "bold"),
+                            ("    theme                   Show current theme and colors", "dim"),
+                            ("    theme dark              Switch to dark theme", "dim"),
+                            ("    theme light             Switch to light theme", "dim"),
+                            ("    theme high-contrast     Switch to high-contrast theme", "dim"),
+                            ("    theme reload            Reload from config files", "dim"),
+                            ("", ""),
+                            ("CUSTOM THEMES", "bold"),
+                            ("    Create a theme.json file in .jaato/ or ~/.jaato/ with:", ""),
+                            ("", ""),
+                            ('    {', "dim"),
+                            ('      "colors": {', "dim"),
+                            ('        "primary": "#007ACC",', "dim"),
+                            ('        "secondary": "#6C757D",', "dim"),
+                            ('        "success": "#28A745",', "dim"),
+                            ('        "warning": "#FFC107",', "dim"),
+                            ('        "error": "#DC3545",', "dim"),
+                            ('        "muted": "#6C757D",', "dim"),
+                            ('        "background": "#1E1E1E",', "dim"),
+                            ('        "surface": "#252526",', "dim"),
+                            ('        "text": "#D4D4D4",', "dim"),
+                            ('        "text_muted": "#808080"', "dim"),
+                            ('      }', "dim"),
+                            ('    }', "dim"),
+                            ("", ""),
+                            ("CONFIGURATION FILES", "bold"),
+                            ("    .jaato/theme.json       Project-level theme", "dim"),
+                            ("    ~/.jaato/theme.json     User-level theme", "dim"),
+                        ])
                     elif subcmd in BUILTIN_THEMES:
                         new_theme = BUILTIN_THEMES[subcmd].copy()
                         display.set_theme(new_theme)
