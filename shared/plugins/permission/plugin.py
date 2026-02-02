@@ -733,6 +733,29 @@ class PermissionPlugin:
 
         return "\n".join(lines)
 
+    def get_permission_status(self) -> Dict[str, Any]:
+        """Get structured permission status for UI display.
+
+        Returns:
+            Dict with:
+                - effective_default: "allow", "deny", or "ask"
+                - suspension_scope: "turn", "idle", "session", or None
+                - is_suspended: bool
+        """
+        # Determine effective default policy
+        if self._policy:
+            effective_default = (
+                self._policy.session_default_policy or self._policy.default_policy
+            )
+        else:
+            effective_default = "ask"
+
+        return {
+            "effective_default": effective_default,
+            "suspension_scope": self.suspension_scope,
+            "is_suspended": self.is_suspended,
+        }
+
     def _permissions_suspend(self, turn_only: bool = False) -> str:
         """Suspend permission prompting.
 
