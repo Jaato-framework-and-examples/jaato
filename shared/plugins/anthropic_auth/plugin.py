@@ -108,6 +108,7 @@ class AnthropicAuthPlugin:
             CommandCompletion("code", "Complete login with authorization code from browser"),
             CommandCompletion("logout", "Clear stored OAuth tokens"),
             CommandCompletion("status", "Show current authentication status"),
+            CommandCompletion("help", "Show detailed help for this command"),
         ]
 
         if not args:
@@ -141,6 +142,8 @@ class AnthropicAuthPlugin:
             return self._cmd_logout()
         elif action_lower == "status":
             return self._cmd_status()
+        elif action_lower == "help":
+            return self._cmd_help()
         else:
             self._emit(
                 f"Unknown action: '{raw_action}'\n\n"
@@ -149,8 +152,71 @@ class AnthropicAuthPlugin:
                 "  code <code> - Complete login with authorization code\n"
                 "  logout      - Clear stored OAuth tokens\n"
                 "  status      - Show current authentication status\n"
+                "  help        - Show detailed help\n"
             )
             return ""
+
+    def _cmd_help(self) -> str:
+        """Return detailed help text."""
+        help_text = """Anthropic Auth Command
+
+Authenticate with Anthropic using OAuth PKCE flow. This enables access to
+Claude API using your Claude Pro or Max subscription without API credits.
+
+USAGE
+    anthropic-auth <action>
+
+ACTIONS
+    login             Open browser to authenticate with Anthropic
+                      Generates PKCE challenge and opens auth URL
+
+    code <auth_code>  Complete login with the authorization code
+                      Paste the code shown after browser authorization
+
+    logout            Clear stored OAuth tokens
+                      Removes credentials from keychain/keyring
+
+    status            Show current authentication status
+                      Displays token type and account info
+
+    help              Show this help message
+
+AUTHENTICATION FLOW
+    1. Run 'anthropic-auth login'
+    2. Browser opens to Anthropic's auth page
+    3. Sign in with your Anthropic account
+    4. Copy the authorization code shown
+    5. Run 'anthropic-auth code <paste_code_here>'
+    6. Token is saved and ready to use
+
+EXAMPLES
+    anthropic-auth login              Start OAuth login
+    anthropic-auth code ABC123xyz     Complete login with code
+    anthropic-auth status             Check authentication status
+    anthropic-auth logout             Clear stored credentials
+
+TOKEN TYPES
+    OAuth Token (sk-ant-oat01-...)    From PKCE OAuth flow
+                                      Uses Pro/Max subscription
+    API Key (sk-ant-api03-...)        From console.anthropic.com
+                                      Uses API credits
+
+TOKEN STORAGE
+    Tokens are securely stored in your system keychain:
+    - macOS: Keychain Access
+    - Linux: Secret Service (GNOME Keyring, KWallet)
+    - Windows: Credential Manager
+
+ENVIRONMENT VARIABLES
+    ANTHROPIC_AUTH_TOKEN    OAuth token (from 'claude setup-token')
+    ANTHROPIC_API_KEY       API key (uses credits, not subscription)
+
+NOTES
+    - OAuth tokens use your Pro/Max subscription (no API credits)
+    - Tokens auto-refresh when expired
+    - Alternative: Run 'claude setup-token' from Claude Code CLI"""
+        self._emit(help_text)
+        return ""
 
     def _cmd_login(self) -> str:
         """Handle the login command - step 1: open browser."""

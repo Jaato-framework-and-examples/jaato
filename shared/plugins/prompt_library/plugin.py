@@ -1616,6 +1616,7 @@ description: {description}
             subcommands = [
                 ("fetch", "Fetch prompts from external source"),
                 ("remove", "Remove a prompt from the library"),
+                ("help", "Show detailed help for this command"),
             ]
             for name, desc in subcommands:
                 if not prefix or name.startswith(prefix):
@@ -1744,6 +1745,10 @@ description: {description}
         # Handle 'remove' subcommand
         if first_arg == "remove":
             return self._handle_remove_subcommand(positional_args[1:])
+
+        # Handle 'help' subcommand
+        if first_arg == "help":
+            return self._handle_help_subcommand()
 
         # Otherwise, first arg is prompt name
         prompt_name = positional_args[0]
@@ -1925,6 +1930,90 @@ Examples:
             return f"Permission denied: cannot remove {info.path}"
         except Exception as e:
             return f"Failed to remove prompt: {e}"
+
+    def _handle_help_subcommand(self) -> str:
+        """Return detailed help text for the prompt command."""
+        return """Prompt Command
+
+Manage and use prompts from the prompt library. Prompts are reusable text
+templates with optional parameter substitution.
+
+USAGE
+    prompt [subcommand | name] [args]
+
+SUBCOMMANDS
+    (none)            List all available prompts with descriptions
+                      Shows prompts from all configured sources
+
+    <name> [args...]  Use a prompt by name, optionally with arguments
+                      Arguments are substituted for {{param}} placeholders
+
+    fetch <type> <params...> [user]
+                      Fetch prompts from external sources
+                      Add 'user' to save to ~/.jaato/ instead of project
+
+    remove <name>     Remove a prompt from the library
+                      Only works for writable locations
+
+    help              Show this help message
+
+FETCH SOURCE TYPES
+    npx <package> [args...]     Install via npx (for skills)
+    git <repo_url>              Clone a git repository
+    github <owner/repo>         Fetch all prompts from GitHub repo
+    github <owner/repo/path>    Fetch specific prompt/skill from GitHub
+    url <url>                   Fetch single prompt file from URL
+
+EXAMPLES
+    prompt                                  List all available prompts
+    prompt code-review file.py              Use 'code-review' prompt
+    prompt explain {{code}} myfile.js       Use with positional arg
+    prompt fetch github anthropics/prompt-library
+                                            Fetch from GitHub repo
+    prompt fetch github owner/repo/skill-name
+                                            Fetch specific skill
+    prompt fetch npx clawdhub@latest install some-skill
+                                            Install skill via npx
+    prompt fetch url https://example.com/prompt.md user
+                                            Fetch to user directory
+    prompt remove old-prompt                Remove a prompt
+
+PROMPT FILE FORMAT
+    Prompts are Markdown files with optional YAML frontmatter:
+
+    ---
+    description: Brief description of the prompt
+    tags: [code, review]
+    ---
+
+    Your prompt content here with {{parameter}} placeholders.
+
+PARAMETER SUBSTITUTION
+    Use {{param}} in prompts for required parameters
+    Use {{?param}} for optional parameters (removed if not provided)
+    Pass values as positional args: prompt name arg1 arg2
+
+PROMPT SOURCES (in search order)
+    .claude/                Project Claude directory (read-only)
+    .jaato/prompts/         Project prompts directory
+    .jaato/skills/          Project skills directory
+    ~/.jaato/prompts/       User prompts directory
+    ~/.jaato/skills/        User skills directory
+
+SKILLS vs PROMPTS
+    Skills are directory-based prompts with additional resources:
+    - Main prompt in index.md or skill.md
+    - Supporting files (examples, data)
+    - Self-contained and portable
+
+CONFIGURATION
+    Prompts can be saved by the model using savePrompt tool,
+    or added manually to the prompts directories.
+
+NOTES
+    - Prompt output is sent to the model for execution
+    - Use 'prompt' without args to see available prompts
+    - Skills from github paths are saved to skills/ directory"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
