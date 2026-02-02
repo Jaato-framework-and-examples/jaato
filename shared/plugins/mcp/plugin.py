@@ -611,26 +611,81 @@ class MCPToolPlugin:
 
     def _cmd_help(self) -> str:
         """Return help text for MCP commands."""
-        return """MCP Server Configuration Commands:
+        return """MCP Command
 
-  mcp list                  - List all configured MCP servers
-  mcp status                - Show connection status of all servers
-  mcp show <name>           - Show configuration for a specific server
-  mcp add <name> <command> [args...] - Add a new MCP server
-  mcp remove <name>         - Remove an MCP server from configuration
-  mcp connect <name>        - Connect to a configured but disconnected server
-  mcp disconnect <name>     - Disconnect from a running server
-  mcp reload                - Reload configuration from .mcp.json
-  mcp logs [server|clear]   - Show interaction logs (optionally filter by server)
+Manage Model Context Protocol (MCP) servers. MCP servers provide additional
+tools and capabilities that the model can use during conversations.
 
-Examples:
-  mcp add github /usr/bin/mcp-server-github stdio
-  mcp show github
-  mcp disconnect github
-  mcp connect github
-  mcp logs                  - Show all logs
-  mcp logs GitHub           - Show logs for GitHub server only
-  mcp logs clear            - Clear all logs"""
+USAGE
+    mcp [subcommand] [args]
+
+SUBCOMMANDS
+    list              List all configured MCP servers with their status
+                      (this is the default when no subcommand is given)
+
+    status            Show detailed connection status of all servers
+                      Includes tool counts and error information
+
+    show <name>       Show full configuration for a specific server
+                      Displays command, args, env vars, and connection type
+
+    add <name> <cmd> [args...]
+                      Add a new MCP server to configuration
+                      Saves to .mcp.json and optionally auto-connects
+
+    remove <name>     Remove an MCP server from configuration
+                      Disconnects if running, then removes from .mcp.json
+
+    connect <name>    Connect to a configured but disconnected server
+                      Server must be defined in .mcp.json
+
+    disconnect <name> Disconnect from a running server
+                      Keeps configuration, just stops the connection
+
+    reload            Reload configuration from .mcp.json
+                      Picks up external changes to the config file
+
+    logs [server|clear]
+                      Show interaction logs for debugging
+                      Filter by server name or use 'clear' to reset
+
+    help              Show this help message
+
+EXAMPLES
+    mcp                           List all configured servers
+    mcp status                    Show connection status
+    mcp add github mcp-github     Add GitHub MCP server
+    mcp show github               Show GitHub server config
+    mcp connect github            Connect to GitHub server
+    mcp disconnect github         Disconnect GitHub server
+    mcp remove github             Remove GitHub from config
+    mcp logs                      Show all interaction logs
+    mcp logs github               Show logs for GitHub only
+    mcp logs clear                Clear all logs
+    mcp reload                    Reload .mcp.json config
+
+CONFIGURATION FILE
+    MCP servers are configured in .mcp.json:
+
+    {
+      "mcpServers": {
+        "ServerName": {
+          "type": "stdio",
+          "command": "mcp-server-command",
+          "args": ["--flag", "value"],
+          "env": {"VAR": "value"}
+        }
+      }
+    }
+
+CONNECTION TYPES
+    stdio             Communicate via stdin/stdout (most common)
+    sse               Server-sent events over HTTP
+
+NOTES
+    - Servers auto-connect on startup if configured in .mcp.json
+    - Failed servers show error details in 'mcp status'
+    - Tools from connected servers appear in the model's tool list"""
 
     def _cmd_list(self) -> str:
         """List all configured MCP servers."""

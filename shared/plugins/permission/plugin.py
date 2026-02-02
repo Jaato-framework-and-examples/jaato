@@ -551,10 +551,12 @@ class PermissionPlugin:
             return self._permissions_resume()
         elif subcommand == "clear":
             return self._permissions_clear()
+        elif subcommand == "help":
+            return self._permissions_help()
         else:
             return (
                 f"Unknown subcommand: {subcommand}\n"
-                "Usage: permissions <show|status|check|allow|deny|default|suspend|resume|clear>\n"
+                "Usage: permissions <show|status|check|allow|deny|default|suspend|resume|clear|help>\n"
                 "  show              - Display current effective policy\n"
                 "  status            - Quick view of suspension state\n"
                 "  check <tool>      - Test what decision a tool would get\n"
@@ -563,7 +565,8 @@ class PermissionPlugin:
                 "  default <policy>  - Set session default (allow|deny|ask)\n"
                 "  suspend [--turn]  - Suspend prompting (until idle, or --turn for this turn only)\n"
                 "  resume            - Resume normal prompting\n"
-                "  clear             - Reset session modifications"
+                "  clear             - Reset session modifications\n"
+                "  help              - Show detailed help"
             )
 
     def _permissions_show(self) -> str:
@@ -634,6 +637,86 @@ class PermissionPlugin:
         else:
             lines.append("  Blacklist: (none)")
 
+        return "\n".join(lines)
+
+    def _permissions_help(self) -> str:
+        """Show detailed help for the permissions command."""
+        lines = []
+        lines.append("Permissions Command")
+        lines.append("")
+        lines.append("Manage tool execution permissions. Control which tools the model can use")
+        lines.append("and how permission prompts are handled.")
+        lines.append("")
+        lines.append("USAGE")
+        lines.append("    permissions [subcommand] [args]")
+        lines.append("")
+        lines.append("SUBCOMMANDS")
+        lines.append("    show              Display the current effective permission policy")
+        lines.append("                      Shows base config, session overrides, and status")
+        lines.append("                      (this is the default when no subcommand is given)")
+        lines.append("")
+        lines.append("    status            Quick view of current suspension state")
+        lines.append("                      Shows if permissions are suspended and why")
+        lines.append("")
+        lines.append("    check <tool>      Test what decision a tool would get")
+        lines.append("                      Shows ALLOW/DENY/ASK and the matching rule")
+        lines.append("")
+        lines.append("    allow <pattern>   Add tool or pattern to session whitelist")
+        lines.append("                      Patterns support wildcards (e.g., 'file_*')")
+        lines.append("")
+        lines.append("    deny <pattern>    Add tool or pattern to session blacklist")
+        lines.append("                      Blocked tools will fail without prompting")
+        lines.append("")
+        lines.append("    default <policy>  Set the session default policy")
+        lines.append("                      Options: allow, deny, ask")
+        lines.append("")
+        lines.append("    suspend           Suspend permission prompts until session goes idle")
+        lines.append("    suspend --turn    Suspend prompts for the current turn only")
+        lines.append("")
+        lines.append("    resume            Resume normal permission prompting")
+        lines.append("                      Clears any suspension state")
+        lines.append("")
+        lines.append("    clear             Reset all session permission modifications")
+        lines.append("                      Removes whitelist/blacklist entries and default")
+        lines.append("")
+        lines.append("    help              Show this help message")
+        lines.append("")
+        lines.append("EXAMPLES")
+        lines.append("    permissions                      Show current policy")
+        lines.append("    permissions allow Bash           Always allow Bash tool")
+        lines.append("    permissions deny file_edit*      Block all file edit tools")
+        lines.append("    permissions check web_search     Test what web_search would get")
+        lines.append("    permissions default allow        Auto-approve all tools")
+        lines.append("    permissions suspend              Stop prompting until idle")
+        lines.append("    permissions suspend --turn       Stop prompting this turn only")
+        lines.append("    permissions resume               Resume normal prompting")
+        lines.append("    permissions clear                Reset to base config")
+        lines.append("")
+        lines.append("PERMISSION PROMPT RESPONSES")
+        lines.append("    When prompted for permission, you can respond with:")
+        lines.append("    [y]es     - Allow this execution")
+        lines.append("    [n]o      - Deny this execution")
+        lines.append("    [a]lways  - Allow and remember for this session")
+        lines.append("    [never]   - Deny and block for this session")
+        lines.append("    [once]    - Allow just this once")
+        lines.append("    [t]urn    - Allow all remaining tools this turn")
+        lines.append("    [i]dle    - Allow until session goes idle")
+        lines.append("")
+        lines.append("PATTERN MATCHING")
+        lines.append("    Patterns support fnmatch-style wildcards:")
+        lines.append("    *         - Match any characters")
+        lines.append("    ?         - Match single character")
+        lines.append("    [seq]     - Match any character in seq")
+        lines.append("    [!seq]    - Match any character not in seq")
+        lines.append("")
+        lines.append("CONFIGURATION FILE")
+        lines.append("    Base permissions can be configured in .jaato/permissions.json:")
+        lines.append("")
+        lines.append('    {')
+        lines.append('      "default": "ask",')
+        lines.append('      "whitelist": ["introspection*", "todo*"],')
+        lines.append('      "blacklist": ["*dangerous*"]')
+        lines.append('    }')
         return "\n".join(lines)
 
     def _permissions_check(self, tool_name: str) -> str:
