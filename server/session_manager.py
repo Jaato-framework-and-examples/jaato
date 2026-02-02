@@ -118,19 +118,13 @@ class SessionManager:
 
     def __init__(
         self,
-        env_file: str = ".env",
-        provider: Optional[str] = None,
         storage_path: Optional[str] = None,
     ):
         """Initialize the session manager.
 
         Args:
-            env_file: Path to .env file.
-            provider: Model provider override.
             storage_path: Override for session storage path.
         """
-        self._env_file = env_file
-        self._provider = provider
 
         # Initialize session plugin for persistence
         self._session_plugin: SessionPlugin = create_session_plugin()
@@ -372,21 +366,26 @@ class SessionManager:
             counter += 1
             session_id = f"{original_id}_{counter}"
 
-        # Get client's env_file (if provided, use client's .env; otherwise use server's)
+        # Get env_file from client config or derive from workspace path
+        # Sessions are workspace-bound: the workspace determines the .env file,
+        # which in turn determines the provider.
         client_config = self._client_config.get(client_id, {})
-        session_env_file = client_config.get('env_file') or self._env_file
+        session_env_file = client_config.get('env_file')
+        if not session_env_file and workspace_path:
+            # Default to workspace/.env
+            import os
+            workspace_env = os.path.join(workspace_path, '.env')
+            if os.path.exists(workspace_env):
+                session_env_file = workspace_env
 
-        # If client provided their own env_file, don't override provider -
-        # let JaatoClient read JAATO_PROVIDER from the env file
-        session_provider = None if client_config.get('env_file') else self._provider
-
-        logger.info(f"Creating session for client {client_id}: env_file={session_env_file}, provider={session_provider}")
+        logger.info(f"Creating session for client {client_id}: env_file={session_env_file}")
         logger.info(f"  Client config: {client_config}")
 
         # Create JaatoServer for this session
+        # Provider is determined by env_file, not passed explicitly
         server = JaatoServer(
             env_file=session_env_file,
-            provider=session_provider,
+            provider=None,  # Let env_file determine provider
             # During init, emit directly to requesting client (not yet attached to session)
             on_event=lambda e: self._emit_to_client(client_id, e),
             workspace_path=workspace_path,
@@ -648,14 +647,15 @@ class SessionManager:
         # Determine which env_file to use for this session:
         # 1. If client_id is provided, use client's env_file from their config
         # 2. If session has workspace_path, try workspace/.env
-        # 3. Fall back to SessionManager's default env_file
-        session_env_file = self._env_file
+        # Sessions are workspace-bound: the workspace determines the .env file,
+        # which in turn determines the provider.
+        session_env_file = None
         if client_id:
             client_config = self._client_config.get(client_id, {})
             if client_config.get('env_file'):
                 session_env_file = client_config['env_file']
                 logger.debug(f"_load_session: using client's env_file: {session_env_file}")
-        elif state.workspace_path:
+        if not session_env_file and state.workspace_path:
             import os
             workspace_env = os.path.join(state.workspace_path, '.env')
             if os.path.exists(workspace_env):
@@ -664,7 +664,7 @@ class SessionManager:
 
         server = JaatoServer(
             env_file=session_env_file,
-            provider=self._provider,
+            provider=None,  # Let env_file determine provider
             on_event=init_callback,
             session_id=session_id,
         )

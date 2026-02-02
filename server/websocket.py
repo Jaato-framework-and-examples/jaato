@@ -92,8 +92,6 @@ class JaatoWSServer:
         self,
         host: str = "localhost",
         port: int = 8080,
-        env_file: str = ".env",
-        provider: Optional[str] = None,
         workspace_root: Optional[str] = None,
     ):
         """Initialize the WebSocket server.
@@ -101,9 +99,9 @@ class JaatoWSServer:
         Args:
             host: Host to bind to.
             port: Port to bind to.
-            env_file: Path to .env file for JaatoServer.
-            provider: Model provider override.
-            workspace_root: Root directory for workspaces (enables workspace mode).
+            workspace_root: Root directory for workspaces. Remote clients select
+                from subdirectories; each workspace has its own .env file that
+                determines the provider.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -112,8 +110,6 @@ class JaatoWSServer:
 
         self.host = host
         self.port = port
-        self._env_file = env_file
-        self._provider = provider
         self._workspace_root = workspace_root
 
         # Server state
@@ -136,32 +132,24 @@ class JaatoWSServer:
         """Start the server and block until shutdown.
 
         This method:
-        1. Initializes WorkspaceManager (if workspace_root provided)
-        2. Initializes JaatoServer (only if NOT in workspace mode)
-        3. Starts the WebSocket server
-        4. Runs event broadcasting loop
-        5. Blocks until stop() is called
+        1. Initializes WorkspaceManager (workspace_root required)
+        2. Starts the WebSocket server
+        3. Runs event broadcasting loop
+        4. Blocks until stop() is called
 
-        In workspace mode, JaatoServer initialization is deferred until
-        a workspace is selected and configured.
+        JaatoServer initialization is deferred until a workspace is selected
+        and configured by the client.
         """
-        # Initialize workspace manager if workspace_root is provided
-        if self._workspace_root:
-            self._workspace_manager = WorkspaceManager(self._workspace_root)
-            self._workspace_manager.discover_workspaces()
-            logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
-        else:
-            # Non-workspace mode: initialize JaatoServer immediately
-            self._jaato_server = JaatoServer(
-                env_file=self._env_file,
-                provider=self._provider,
-                on_event=self._on_server_event,
+        # WebSocket server requires workspace_root for remote clients
+        if not self._workspace_root:
+            raise RuntimeError(
+                "WebSocket server requires --workspace-root. "
+                "Remote clients select workspaces from the server."
             )
 
-            if not self._jaato_server.initialize():
-                raise RuntimeError("Failed to initialize JaatoServer")
-
-            logger.info(f"JaatoServer initialized: {self._jaato_server.model_provider}/{self._jaato_server.model_name}")
+        self._workspace_manager = WorkspaceManager(self._workspace_root)
+        self._workspace_manager.discover_workspaces()
+        logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
 
         # Start WebSocket server
         async with websockets.serve(
@@ -579,12 +567,11 @@ async def main():
     parser = argparse.ArgumentParser(description="Jaato WebSocket Server")
     parser.add_argument("--host", default="localhost", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8080, help="Port to bind to")
-    parser.add_argument("--env-file", default=".env", help="Path to .env file")
-    parser.add_argument("--provider", help="Model provider override")
     parser.add_argument(
         "--workspace-root",
         metavar="PATH",
-        help="Root directory for workspaces (enables workspace mode)",
+        required=True,
+        help="Root directory for workspaces (remote clients select from subdirectories)",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
@@ -598,8 +585,6 @@ async def main():
     server = JaatoWSServer(
         host=args.host,
         port=args.port,
-        env_file=args.env_file,
-        provider=args.provider,
         workspace_root=args.workspace_root,
     )
 
