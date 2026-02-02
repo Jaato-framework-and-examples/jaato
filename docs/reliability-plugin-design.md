@@ -1661,9 +1661,12 @@ Turn 4:
 - [ ] Rate-based thresholds with decay
 
 ### Phase 5: Persistence & Configuration
-- [ ] JSON persistence layer (cross-session)
-- [ ] Project/user config loading
-- [ ] Migration support
+- [ ] User-level persistence (`~/.jaato/reliability.json`)
+- [ ] Workspace-level persistence (`.jaato/reliability.json`)
+- [ ] Session state serialization for reconnect
+- [ ] Three-level merge strategy (session > workspace > user)
+- [ ] Pattern promotion (workspace → user for cross-workspace patterns)
+- [ ] Migration support between versions
 - [ ] Session boundary tracking for decay
 
 ### Phase 6: Model Reliability (Tool Failures)
@@ -1979,6 +1982,281 @@ http_request|domain=api.stable.com → TRUSTED (always works)
 
 bash|command=git                   → TRUSTED
 bash|command=rm                    → ESCALATED (dangerous, user declined often)
+```
+
+### 6. Persistence Hierarchy: Session → Workspace → User
+
+**Decision**: Three-level persistence hierarchy with different data at each level.
+
+#### Persistence Levels
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     SESSION (in-memory + IPC)                    │
+│  • Current turn tool sequence                                   │
+│  • Active behavioral patterns being tracked                     │
+│  • Pending nudges                                               │
+│  • Live escalation states                                       │
+│  └──────────────────────────────────────────────────────────────┘
+│                              ▲ restored on reconnect
+│  ┌──────────────────────────────────────────────────────────────┐
+│  │                  WORKSPACE (.jaato/reliability.json)          │
+│  │  • Tool reliability states (per failure_key)                 │
+│  │  • Failure history for this project                          │
+│  │  • Model profiles for tools used in this workspace           │
+│  │  • Behavioral pattern history (this project)                 │
+│  │  • Workspace-specific thresholds/overrides                   │
+│  └──────────────────────────────────────────────────────────────┘
+│                              ▲ inherits defaults from
+│  ┌──────────────────────────────────────────────────────────────┐
+│  │                    USER (~/.jaato/reliability.json)           │
+│  │  • Default configuration (thresholds, recovery mode)         │
+│  │  • Cross-workspace model behavioral profiles                 │
+│  │  • Global tool patterns (tools that fail everywhere)         │
+│  │  • Nudge aggressiveness preference                           │
+│  │  • Model switching preferences                               │
+│  └──────────────────────────────────────────────────────────────┘
+```
+
+#### Data Structures Per Level
+
+```python
+@dataclass
+class SessionReliabilityState:
+    """In-memory state for current session. Restored on reconnect."""
+
+    session_id: str
+    started_at: datetime
+
+    # Current turn tracking
+    current_turn_index: int
+    current_turn_tools: List[ToolCall]
+    announced_actions: List[str]
+
+    # Active patterns
+    active_patterns: List[BehavioralPattern]
+    pending_nudges: List[Nudge]
+
+    # Live states (overlay on workspace)
+    escalation_overrides: Dict[str, TrustState]  # Temporary escalations
+
+    def serialize_for_reconnect(self) -> bytes:
+        """Serialize for IPC persistence during disconnect."""
+        ...
+
+    @classmethod
+    def restore_from_reconnect(cls, data: bytes) -> "SessionReliabilityState":
+        """Restore after client reconnects to server."""
+        ...
+
+
+@dataclass
+class WorkspaceReliabilityData:
+    """Persisted per workspace in .jaato/reliability.json"""
+
+    version: int = 1
+
+    # Tool reliability (workspace-specific)
+    tool_states: Dict[str, ToolReliabilityState]
+    failure_history: List[FailureRecord]
+
+    # Model profiles for this workspace
+    model_tool_profiles: Dict[Tuple[str, str], ModelToolProfile]
+    model_behavioral_profiles: Dict[str, ModelBehavioralProfile]
+
+    # Behavioral patterns in this workspace
+    pattern_history: List[BehavioralPattern]
+
+    # Workspace-specific config overrides
+    config_overrides: Optional[ReliabilityConfig]
+
+    # Session tracking for decay
+    session_history: List[SessionInfo]
+
+
+@dataclass
+class UserReliabilityData:
+    """Persisted per user in ~/.jaato/reliability.json"""
+
+    version: int = 1
+
+    # Default configuration
+    default_config: ReliabilityConfig
+
+    # Cross-workspace patterns
+    global_model_behavioral_profiles: Dict[str, ModelBehavioralProfile]
+    global_tool_patterns: Dict[str, ToolReliabilityState]  # Tools that fail everywhere
+
+    # User preferences
+    recovery_mode: RecoveryMode
+    nudge_aggressiveness: NudgeType  # Max nudge level user wants
+    model_switch_strategy: ModelSwitchStrategy
+    preferred_models: List[str]
+```
+
+#### Merge Strategy
+
+```python
+class ReliabilityPersistenceManager:
+    """Manages the three-level persistence hierarchy."""
+
+    def __init__(self, workspace_path: Optional[Path] = None):
+        self._user_data = self._load_user_data()
+        self._workspace_data = self._load_workspace_data(workspace_path)
+        self._session_state: Optional[SessionReliabilityState] = None
+
+    def get_effective_config(self) -> ReliabilityConfig:
+        """Merge configs: user defaults < workspace overrides."""
+        config = copy.deepcopy(self._user_data.default_config)
+
+        if self._workspace_data.config_overrides:
+            # Workspace overrides specific fields
+            for field in fields(self._workspace_data.config_overrides):
+                value = getattr(self._workspace_data.config_overrides, field.name)
+                if value is not None:
+                    setattr(config, field.name, value)
+
+        return config
+
+    def get_tool_state(self, failure_key: str) -> ToolReliabilityState:
+        """Get tool state with session > workspace > user priority."""
+
+        # Session override (temporary escalation)
+        if self._session_state and failure_key in self._session_state.escalation_overrides:
+            state = self._workspace_data.tool_states.get(failure_key)
+            if state:
+                state = copy.copy(state)
+                state.state = self._session_state.escalation_overrides[failure_key]
+                return state
+
+        # Workspace state
+        if failure_key in self._workspace_data.tool_states:
+            return self._workspace_data.tool_states[failure_key]
+
+        # User global pattern (tools that fail across workspaces)
+        if failure_key in self._user_data.global_tool_patterns:
+            return self._user_data.global_tool_patterns[failure_key]
+
+        # Default: trusted
+        return ToolReliabilityState(
+            failure_key=failure_key,
+            tool_name=failure_key.split("|")[0],
+            state=TrustState.TRUSTED,
+            ...
+        )
+
+    def get_model_profile(self, model: str, failure_key: str) -> ModelToolProfile:
+        """Get model profile: workspace-specific > user global."""
+
+        key = (model, failure_key)
+
+        # Workspace-specific profile
+        if key in self._workspace_data.model_tool_profiles:
+            return self._workspace_data.model_tool_profiles[key]
+
+        # User global (cross-workspace)
+        # Note: We use tool_name only for global, not full failure_key
+        tool_name = failure_key.split("|")[0]
+        global_key = (model, tool_name)
+        if global_key in self._user_data.global_model_behavioral_profiles:
+            return self._user_data.global_model_behavioral_profiles[global_key]
+
+        return ModelToolProfile(model_name=model, failure_key=failure_key)
+```
+
+#### Session Restore on Reconnect
+
+When a client disconnects and reconnects to a running server:
+
+```python
+class JaatoServer:
+    """Server-side session persistence for reconnect."""
+
+    def __init__(self):
+        self._session_snapshots: Dict[str, bytes] = {}
+
+    def on_client_disconnect(self, session_id: str):
+        """Snapshot session state for potential reconnect."""
+        session = self._sessions.get(session_id)
+        if session and session.reliability_plugin:
+            snapshot = session.reliability_plugin.get_session_state().serialize_for_reconnect()
+            self._session_snapshots[session_id] = snapshot
+            # Keep snapshot for 5 minutes
+            self._schedule_snapshot_cleanup(session_id, timeout=300)
+
+    def on_client_reconnect(self, session_id: str, client: IpcClient):
+        """Restore session state on reconnect."""
+        if session_id in self._session_snapshots:
+            snapshot = self._session_snapshots.pop(session_id)
+            session = self._sessions.get(session_id)
+            if session and session.reliability_plugin:
+                state = SessionReliabilityState.restore_from_reconnect(snapshot)
+                session.reliability_plugin.restore_session_state(state)
+
+                # Notify client of restored state
+                client.send(SessionRestoredEvent(
+                    session_id=session_id,
+                    turn_index=state.current_turn_index,
+                    active_patterns=len(state.active_patterns),
+                    pending_nudges=len(state.pending_nudges),
+                ))
+```
+
+#### Promotion: Workspace → User
+
+When patterns are consistent across workspaces, promote to user level:
+
+```python
+def _check_global_pattern_promotion(self, failure_key: str):
+    """Promote workspace patterns to user-global if consistent."""
+
+    tool_name = failure_key.split("|")[0]
+
+    # Check if this tool fails in multiple workspaces
+    # (requires tracking workspace identifiers in user data)
+    workspaces_with_failures = self._user_data.get_workspaces_with_tool_failures(tool_name)
+
+    if len(workspaces_with_failures) >= 3:
+        # This tool fails across workspaces - promote to global
+        avg_failure_rate = self._calculate_cross_workspace_failure_rate(tool_name)
+
+        if avg_failure_rate > 0.5:  # Fails more than half the time everywhere
+            self._user_data.global_tool_patterns[tool_name] = ToolReliabilityState(
+                failure_key=tool_name,  # Generic, not workspace-specific
+                tool_name=tool_name,
+                state=TrustState.ESCALATED,
+                escalation_reason=f"Fails across {len(workspaces_with_failures)} workspaces",
+            )
+            self._save_user_data()
+```
+
+#### File Locations
+
+```python
+def _get_workspace_path(self, workspace: Path) -> Path:
+    """Workspace-level persistence."""
+    return workspace / ".jaato" / "reliability.json"
+
+def _get_user_path(self) -> Path:
+    """User-level persistence."""
+    return Path.home() / ".jaato" / "reliability.json"
+
+def _get_session_snapshot_path(self, session_id: str) -> Path:
+    """Temporary session snapshots (for server crash recovery)."""
+    return Path(tempfile.gettempdir()) / "jaato_sessions" / f"{session_id}.snapshot"
+```
+
+#### Environment Variable Overrides
+
+```bash
+# Override persistence locations
+JAATO_RELIABILITY_USER_PATH=~/.config/jaato/reliability.json
+JAATO_RELIABILITY_WORKSPACE_PATH=.jaato/reliability.json
+
+# Disable persistence levels
+JAATO_RELIABILITY_NO_USER_PERSIST=true      # Don't save to user level
+JAATO_RELIABILITY_NO_WORKSPACE_PERSIST=true # Don't save to workspace level
+JAATO_RELIABILITY_SESSION_ONLY=true         # No persistence at all
 ```
 
 ---
