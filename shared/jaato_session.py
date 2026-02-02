@@ -2183,6 +2183,10 @@ NOTES
                         # Accumulate text for potential mid-turn interrupt preservation
                         accumulated_streaming_text.append(chunk)
 
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(chunk)
+
                         # Check for pending mid-turn prompts during streaming
                         # This allows user input to interrupt the current generation
                         if self._message_queue.has_parent_messages():
@@ -2466,6 +2470,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                     elif part.function_call:
@@ -2604,6 +2611,9 @@ NOTES
                             on_output("model", part.text, "write")
                         # Forward to parent for visibility
                         self._forward_to_parent("MODEL_OUTPUT", part.text)
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(part.text)
                     accumulated_text.append(part.text)
 
             # Final check for mid-turn prompts before completing the turn
@@ -2634,6 +2644,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                 # Check if the mid-turn response triggered more function calls
