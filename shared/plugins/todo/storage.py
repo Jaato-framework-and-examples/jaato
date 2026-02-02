@@ -116,12 +116,16 @@ class FileStorage(TodoStorage):
 
     def _save_plan_to_file(self, plan: TodoPlan) -> None:
         """Save plan to individual file in directory."""
+        # Ensure directory exists before writing (handles CWD changes, deletions, etc.)
+        self._path.mkdir(parents=True, exist_ok=True)
         plan_file = self._path / f"{plan.plan_id}.json"
         with open(plan_file, 'w', encoding='utf-8') as f:
             json.dump(plan.to_dict(), f, indent=2)
 
     def _save_plan_to_single_file(self, plan: TodoPlan) -> None:
         """Save plan to single JSON file."""
+        # Ensure parent directory exists before writing
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         plans = self._load_all_plans_from_file()
         plans[plan.plan_id] = plan.to_dict()
         with open(self._path, 'w', encoding='utf-8') as f:
@@ -213,6 +217,8 @@ class FileStorage(TodoStorage):
         if plan_id not in plans:
             return False
         del plans[plan_id]
+        # Ensure parent directory exists before writing
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, 'w', encoding='utf-8') as f:
             json.dump(plans, f, indent=2)
         return True
@@ -221,12 +227,14 @@ class FileStorage(TodoStorage):
         """Clear all plans."""
         with self._lock:
             if self._use_directory:
-                for plan_file in self._path.glob("*.json"):
-                    plan_file.unlink()
-            else:
                 if self._path.exists():
-                    with open(self._path, 'w', encoding='utf-8') as f:
-                        json.dump({}, f)
+                    for plan_file in self._path.glob("*.json"):
+                        plan_file.unlink()
+            else:
+                # Ensure parent directory exists before writing
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._path, 'w', encoding='utf-8') as f:
+                    json.dump({}, f)
 
 
 class HybridStorage(TodoStorage):
