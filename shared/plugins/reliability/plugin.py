@@ -23,6 +23,10 @@ from .types import (
     ModelSwitchStrategy,
     ModelSwitchSuggestion,
     ModelToolProfile,
+    Nudge,
+    NudgeConfig,
+    NudgeLevel,
+    NudgeType,
     PatternDetectionConfig,
     ReliabilityConfig,
     ToolReliabilityState,
@@ -35,6 +39,7 @@ from .persistence import (
     SessionReliabilityState,
 )
 from .patterns import PatternDetector
+from .nudge import NudgeInjector, NudgeStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,12 @@ class ReliabilityPlugin:
         self._pattern_detector: Optional[PatternDetector] = None
         # on_pattern_detected: (pattern) -> None
         self._on_pattern_detected: Optional[Callable[[BehavioralPattern], None]] = None
+
+        # Nudge injection
+        self._nudge_config = NudgeConfig()
+        self._nudge_injector: Optional[NudgeInjector] = None
+        # on_nudge_injected: (nudge) -> None
+        self._on_nudge_injected: Optional[Callable[[Nudge], None]] = None
 
     @property
     def name(self) -> str:
@@ -159,6 +170,7 @@ class ReliabilityPlugin:
                 CommandCompletion("settings", "Show or save settings"),
                 CommandCompletion("model", "Model-specific reliability tracking"),
                 CommandCompletion("patterns", "Behavioral pattern detection"),
+                CommandCompletion("nudge", "Nudge injection settings"),
             ]
 
         if len(command_parts) == 2:
@@ -197,6 +209,15 @@ class ReliabilityPlugin:
                     CommandCompletion("disable", "Disable pattern detection"),
                     CommandCompletion("history", "Show detected patterns"),
                     CommandCompletion("clear", "Clear pattern history"),
+                ]
+            elif subcommand == "nudge":
+                return [
+                    CommandCompletion("status", "Show nudge injection status"),
+                    CommandCompletion("off", "Disable nudge injection"),
+                    CommandCompletion("gentle", "Only gentle reminders"),
+                    CommandCompletion("direct", "Gentle + direct instructions"),
+                    CommandCompletion("full", "All nudges including interrupts"),
+                    CommandCompletion("history", "Show nudge history"),
                 ]
 
         if len(command_parts) == 3:
@@ -373,10 +394,20 @@ class ReliabilityPlugin:
                 session_id=self._session_id,
                 model_name=self._current_model,
             )
-            if self._on_pattern_detected:
-                self._pattern_detector.set_pattern_hook(self._on_pattern_detected)
+            # Set up combined pattern hook for user callback + nudge injection
+            self._pattern_detector.set_pattern_hook(self._handle_pattern_detected)
         elif not enabled:
             self._pattern_detector = None
+
+    def _handle_pattern_detected(self, pattern: BehavioralPattern) -> None:
+        """Internal handler for detected patterns. Triggers nudges and user callback."""
+        # Inject nudge if injector is enabled
+        if self._nudge_injector:
+            self._nudge_injector.on_pattern_detected(pattern)
+
+        # Call user's pattern hook if set
+        if self._on_pattern_detected:
+            self._on_pattern_detected(pattern)
 
     def set_pattern_hook(
         self,
@@ -460,6 +491,107 @@ class ReliabilityPlugin:
         if self._pattern_detector:
             return self._pattern_detector.get_pattern_summary()
         return {"total": 0, "by_type": {}, "by_severity": {}, "enabled": False}
+
+    # -------------------------------------------------------------------------
+    # Nudge Injection
+    # -------------------------------------------------------------------------
+
+    def set_nudge_config(self, config: NudgeConfig) -> None:
+        """Set nudge injection configuration."""
+        self._nudge_config = config
+        if self._nudge_injector:
+            self._nudge_injector.set_config(config)
+
+    def set_nudge_level(self, level: NudgeLevel) -> None:
+        """Set the nudge intensity level.
+
+        Args:
+            level: OFF, GENTLE, DIRECT, or FULL
+        """
+        self._nudge_config.level = level
+        if self._nudge_injector:
+            self._nudge_injector.set_level(level)
+
+    def enable_nudge_injection(self, enabled: bool = True) -> None:
+        """Enable or disable nudge injection.
+
+        When enabled with pattern detection, nudges are automatically
+        injected when stall patterns are detected.
+
+        Args:
+            enabled: Whether to enable nudge injection
+        """
+        if enabled and not self._nudge_injector:
+            self._nudge_injector = NudgeInjector(
+                config=self._nudge_config,
+            )
+            if self._on_nudge_injected:
+                self._nudge_injector.set_nudge_hooks(on_nudge_injected=self._on_nudge_injected)
+        elif not enabled:
+            self._nudge_injector = None
+
+    def set_nudge_hook(
+        self,
+        on_nudge_injected: Optional[Callable[[Nudge], None]] = None,
+    ) -> None:
+        """Set hook for nudge injection events.
+
+        Args:
+            on_nudge_injected: Called when a nudge is injected.
+                Signature: (nudge: Nudge) -> None
+        """
+        self._on_nudge_injected = on_nudge_injected
+        if self._nudge_injector:
+            self._nudge_injector.set_nudge_hooks(on_nudge_injected=on_nudge_injected)
+
+    def set_nudge_callbacks(
+        self,
+        inject_system_guidance: Optional[Callable[[str], None]] = None,
+        inject_context_hint: Optional[Callable[[str], None]] = None,
+        request_pause: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        """Set callbacks for injecting nudges into the session.
+
+        These callbacks allow the plugin to inject messages into the
+        model's context when patterns are detected.
+
+        Args:
+            inject_system_guidance: Inject as high-priority system message
+            inject_context_hint: Inject as lower-priority context hint
+            request_pause: Request user intervention (highest priority)
+        """
+        if self._nudge_injector:
+            self._nudge_injector.set_injection_callbacks(
+                inject_system_guidance=inject_system_guidance,
+                inject_context_hint=inject_context_hint,
+                request_pause=request_pause,
+            )
+
+    def inject_nudge_for_pattern(self, pattern: BehavioralPattern) -> Optional[Nudge]:
+        """Inject a nudge for a detected pattern.
+
+        This is called automatically when pattern detection is enabled
+        and a pattern is detected. Can also be called manually.
+
+        Args:
+            pattern: The detected behavioral pattern
+
+        Returns:
+            The injected Nudge if one was created, None otherwise
+        """
+        if self._nudge_injector:
+            return self._nudge_injector.on_pattern_detected(pattern)
+        return None
+
+    def get_nudge_injector(self) -> Optional[NudgeInjector]:
+        """Get the nudge injector instance (if enabled)."""
+        return self._nudge_injector
+
+    def get_nudge_summary(self) -> Dict[str, Any]:
+        """Get summary of nudge injection activity."""
+        if self._nudge_injector:
+            return self._nudge_injector.get_nudge_summary()
+        return {"total": 0, "effective": 0, "by_type": {}, "enabled": False}
 
     # -------------------------------------------------------------------------
     # Core Failure Tracking
@@ -1213,8 +1345,10 @@ class ReliabilityPlugin:
             return self._cmd_model(args)
         elif subcommand == "patterns":
             return self._cmd_patterns(args)
+        elif subcommand == "nudge":
+            return self._cmd_nudge(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns"
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns, nudge"
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -1651,6 +1785,105 @@ class ReliabilityPlugin:
                 lines.append(f"    Tools: {' → '.join(recent)}")
             if pattern.expected_action:
                 lines.append(f"    Suggestion: {pattern.expected_action}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _cmd_nudge(self, args: str) -> str:
+        """Handle nudge injection commands."""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "status":
+            return self._nudge_status()
+        elif parts[0] == "off":
+            self._nudge_config.level = NudgeLevel.OFF
+            self._session_settings.nudge_level = "off"
+            if self._nudge_injector:
+                self._nudge_injector.set_level(NudgeLevel.OFF)
+            return "Nudge injection set to OFF"
+        elif parts[0] == "gentle":
+            self._nudge_config.level = NudgeLevel.GENTLE
+            self._session_settings.nudge_level = "gentle"
+            self.enable_nudge_injection(True)
+            self._nudge_injector.set_level(NudgeLevel.GENTLE)
+            return "Nudge injection set to GENTLE (reminders only)"
+        elif parts[0] == "direct":
+            self._nudge_config.level = NudgeLevel.DIRECT
+            self._session_settings.nudge_level = "direct"
+            self.enable_nudge_injection(True)
+            self._nudge_injector.set_level(NudgeLevel.DIRECT)
+            return "Nudge injection set to DIRECT (reminders + direct instructions)"
+        elif parts[0] == "full":
+            self._nudge_config.level = NudgeLevel.FULL
+            self._session_settings.nudge_level = "full"
+            self.enable_nudge_injection(True)
+            self._nudge_injector.set_level(NudgeLevel.FULL)
+            return "Nudge injection set to FULL (all nudges including interrupts)"
+        elif parts[0] == "history":
+            return self._nudge_history(int(parts[1]) if len(parts) > 1 else 10)
+        else:
+            return (
+                f"Unknown nudge subcommand: {parts[0]}\n"
+                "Usage: reliability nudge [status|off|gentle|direct|full|history]"
+            )
+
+    def _nudge_status(self) -> str:
+        """Show nudge injection status."""
+        enabled = self._nudge_injector is not None
+        summary = self.get_nudge_summary()
+
+        lines = [
+            "Nudge Injection Status",
+            "-" * 60,
+            f"  Status: {'ENABLED' if enabled else 'DISABLED'}",
+            f"  Level: {self._nudge_config.level.value}",
+            f"  Cooldown: {self._nudge_config.cooldown_seconds}s between nudges",
+        ]
+
+        lines.extend([
+            "",
+            f"  Total nudges: {summary.get('total', 0)}",
+            f"  Effective: {summary.get('effective', 0)}",
+            f"  Acknowledged: {summary.get('acknowledged', 0)}",
+            f"  Pending: {summary.get('pending', 0)}",
+        ])
+
+        if summary.get('by_type'):
+            lines.append("")
+            lines.append("  By type:")
+            for ntype, count in sorted(summary['by_type'].items()):
+                lines.append(f"    - {ntype}: {count}")
+
+        effectiveness = summary.get('effectiveness_rate', 0)
+        if summary.get('total', 0) > 0:
+            lines.append("")
+            lines.append(f"  Effectiveness rate: {effectiveness:.1%}")
+
+        lines.append("-" * 60)
+        return "\n".join(lines)
+
+    def _nudge_history(self, limit: int = 10) -> str:
+        """Show nudge injection history."""
+        if not self._nudge_injector:
+            return "Nudge injection not enabled. Use 'reliability nudge gentle|direct|full' first."
+
+        nudges = self._nudge_injector.get_recent_nudges(limit)
+
+        if not nudges:
+            return "No nudges injected yet."
+
+        lines = [f"Recent Nudges (last {len(nudges)}):", "-" * 60]
+
+        for nudge in reversed(nudges):
+            time_str = nudge.injected_at.strftime("%H:%M:%S")
+            status = ""
+            if nudge.effective:
+                status = " ✓"
+            elif nudge.acknowledged:
+                status = " ○"
+            lines.append(f"  [{time_str}] {nudge.nudge_type.value}{status}")
+            lines.append(f"    Pattern: {nudge.pattern.pattern_type.value}")
+            lines.append(f"    Message: {nudge.message[:60]}...")
             lines.append("")
 
         return "\n".join(lines)

@@ -744,3 +744,86 @@ class PatternDetectionConfig:
             "making the change",
         ]
     )
+
+
+# -----------------------------------------------------------------------------
+# Nudge Injection Types
+# -----------------------------------------------------------------------------
+
+
+class NudgeType(Enum):
+    """Types of nudges to inject into the model's context."""
+
+    GENTLE_REMINDER = "gentle"      # Soft suggestion, low urgency
+    DIRECT_INSTRUCTION = "direct"   # Clear instruction, moderate urgency
+    INTERRUPT = "interrupt"         # Stop and require user input
+
+
+class NudgeLevel(Enum):
+    """User-configurable nudge intensity levels."""
+
+    OFF = "off"           # No nudges
+    GENTLE = "gentle"     # Only gentle reminders
+    DIRECT = "direct"     # Gentle + direct instructions
+    FULL = "full"         # All nudges including interrupts
+
+
+@dataclass
+class Nudge:
+    """A guidance injection for the model."""
+
+    nudge_type: NudgeType
+    message: str
+    pattern: BehavioralPattern
+    injected_at: datetime
+
+    # Tracking
+    acknowledged: bool = False
+    effective: bool = False  # Did the nudge resolve the pattern?
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "nudge_type": self.nudge_type.value,
+            "message": self.message,
+            "pattern": self.pattern.to_dict(),
+            "injected_at": self.injected_at.isoformat(),
+            "acknowledged": self.acknowledged,
+            "effective": self.effective,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Nudge":
+        """Deserialize from dictionary."""
+        return cls(
+            nudge_type=NudgeType(data["nudge_type"]),
+            message=data["message"],
+            pattern=BehavioralPattern.from_dict(data["pattern"]),
+            injected_at=datetime.fromisoformat(data["injected_at"]),
+            acknowledged=data.get("acknowledged", False),
+            effective=data.get("effective", False),
+        )
+
+    def to_system_message(self) -> str:
+        """Format nudge as a system message for injection."""
+        if self.nudge_type == NudgeType.INTERRUPT:
+            return f"[SYSTEM INTERRUPT] {self.message}"
+        elif self.nudge_type == NudgeType.DIRECT_INSTRUCTION:
+            return f"[NOTICE] {self.message}"
+        else:
+            return f"[Reminder] {self.message}"
+
+
+@dataclass
+class NudgeConfig:
+    """Configuration for nudge injection behavior."""
+
+    level: NudgeLevel = NudgeLevel.DIRECT  # Default: gentle + direct, no interrupts
+    enabled: bool = True
+
+    # Cooldown to avoid spamming nudges
+    cooldown_seconds: float = 30.0  # Min time between nudges for same pattern type
+
+    # Auto-escalation
+    escalate_on_ignore: bool = True  # Escalate severity if nudge is ignored
+    escalation_threshold: int = 2    # How many ignored nudges before escalation

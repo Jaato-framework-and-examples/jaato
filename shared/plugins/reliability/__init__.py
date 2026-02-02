@@ -33,6 +33,11 @@ from .types import (
     PatternDetectionConfig,
     PatternSeverity,
     ToolCall,
+    # Nudge injection types
+    Nudge,
+    NudgeConfig,
+    NudgeLevel,
+    NudgeType,
 )
 from .persistence import (
     ReliabilityPersistence,
@@ -42,6 +47,7 @@ from .persistence import (
     UserReliabilityData,
 )
 from .patterns import PatternDetector
+from .nudge import NudgeInjector, NudgeStrategy
 
 __all__ = [
     # Plugin
@@ -78,4 +84,11 @@ __all__ = [
     "UserReliabilityData",
     # Pattern detection
     "PatternDetector",
+    # Nudge injection
+    "Nudge",
+    "NudgeConfig",
+    "NudgeInjector",
+    "NudgeLevel",
+    "NudgeStrategy",
+    "NudgeType",
 ]

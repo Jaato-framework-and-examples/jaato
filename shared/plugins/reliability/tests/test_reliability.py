@@ -1243,3 +1243,590 @@ class TestModelToolProfile:
         assert profile.total_attempts == 10
         assert profile.failures == 3
         assert profile.success_rate == pytest.approx(0.7)
+
+
+class TestPatternDetection:
+    """Tests for behavioral pattern detection."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with pattern detection enabled."""
+        from ..types import PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            enabled=True,
+            repetitive_call_threshold=3,
+            introspection_loop_threshold=3,
+            max_reads_before_action=4,
+        ))
+        plugin.enable_pattern_detection(True)
+        return plugin
+
+    def test_pattern_detection_enabled(self, plugin):
+        """Test that pattern detection can be enabled."""
+        assert plugin.get_pattern_detector() is not None
+
+    def test_repetitive_calls_detection(self, plugin):
+        """Test detection of repetitive tool calls."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+
+        def on_pattern(pattern):
+            patterns.append(pattern)
+
+        plugin.set_pattern_hook(on_pattern)
+        plugin.on_turn_start(1)
+
+        # Call same tool 3 times (threshold)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        assert len(patterns) == 1
+        assert patterns[0].pattern_type == BehavioralPatternType.REPETITIVE_CALLS
+        assert patterns[0].repetition_count >= 3
+
+    def test_introspection_loop_detection(self, plugin):
+        """Test detection of introspection loops."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+
+        def on_pattern(pattern):
+            patterns.append(pattern)
+
+        plugin.set_pattern_hook(on_pattern)
+        plugin.on_turn_start(1)
+
+        # Call introspection tools 3 times
+        for i in range(3):
+            plugin.on_tool_called("list_tools", {})
+
+        assert len(patterns) == 1
+        assert patterns[0].pattern_type == BehavioralPatternType.INTROSPECTION_LOOP
+
+    def test_read_only_stall_detection(self, plugin):
+        """Test detection of read-only stalls."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        # Use higher threshold to avoid triggering repetitive calls
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            enabled=True,
+            repetitive_call_threshold=10,  # High to avoid triggering
+            max_reads_before_action=4,
+        ))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+
+        def on_pattern(pattern):
+            patterns.append(pattern)
+
+        plugin.set_pattern_hook(on_pattern)
+        plugin.on_turn_start(1)
+
+        # Call different read-only tools without any action
+        read_tools = ["Read", "Glob", "Grep", "Read"]
+        for tool in read_tools:
+            plugin.on_tool_called(tool, {"path": f"/tmp/file{tool}.txt"})
+
+        assert len(patterns) >= 1
+        read_only_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.READ_ONLY_LOOP]
+        assert len(read_only_patterns) >= 1
+
+    def test_pattern_summary(self, plugin):
+        """Test pattern summary reporting."""
+        plugin.on_turn_start(1)
+
+        # Generate a pattern
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        summary = plugin.get_pattern_summary()
+
+        assert summary["total"] >= 1
+        assert "repetitive_calls" in str(summary["by_type"]).lower()
+
+    def test_pattern_command_status(self, plugin):
+        """Test patterns status command."""
+        output = plugin.handle_command("patterns", "status")
+
+        assert "Pattern Detection" in output
+        assert "ENABLED" in output
+
+    def test_pattern_command_disable_enable(self, plugin):
+        """Test patterns enable/disable commands."""
+        output = plugin.handle_command("patterns", "disable")
+        assert "DISABLED" in output
+        assert plugin.get_pattern_detector() is None
+
+        output = plugin.handle_command("patterns", "enable")
+        assert "ENABLED" in output
+        assert plugin.get_pattern_detector() is not None
+
+
+class TestNudgeTypes:
+    """Tests for nudge type definitions."""
+
+    def test_nudge_level_values(self):
+        """Test NudgeLevel enum values."""
+        from ..types import NudgeLevel
+
+        assert NudgeLevel.OFF.value == "off"
+        assert NudgeLevel.GENTLE.value == "gentle"
+        assert NudgeLevel.DIRECT.value == "direct"
+        assert NudgeLevel.FULL.value == "full"
+
+    def test_nudge_type_values(self):
+        """Test NudgeType enum values."""
+        from ..types import NudgeType
+
+        assert NudgeType.GENTLE_REMINDER.value == "gentle"
+        assert NudgeType.DIRECT_INSTRUCTION.value == "direct"
+        assert NudgeType.INTERRUPT.value == "interrupt"
+
+    def test_nudge_config_defaults(self):
+        """Test NudgeConfig default values."""
+        from ..types import NudgeConfig, NudgeLevel
+
+        config = NudgeConfig()
+
+        assert config.enabled is True
+        assert config.level == NudgeLevel.DIRECT
+        assert config.cooldown_seconds > 0
+
+    def test_nudge_dataclass(self):
+        """Test Nudge dataclass creation."""
+        from ..types import Nudge, NudgeType, BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile", "readFile", "readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+        )
+
+        nudge = Nudge(
+            nudge_type=NudgeType.GENTLE_REMINDER,
+            message="Test message",
+            pattern=pattern,
+            injected_at=datetime.now(),
+        )
+
+        assert nudge.nudge_type == NudgeType.GENTLE_REMINDER
+        assert nudge.message == "Test message"
+        assert nudge.acknowledged is False
+        assert nudge.effective is False
+
+    def test_nudge_to_system_message(self):
+        """Test Nudge.to_system_message() formatting."""
+        from ..types import Nudge, NudgeType, BehavioralPattern, BehavioralPatternType
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+        )
+
+        nudge = Nudge(
+            nudge_type=NudgeType.DIRECT_INSTRUCTION,
+            message="Stop repeating yourself!",
+            pattern=pattern,
+            injected_at=datetime.now(),
+        )
+
+        msg = nudge.to_system_message()
+
+        assert "Stop repeating yourself!" in msg
+        assert "system-reminder" in msg.lower() or len(msg) > 0
+
+
+class TestNudgeStrategy:
+    """Tests for NudgeStrategy class."""
+
+    def test_create_nudge_for_repetitive_calls(self):
+        """Test creating nudge for repetitive calls pattern."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity
+        from ..nudge import NudgeStrategy
+
+        strategy = NudgeStrategy()
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile", "readFile", "readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+
+        nudge = strategy.create_nudge(pattern)
+
+        assert nudge is not None
+        assert "readFile" in nudge.message
+        assert "3" in nudge.message
+
+    def test_create_nudge_severity_escalation(self):
+        """Test that severity affects nudge type."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeType
+        from ..nudge import NudgeStrategy
+
+        strategy = NudgeStrategy()
+
+        # Minor severity -> gentle reminder
+        minor_pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+        minor_nudge = strategy.create_nudge(minor_pattern)
+        assert minor_nudge.nudge_type == NudgeType.GENTLE_REMINDER
+
+        # Severe -> interrupt
+        severe_pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=10,
+            duration_seconds=60.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.SEVERE,
+        )
+        severe_nudge = strategy.create_nudge(severe_pattern)
+        assert severe_nudge.nudge_type == NudgeType.INTERRUPT
+
+    def test_should_inject_level_filtering(self):
+        """Test that nudge level filters appropriately."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel, NudgeType
+        from ..nudge import NudgeStrategy
+
+        strategy = NudgeStrategy()
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+        gentle_nudge = strategy.create_nudge(pattern)
+
+        # GENTLE level should allow gentle reminders
+        gentle_config = NudgeConfig(level=NudgeLevel.GENTLE)
+        assert strategy.should_inject(gentle_nudge, gentle_config) is True
+
+        # OFF level should block all
+        off_config = NudgeConfig(level=NudgeLevel.OFF)
+        assert strategy.should_inject(gentle_nudge, off_config) is False
+
+        # Create interrupt nudge
+        severe_pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=10,
+            duration_seconds=60.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.SEVERE,
+        )
+        interrupt_nudge = strategy.create_nudge(severe_pattern)
+
+        # GENTLE level should block interrupts
+        assert strategy.should_inject(interrupt_nudge, gentle_config) is False
+
+        # FULL level should allow interrupts
+        full_config = NudgeConfig(level=NudgeLevel.FULL)
+        assert strategy.should_inject(interrupt_nudge, full_config) is True
+
+
+class TestNudgeInjector:
+    """Tests for NudgeInjector class."""
+
+    def test_nudge_injector_creation(self):
+        """Test NudgeInjector creation."""
+        from ..nudge import NudgeInjector
+
+        injector = NudgeInjector()
+        assert injector is not None
+
+    def test_on_pattern_detected_creates_nudge(self):
+        """Test that on_pattern_detected creates and records nudge."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL))
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile", "readFile", "readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+
+        nudge = injector.on_pattern_detected(pattern)
+
+        assert nudge is not None
+        assert len(injector.get_nudge_history()) == 1
+
+    def test_cooldown_prevents_spam(self):
+        """Test that cooldown prevents nudge spam."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        config = NudgeConfig(level=NudgeLevel.FULL, cooldown_seconds=60)
+        injector = NudgeInjector(config=config)
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+
+        # First nudge should succeed
+        first = injector.on_pattern_detected(pattern)
+        assert first is not None
+
+        # Second immediately should be blocked by cooldown
+        second = injector.on_pattern_detected(pattern)
+        assert second is None
+
+        assert len(injector.get_nudge_history()) == 1
+
+    def test_nudge_callbacks_called(self):
+        """Test that injection callbacks are called."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        injected_messages = []
+
+        def mock_inject(msg):
+            injected_messages.append(msg)
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL))
+        injector.set_injection_callbacks(inject_system_guidance=mock_inject)
+
+        # Create pattern that will trigger direct instruction (moderate severity)
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=5,
+            duration_seconds=10.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MODERATE,
+        )
+
+        injector.on_pattern_detected(pattern)
+
+        assert len(injected_messages) >= 1
+
+    def test_nudge_summary(self):
+        """Test nudge summary statistics."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL, cooldown_seconds=0))
+
+        # Inject a few nudges with different pattern types
+        for i, ptype in enumerate([
+            BehavioralPatternType.REPETITIVE_CALLS,
+            BehavioralPatternType.INTROSPECTION_LOOP,
+            BehavioralPatternType.READ_ONLY_LOOP,
+        ]):
+            pattern = BehavioralPattern(
+                pattern_type=ptype,
+                detected_at=datetime.now(),
+                turn_index=i,
+                session_id="test",
+                tool_sequence=["tool"],
+                repetition_count=3,
+                duration_seconds=5.0,
+                model_name="gpt-4",
+                severity=PatternSeverity.MINOR,
+            )
+            injector.on_pattern_detected(pattern)
+
+        summary = injector.get_nudge_summary()
+
+        assert summary["total"] == 3
+        assert "gentle" in str(summary["by_type"]).lower()
+
+    def test_mark_nudge_effective(self):
+        """Test marking nudge as effective."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL))
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+
+        nudge = injector.on_pattern_detected(pattern)
+
+        # Initially not effective
+        assert nudge.effective is False
+
+        # Mark as effective
+        injector.mark_last_nudge_effective(True)
+
+        assert nudge.effective is True
+        assert nudge.acknowledged is True
+
+
+class TestPluginNudgeIntegration:
+    """Tests for nudge integration with the reliability plugin."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with pattern detection and nudge injection."""
+        from ..types import PatternDetectionConfig, NudgeConfig, NudgeLevel
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            enabled=True,
+            repetitive_call_threshold=3,
+        ))
+        plugin.enable_pattern_detection(True)
+        plugin.set_nudge_config(NudgeConfig(level=NudgeLevel.FULL, cooldown_seconds=0))
+        plugin.enable_nudge_injection(True)
+        return plugin
+
+    def test_pattern_triggers_nudge(self, plugin):
+        """Test that detected patterns automatically trigger nudges."""
+        nudges = []
+
+        def on_nudge(nudge):
+            nudges.append(nudge)
+
+        plugin.set_nudge_hook(on_nudge)
+        plugin.on_turn_start(1)
+
+        # Generate repetitive calls to trigger pattern
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        assert len(nudges) >= 1
+
+    def test_nudge_command_status(self, plugin):
+        """Test nudge status command."""
+        output = plugin.handle_command("nudge", "status")
+
+        assert "Nudge Injection" in output
+        assert "ENABLED" in output
+
+    def test_nudge_command_level_change(self, plugin):
+        """Test changing nudge level via commands."""
+        from ..types import NudgeLevel
+
+        output = plugin.handle_command("nudge", "off")
+        assert "OFF" in output
+
+        output = plugin.handle_command("nudge", "gentle")
+        assert "GENTLE" in output
+
+        output = plugin.handle_command("nudge", "direct")
+        assert "DIRECT" in output
+
+        output = plugin.handle_command("nudge", "full")
+        assert "FULL" in output
+
+    def test_nudge_command_history(self, plugin):
+        """Test nudge history command."""
+        # Generate some nudges first
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        output = plugin.handle_command("nudge", "history")
+
+        assert "Nudge" in output or "nudge" in output
+
+    def test_nudge_injection_disabled_by_default(self):
+        """Test that nudge injection must be explicitly enabled."""
+        plugin = ReliabilityPlugin()
+        plugin.enable_pattern_detection(True)
+
+        # Don't enable nudge injection
+        assert plugin.get_nudge_injector() is None
+
+    def test_nudge_summary_via_plugin(self, plugin):
+        """Test getting nudge summary through plugin."""
+        plugin.on_turn_start(1)
+
+        # Generate pattern and nudge
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        summary = plugin.get_nudge_summary()
+
+        assert "total" in summary
+        assert summary["total"] >= 1
+
+    def test_manual_nudge_injection(self, plugin):
+        """Test injecting nudge for a pattern manually."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["readFile"],
+            repetition_count=3,
+            duration_seconds=5.0,
+            model_name="gpt-4",
+            severity=PatternSeverity.MINOR,
+        )
+
+        nudge = plugin.inject_nudge_for_pattern(pattern)
+
+        assert nudge is not None
