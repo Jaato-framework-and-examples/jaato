@@ -2,7 +2,11 @@
 
 ## Overview
 
-The **reliability plugin** is a cross-cutting concern that tracks failures from tools/plugins and dynamically adjusts permission requirements based on failure history. The core principle is **adaptive trust**: tools that work reliably maintain their approval status, while unreliable tools get escalated back to requiring explicit user approval.
+The **reliability plugin** is a cross-cutting concern that tracks both **tool failures** and **behavioral patterns** to dynamically adjust the agentic loop. The core principles are:
+
+- **Adaptive trust**: Tools that work reliably maintain approval status; unreliable tools get escalated back to requiring explicit user approval
+- **Behavioral awareness**: Detect when models are stuck in unproductive loops (e.g., repeatedly calling introspection tools, announcing actions without executing)
+- **Active intervention**: Inject nudges into the conversation to unstick stalled models
 
 ## Design Goals
 
@@ -12,6 +16,8 @@ The **reliability plugin** is a cross-cutting concern that tracks failures from 
 4. **Recovery paths** - Tools can "earn back" trust after a cooldown period
 5. **Rich context** - Capture enough information to make intelligent escalation decisions
 6. **Adaptive model selection** - Enable model switching when current model consistently fails at specific tools
+7. **Behavioral pattern detection** - Identify stall loops, repetitive calls, and announce-without-action patterns
+8. **Nudge injection** - Actively guide models out of unproductive patterns
 
 ---
 
@@ -1117,6 +1123,518 @@ reliability model disabled           # Disable model switching
 
 ---
 
+## Behavioral Pattern Detection
+
+Beyond tool failures, the reliability plugin can detect **behavioral stalls** - patterns where the model is stuck in an unproductive loop even though individual tool calls succeed.
+
+### Pattern Types
+
+```python
+class BehavioralPatternType(Enum):
+    """Types of behavioral patterns to detect."""
+
+    # Repetitive patterns
+    REPETITIVE_CALLS = "repetitive_calls"       # Same tool called N times with similar args
+    INTROSPECTION_LOOP = "introspection_loop"   # Stuck calling list_tools, get_schema, etc.
+
+    # Progress stalls
+    ANNOUNCE_NO_ACTION = "announce_no_action"   # Model says "proceeding" but only reads
+    READ_ONLY_LOOP = "read_only_loop"           # Only calling read tools, avoiding writes
+    PLANNING_LOOP = "planning_loop"             # Infinite planning without execution
+
+    # Avoidance patterns
+    TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
+    ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
+```
+
+### BehavioralPattern Record
+
+```python
+@dataclass
+class BehavioralPattern:
+    """Records a detected behavioral pattern."""
+
+    pattern_type: BehavioralPatternType
+    detected_at: datetime
+    turn_index: int
+    session_id: str
+
+    # Pattern specifics
+    tool_sequence: List[str]              # Recent tool calls leading to detection
+    repetition_count: int                 # How many times pattern repeated
+    duration_seconds: float               # How long pattern has persisted
+
+    # Context
+    model_name: str
+    last_model_text: Optional[str]        # What the model said (e.g., "Proceeding now")
+    expected_action: Optional[str]        # What tool should have been called
+
+    # Severity
+    severity: PatternSeverity
+
+
+class PatternSeverity(Enum):
+    MINOR = "minor"           # 2-3 repetitions, just starting
+    MODERATE = "moderate"     # 4-5 repetitions, clear stall
+    SEVERE = "severe"         # 6+ repetitions, intervention needed
+```
+
+### Detection Engine
+
+```python
+@dataclass
+class PatternDetectionConfig:
+    """Configuration for behavioral pattern detection."""
+
+    enabled: bool = True
+
+    # Repetition thresholds
+    repetitive_call_threshold: int = 3        # Same tool N times triggers detection
+    introspection_tool_names: Set[str] = field(
+        default_factory=lambda: {"list_tools", "get_tool_schemas", "askPermission"}
+    )
+    introspection_loop_threshold: int = 2     # N introspection calls without action
+
+    # Progress tracking
+    read_only_tools: Set[str] = field(
+        default_factory=lambda: {"readFile", "list_tools", "get_tool_schemas", "glob", "grep"}
+    )
+    action_tools: Set[str] = field(
+        default_factory=lambda: {"writeFile", "updateFile", "bash", "removeFile"}
+    )
+    max_reads_before_action: int = 5          # N reads without action = stall
+
+    # Time-based
+    max_turn_duration_seconds: float = 120.0  # Turn taking too long = possible stall
+
+    # Announce detection (requires text analysis)
+    announce_phrases: List[str] = field(
+        default_factory=lambda: [
+            "proceeding now",
+            "let me",
+            "i'll now",
+            "executing",
+            "running",
+            "starting",
+        ]
+    )
+
+
+class PatternDetector:
+    """Detects behavioral patterns in tool usage."""
+
+    def __init__(self, config: PatternDetectionConfig):
+        self._config = config
+        self._turn_history: List[ToolCall] = []
+        self._turn_start: Optional[datetime] = None
+        self._last_action_index: int = -1
+        self._announced_actions: List[str] = []
+
+    def on_turn_start(self):
+        """Called when a new turn begins."""
+        self._turn_history = []
+        self._turn_start = datetime.now()
+        self._announced_actions = []
+
+    def on_tool_called(self, tool_name: str, args: dict) -> Optional[BehavioralPattern]:
+        """Called BEFORE tool execution. Returns pattern if detected."""
+
+        self._turn_history.append(ToolCall(tool_name, args, datetime.now()))
+
+        # Check for repetitive calls
+        pattern = self._check_repetitive_calls(tool_name)
+        if pattern:
+            return pattern
+
+        # Check for introspection loop
+        pattern = self._check_introspection_loop(tool_name)
+        if pattern:
+            return pattern
+
+        # Check for read-only stall
+        pattern = self._check_read_only_stall(tool_name)
+        if pattern:
+            return pattern
+
+        return None
+
+    def on_model_text(self, text: str):
+        """Called when model outputs text. Track announcements."""
+        text_lower = text.lower()
+        for phrase in self._config.announce_phrases:
+            if phrase in text_lower:
+                self._announced_actions.append(text)
+                break
+
+    def on_tool_result(self, tool_name: str, success: bool):
+        """Called after tool execution."""
+        if tool_name in self._config.action_tools and success:
+            self._last_action_index = len(self._turn_history) - 1
+            self._announced_actions = []  # Action taken, clear announcements
+
+    def check_announce_no_action(self) -> Optional[BehavioralPattern]:
+        """Check if model announced action but didn't follow through."""
+
+        if not self._announced_actions:
+            return None
+
+        # Had announcements, check if any action tools were called after
+        recent_tools = [t.tool_name for t in self._turn_history[-3:]]
+        action_taken = any(t in self._config.action_tools for t in recent_tools)
+
+        if not action_taken and len(self._announced_actions) >= 2:
+            return BehavioralPattern(
+                pattern_type=BehavioralPatternType.ANNOUNCE_NO_ACTION,
+                detected_at=datetime.now(),
+                turn_index=self._current_turn,
+                session_id=self._session_id,
+                tool_sequence=recent_tools,
+                repetition_count=len(self._announced_actions),
+                duration_seconds=self._turn_elapsed(),
+                model_name=self._model_name,
+                last_model_text=self._announced_actions[-1],
+                expected_action="action tool (write, bash, etc.)",
+                severity=self._calculate_severity(len(self._announced_actions)),
+            )
+
+        return None
+
+    def _check_repetitive_calls(self, tool_name: str) -> Optional[BehavioralPattern]:
+        """Detect same tool called repeatedly."""
+
+        if len(self._turn_history) < self._config.repetitive_call_threshold:
+            return None
+
+        recent = self._turn_history[-self._config.repetitive_call_threshold:]
+        if all(t.tool_name == tool_name for t in recent):
+            return BehavioralPattern(
+                pattern_type=BehavioralPatternType.REPETITIVE_CALLS,
+                detected_at=datetime.now(),
+                turn_index=self._current_turn,
+                session_id=self._session_id,
+                tool_sequence=[t.tool_name for t in recent],
+                repetition_count=len(recent),
+                duration_seconds=self._turn_elapsed(),
+                model_name=self._model_name,
+                last_model_text=None,
+                expected_action=None,
+                severity=self._calculate_severity(len(recent)),
+            )
+
+        return None
+
+    def _check_introspection_loop(self, tool_name: str) -> Optional[BehavioralPattern]:
+        """Detect stuck in introspection tools."""
+
+        if tool_name not in self._config.introspection_tool_names:
+            return None
+
+        recent = self._turn_history[-self._config.introspection_loop_threshold:]
+        introspection_count = sum(
+            1 for t in recent if t.tool_name in self._config.introspection_tool_names
+        )
+
+        if introspection_count >= self._config.introspection_loop_threshold:
+            return BehavioralPattern(
+                pattern_type=BehavioralPatternType.INTROSPECTION_LOOP,
+                detected_at=datetime.now(),
+                turn_index=self._current_turn,
+                session_id=self._session_id,
+                tool_sequence=[t.tool_name for t in recent],
+                repetition_count=introspection_count,
+                duration_seconds=self._turn_elapsed(),
+                model_name=self._model_name,
+                last_model_text=None,
+                expected_action="proceed with actual task",
+                severity=PatternSeverity.MODERATE,
+            )
+
+        return None
+```
+
+### Hook Integration
+
+The reliability plugin needs a new hook point - `on_tool_called` - in addition to `on_tool_result`:
+
+```python
+class ReliabilityPlugin:
+    """Extended with behavioral pattern detection."""
+
+    def set_tool_hooks(self):
+        """Called by ToolExecutor to register hooks."""
+        return {
+            "on_tool_called": self._on_tool_called,    # NEW: before execution
+            "on_tool_result": self._on_tool_result,    # existing: after execution
+        }
+
+    def set_model_output_hook(self):
+        """Called by session to track model text output."""
+        return self._on_model_text
+
+    def _on_tool_called(self, tool_name: str, args: dict, call_id: str):
+        """Hook called before tool execution."""
+
+        pattern = self._pattern_detector.on_tool_called(tool_name, args)
+
+        if pattern:
+            self._handle_detected_pattern(pattern)
+
+    def _on_model_text(self, text: str):
+        """Hook called when model outputs text."""
+        self._pattern_detector.on_model_text(text)
+
+        # Also check for announce-no-action at text boundaries
+        pattern = self._pattern_detector.check_announce_no_action()
+        if pattern:
+            self._handle_detected_pattern(pattern)
+```
+
+### Nudge Injection Mechanism
+
+When a pattern is detected, inject guidance into the agentic loop:
+
+```python
+class NudgeType(Enum):
+    """Types of nudges to inject."""
+
+    GENTLE_REMINDER = "gentle"      # Soft suggestion
+    DIRECT_INSTRUCTION = "direct"   # Clear instruction
+    INTERRUPT = "interrupt"         # Stop and ask user
+
+
+@dataclass
+class Nudge:
+    """A guidance injection for the model."""
+
+    nudge_type: NudgeType
+    message: str
+    pattern: BehavioralPattern
+    injected_at: datetime
+
+
+class NudgeStrategy:
+    """Determines what nudge to inject based on pattern."""
+
+    NUDGE_TEMPLATES = {
+        BehavioralPatternType.REPETITIVE_CALLS: {
+            PatternSeverity.MINOR: (
+                NudgeType.GENTLE_REMINDER,
+                "You've called {tool_name} {count} times. Consider if you have the information needed to proceed."
+            ),
+            PatternSeverity.MODERATE: (
+                NudgeType.DIRECT_INSTRUCTION,
+                "NOTICE: You are in a loop calling {tool_name} repeatedly. Stop and take action on what you've learned."
+            ),
+            PatternSeverity.SEVERE: (
+                NudgeType.INTERRUPT,
+                "BLOCKED: Detected {count}x repeated calls to {tool_name}. The system is pausing for user intervention."
+            ),
+        },
+        BehavioralPatternType.ANNOUNCE_NO_ACTION: {
+            PatternSeverity.MINOR: (
+                NudgeType.GENTLE_REMINDER,
+                "You mentioned proceeding but haven't called an action tool yet. Please execute the planned action."
+            ),
+            PatternSeverity.MODERATE: (
+                NudgeType.DIRECT_INSTRUCTION,
+                "NOTICE: You've announced action {count} times without executing. Call the appropriate tool NOW."
+            ),
+            PatternSeverity.SEVERE: (
+                NudgeType.INTERRUPT,
+                "BLOCKED: Repeated announcements without action. System pausing for user input."
+            ),
+        },
+        BehavioralPatternType.INTROSPECTION_LOOP: {
+            PatternSeverity.MINOR: (
+                NudgeType.GENTLE_REMINDER,
+                "You have the tool list. Proceed with the actual task instead of re-querying tools."
+            ),
+            PatternSeverity.MODERATE: (
+                NudgeType.DIRECT_INSTRUCTION,
+                "NOTICE: Stop querying tool metadata. You have sufficient information. Execute the task."
+            ),
+            PatternSeverity.SEVERE: (
+                NudgeType.INTERRUPT,
+                "BLOCKED: Stuck in introspection loop. System pausing for user guidance."
+            ),
+        },
+    }
+
+    def create_nudge(self, pattern: BehavioralPattern) -> Nudge:
+        """Create appropriate nudge for detected pattern."""
+
+        templates = self.NUDGE_TEMPLATES.get(pattern.pattern_type, {})
+        nudge_type, template = templates.get(
+            pattern.severity,
+            (NudgeType.GENTLE_REMINDER, "Please proceed with the task.")
+        )
+
+        message = template.format(
+            tool_name=pattern.tool_sequence[-1] if pattern.tool_sequence else "unknown",
+            count=pattern.repetition_count,
+        )
+
+        return Nudge(
+            nudge_type=nudge_type,
+            message=message,
+            pattern=pattern,
+            injected_at=datetime.now(),
+        )
+
+
+class NudgeInjector:
+    """Injects nudges into the agentic loop."""
+
+    def __init__(self, session: JaatoSession):
+        self._session = session
+        self._injected_nudges: List[Nudge] = []
+
+    def inject(self, nudge: Nudge) -> bool:
+        """Inject nudge into the conversation. Returns True if injected."""
+
+        self._injected_nudges.append(nudge)
+
+        if nudge.nudge_type == NudgeType.INTERRUPT:
+            # Pause execution and notify user
+            self._session.request_pause(reason=nudge.message)
+            self._notify_user(nudge)
+            return True
+
+        elif nudge.nudge_type == NudgeType.DIRECT_INSTRUCTION:
+            # Inject as system message for next turn
+            self._session.inject_system_guidance(nudge.message)
+            self._notify_user(nudge, level="warning")
+            return True
+
+        elif nudge.nudge_type == NudgeType.GENTLE_REMINDER:
+            # Inject as subtle context
+            self._session.inject_context_hint(nudge.message)
+            return True
+
+        return False
+
+    def _notify_user(self, nudge: Nudge, level: str = "info"):
+        """Show nudge to user via output callback."""
+        prefix = "⚠️" if level == "warning" else "ℹ️"
+        self._output_callback(
+            "reliability",
+            f"{prefix} Pattern detected: {nudge.pattern.pattern_type.value}\n"
+            f"   {nudge.message}",
+            "write"
+        )
+```
+
+### Session Integration
+
+The session needs methods to accept nudge injections:
+
+```python
+class JaatoSession:
+    """Extended with nudge injection points."""
+
+    def inject_system_guidance(self, message: str):
+        """Inject guidance that appears as system context in next turn."""
+        self._pending_guidance.append({
+            "role": "system",
+            "content": f"[RELIABILITY GUIDANCE]: {message}",
+        })
+
+    def inject_context_hint(self, message: str):
+        """Inject subtle hint into context (less prominent than guidance)."""
+        self._context_hints.append(message)
+
+    def request_pause(self, reason: str):
+        """Pause the agentic loop for user intervention."""
+        self._paused = True
+        self._pause_reason = reason
+        # Emit event for client to handle
+        self._emit_event(PauseRequestedEvent(reason=reason))
+```
+
+### Model Behavioral Profiles
+
+Extend model profiles to track behavioral patterns:
+
+```python
+@dataclass
+class ModelBehavioralProfile:
+    """Tracks a model's behavioral tendencies."""
+
+    model_name: str
+
+    # Pattern frequencies
+    pattern_counts: Dict[BehavioralPatternType, int] = field(default_factory=dict)
+
+    # Nudge effectiveness
+    nudges_sent: int = 0
+    nudges_effective: int = 0  # Pattern stopped after nudge
+
+    # Stall tendency
+    total_turns: int = 0
+    stalled_turns: int = 0
+
+    @property
+    def stall_rate(self) -> float:
+        if self.total_turns == 0:
+            return 0.0
+        return self.stalled_turns / self.total_turns
+
+    @property
+    def nudge_effectiveness(self) -> float:
+        if self.nudges_sent == 0:
+            return 1.0
+        return self.nudges_effective / self.nudges_sent
+
+    def most_common_pattern(self) -> Optional[BehavioralPatternType]:
+        if not self.pattern_counts:
+            return None
+        return max(self.pattern_counts.items(), key=lambda x: x[1])[0]
+```
+
+### User Commands for Behavioral Tracking
+
+```
+reliability patterns                     # Show detected patterns summary
+reliability patterns --model <name>      # Show patterns for specific model
+reliability nudge gentle|direct|off      # Set nudge aggressiveness
+reliability stalls                       # Show stall statistics
+```
+
+### Example Scenario
+
+```
+Turn 1:
+  Model: "I'll restore the file from backup. Proceeding now."
+  Tool: list_tools({category: 'filesystem'}) ✓
+  → on_model_text: detected "proceeding now"
+  → on_tool_called: list_tools (introspection tool)
+  → No action tool followed announcement
+
+Turn 2:
+  Model: "I'm going to restore and apply the fix. Proceeding immediately."
+  Tool: list_tools({category: 'filesystem'}) ✓
+  → on_model_text: detected "proceeding" (2nd time)
+  → on_tool_called: list_tools again
+  → Pattern detected: ANNOUNCE_NO_ACTION (severity: MINOR)
+  → Nudge injected: "You mentioned proceeding but haven't called an action tool yet."
+
+Turn 3:
+  Model: "You're right - I need to actually execute. Proceeding with the real steps now."
+  Tool: list_tools({category: 'filesystem'}) ✓
+  → on_model_text: detected "proceeding" (3rd time!)
+  → Pattern detected: ANNOUNCE_NO_ACTION (severity: MODERATE)
+  → Nudge injected: "NOTICE: You've announced action 3 times without executing."
+
+Turn 4:
+  Model: [still not taking action]
+  Tool: list_tools(...) ✓
+  → Pattern detected: ANNOUNCE_NO_ACTION (severity: SEVERE)
+  → INTERRUPT: System pauses, notifies user
+  → User sees: "⚠️ Model stuck in announce-no-action loop. Intervention needed."
+```
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: Core Infrastructure
@@ -1124,7 +1642,7 @@ reliability model disabled           # Disable model switching
 - [ ] FailureRecord data model
 - [ ] ToolReliabilityState tracking
 - [ ] Basic escalation/recovery logic
-- [ ] Integration with ToolExecutor result hook
+- [ ] Integration with ToolExecutor result hook (`on_tool_result`)
 
 ### Phase 2: Permission Integration
 - [ ] Permission plugin wrapper
@@ -1148,16 +1666,36 @@ reliability model disabled           # Disable model switching
 - [ ] Migration support
 - [ ] Session boundary tracking for decay
 
-### Phase 6: Model Reliability
+### Phase 6: Model Reliability (Tool Failures)
 - [ ] ModelToolProfile tracking
 - [ ] Model success rate comparison
 - [ ] `reliability model suggest|auto|disabled` command
 - [ ] Auto-switch integration with session
 
-### Phase 7: Observability
+### Phase 7: Behavioral Pattern Detection
+- [ ] Add `on_tool_called` hook to ToolExecutor (before execution)
+- [ ] Add model text output hook to session
+- [ ] BehavioralPattern and PatternDetector implementation
+- [ ] Pattern type detection (repetitive, introspection loop, announce-no-action)
+- [ ] Severity escalation logic
+
+### Phase 8: Nudge Injection System
+- [ ] NudgeStrategy and nudge templates
+- [ ] NudgeInjector implementation
+- [ ] Session integration (`inject_system_guidance`, `inject_context_hint`, `request_pause`)
+- [ ] `reliability nudge gentle|direct|off` command
+- [ ] `reliability patterns` command
+
+### Phase 9: Model Behavioral Profiles
+- [ ] ModelBehavioralProfile tracking
+- [ ] Nudge effectiveness tracking
+- [ ] Stall rate per model
+- [ ] Cross-reference with tool failure profiles for model switching decisions
+
+### Phase 10: Observability
 - [ ] reliability_status tool (for model)
-- [ ] OpenTelemetry integration
-- [ ] Dashboard metrics
+- [ ] Pattern detection events for OpenTelemetry
+- [ ] Dashboard metrics (failures + patterns)
 
 ---
 
