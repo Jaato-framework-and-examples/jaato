@@ -100,10 +100,16 @@ class TestRegistryExposePermissionPlugin:
 
 
 class TestRegistryAskPermissionTool:
-    """Tests for askPermission tool exposure via registry."""
+    """Tests for askPermission tool exposure via registry.
 
-    def test_askPermission_declaration_when_exposed(self):
-        """Test that askPermission is in declarations when permission plugin is exposed."""
+    Note: askPermission is no longer exposed as a model-callable tool by default.
+    The model should call tools directly and the permission middleware handles
+    approval prompts. This prevents models from calling askPermission instead
+    of the actual tool they want to execute.
+    """
+
+    def test_askPermission_declaration_not_exposed(self):
+        """Test that askPermission is NOT in declarations (it's no longer exposed)."""
         registry = PluginRegistry()
         registry.discover()
 
@@ -112,14 +118,19 @@ class TestRegistryAskPermissionTool:
         tool_names = [d.name for d in declarations]
         assert "askPermission" not in tool_names
 
-        # Expose
+        # Expose permission plugin - askPermission should still NOT be in declarations
+        # because we removed it from get_tool_schemas() to prevent model confusion
         registry.expose_tool("permission")
         declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
-        assert "askPermission" in tool_names
+        assert "askPermission" not in tool_names
 
     def test_askPermission_executor_when_exposed(self):
-        """Test that askPermission executor is available when permission plugin is exposed."""
+        """Test that askPermission executor is available when permission plugin is exposed.
+
+        Even though askPermission is not in tool schemas (not model-callable),
+        the executor is still available for programmatic use.
+        """
         registry = PluginRegistry()
         registry.discover()
 
@@ -298,7 +309,7 @@ class TestRegistryMultiplePluginsWithPermission:
     """Tests for permission plugin alongside other plugins."""
 
     def test_permission_plugin_declarations_combined(self):
-        """Test that permission plugin declarations combine with others."""
+        """Test that permission plugin doesn't add tool schemas (askPermission not exposed)."""
         registry = PluginRegistry()
         registry.discover()
 
@@ -308,11 +319,15 @@ class TestRegistryMultiplePluginsWithPermission:
         declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
-        # askPermission should be present
-        assert "askPermission" in tool_names
+        # askPermission should NOT be present (no longer exposed to model)
+        assert "askPermission" not in tool_names
 
     def test_permission_plugin_executors_combined(self):
-        """Test that permission plugin executors combine with others."""
+        """Test that permission plugin executors combine with others.
+
+        Even though askPermission is not exposed as a model tool, the executor
+        is still available for programmatic use.
+        """
         registry = PluginRegistry()
         registry.discover()
 
@@ -320,7 +335,7 @@ class TestRegistryMultiplePluginsWithPermission:
 
         executors = registry.get_exposed_executors()
 
-        # askPermission executor should be present
+        # askPermission executor should be present (for programmatic use)
         assert "askPermission" in executors
 
 
