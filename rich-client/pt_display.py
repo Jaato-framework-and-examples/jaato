@@ -1565,6 +1565,16 @@ class PTDisplay:
             buffer.toggle_tools_expanded()
             self._app.invalidate()
 
+        @kb.add(*keys.get_key_args("open_editor"))
+        def handle_open_editor(event):
+            """Handle Ctrl+G - open current input in external editor ($EDITOR)."""
+            # Don't open editor in pager mode or when buffer is empty
+            if getattr(self, '_pager_active', False):
+                return
+            # Open the buffer in external editor
+            # This uses $EDITOR or $VISUAL, falling back to vi
+            event.current_buffer.open_in_editor()
+
         @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True)
         def handle_tool_nav_enter(event):
             """Handle Ctrl+N - enter/exit tool navigation mode."""

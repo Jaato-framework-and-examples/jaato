@@ -162,6 +162,9 @@ DEFAULT_KEYBINDINGS = {
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
     "permission_prev": "s-tab",   # Previous permission option
+
+    # External editor
+    "open_editor": "c-g",  # Open current input in external editor ($EDITOR)
 }
 
 
@@ -323,6 +326,7 @@ class KeybindingConfig:
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
+    open_editor: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["open_editor"])
 
     # Tool navigation
     tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
