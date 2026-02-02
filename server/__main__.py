@@ -47,8 +47,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dotenv import load_dotenv
-
 from server.session_manager import SessionManager
 from server.events import Event
 
@@ -116,33 +114,24 @@ class JaatoDaemon:
         self,
         ipc_socket: Optional[str] = None,
         web_socket: Optional[str] = None,
-        env_file: str = ".env",
-        provider: Optional[str] = None,
         pid_file: str = DEFAULT_PID_FILE,
         config_file: str = DEFAULT_CONFIG_FILE,
         log_file: str = DEFAULT_LOG_FILE,
-        workspace_root: Optional[str] = None,
     ):
         """Initialize the daemon.
 
         Args:
             ipc_socket: Path to Unix domain socket (None to disable).
             web_socket: WebSocket address as "host:port" or ":port" (None to disable).
-            env_file: Path to .env file.
-            provider: Model provider override.
             pid_file: Path to PID file for daemon mode.
             config_file: Path to config file for restart support.
             log_file: Path to log file for daemon mode.
-            workspace_root: Root directory for workspaces (for web clients).
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
-        self.env_file = env_file
-        self.provider = provider
         self.pid_file = pid_file
         self.config_file = config_file
         self.log_file = log_file
-        self.workspace_root = workspace_root
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -163,10 +152,9 @@ class JaatoDaemon:
         # without their own env file.
 
         # Initialize session manager
-        self._session_manager = SessionManager(
-            env_file=self.env_file,  # Fallback env_file for sessions
-            provider=None,  # No default provider - each session uses its own
-        )
+        # Note: Sessions are workspace-bound. Each session gets its env_file and
+        # provider from the client's workspace, not from server-level config.
+        self._session_manager = SessionManager()
 
         # Set up event routing
         self._session_manager.set_event_callback(self._route_event)
@@ -206,9 +194,6 @@ class JaatoDaemon:
             self._ws_server = JaatoWSServer(
                 host=host,
                 port=port,
-                env_file=self.env_file,
-                provider=self.provider,
-                workspace_root=self.workspace_root,
             )
             tasks.append(asyncio.create_task(self._ws_server.start()))
             logger.info(f"WebSocket server will listen on ws://{host}:{port}")
@@ -279,11 +264,8 @@ class JaatoDaemon:
         config = {
             "ipc_socket": self.ipc_socket,
             "web_socket": self.web_socket,
-            "env_file": self.env_file,
-            "provider": self.provider,
             "pid_file": self.pid_file,
             "log_file": self.log_file,
-            "workspace_root": self.workspace_root,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -1054,9 +1036,6 @@ Examples:
   # Start with both
   python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080
 
-  # Start with workspace root for web clients
-  python -m server --web-socket 0.0.0.0:8080 --workspace-root ~/projects
-
   # Start as daemon (background)
   python -m server --ipc-socket /tmp/jaato.sock --daemon
 
@@ -1106,20 +1085,6 @@ Examples:
     )
 
     # Configuration
-    parser.add_argument(
-        "--env-file",
-        default=".env",
-        help="Path to .env file (default: .env)",
-    )
-    parser.add_argument(
-        "--provider",
-        help="Model provider override",
-    )
-    parser.add_argument(
-        "--workspace-root",
-        metavar="PATH",
-        help="Root directory for workspaces (web clients select from subdirectories)",
-    )
     parser.add_argument(
         "--pid-file",
         default=DEFAULT_PID_FILE,
@@ -1185,10 +1150,7 @@ Examples:
         # Apply saved config
         args.ipc_socket = config.get("ipc_socket")
         args.web_socket = config.get("web_socket")
-        args.env_file = config.get("env_file", ".env")
-        args.provider = config.get("provider")
         args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
-        args.workspace_root = config.get("workspace_root")
 
         # Always restart as daemon
         args.daemon = True
@@ -1224,8 +1186,6 @@ Examples:
             print(f"  IPC socket: {args.ipc_socket}")
         if args.web_socket:
             print(f"  WebSocket: {args.web_socket}")
-        if args.workspace_root:
-            print(f"  Workspace root: {args.workspace_root}")
         daemonize(args.log_file)
 
     # Reconfigure logging for daemon/background mode with rotating file handler
@@ -1237,11 +1197,8 @@ Examples:
     daemon = JaatoDaemon(
         ipc_socket=args.ipc_socket,
         web_socket=args.web_socket,
-        env_file=args.env_file,
-        provider=args.provider,
         pid_file=args.pid_file,
         log_file=args.log_file,
-        workspace_root=args.workspace_root,
     )
 
     try:
