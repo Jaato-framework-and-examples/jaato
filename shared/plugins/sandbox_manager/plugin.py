@@ -482,6 +482,10 @@ class SandboxManagerPlugin:
         if not self._get_current_session_id():
             return {"error": "No active session. Start or resume a session first."}
 
+        # Strip @ prefix from file completion
+        if path.startswith("@"):
+            path = path[1:]
+
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
@@ -531,6 +535,10 @@ class SandboxManagerPlugin:
 
         if not self._get_current_session_id():
             return {"error": "No active session. Start or resume a session first."}
+
+        # Strip @ prefix from file completion
+        if path.startswith("@"):
+            path = path[1:]
 
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
