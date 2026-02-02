@@ -2127,3 +2127,315 @@ class TestPluginBehavioralIntegration:
         result = plugin.compare_behavioral_profiles("gpt-4", "claude-3")
 
         assert "recommendation" in result
+
+
+# =============================================================================
+# Observability Tests (Phase 10)
+# =============================================================================
+
+class TestReliabilityStatusTool:
+    """Tests for the enhanced reliability_status tool."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with pattern detection enabled."""
+        config = ReliabilityConfig()
+        plugin = ReliabilityPlugin(config)
+        plugin.set_session_context("test-session")
+        plugin.set_model_context("gpt-4", ["gpt-4", "claude-3"])
+        plugin.enable_pattern_detection()
+        plugin.enable_nudge_injection()
+        return plugin
+
+    def test_basic_status(self, plugin):
+        """Test basic reliability status output."""
+        result = plugin._execute_status({})
+
+        assert "tool_status" in result or "tools" in result
+        assert "summary" in result
+
+    def test_status_with_tool_name(self, plugin):
+        """Test status for specific tool."""
+        plugin.on_tool_called("readFile", {"path": "/etc/passwd"})
+        plugin.on_tool_result("readFile", {"path": "/etc/passwd"}, False, {"error": "Permission denied"}, "call-1", "filesystem")
+
+        result = plugin._execute_status({"tool_name": "readFile"})
+
+        assert "tools" in result
+
+    def test_status_with_history(self, plugin):
+        """Test status with failure history."""
+        plugin.on_tool_result("readFile", {"path": "/etc/test"}, False, {"error": "File not found"}, "call-1", "filesystem")
+
+        result = plugin._execute_status({"include_history": True})
+
+        assert "recent_failures" in result
+        assert len(result["recent_failures"]) > 0
+
+    def test_status_with_patterns(self, plugin):
+        """Test status with pattern information."""
+        plugin.on_turn_start(1)
+        # Trigger repetitive pattern
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        result = plugin._execute_status({"include_patterns": True})
+
+        # Should have pattern info (even if empty)
+        assert "recent_patterns" in result or "pattern_stats" in result
+
+    def test_status_with_behavior(self, plugin):
+        """Test status with behavioral profile."""
+        plugin.on_turn_start(1)
+
+        result = plugin._execute_status({"include_behavior": True})
+
+        assert "behavioral_profile" in result
+        profile = result["behavioral_profile"]
+        assert "model" in profile
+        assert "stall_rate" in profile
+        assert "nudge_effectiveness" in profile
+
+    def test_status_with_model_comparison(self, plugin):
+        """Test status with model comparison."""
+        plugin.on_turn_start(1)
+        # Create some data for gpt-4
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        # Switch models and create data for claude-3
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        plugin.on_turn_start(2)
+
+        result = plugin._execute_status({
+            "compare_models": ["gpt-4", "claude-3"]
+        })
+
+        assert "model_comparison" in result
+
+    def test_summary_metrics(self, plugin):
+        """Test summary metrics in status output."""
+        plugin.on_turn_start(1)
+        plugin.on_tool_result("bash", {"command": "rm -rf /"}, False, {"error": "Permission denied"}, "call-1", "cli")
+
+        result = plugin._execute_status({})
+
+        summary = result.get("summary", {})
+        assert "tools" in summary
+        assert "total_tracked" in summary["tools"]
+        assert "escalated" in summary["tools"]
+        assert "total_failures" in summary["tools"]
+
+
+class TestTelemetryIntegration:
+    """Tests for telemetry/OpenTelemetry event emission."""
+
+    @pytest.fixture
+    def mock_telemetry(self):
+        """Create a mock telemetry plugin."""
+        class MockTelemetry:
+            def __init__(self):
+                self.enabled = True
+                self._current_span_id = "span-123"
+                self._current_trace_id = "trace-456"
+
+            def get_current_span_id(self):
+                return self._current_span_id
+
+            def get_current_trace_id(self):
+                return self._current_trace_id
+
+        return MockTelemetry()
+
+    @pytest.fixture
+    def plugin(self, mock_telemetry):
+        """Create plugin with telemetry."""
+        config = ReliabilityConfig()
+        plugin = ReliabilityPlugin(config)
+        plugin.set_session_context("test-session")
+        plugin.set_model_context("gpt-4", ["gpt-4"])
+        plugin.set_telemetry(mock_telemetry)
+        plugin.enable_pattern_detection()
+        plugin.enable_nudge_injection()
+        return plugin
+
+    def test_set_telemetry(self, plugin, mock_telemetry):
+        """Test that telemetry can be set."""
+        assert plugin._telemetry is mock_telemetry
+
+    def test_pattern_event_emission(self, plugin, caplog):
+        """Test that pattern detection emits telemetry events."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        plugin.on_turn_start(1)
+        # Trigger repetitive pattern
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        # Check that pattern event was logged
+        pattern_logs = [r for r in caplog.records if "pattern_detected" in r.message]
+        assert len(pattern_logs) > 0
+
+    def test_nudge_event_emission(self, plugin, caplog):
+        """Test that nudge injection emits telemetry events."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        plugin.on_turn_start(1)
+        # Trigger repetitive pattern (which should trigger nudge)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        # Check that nudge event was logged
+        nudge_logs = [r for r in caplog.records if "nudge_injected" in r.message]
+        assert len(nudge_logs) > 0
+
+    def test_failure_event_emission(self, plugin, caplog):
+        """Test that failures emit telemetry events."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        plugin.on_tool_result(
+            "bash",
+            {"command": "invalid_cmd"},
+            False,
+            {"error": "Command not found"},
+            "call-1",
+            "cli"
+        )
+
+        # Check that failure event was logged
+        failure_logs = [r for r in caplog.records if "tool_failure" in r.message]
+        assert len(failure_logs) > 0
+
+    def test_trust_state_event_emission(self, plugin, caplog):
+        """Test that trust state changes emit telemetry events."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        # Trigger multiple failures to cause escalation
+        for i in range(5):
+            plugin.on_tool_result(
+                "bash",
+                {"command": "bad_cmd"},
+                False,
+                {"error": "Failed", "http_status": 500},
+                f"call-{i}",
+                "cli"
+            )
+
+        # Check that trust state event was logged
+        state_logs = [r for r in caplog.records if "trust_state_changed" in r.message]
+        assert len(state_logs) > 0
+
+    def test_telemetry_disabled(self, caplog):
+        """Test that telemetry events are not emitted when disabled."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        # Create telemetry with enabled=False
+        class DisabledTelemetry:
+            enabled = False
+
+            def get_current_span_id(self):
+                return None
+
+        config = ReliabilityConfig()
+        plugin = ReliabilityPlugin(config)
+        plugin.set_session_context("test-session")
+        plugin.set_model_context("gpt-4", ["gpt-4"])
+        plugin.set_telemetry(DisabledTelemetry())
+        plugin.enable_pattern_detection()
+
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        # No telemetry events should be logged
+        pattern_logs = [r for r in caplog.records if "pattern_detected" in r.message]
+        assert len(pattern_logs) == 0
+
+
+class TestObservabilitySummary:
+    """Tests for observability summary/dashboard metrics."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create plugin with all features enabled."""
+        config = ReliabilityConfig()
+        plugin = ReliabilityPlugin(config)
+        plugin.set_session_context("test-session")
+        plugin.set_model_context("gpt-4", ["gpt-4", "claude-3"])
+        plugin.enable_pattern_detection()
+        plugin.enable_nudge_injection()
+        return plugin
+
+    def test_summary_with_no_data(self, plugin):
+        """Test summary when no data collected."""
+        summary = plugin._get_observability_summary()
+
+        assert "tools" in summary
+        assert summary["tools"]["total_tracked"] == 0
+        assert summary["tools"]["escalated"] == 0
+        assert summary["tools"]["total_failures"] == 0
+
+    def test_summary_with_failures(self, plugin):
+        """Test summary with recorded failures."""
+        plugin.on_tool_result("bash", {"command": "test"}, False, {"error": "Failed"}, "call-1", "cli")
+
+        summary = plugin._get_observability_summary()
+
+        assert summary["tools"]["total_failures"] == 1
+
+    def test_summary_with_patterns(self, plugin):
+        """Test summary with detected patterns."""
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        summary = plugin._get_observability_summary()
+
+        assert "patterns" in summary
+        assert summary["patterns"]["total_detected"] > 0
+        assert "by_type" in summary["patterns"]
+        assert "by_severity" in summary["patterns"]
+
+    def test_summary_with_nudges(self, plugin):
+        """Test summary with nudge information."""
+        plugin.on_turn_start(1)
+        # Trigger pattern and nudge
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        summary = plugin._get_observability_summary()
+
+        assert "nudges" in summary
+        assert summary["nudges"]["total_sent"] > 0
+
+    def test_summary_with_multiple_models(self, plugin):
+        """Test summary with multiple model profiles."""
+        plugin.on_turn_start(1)
+
+        plugin.set_model_context("claude-3", ["gpt-4", "claude-3"])
+        plugin.on_turn_start(2)
+
+        summary = plugin._get_observability_summary()
+
+        assert "models" in summary
+        assert len(summary["models"]) >= 2
+
+    def test_model_summary_contains_metrics(self, plugin):
+        """Test that model summaries contain expected metrics."""
+        plugin.on_turn_start(1)
+        for i in range(3):
+            plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+
+        summary = plugin._get_observability_summary()
+
+        if "models" in summary and len(summary["models"]) > 0:
+            model_summary = summary["models"][0]
+            assert "model" in model_summary
+            assert "stall_rate" in model_summary
+            assert "nudge_effectiveness" in model_summary
+            assert "turns" in model_summary

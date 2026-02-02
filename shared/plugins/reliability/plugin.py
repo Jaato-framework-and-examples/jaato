@@ -109,9 +109,20 @@ class ReliabilityPlugin:
         # Model behavioral profiles
         self._behavioral_profiles: Dict[str, ModelBehavioralProfile] = {}  # model_name -> profile
 
+        # Telemetry integration
+        self._telemetry = None  # Optional TelemetryPlugin
+
     @property
     def name(self) -> str:
         return "reliability"
+
+    def set_telemetry(self, telemetry) -> None:
+        """Set telemetry plugin for OpenTelemetry event emission.
+
+        Args:
+            telemetry: A TelemetryPlugin instance for emitting events.
+        """
+        self._telemetry = telemetry
 
     # -------------------------------------------------------------------------
     # Plugin Protocol Implementation
@@ -122,7 +133,7 @@ class ReliabilityPlugin:
         return [
             ToolSchema(
                 name="reliability_status",
-                description="Check the reliability status of tools. Shows which tools are escalated, recovering, or blocked due to failures.",
+                description="Check reliability status including tool trust, behavioral patterns, and model performance. Use to understand failure history, detect stall patterns, and compare model behavior.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -134,6 +145,25 @@ class ReliabilityPlugin:
                             "type": "boolean",
                             "description": "Include recent failure history",
                             "default": False
+                        },
+                        "include_patterns": {
+                            "type": "boolean",
+                            "description": "Include detected behavioral patterns (stalls, loops)",
+                            "default": False
+                        },
+                        "include_behavior": {
+                            "type": "boolean",
+                            "description": "Include model behavioral profile (stall rate, nudge effectiveness)",
+                            "default": False
+                        },
+                        "model_name": {
+                            "type": "string",
+                            "description": "Specific model to show behavior for (uses current model if omitted)"
+                        },
+                        "compare_models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of two model names to compare behavior between"
                         }
                     }
                 }
@@ -427,12 +457,17 @@ class ReliabilityPlugin:
         # Record to behavioral profile
         self._record_pattern_to_profile(pattern)
 
+        # Emit telemetry event for pattern detection
+        self._emit_pattern_event(pattern)
+
         # Inject nudge if injector is enabled
         if self._nudge_injector:
             nudge = self._nudge_injector.on_pattern_detected(pattern)
             # Record nudge to behavioral profile if it was actually sent
             if nudge:
                 self._record_nudge_to_profile(nudge)
+                # Emit telemetry event for nudge injection
+                self._emit_nudge_event(nudge)
                 # Call nudge hook
                 if self._on_nudge_injected:
                     self._on_nudge_injected(nudge)
@@ -440,6 +475,109 @@ class ReliabilityPlugin:
         # Call user's pattern hook if set
         if self._on_pattern_detected:
             self._on_pattern_detected(pattern)
+
+    def _emit_pattern_event(self, pattern: BehavioralPattern) -> None:
+        """Emit OpenTelemetry event for pattern detection."""
+        if not self._telemetry or not getattr(self._telemetry, 'enabled', False):
+            return
+
+        try:
+            # Get current span context if available
+            span_id = self._telemetry.get_current_span_id()
+            if not span_id:
+                return  # No active span
+
+            # We add the event to the current span
+            # This requires getting the current span which varies by telemetry impl
+            # For now, log the pattern data that can be scraped by metrics
+            logger.info(
+                "reliability.pattern_detected",
+                extra={
+                    "pattern_type": pattern.pattern_type.value,
+                    "severity": pattern.severity.value,
+                    "turn_index": pattern.turn_index,
+                    "model_name": pattern.model_name,
+                    "repetition_count": pattern.repetition_count,
+                    "session_id": pattern.session_id,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit pattern telemetry event: {e}")
+
+    def _emit_nudge_event(self, nudge: Nudge) -> None:
+        """Emit OpenTelemetry event for nudge injection."""
+        if not self._telemetry or not getattr(self._telemetry, 'enabled', False):
+            return
+
+        try:
+            # Get context from the triggering pattern
+            pattern = nudge.pattern
+            logger.info(
+                "reliability.nudge_injected",
+                extra={
+                    "nudge_type": nudge.nudge_type.value,
+                    "turn_index": pattern.turn_index if pattern else self._turn_index,
+                    "model_name": pattern.model_name if pattern else self._current_model,
+                    "pattern_type": pattern.pattern_type.value if pattern else None,
+                    "session_id": pattern.session_id if pattern else self._session_id,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit nudge telemetry event: {e}")
+
+    def _emit_trust_state_event(
+        self,
+        failure_key: str,
+        tool_name: str,
+        old_state: str,
+        new_state: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Emit OpenTelemetry event for trust state change."""
+        if not self._telemetry or not getattr(self._telemetry, 'enabled', False):
+            return
+
+        try:
+            logger.info(
+                "reliability.trust_state_changed",
+                extra={
+                    "failure_key": failure_key,
+                    "tool_name": tool_name,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                    "reason": reason,
+                    "session_id": self._session_id,
+                    "model_name": self._current_model,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit trust state telemetry event: {e}")
+
+    def _emit_failure_event(
+        self,
+        failure_key: str,
+        tool_name: str,
+        severity: str,
+        error_type: str,
+    ) -> None:
+        """Emit OpenTelemetry event for tool failure."""
+        if not self._telemetry or not getattr(self._telemetry, 'enabled', False):
+            return
+
+        try:
+            logger.info(
+                "reliability.tool_failure",
+                extra={
+                    "failure_key": failure_key,
+                    "tool_name": tool_name,
+                    "severity": severity,
+                    "error_type": error_type,
+                    "session_id": self._session_id,
+                    "model_name": self._current_model,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit failure telemetry event: {e}")
 
     def set_pattern_hook(
         self,
@@ -748,6 +886,14 @@ class ReliabilityPlugin:
         self._failure_history.append(record)
         self._prune_history()
 
+        # Emit telemetry event for failure
+        self._emit_failure_event(
+            failure_key.to_string(),
+            failure_key.tool_name,
+            severity.value,
+            record.error_type,
+        )
+
         # Update state counters
         state.consecutive_failures += 1
         state.total_failures += 1
@@ -791,15 +937,25 @@ class ReliabilityPlugin:
         if severity == FailureSeverity.SECURITY:
             should_escalate = True
             was_blocked = state.state == TrustState.BLOCKED
+            old_state = state.state.value
             state.state = TrustState.BLOCKED
             reason = "Security concern detected"
 
-            # Emit blocked hook
-            if not was_blocked and self._on_blocked:
-                self._on_blocked(failure_key.to_string(), reason)
+            # Emit blocked hook and telemetry
+            if not was_blocked:
+                if self._on_blocked:
+                    self._on_blocked(failure_key.to_string(), reason)
+                self._emit_trust_state_event(
+                    failure_key.to_string(),
+                    state.tool_name,
+                    old_state,
+                    state.state.value,
+                    reason,
+                )
 
         # Apply escalation if needed
         if should_escalate and state.state == TrustState.TRUSTED:
+            old_state = state.state.value
             state.state = TrustState.ESCALATED
             state.escalated_at = now
             state.escalation_reason = reason
@@ -809,23 +965,39 @@ class ReliabilityPlugin:
             if rule.notify_user:
                 self._notify_escalation(state)
 
-            # Emit escalated hook
+            # Emit escalated hook and telemetry
             if self._on_escalated:
                 self._on_escalated(failure_key.to_string(), state.state, reason)
+            self._emit_trust_state_event(
+                failure_key.to_string(),
+                state.tool_name,
+                old_state,
+                state.state.value,
+                reason,
+            )
 
         # If recovering, reset recovery progress
         elif state.state == TrustState.RECOVERING:
+            old_state = state.state.value
             state.state = TrustState.ESCALATED
             state.recovery_started = None
             state.successes_since_recovery = 0
+            re_escalation_reason = "Recovery interrupted by failure"
 
-            # Emit escalated hook (re-escalation from recovering)
+            # Emit escalated hook and telemetry (re-escalation from recovering)
             if self._on_escalated:
                 self._on_escalated(
                     failure_key.to_string(),
                     state.state,
-                    "Recovery interrupted by failure"
+                    re_escalation_reason,
                 )
+            self._emit_trust_state_event(
+                failure_key.to_string(),
+                state.tool_name,
+                old_state,
+                state.state.value,
+                re_escalation_reason,
+            )
 
         logger.debug(
             f"Failure recorded: {failure_key.to_string()} "
@@ -849,11 +1021,21 @@ class ReliabilityPlugin:
         if state.state == TrustState.ESCALATED:
             # Check if cooldown period passed
             if state.escalation_expires and now >= state.escalation_expires:
+                old_state = state.state.value
                 state.state = TrustState.RECOVERING
                 state.recovery_started = now
                 state.successes_since_recovery = 1
                 state.successes_needed = rule.success_count_to_recover
                 logger.debug(f"Tool {state.failure_key} entering recovery")
+
+                # Emit telemetry for entering recovery
+                self._emit_trust_state_event(
+                    state.failure_key,
+                    state.tool_name,
+                    old_state,
+                    state.state.value,
+                    "Cooldown expired, entering recovery",
+                )
                 return state
 
         elif state.state == TrustState.RECOVERING:
@@ -861,6 +1043,7 @@ class ReliabilityPlugin:
 
             if state.successes_since_recovery >= state.successes_needed:
                 # Full recovery
+                old_state = state.state.value
                 state.state = TrustState.TRUSTED
                 state.escalated_at = None
                 state.escalation_reason = None
@@ -870,9 +1053,16 @@ class ReliabilityPlugin:
                 self._notify_recovery(state)
                 logger.info(f"Tool {state.failure_key} recovered to TRUSTED")
 
-                # Emit recovered hook
+                # Emit recovered hook and telemetry
                 if self._on_recovered:
                     self._on_recovered(state.failure_key, state.state)
+                self._emit_trust_state_event(
+                    state.failure_key,
+                    state.tool_name,
+                    old_state,
+                    state.state.value,
+                    "Recovery complete",
+                )
 
                 return state
 
@@ -1314,7 +1504,14 @@ class ReliabilityPlugin:
         """Execute reliability_status tool."""
         tool_name = args.get("tool_name")
         include_history = args.get("include_history", False)
+        include_patterns = args.get("include_patterns", False)
+        include_behavior = args.get("include_behavior", False)
+        model_name = args.get("model_name")
+        compare_models = args.get("compare_models")
 
+        result: Dict[str, Any] = {}
+
+        # Tool reliability status
         if tool_name:
             # Show specific tool
             matching = [
@@ -1322,24 +1519,25 @@ class ReliabilityPlugin:
                 if tool_name in key or tool_name == state.tool_name
             ]
             if not matching:
-                return {"message": f"No reliability data for tool '{tool_name}'"}
-
-            result = {"tools": [self._format_state(s) for s in matching]}
+                result["tools"] = {"message": f"No reliability data for tool '{tool_name}'"}
+            else:
+                result["tools"] = [self._format_state(s) for s in matching]
         else:
             # Show all non-trusted
             escalated = self.get_escalated_tools()
             if not escalated:
-                return {
+                result["tool_status"] = {
                     "message": "All tools are TRUSTED",
                     "total_tracked": len(self._tool_states),
                 }
+            else:
+                result["tool_status"] = {
+                    "escalated_tools": [self._format_state(s) for s in escalated],
+                    "total_tracked": len(self._tool_states),
+                    "total_escalated": len(escalated),
+                }
 
-            result = {
-                "escalated_tools": [self._format_state(s) for s in escalated],
-                "total_tracked": len(self._tool_states),
-                "total_escalated": len(escalated),
-            }
-
+        # Failure history
         if include_history:
             recent = self._failure_history[-10:]
             result["recent_failures"] = [
@@ -1353,7 +1551,115 @@ class ReliabilityPlugin:
                 for r in reversed(recent)
             ]
 
+        # Behavioral patterns
+        if include_patterns and self._pattern_detector:
+            patterns = self._pattern_detector.get_recent_patterns(10)
+            if patterns:
+                result["recent_patterns"] = [
+                    {
+                        "type": p.pattern_type.value,
+                        "severity": p.severity.value,
+                        "tool_sequence": p.tool_sequence[-5:],  # Last 5 tools
+                        "expected_action": p.expected_action,
+                        "repetitions": p.repetition_count,
+                        "timestamp": p.detected_at.isoformat(),
+                    }
+                    for p in patterns
+                ]
+            else:
+                result["recent_patterns"] = {"message": "No patterns detected"}
+
+            # Pattern statistics
+            stats = self._pattern_detector.get_pattern_summary()
+            if stats:
+                result["pattern_stats"] = stats
+
+        # Model behavioral profile
+        if include_behavior:
+            target_model = model_name or self._current_model
+            if target_model:
+                profile = self.get_behavioral_profile(target_model)
+                result["behavioral_profile"] = {
+                    "model": target_model,
+                    "stall_rate": round(profile.stall_rate, 3),
+                    "nudge_effectiveness": round(profile.nudge_effectiveness, 3),
+                    "total_turns": profile.total_turns,
+                    "stalled_turns": profile.stalled_turns,
+                    "nudges_sent": profile.nudges_sent,
+                    "nudges_effective": profile.nudges_effective,
+                    "pattern_summary": {
+                        pt.value: count
+                        for pt, count in profile.pattern_counts.items()
+                    } if profile.pattern_counts else {},
+                }
+            else:
+                result["behavioral_profile"] = {"message": "No model set"}
+
+        # Model comparison
+        if compare_models and len(compare_models) >= 2:
+            comparison = self.compare_behavioral_profiles(
+                compare_models[0], compare_models[1]
+            )
+            if comparison:
+                result["model_comparison"] = comparison
+            else:
+                result["model_comparison"] = {
+                    "message": f"Cannot compare: need data for both {compare_models[0]} and {compare_models[1]}"
+                }
+
+        # Summary metrics for dashboard
+        result["summary"] = self._get_observability_summary()
+
         return result
+
+    def _get_observability_summary(self) -> Dict[str, Any]:
+        """Get summary metrics for observability dashboard."""
+        summary: Dict[str, Any] = {
+            "tools": {
+                "total_tracked": len(self._tool_states),
+                "escalated": len(self.get_escalated_tools()),
+                "total_failures": len(self._failure_history),
+            }
+        }
+
+        # Pattern metrics
+        if self._pattern_detector:
+            patterns = self._pattern_detector.get_recent_patterns(100)
+            if patterns:
+                by_type: Dict[str, int] = {}
+                by_severity: Dict[str, int] = {}
+                for p in patterns:
+                    pt = p.pattern_type.value
+                    by_type[pt] = by_type.get(pt, 0) + 1
+                    sev = p.severity.value
+                    by_severity[sev] = by_severity.get(sev, 0) + 1
+                summary["patterns"] = {
+                    "total_detected": len(patterns),
+                    "by_type": by_type,
+                    "by_severity": by_severity,
+                }
+
+        # Nudge metrics
+        if self._nudge_injector:
+            nudge_history = self._nudge_injector.get_nudge_history()
+            if nudge_history:
+                summary["nudges"] = {
+                    "total_sent": len(nudge_history),
+                }
+
+        # Model metrics
+        if self._behavioral_profiles:
+            model_summaries = []
+            for model, profile in self._behavioral_profiles.items():
+                model_summaries.append({
+                    "model": model,
+                    "stall_rate": round(profile.stall_rate, 3),
+                    "nudge_effectiveness": round(profile.nudge_effectiveness, 3),
+                    "turns": profile.total_turns,
+                })
+            summary["models"] = model_summaries
+
+        return summary
 
     def _format_state(self, state: ToolReliabilityState) -> Dict[str, Any]:
         """Format state for display."""
