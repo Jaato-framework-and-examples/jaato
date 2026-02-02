@@ -1,0 +1,706 @@
+"""Reliability plugin for tracking tool failures and adaptive trust."""
+
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from ..base import (
+    CommandCompletion,
+    CommandParameter,
+    OutputCallback,
+    ToolPlugin,
+    UserCommand,
+)
+from ..model_provider.types import ToolSchema
+from .types import (
+    EscalationRule,
+    FailureKey,
+    FailureRecord,
+    FailureSeverity,
+    ReliabilityConfig,
+    ToolReliabilityState,
+    TrustState,
+    classify_failure,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ReliabilityPlugin:
+    """Plugin that tracks tool failures and adjusts trust dynamically.
+
+    This plugin monitors tool execution results and maintains reliability
+    profiles for each tool+parameters combination. When failures exceed
+    configured thresholds, tools are escalated to require explicit approval.
+    """
+
+    def __init__(self, config: Optional[ReliabilityConfig] = None):
+        self._config = config or ReliabilityConfig()
+
+        # State tracking
+        self._tool_states: Dict[str, ToolReliabilityState] = {}
+        self._failure_history: List[FailureRecord] = []
+
+        # Session context
+        self._session_id: str = ""
+        self._turn_index: int = 0
+
+        # Callbacks
+        self._output_callback: Optional[OutputCallback] = None
+
+        # Plugin registry for looking up plugin names
+        self._registry = None
+
+        # Workspace path for persistence
+        self._workspace_path: Optional[str] = None
+
+    @property
+    def name(self) -> str:
+        return "reliability"
+
+    # -------------------------------------------------------------------------
+    # Plugin Protocol Implementation
+    # -------------------------------------------------------------------------
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return tool schemas for model-callable tools."""
+        return [
+            ToolSchema(
+                name="reliability_status",
+                description="Check the reliability status of tools. Shows which tools are escalated, recovering, or blocked due to failures.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Specific tool to check (optional, shows all if omitted)"
+                        },
+                        "include_history": {
+                            "type": "boolean",
+                            "description": "Include recent failure history",
+                            "default": False
+                        }
+                    }
+                }
+            ),
+        ]
+
+    def get_executors(self) -> Dict[str, Callable]:
+        """Return executors for model-callable tools."""
+        return {
+            "reliability_status": self._execute_status,
+        }
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """These tools don't need permission checks."""
+        return ["reliability_status"]
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """Return user-facing commands."""
+        return [
+            UserCommand(
+                name="reliability",
+                description="Manage reliability tracking and tool trust",
+                parameters=[
+                    CommandParameter(name="subcommand", description="Subcommand to run", required=False),
+                    CommandParameter(name="args", description="Arguments", required=False, capture_rest=True),
+                ],
+            ),
+        ]
+
+    def get_command_completions(self, command_parts: List[str]) -> List[CommandCompletion]:
+        """Provide completions for reliability commands."""
+        if len(command_parts) == 1:
+            return [
+                CommandCompletion("status", "Show reliability status for all tools"),
+                CommandCompletion("recovery", "Set recovery mode (auto|ask)"),
+                CommandCompletion("reset", "Reset a tool to trusted state"),
+                CommandCompletion("history", "Show recent failure history"),
+                CommandCompletion("config", "Show current configuration"),
+            ]
+
+        if len(command_parts) == 2:
+            subcommand = command_parts[1]
+            if subcommand == "recovery":
+                return [
+                    CommandCompletion("auto", "Automatically recover tools after cooldown"),
+                    CommandCompletion("ask", "Prompt before recovering tools"),
+                ]
+            elif subcommand == "reset":
+                # Return list of escalated/blocked tools
+                return [
+                    CommandCompletion(key, f"Reset {state.tool_name} ({state.state.value})")
+                    for key, state in self._tool_states.items()
+                    if state.state in (TrustState.ESCALATED, TrustState.BLOCKED)
+                ]
+
+        return []
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions about reliability tracking."""
+        return None  # No special instructions needed
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the plugin."""
+        if config:
+            # Could load config overrides here
+            pass
+        logger.info("Reliability plugin initialized")
+
+    def shutdown(self) -> None:
+        """Shutdown the plugin."""
+        # Could persist state here
+        logger.info("Reliability plugin shutdown")
+
+    # -------------------------------------------------------------------------
+    # Auto-wiring Methods
+    # -------------------------------------------------------------------------
+
+    def set_plugin_registry(self, registry) -> None:
+        """Called by registry during exposure."""
+        self._registry = registry
+
+    def set_workspace_path(self, path: str) -> None:
+        """Called when workspace path is set."""
+        self._workspace_path = path
+        # Could load persisted state here
+
+    def set_output_callback(self, callback: OutputCallback) -> None:
+        """Set callback for output messages."""
+        self._output_callback = callback
+
+    def set_session_context(self, session_id: str) -> None:
+        """Set session context for failure tracking."""
+        self._session_id = session_id
+
+    def set_turn_index(self, turn_index: int) -> None:
+        """Update current turn index."""
+        self._turn_index = turn_index
+
+    # -------------------------------------------------------------------------
+    # Core Failure Tracking
+    # -------------------------------------------------------------------------
+
+    def on_tool_result(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        success: bool,
+        result: Any,
+        call_id: str = "",
+        plugin_name: str = "",
+    ) -> Optional[ToolReliabilityState]:
+        """Hook called after tool execution. Updates reliability state.
+
+        Args:
+            tool_name: Name of the tool that was executed
+            args: Arguments passed to the tool
+            success: Whether the tool execution succeeded (from executor)
+            result: The tool result (may contain error info even if success=True)
+            call_id: Unique identifier for this call
+            plugin_name: Name of the plugin that provided the tool
+
+        Returns:
+            Updated ToolReliabilityState if state changed, None otherwise
+        """
+        # Create failure key from invocation
+        failure_key = FailureKey.from_invocation(tool_name, args)
+        key_str = failure_key.to_string()
+
+        # Determine if this is actually a failure
+        is_failure = not success or self._is_error_result(result)
+
+        # Get or create state
+        state = self._get_or_create_state(key_str, tool_name)
+
+        if is_failure:
+            return self._handle_failure(state, failure_key, result, call_id, plugin_name)
+        else:
+            return self._handle_success(state)
+
+    def _is_error_result(self, result: Any) -> bool:
+        """Check if a result indicates an error even if execution 'succeeded'."""
+        if not isinstance(result, dict):
+            return False
+        return "error" in result or result.get("status_code", 200) >= 400
+
+    def _get_or_create_state(self, key_str: str, tool_name: str) -> ToolReliabilityState:
+        """Get existing state or create new one."""
+        if key_str not in self._tool_states:
+            self._tool_states[key_str] = ToolReliabilityState(
+                failure_key=key_str,
+                tool_name=tool_name,
+            )
+        return self._tool_states[key_str]
+
+    def _handle_failure(
+        self,
+        state: ToolReliabilityState,
+        failure_key: FailureKey,
+        result: Any,
+        call_id: str,
+        plugin_name: str,
+    ) -> ToolReliabilityState:
+        """Process a failure and potentially escalate."""
+        now = datetime.now()
+
+        # Classify the failure
+        error_dict = result if isinstance(result, dict) else {"error": str(result)}
+        severity, weight = classify_failure(failure_key.tool_name, error_dict)
+
+        # Create failure record
+        record = FailureRecord(
+            failure_key=failure_key.to_string(),
+            tool_name=failure_key.tool_name,
+            plugin_name=plugin_name,
+            timestamp=now,
+            parameter_signature=failure_key.parameter_signature,
+            error_type=type(result).__name__ if not isinstance(result, dict) else "error",
+            error_message=str(error_dict.get("error", "")),
+            severity=severity,
+            weight=weight,
+            call_id=call_id,
+            session_id=self._session_id,
+            turn_index=self._turn_index,
+            http_status=error_dict.get("http_status") or error_dict.get("status_code"),
+        )
+
+        # Add to history
+        self._failure_history.append(record)
+        self._prune_history()
+
+        # Update state counters
+        state.consecutive_failures += 1
+        state.total_failures += 1
+        state.last_failure = now
+
+        # Get applicable rule
+        rule = self._config.get_rule_for_tool(
+            failure_key.tool_name,
+            plugin_name,
+            failure_key.parameter_signature.split("|")[0].split("=")[1] if "domain=" in failure_key.parameter_signature else None
+        )
+
+        # Count failures in window (only matching severity)
+        if severity in rule.severity_filter:
+            state.failures_in_window = self._count_failures_in_window(
+                failure_key.to_string(),
+                rule.window_seconds,
+                rule.severity_filter,
+            )
+
+        # Check escalation conditions
+        should_escalate = False
+        reason = ""
+
+        if rule.count_threshold and state.failures_in_window >= rule.count_threshold:
+            should_escalate = True
+            reason = f"{int(state.failures_in_window)} failures in {rule.window_seconds}s"
+
+        elif rule.consecutive_threshold and state.consecutive_failures >= rule.consecutive_threshold:
+            should_escalate = True
+            reason = f"{state.consecutive_failures} consecutive failures"
+
+        elif rule.rate_threshold and state.total_failures + state.total_successes >= 5:
+            rate = state.total_failures / (state.total_failures + state.total_successes)
+            if rate >= rule.rate_threshold:
+                should_escalate = True
+                reason = f"{rate:.0%} failure rate"
+
+        # Critical severity always escalates
+        if severity == FailureSeverity.SECURITY:
+            should_escalate = True
+            state.state = TrustState.BLOCKED
+            reason = "Security concern detected"
+
+        # Apply escalation if needed
+        if should_escalate and state.state == TrustState.TRUSTED:
+            state.state = TrustState.ESCALATED
+            state.escalated_at = now
+            state.escalation_reason = reason
+            state.escalation_expires = now + timedelta(seconds=rule.escalation_duration_seconds)
+            state.successes_needed = rule.success_count_to_recover
+
+            if rule.notify_user:
+                self._notify_escalation(state)
+
+        # If recovering, reset recovery progress
+        elif state.state == TrustState.RECOVERING:
+            state.state = TrustState.ESCALATED
+            state.recovery_started = None
+            state.successes_since_recovery = 0
+
+        logger.debug(
+            f"Failure recorded: {failure_key.to_string()} "
+            f"severity={severity.value} state={state.state.value}"
+        )
+
+        return state
+
+    def _handle_success(self, state: ToolReliabilityState) -> Optional[ToolReliabilityState]:
+        """Process a success, potentially recovering trust."""
+        now = datetime.now()
+
+        # Update counters
+        state.consecutive_failures = 0
+        state.total_successes += 1
+        state.last_success = now
+
+        # Get applicable rule
+        rule = self._config.get_rule_for_tool(state.tool_name)
+
+        if state.state == TrustState.ESCALATED:
+            # Check if cooldown period passed
+            if state.escalation_expires and now >= state.escalation_expires:
+                state.state = TrustState.RECOVERING
+                state.recovery_started = now
+                state.successes_since_recovery = 1
+                state.successes_needed = rule.success_count_to_recover
+                logger.debug(f"Tool {state.failure_key} entering recovery")
+                return state
+
+        elif state.state == TrustState.RECOVERING:
+            state.successes_since_recovery += 1
+
+            if state.successes_since_recovery >= state.successes_needed:
+                # Full recovery
+                state.state = TrustState.TRUSTED
+                state.escalated_at = None
+                state.escalation_reason = None
+                state.escalation_expires = None
+                state.recovery_started = None
+                state.successes_since_recovery = 0
+                self._notify_recovery(state)
+                logger.info(f"Tool {state.failure_key} recovered to TRUSTED")
+                return state
+
+        return None  # No significant state change
+
+    def _count_failures_in_window(
+        self,
+        failure_key: str,
+        window_seconds: int,
+        severity_filter: set,
+    ) -> float:
+        """Count weighted failures in time window."""
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=window_seconds)
+
+        total = 0.0
+        for record in self._failure_history:
+            if record.failure_key != failure_key:
+                continue
+            if record.timestamp < cutoff:
+                continue
+            if record.severity not in severity_filter:
+                continue
+
+            # Apply time decay: 10% reduction per hour
+            age_seconds = (now - record.timestamp).total_seconds()
+            decay = max(0.1, 1.0 - (age_seconds / 3600) * 0.1)
+
+            total += record.weight * decay
+
+        return total
+
+    def _prune_history(self) -> None:
+        """Remove old history entries."""
+        if len(self._failure_history) > self._config.max_history_entries:
+            self._failure_history = self._failure_history[-self._config.max_history_entries:]
+
+    # -------------------------------------------------------------------------
+    # State Query Methods
+    # -------------------------------------------------------------------------
+
+    def get_state(self, failure_key: str) -> Optional[ToolReliabilityState]:
+        """Get reliability state for a tool+params combination."""
+        return self._tool_states.get(failure_key)
+
+    def get_all_states(self) -> Dict[str, ToolReliabilityState]:
+        """Get all tracked states."""
+        return dict(self._tool_states)
+
+    def get_escalated_tools(self) -> List[ToolReliabilityState]:
+        """Get list of tools that are escalated or blocked."""
+        return [
+            state for state in self._tool_states.values()
+            if state.state in (TrustState.ESCALATED, TrustState.BLOCKED, TrustState.RECOVERING)
+        ]
+
+    def is_escalated(self, tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Check if a tool invocation is escalated.
+
+        Returns:
+            Tuple of (is_escalated, reason)
+        """
+        failure_key = FailureKey.from_invocation(tool_name, args)
+        state = self._tool_states.get(failure_key.to_string())
+
+        if not state:
+            return (False, None)
+
+        if state.state in (TrustState.ESCALATED, TrustState.BLOCKED):
+            return (True, state.escalation_reason)
+
+        return (False, None)
+
+    # -------------------------------------------------------------------------
+    # Manual State Management
+    # -------------------------------------------------------------------------
+
+    def reset_tool(self, failure_key: str) -> bool:
+        """Manually reset a tool to TRUSTED state."""
+        if failure_key not in self._tool_states:
+            return False
+
+        state = self._tool_states[failure_key]
+        state.state = TrustState.TRUSTED
+        state.escalated_at = None
+        state.escalation_reason = None
+        state.escalation_expires = None
+        state.recovery_started = None
+        state.successes_since_recovery = 0
+        state.consecutive_failures = 0
+        state.failures_in_window = 0.0
+
+        logger.info(f"Tool {failure_key} manually reset to TRUSTED")
+        return True
+
+    def reset_all(self) -> int:
+        """Reset all tools to TRUSTED. Returns count of reset tools."""
+        count = 0
+        for state in self._tool_states.values():
+            if state.state != TrustState.TRUSTED:
+                state.state = TrustState.TRUSTED
+                state.escalated_at = None
+                state.escalation_reason = None
+                state.escalation_expires = None
+                state.recovery_started = None
+                state.successes_since_recovery = 0
+                count += 1
+        return count
+
+    # -------------------------------------------------------------------------
+    # Notifications
+    # -------------------------------------------------------------------------
+
+    def _notify_escalation(self, state: ToolReliabilityState) -> None:
+        """Notify user when a tool is escalated."""
+        if not self._output_callback:
+            return
+
+        expires_str = ""
+        if state.escalation_expires:
+            remaining = state.escalation_expires - datetime.now()
+            minutes = int(remaining.total_seconds() / 60)
+            expires_str = f"\n   Duration: {minutes}m until recovery eligible"
+
+        self._output_callback(
+            "reliability",
+            f"Tool '{state.tool_name}' escalated to require approval\n"
+            f"   Key: {state.failure_key}\n"
+            f"   Reason: {state.escalation_reason}"
+            f"{expires_str}",
+            "write"
+        )
+
+    def _notify_recovery(self, state: ToolReliabilityState) -> None:
+        """Notify user when a tool recovers."""
+        if not self._output_callback:
+            return
+
+        self._output_callback(
+            "reliability",
+            f"Tool '{state.tool_name}' recovered to TRUSTED\n"
+            f"   Key: {state.failure_key}",
+            "write"
+        )
+
+    # -------------------------------------------------------------------------
+    # Tool Executors
+    # -------------------------------------------------------------------------
+
+    def _execute_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute reliability_status tool."""
+        tool_name = args.get("tool_name")
+        include_history = args.get("include_history", False)
+
+        if tool_name:
+            # Show specific tool
+            matching = [
+                state for key, state in self._tool_states.items()
+                if tool_name in key or tool_name == state.tool_name
+            ]
+            if not matching:
+                return {"message": f"No reliability data for tool '{tool_name}'"}
+
+            result = {"tools": [self._format_state(s) for s in matching]}
+        else:
+            # Show all non-trusted
+            escalated = self.get_escalated_tools()
+            if not escalated:
+                return {
+                    "message": "All tools are TRUSTED",
+                    "total_tracked": len(self._tool_states),
+                }
+
+            result = {
+                "escalated_tools": [self._format_state(s) for s in escalated],
+                "total_tracked": len(self._tool_states),
+                "total_escalated": len(escalated),
+            }
+
+        if include_history:
+            recent = self._failure_history[-10:]
+            result["recent_failures"] = [
+                {
+                    "tool": r.tool_name,
+                    "key": r.failure_key,
+                    "error": r.error_message[:100],
+                    "severity": r.severity.value,
+                    "timestamp": r.timestamp.isoformat(),
+                }
+                for r in reversed(recent)
+            ]
+
+        return result
+
+    def _format_state(self, state: ToolReliabilityState) -> Dict[str, Any]:
+        """Format state for display."""
+        result = {
+            "key": state.failure_key,
+            "tool": state.tool_name,
+            "state": state.state.value,
+            "failures": state.total_failures,
+            "successes": state.total_successes,
+        }
+
+        if state.escalation_reason:
+            result["reason"] = state.escalation_reason
+
+        if state.state == TrustState.RECOVERING:
+            result["recovery_progress"] = f"{state.successes_since_recovery}/{state.successes_needed}"
+
+        if state.escalation_expires:
+            remaining = state.escalation_expires - datetime.now()
+            if remaining.total_seconds() > 0:
+                result["cooldown_remaining"] = f"{int(remaining.total_seconds() / 60)}m"
+
+        return result
+
+    # -------------------------------------------------------------------------
+    # User Command Handler
+    # -------------------------------------------------------------------------
+
+    def handle_command(self, subcommand: str, args: str) -> str:
+        """Handle user commands."""
+        if not subcommand or subcommand == "status":
+            return self._cmd_status(args)
+        elif subcommand == "recovery":
+            return self._cmd_recovery(args)
+        elif subcommand == "reset":
+            return self._cmd_reset(args)
+        elif subcommand == "history":
+            return self._cmd_history(args)
+        elif subcommand == "config":
+            return self._cmd_config()
+        else:
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config"
+
+    def _cmd_status(self, args: str) -> str:
+        """Show reliability status."""
+        escalated = self.get_escalated_tools()
+
+        if not escalated:
+            return f"All tools TRUSTED ({len(self._tool_states)} tracked)"
+
+        lines = ["Reliability Status:", "-" * 60]
+        for state in escalated:
+            status_info = f"{state.state.value}"
+            if state.state == TrustState.RECOVERING:
+                status_info += f" ({state.successes_since_recovery}/{state.successes_needed})"
+
+            lines.append(f"  {state.failure_key}")
+            lines.append(f"    State: {status_info}")
+            if state.escalation_reason:
+                lines.append(f"    Reason: {state.escalation_reason}")
+
+        lines.append("-" * 60)
+        lines.append(f"{len(escalated)} escalated, {len(self._tool_states) - len(escalated)} trusted")
+
+        return "\n".join(lines)
+
+    def _cmd_recovery(self, args: str) -> str:
+        """Set recovery mode."""
+        mode = args.strip().lower() if args else ""
+        if mode == "auto":
+            self._config.enable_auto_recovery = True
+            return "Recovery mode set to AUTO"
+        elif mode == "ask":
+            self._config.enable_auto_recovery = False
+            return "Recovery mode set to ASK"
+        else:
+            current = "auto" if self._config.enable_auto_recovery else "ask"
+            return f"Current recovery mode: {current}\nUsage: reliability recovery auto|ask"
+
+    def _cmd_reset(self, args: str) -> str:
+        """Reset a tool."""
+        key = args.strip() if args else ""
+        if not key:
+            return "Usage: reliability reset <failure_key>\nUse tab completion to see escalated tools"
+
+        if key == "all":
+            count = self.reset_all()
+            return f"Reset {count} tools to TRUSTED"
+
+        if self.reset_tool(key):
+            return f"Reset '{key}' to TRUSTED"
+        else:
+            return f"Tool '{key}' not found in reliability tracking"
+
+    def _cmd_history(self, args: str) -> str:
+        """Show failure history."""
+        limit = 10
+        if args:
+            try:
+                parts = args.split()
+                if len(parts) >= 2 and parts[0] == "limit":
+                    limit = int(parts[1])
+            except ValueError:
+                pass
+
+        recent = self._failure_history[-limit:]
+        if not recent:
+            return "No failure history"
+
+        lines = [f"Recent failures (last {len(recent)}):"]
+        for record in reversed(recent):
+            time_str = record.timestamp.strftime("%H:%M:%S")
+            lines.append(
+                f"  [{time_str}] {record.failure_key} "
+                f"({record.severity.value}): {record.error_message[:50]}"
+            )
+
+        return "\n".join(lines)
+
+    def _cmd_config(self) -> str:
+        """Show current configuration."""
+        rule = self._config.default_rule
+        return (
+            f"Reliability Configuration:\n"
+            f"  Count threshold: {rule.count_threshold}\n"
+            f"  Window: {rule.window_seconds}s\n"
+            f"  Escalation duration: {rule.escalation_duration_seconds}s\n"
+            f"  Recovery successes needed: {rule.success_count_to_recover}\n"
+            f"  Auto recovery: {self._config.enable_auto_recovery}\n"
+            f"  Max history: {self._config.max_history_entries}"
+        )
+
+
+def create_plugin(config: Optional[Dict[str, Any]] = None) -> ReliabilityPlugin:
+    """Factory function to create the plugin."""
+    reliability_config = None
+    if config:
+        # Could parse config dict into ReliabilityConfig here
+        pass
+    return ReliabilityPlugin(reliability_config)
