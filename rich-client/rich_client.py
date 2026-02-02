@@ -2019,17 +2019,63 @@ class RichClient:
         subcommand = parts[1] if len(parts) > 1 else ""
 
         if subcommand == 'help':
-            self._display.add_system_message("Screenshot - Capture TUI state", "bold")
-            self._display.add_system_message("")
-            self._display.add_system_message("Usage:")
-            self._display.add_system_message("  screenshot              Capture and send hint to model", "dim")
-            self._display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
-            self._display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
-            self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
-            self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
-            self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
-            self._display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
-            self._display.add_system_message("  screenshot help         Show this help", "dim")
+            self._display.show_lines([
+                ("Screenshot Command", "bold"),
+                ("", ""),
+                ("Capture the TUI state as an image for vision analysis or debugging.", ""),
+                ("Captures can be sent to the model as hints or saved for later use.", ""),
+                ("", ""),
+                ("USAGE", "bold"),
+                ("    screenshot [subcommand] [args]", ""),
+                ("", ""),
+                ("SUBCOMMANDS", "bold"),
+                ("    (none)            Capture TUI and send path hint to model", "dim"),
+                ("                      Model receives the path to read the image", "dim"),
+                ("", ""),
+                ("    nosend            Capture TUI without sending hint to model", "dim"),
+                ("                      Useful for manual inspection", "dim"),
+                ("", ""),
+                ("    copy              Capture and copy to clipboard as PNG", "dim"),
+                ("                      Requires clipboard support (xclip/pbcopy)", "dim"),
+                ("", ""),
+                ("    format [F]        Show or set output format", "dim"),
+                ("                      Available: svg, png, html", "dim"),
+                ("", ""),
+                ("    auto              Toggle auto-capture on turn end", "dim"),
+                ("                      Automatically captures after each model turn", "dim"),
+                ("", ""),
+                ("    interval <N>      Set periodic capture interval in ms", "dim"),
+                ("                      Use 0 to disable (default)", "dim"),
+                ("", ""),
+                ("    delay <N>         Capture once after N seconds", "dim"),
+                ("                      Default: 5 seconds", "dim"),
+                ("", ""),
+                ("    help              Show this help message", "dim"),
+                ("", ""),
+                ("EXAMPLES", "bold"),
+                ("    screenshot                    Capture and hint model", "dim"),
+                ("    screenshot nosend             Capture without hint", "dim"),
+                ("    screenshot copy               Capture to clipboard", "dim"),
+                ("    screenshot format png         Switch to PNG output", "dim"),
+                ("    screenshot auto               Toggle auto-capture", "dim"),
+                ("    screenshot interval 5000      Capture every 5 seconds", "dim"),
+                ("    screenshot delay 3            Capture in 3 seconds", "dim"),
+                ("", ""),
+                ("OUTPUT FORMATS", "bold"),
+                ("    svg               Scalable vector (default, best quality)", "dim"),
+                ("    png               Raster image (requires cairosvg)", "dim"),
+                ("    html              HTML with embedded styles", "dim"),
+                ("", ""),
+                ("OUTPUT DIRECTORY", "bold"),
+                ("    Captures are saved to $JAATO_VISION_DIR", ""),
+                ("    Default: /tmp/jaato_vision", "dim"),
+                ("", ""),
+                ("NOTES", "bold"),
+                ("    - SVG format preserves text and is searchable", "dim"),
+                ("    - PNG requires cairosvg package for conversion", "dim"),
+                ("    - Auto-capture helps debug streaming output", "dim"),
+                ("    - Hint includes <tui-screenshot> tag for model", "dim"),
+            ])
             return
 
         if subcommand == 'format':
@@ -2944,17 +2990,63 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
     subcommand = parts[1] if len(parts) > 1 else ""
 
     if subcommand == 'help':
-        display.add_system_message("Screenshot - Capture TUI state", "bold")
-        display.add_system_message("")
-        display.add_system_message("Usage:")
-        display.add_system_message("  screenshot              Capture and send hint to model", "dim")
-        display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
-        display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
-        display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
-        display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
-        display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
-        display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
-        display.add_system_message("  screenshot help         Show this help", "dim")
+        display.show_lines([
+            ("Screenshot Command", "bold"),
+            ("", ""),
+            ("Capture the TUI state as an image for vision analysis or debugging.", ""),
+            ("Captures can be sent to the model as hints or saved for later use.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    screenshot [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    (none)            Capture TUI and send path hint to model", "dim"),
+            ("                      Model receives the path to read the image", "dim"),
+            ("", ""),
+            ("    nosend            Capture TUI without sending hint to model", "dim"),
+            ("                      Useful for manual inspection", "dim"),
+            ("", ""),
+            ("    copy              Capture and copy to clipboard as PNG", "dim"),
+            ("                      Requires clipboard support (xclip/pbcopy)", "dim"),
+            ("", ""),
+            ("    format [F]        Show or set output format", "dim"),
+            ("                      Available: svg, png, html", "dim"),
+            ("", ""),
+            ("    auto              Toggle auto-capture on turn end", "dim"),
+            ("                      Automatically captures after each model turn", "dim"),
+            ("", ""),
+            ("    interval <N>      Set periodic capture interval in ms", "dim"),
+            ("                      Use 0 to disable (default)", "dim"),
+            ("", ""),
+            ("    delay <N>         Capture once after N seconds", "dim"),
+            ("                      Default: 5 seconds", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    screenshot                    Capture and hint model", "dim"),
+            ("    screenshot nosend             Capture without hint", "dim"),
+            ("    screenshot copy               Capture to clipboard", "dim"),
+            ("    screenshot format png         Switch to PNG output", "dim"),
+            ("    screenshot auto               Toggle auto-capture", "dim"),
+            ("    screenshot interval 5000      Capture every 5 seconds", "dim"),
+            ("    screenshot delay 3            Capture in 3 seconds", "dim"),
+            ("", ""),
+            ("OUTPUT FORMATS", "bold"),
+            ("    svg               Scalable vector (default, best quality)", "dim"),
+            ("    png               Raster image (requires cairosvg)", "dim"),
+            ("    html              HTML with embedded styles", "dim"),
+            ("", ""),
+            ("OUTPUT DIRECTORY", "bold"),
+            ("    Captures are saved to $JAATO_VISION_DIR", ""),
+            ("    Default: /tmp/jaato_vision", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - SVG format preserves text and is searchable", "dim"),
+            ("    - PNG requires cairosvg package for conversion", "dim"),
+            ("    - Auto-capture helps debug streaming output", "dim"),
+            ("    - Hint includes <tui-screenshot> tag for model", "dim"),
+        ])
         return
 
     if subcommand == 'format':
