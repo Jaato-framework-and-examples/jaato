@@ -13,6 +13,7 @@ from ..base import (
 )
 from ..model_provider.types import ToolSchema
 from .types import (
+    EscalationInfo,
     EscalationRule,
     FailureKey,
     FailureRecord,
@@ -53,6 +54,14 @@ class ReliabilityPlugin:
 
         # Workspace path for persistence
         self._workspace_path: Optional[str] = None
+
+        # Event callbacks for UI integration
+        # on_escalated: (failure_key, state, reason) -> None
+        self._on_escalated: Optional[Callable[[str, TrustState, str], None]] = None
+        # on_recovered: (failure_key, state) -> None
+        self._on_recovered: Optional[Callable[[str, TrustState], None]] = None
+        # on_blocked: (failure_key, reason) -> None
+        self._on_blocked: Optional[Callable[[str, str], None]] = None
 
     @property
     def name(self) -> str:
@@ -177,6 +186,29 @@ class ReliabilityPlugin:
         """Update current turn index."""
         self._turn_index = turn_index
 
+    def set_reliability_hooks(
+        self,
+        on_escalated: Optional[Callable[[str, TrustState, str], None]] = None,
+        on_recovered: Optional[Callable[[str, TrustState], None]] = None,
+        on_blocked: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        """Set hooks for reliability lifecycle events.
+
+        These hooks enable UI integration by notifying when tools are
+        escalated, recovered, or blocked.
+
+        Args:
+            on_escalated: Called when a tool is escalated to require approval.
+                Signature: (failure_key, state, reason) -> None
+            on_recovered: Called when a tool recovers to trusted state.
+                Signature: (failure_key, state) -> None
+            on_blocked: Called when a tool is blocked due to security concern.
+                Signature: (failure_key, reason) -> None
+        """
+        self._on_escalated = on_escalated
+        self._on_recovered = on_recovered
+        self._on_blocked = on_blocked
+
     # -------------------------------------------------------------------------
     # Core Failure Tracking
     # -------------------------------------------------------------------------
@@ -293,7 +325,8 @@ class ReliabilityPlugin:
         should_escalate = False
         reason = ""
 
-        if rule.count_threshold and state.failures_in_window >= rule.count_threshold:
+        # Use small tolerance for floating-point comparison due to time decay
+        if rule.count_threshold and state.failures_in_window >= (rule.count_threshold - 0.01):
             should_escalate = True
             reason = f"{int(state.failures_in_window)} failures in {rule.window_seconds}s"
 
@@ -307,11 +340,16 @@ class ReliabilityPlugin:
                 should_escalate = True
                 reason = f"{rate:.0%} failure rate"
 
-        # Critical severity always escalates
+        # Critical severity always escalates to BLOCKED
         if severity == FailureSeverity.SECURITY:
             should_escalate = True
+            was_blocked = state.state == TrustState.BLOCKED
             state.state = TrustState.BLOCKED
             reason = "Security concern detected"
+
+            # Emit blocked hook
+            if not was_blocked and self._on_blocked:
+                self._on_blocked(failure_key.to_string(), reason)
 
         # Apply escalation if needed
         if should_escalate and state.state == TrustState.TRUSTED:
@@ -324,11 +362,23 @@ class ReliabilityPlugin:
             if rule.notify_user:
                 self._notify_escalation(state)
 
+            # Emit escalated hook
+            if self._on_escalated:
+                self._on_escalated(failure_key.to_string(), state.state, reason)
+
         # If recovering, reset recovery progress
         elif state.state == TrustState.RECOVERING:
             state.state = TrustState.ESCALATED
             state.recovery_started = None
             state.successes_since_recovery = 0
+
+            # Emit escalated hook (re-escalation from recovering)
+            if self._on_escalated:
+                self._on_escalated(
+                    failure_key.to_string(),
+                    state.state,
+                    "Recovery interrupted by failure"
+                )
 
         logger.debug(
             f"Failure recorded: {failure_key.to_string()} "
@@ -372,6 +422,11 @@ class ReliabilityPlugin:
                 state.successes_since_recovery = 0
                 self._notify_recovery(state)
                 logger.info(f"Tool {state.failure_key} recovered to TRUSTED")
+
+                # Emit recovered hook
+                if self._on_recovered:
+                    self._on_recovered(state.failure_key, state.state)
+
                 return state
 
         return None  # No significant state change
@@ -443,6 +498,89 @@ class ReliabilityPlugin:
             return (True, state.escalation_reason)
 
         return (False, None)
+
+    def check_escalation(self, tool_name: str, args: Dict[str, Any]) -> EscalationInfo:
+        """Check escalation status with rich details for permission prompts.
+
+        This method provides detailed escalation information including:
+        - Whether the tool is escalated
+        - The reason for escalation
+        - Recovery progress if applicable
+        - Display-ready summary for permission prompts
+
+        Args:
+            tool_name: Name of the tool to check
+            args: Arguments for the tool invocation
+
+        Returns:
+            EscalationInfo with full escalation context
+        """
+        failure_key = FailureKey.from_invocation(tool_name, args)
+        key_str = failure_key.to_string()
+        state = self._tool_states.get(key_str)
+
+        if not state:
+            return EscalationInfo(is_escalated=False)
+
+        if state.state == TrustState.TRUSTED:
+            return EscalationInfo(is_escalated=False, state=state.state)
+
+        # Build escalation info
+        is_escalated = state.state in (TrustState.ESCALATED, TrustState.BLOCKED, TrustState.RECOVERING)
+
+        # Determine severity label
+        if state.state == TrustState.BLOCKED:
+            severity_label = "🚫 BLOCKED"
+        elif state.state == TrustState.ESCALATED:
+            severity_label = "⚠ ESCALATED"
+        elif state.state == TrustState.RECOVERING:
+            severity_label = "↻ RECOVERING"
+        else:
+            severity_label = None
+
+        # Build window description
+        window_desc = None
+        rule = self._config.get_rule_for_tool(tool_name)
+        if state.failures_in_window > 0:
+            window_hours = rule.window_seconds / 3600
+            if window_hours >= 1:
+                window_desc = f"{int(state.failures_in_window)} failures in {window_hours:.0f}h"
+            else:
+                window_desc = f"{int(state.failures_in_window)} failures in {rule.window_seconds}s"
+
+        # Recovery progress
+        recovery_progress = None
+        recovery_hint = None
+        if state.state == TrustState.RECOVERING:
+            recovery_progress = f"{state.successes_since_recovery}/{state.successes_needed} successes"
+            remaining = state.successes_needed - state.successes_since_recovery
+            if remaining > 0:
+                recovery_hint = f"{remaining} more success{'es' if remaining > 1 else ''} needed to recover"
+        elif state.state == TrustState.ESCALATED and state.escalation_expires:
+            remaining_time = state.escalation_expires - datetime.now()
+            if remaining_time.total_seconds() > 0:
+                minutes = int(remaining_time.total_seconds() / 60)
+                recovery_hint = f"Cooldown: {minutes}m before recovery eligible"
+
+        # Build summary
+        summary_parts = []
+        if state.tool_name:
+            summary_parts.append(f"Tool '{state.tool_name}'")
+        if state.escalation_reason:
+            summary_parts.append(state.escalation_reason)
+        summary = " - ".join(summary_parts) if summary_parts else None
+
+        return EscalationInfo(
+            is_escalated=is_escalated,
+            state=state.state,
+            reason=state.escalation_reason,
+            failure_count=state.total_failures,
+            window_description=window_desc,
+            recovery_progress=recovery_progress,
+            recovery_hint=recovery_hint,
+            severity_label=severity_label,
+            summary=summary,
+        )
 
     # -------------------------------------------------------------------------
     # Manual State Management
@@ -704,3 +842,207 @@ def create_plugin(config: Optional[Dict[str, Any]] = None) -> ReliabilityPlugin:
         # Could parse config dict into ReliabilityConfig here
         pass
     return ReliabilityPlugin(reliability_config)
+
+
+# -----------------------------------------------------------------------------
+# Permission Integration
+# -----------------------------------------------------------------------------
+
+
+class ReliabilityPermissionWrapper:
+    """Wraps permission plugin to inject reliability-based escalation.
+
+    This wrapper intercepts permission checks and forces approval prompts
+    for tools that have been escalated due to reliability concerns, even
+    if they would normally be auto-approved via whitelist.
+
+    Usage:
+        permission_plugin = PermissionPlugin()
+        reliability_plugin = ReliabilityPlugin()
+
+        # Wrap the permission plugin
+        wrapped = ReliabilityPermissionWrapper(permission_plugin, reliability_plugin)
+
+        # Use wrapped plugin for permission checks
+        executor.set_permission_plugin(wrapped)
+    """
+
+    def __init__(self, inner, reliability: ReliabilityPlugin):
+        """Initialize wrapper.
+
+        Args:
+            inner: The permission plugin to wrap (PermissionPlugin instance)
+            reliability: The reliability plugin for escalation checks
+        """
+        self._inner = inner
+        self._reliability = reliability
+
+    def __getattr__(self, name):
+        """Delegate attribute access to inner plugin."""
+        return getattr(self._inner, name)
+
+    def check_permission(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        call_id: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Check permission with reliability overlay.
+
+        If the tool is escalated due to reliability concerns, this forces
+        a permission prompt even if the tool would normally be whitelisted.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+            context: Optional context (session_id, turn_number, etc.)
+            call_id: Optional call identifier for parallel tool matching
+
+        Returns:
+            Tuple of (is_allowed, metadata_dict)
+        """
+        # Check if tool is escalated due to reliability
+        escalation = self._reliability.check_escalation(tool_name, args)
+
+        if escalation.is_escalated:
+            # Force approval even if whitelisted
+            return self._force_approval_check(
+                tool_name, args, context, call_id, escalation
+            )
+
+        # Otherwise: delegate to inner permission plugin
+        return self._inner.check_permission(tool_name, args, context, call_id)
+
+    def _force_approval_check(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+        call_id: Optional[str],
+        escalation: EscalationInfo,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Override whitelist to require explicit approval.
+
+        Modifies the context to include escalation information, then
+        temporarily forces the permission policy to "ask" for this tool.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+            context: Optional context dict
+            call_id: Optional call identifier
+            escalation: Escalation info from reliability check
+
+        Returns:
+            Tuple of (is_allowed, metadata_dict)
+        """
+        # Build enhanced context with escalation info
+        enhanced_context = dict(context) if context else {}
+        enhanced_context["_reliability_escalation"] = {
+            "is_escalated": True,
+            "state": escalation.state.value,
+            "reason": escalation.reason,
+            "failure_count": escalation.failure_count,
+            "window_description": escalation.window_description,
+            "recovery_progress": escalation.recovery_progress,
+            "recovery_hint": escalation.recovery_hint,
+            "severity_label": escalation.severity_label,
+            "display_lines": escalation.to_display_lines(),
+        }
+
+        # Check if inner plugin has policy to manipulate
+        inner_policy = getattr(self._inner, '_policy', None)
+
+        if inner_policy is not None:
+            # Temporarily remove tool from whitelist to force prompt
+            was_in_whitelist = tool_name in inner_policy.whitelist_tools
+            was_in_session_whitelist = tool_name in inner_policy.session_whitelist
+
+            if was_in_whitelist:
+                inner_policy.whitelist_tools.discard(tool_name)
+            if was_in_session_whitelist:
+                inner_policy.session_whitelist.discard(tool_name)
+
+            try:
+                # Call inner check with modified policy
+                allowed, info = self._inner.check_permission(
+                    tool_name, args, enhanced_context, call_id
+                )
+
+                # Add reliability metadata to result
+                info["_reliability"] = {
+                    "escalated": True,
+                    "state": escalation.state.value,
+                    "reason": escalation.reason,
+                }
+
+                return allowed, info
+            finally:
+                # Restore whitelist state
+                if was_in_whitelist:
+                    inner_policy.whitelist_tools.add(tool_name)
+                if was_in_session_whitelist:
+                    inner_policy.session_whitelist.add(tool_name)
+        else:
+            # No policy access, just delegate with enhanced context
+            allowed, info = self._inner.check_permission(
+                tool_name, args, enhanced_context, call_id
+            )
+            info["_reliability"] = {
+                "escalated": True,
+                "state": escalation.state.value,
+                "reason": escalation.reason,
+            }
+            return allowed, info
+
+    def get_formatted_prompt(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        channel_type: str = "ipc",
+    ) -> Tuple[List[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """Get formatted prompt with reliability info if escalated.
+
+        Enhances the inner plugin's formatted prompt with reliability
+        escalation information when applicable.
+
+        Returns:
+            Tuple of (prompt_lines, format_hint, language, raw_details, warnings, warning_level)
+        """
+        # Get escalation info
+        escalation = self._reliability.check_escalation(tool_name, args)
+
+        # Get base prompt from inner plugin
+        result = self._inner.get_formatted_prompt(tool_name, args, channel_type)
+        prompt_lines, format_hint, language, raw_details, warnings, warning_level = result
+
+        if escalation.is_escalated:
+            # Prepend reliability warning to prompt
+            reliability_lines = escalation.to_display_lines()
+            if reliability_lines:
+                # Add separator
+                reliability_lines.append("")
+                # Combine with original prompt
+                prompt_lines = reliability_lines + prompt_lines
+
+            # Upgrade warning level if needed
+            if escalation.state == TrustState.BLOCKED:
+                warning_level = "error"
+            elif escalation.state == TrustState.ESCALATED and warning_level != "error":
+                warning_level = "warning"
+
+        return prompt_lines, format_hint, language, raw_details, warnings, warning_level
+
+
+def wrap_permission_plugin(permission_plugin, reliability_plugin: ReliabilityPlugin):
+    """Convenience function to wrap a permission plugin with reliability checks.
+
+    Args:
+        permission_plugin: The PermissionPlugin instance to wrap
+        reliability_plugin: The ReliabilityPlugin instance for escalation checks
+
+    Returns:
+        ReliabilityPermissionWrapper that can be used in place of the permission plugin
+    """
+    return ReliabilityPermissionWrapper(permission_plugin, reliability_plugin)

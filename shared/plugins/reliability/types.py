@@ -43,6 +43,65 @@ class TrustState(Enum):
 
 
 @dataclass
+class EscalationInfo:
+    """Information about escalation status for a tool invocation.
+
+    Returned by check_escalation() for use in permission prompts.
+    """
+
+    is_escalated: bool
+    state: TrustState = TrustState.TRUSTED
+
+    # Escalation details (only if is_escalated=True)
+    reason: Optional[str] = None
+    failure_count: int = 0
+    window_description: Optional[str] = None  # e.g., "3 failures in 1 hour"
+
+    # Recovery info
+    recovery_progress: Optional[str] = None   # e.g., "1/3 successes"
+    recovery_hint: Optional[str] = None       # e.g., "2 more successes needed"
+
+    # Display formatting
+    severity_label: Optional[str] = None      # e.g., "⚠ ESCALATED", "🚫 BLOCKED"
+    summary: Optional[str] = None             # Brief summary for permission prompt
+
+    def to_display_lines(self) -> List[str]:
+        """Format escalation info for permission prompt display."""
+        if not self.is_escalated:
+            return []
+
+        lines = []
+
+        # Header with severity
+        if self.severity_label:
+            lines.append(f"{self.severity_label}")
+        elif self.state == TrustState.BLOCKED:
+            lines.append("🚫 BLOCKED - Security concern")
+        elif self.state == TrustState.ESCALATED:
+            lines.append("⚠ ESCALATED - Requires approval")
+        elif self.state == TrustState.RECOVERING:
+            lines.append("↻ RECOVERING - Proving reliability")
+
+        # Reason
+        if self.reason:
+            lines.append(f"   Reason: {self.reason}")
+
+        # Window description
+        if self.window_description:
+            lines.append(f"   History: {self.window_description}")
+
+        # Recovery progress
+        if self.recovery_progress:
+            lines.append(f"   Progress: {self.recovery_progress}")
+
+        # Hint
+        if self.recovery_hint:
+            lines.append(f"   Note: {self.recovery_hint}")
+
+        return lines
+
+
+@dataclass
 class FailureKey:
     """Identifies a specific tool+parameters combination for tracking."""
 

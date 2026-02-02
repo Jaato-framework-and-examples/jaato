@@ -4,6 +4,7 @@ import pytest
 from datetime import datetime, timedelta
 
 from ..types import (
+    EscalationInfo,
     EscalationRule,
     FailureKey,
     FailureRecord,
@@ -13,7 +14,7 @@ from ..types import (
     TrustState,
     classify_failure,
 )
-from ..plugin import ReliabilityPlugin
+from ..plugin import ReliabilityPlugin, ReliabilityPermissionWrapper
 
 
 class TestFailureKey:
@@ -411,3 +412,324 @@ class TestReliabilityPluginCommands:
 
         output = plugin.handle_command("recovery", "ask")
         assert "ASK" in output
+
+
+class TestEscalationInfo:
+    """Tests for EscalationInfo and check_escalation method."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin instance for testing."""
+        config = ReliabilityConfig(
+            default_rule=EscalationRule(
+                count_threshold=3,
+                window_seconds=3600,
+                escalation_duration_seconds=1800,
+                success_count_to_recover=2,
+            )
+        )
+        return ReliabilityPlugin(config)
+
+    def test_check_escalation_not_escalated(self, plugin):
+        """Test check_escalation for a tool that is not tracked."""
+        from ..types import EscalationInfo
+
+        info = plugin.check_escalation("readFile", {"path": "/tmp/test.txt"})
+        assert info.is_escalated is False
+        assert info.state == TrustState.TRUSTED
+
+    def test_check_escalation_after_failures(self, plugin):
+        """Test check_escalation returns rich info for escalated tool."""
+        from ..types import EscalationInfo
+
+        # Generate failures to escalate
+        for i in range(3):
+            plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://api.failing.com/test"},
+                success=False,
+                result={"error": "Service unavailable", "http_status": 503},
+                call_id=f"call_{i}",
+            )
+
+        info = plugin.check_escalation("http_request", {"url": "https://api.failing.com/test"})
+
+        assert info.is_escalated is True
+        assert info.state == TrustState.ESCALATED
+        assert info.reason is not None
+        assert info.failure_count == 3
+        assert info.severity_label == "⚠ ESCALATED"
+        assert "failures" in info.window_description.lower()
+
+    def test_check_escalation_recovering(self, plugin):
+        """Test check_escalation during recovery."""
+        from ..types import EscalationInfo
+
+        # Escalate
+        for i in range(3):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "ls /fail"},
+                success=False,
+                result={"error": "Command failed"},
+                call_id=f"fail_{i}",
+            )
+
+        # Expire escalation
+        key = "bash|command=ls"
+        state = plugin.get_state(key)
+        state.escalation_expires = datetime.now() - timedelta(seconds=1)
+
+        # Start recovery
+        plugin.on_tool_result(
+            tool_name="bash",
+            args={"command": "ls /success"},
+            success=True,
+            result={"output": "files"},
+            call_id="success_1",
+        )
+
+        info = plugin.check_escalation("bash", {"command": "ls /test"})
+
+        assert info.is_escalated is True
+        assert info.state == TrustState.RECOVERING
+        assert info.recovery_progress is not None
+        assert "1/2" in info.recovery_progress
+        assert info.recovery_hint is not None
+        assert info.severity_label == "↻ RECOVERING"
+
+    def test_escalation_info_to_display_lines(self):
+        """Test EscalationInfo.to_display_lines() formatting."""
+        from ..types import EscalationInfo
+
+        # Not escalated - should return empty
+        info = EscalationInfo(is_escalated=False)
+        assert info.to_display_lines() == []
+
+        # Escalated with full info
+        info = EscalationInfo(
+            is_escalated=True,
+            state=TrustState.ESCALATED,
+            reason="3 failures in 3600s",
+            failure_count=3,
+            window_description="3 failures in 1h",
+            recovery_hint="Cooldown: 25m before recovery eligible",
+            severity_label="⚠ ESCALATED",
+        )
+        lines = info.to_display_lines()
+
+        assert len(lines) >= 3
+        assert "⚠ ESCALATED" in lines[0]
+        assert "Reason:" in lines[1]
+        assert any("History:" in line for line in lines)
+
+
+class TestReliabilityHooks:
+    """Tests for reliability lifecycle hooks."""
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with hooks."""
+        config = ReliabilityConfig(
+            default_rule=EscalationRule(
+                count_threshold=3,
+                window_seconds=3600,
+                escalation_duration_seconds=1800,
+                success_count_to_recover=2,
+            )
+        )
+        return ReliabilityPlugin(config)
+
+    def test_on_escalated_hook(self, plugin):
+        """Test that on_escalated hook is called."""
+        escalation_events = []
+
+        def on_escalated(key, state, reason):
+            escalation_events.append((key, state, reason))
+
+        plugin.set_reliability_hooks(on_escalated=on_escalated)
+
+        # Trigger escalation
+        for i in range(3):
+            plugin.on_tool_result(
+                tool_name="readFile",
+                args={"path": "/etc/secret"},
+                success=False,
+                result={"error": "Permission denied"},
+                call_id=f"call_{i}",
+            )
+
+        assert len(escalation_events) == 1
+        key, state, reason = escalation_events[0]
+        assert "readFile" in key
+        assert state == TrustState.ESCALATED
+        assert "failures" in reason.lower()
+
+    def test_on_recovered_hook(self, plugin):
+        """Test that on_recovered hook is called."""
+        recovery_events = []
+
+        def on_recovered(key, state):
+            recovery_events.append((key, state))
+
+        plugin.set_reliability_hooks(on_recovered=on_recovered)
+
+        # Escalate first
+        for i in range(3):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "cat /fail"},
+                success=False,
+                result={"error": "Failed"},
+                call_id=f"fail_{i}",
+            )
+
+        # Expire escalation
+        key = "bash|command=cat"
+        state = plugin.get_state(key)
+        state.escalation_expires = datetime.now() - timedelta(seconds=1)
+
+        # Recover with successes
+        for i in range(2):
+            plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "cat /ok"},
+                success=True,
+                result={"output": "content"},
+                call_id=f"success_{i}",
+            )
+
+        assert len(recovery_events) == 1
+        key, recovered_state = recovery_events[0]
+        assert "bash" in key
+        assert recovered_state == TrustState.TRUSTED
+
+    def test_on_blocked_hook(self, plugin):
+        """Test that on_blocked hook is called for security issues."""
+        blocked_events = []
+
+        def on_blocked(key, reason):
+            blocked_events.append((key, reason))
+
+        plugin.set_reliability_hooks(on_blocked=on_blocked)
+
+        # Trigger security block
+        plugin.on_tool_result(
+            tool_name="bash",
+            args={"command": "eval malicious"},
+            success=False,
+            result={"error": "Security violation: malicious code detected"},
+            call_id="1",
+        )
+
+        assert len(blocked_events) == 1
+        key, reason = blocked_events[0]
+        assert "bash" in key
+        assert "security" in reason.lower()
+
+
+class TestPermissionWrapper:
+    """Tests for ReliabilityPermissionWrapper."""
+
+    @pytest.fixture
+    def reliability_plugin(self):
+        """Create a reliability plugin."""
+        config = ReliabilityConfig(
+            default_rule=EscalationRule(
+                count_threshold=3,
+                window_seconds=3600,
+            )
+        )
+        return ReliabilityPlugin(config)
+
+    def test_wrapper_delegates_to_inner(self, reliability_plugin):
+        """Test that wrapper delegates to inner plugin for non-escalated tools."""
+        from ..plugin import ReliabilityPermissionWrapper
+
+        # Mock inner permission plugin
+        class MockPermissionPlugin:
+            def check_permission(self, tool_name, args, context=None, call_id=None):
+                return True, {"reason": "whitelisted", "method": "whitelist"}
+
+            def get_formatted_prompt(self, tool_name, args, channel_type="ipc"):
+                return ["Tool: " + tool_name], None, None, None, None, None
+
+        inner = MockPermissionPlugin()
+        wrapper = ReliabilityPermissionWrapper(inner, reliability_plugin)
+
+        # Non-escalated tool should delegate
+        allowed, info = wrapper.check_permission("readFile", {"path": "/tmp/test"})
+        assert allowed is True
+        assert info["method"] == "whitelist"
+
+    def test_wrapper_forces_approval_for_escalated(self, reliability_plugin):
+        """Test that wrapper forces approval for escalated tools."""
+        from ..plugin import ReliabilityPermissionWrapper
+
+        # Escalate a tool
+        for i in range(3):
+            reliability_plugin.on_tool_result(
+                tool_name="http_request",
+                args={"url": "https://bad.api.com/fail"},
+                success=False,
+                result={"error": "Service error"},
+                call_id=f"call_{i}",
+            )
+
+        # Mock inner that would normally auto-approve
+        class MockPermissionPlugin:
+            def __init__(self):
+                self._policy = None  # No policy to manipulate
+
+            def check_permission(self, tool_name, args, context=None, call_id=None):
+                # Check if reliability context was added
+                if context and "_reliability_escalation" in context:
+                    return False, {"reason": "prompted for approval", "method": "channel"}
+                return True, {"reason": "whitelisted", "method": "whitelist"}
+
+            def get_formatted_prompt(self, tool_name, args, channel_type="ipc"):
+                return ["Tool: " + tool_name], None, None, None, None, None
+
+        inner = MockPermissionPlugin()
+        wrapper = ReliabilityPermissionWrapper(inner, reliability_plugin)
+
+        # Escalated tool should have reliability context
+        allowed, info = wrapper.check_permission(
+            "http_request",
+            {"url": "https://bad.api.com/fail"}
+        )
+
+        assert "_reliability" in info
+        assert info["_reliability"]["escalated"] is True
+        assert info["_reliability"]["state"] == "escalated"
+
+    def test_wrapper_enhances_prompt_for_escalated(self, reliability_plugin):
+        """Test that wrapper adds reliability info to prompts."""
+        from ..plugin import ReliabilityPermissionWrapper
+
+        # Escalate a tool
+        for i in range(3):
+            reliability_plugin.on_tool_result(
+                tool_name="bash",
+                args={"command": "rm -rf /danger"},
+                success=False,
+                result={"error": "Permission denied"},
+                call_id=f"call_{i}",
+            )
+
+        class MockPermissionPlugin:
+            def get_formatted_prompt(self, tool_name, args, channel_type="ipc"):
+                return ["Tool: " + tool_name, "Args: command"], None, None, None, None, None
+
+        inner = MockPermissionPlugin()
+        wrapper = ReliabilityPermissionWrapper(inner, reliability_plugin)
+
+        lines, fmt, lang, raw, warn, level = wrapper.get_formatted_prompt(
+            "bash",
+            {"command": "rm -rf /danger"},
+            "ipc"
+        )
+
+        # Should have reliability warning prepended
+        assert any("ESCALATED" in line for line in lines)
+        assert level == "warning"
