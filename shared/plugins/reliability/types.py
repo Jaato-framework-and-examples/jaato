@@ -578,3 +578,169 @@ class ModelSwitchConfig:
     min_success_rate_diff: float = 0.3      # Min improvement to suggest (30%)
     min_attempts: int = 3                   # Min attempts before comparing
     preferred_models: List[str] = field(default_factory=list)  # Priority order
+
+
+# -----------------------------------------------------------------------------
+# Behavioral Pattern Detection Types
+# -----------------------------------------------------------------------------
+
+
+class BehavioralPatternType(Enum):
+    """Types of behavioral patterns to detect."""
+
+    # Repetitive patterns
+    REPETITIVE_CALLS = "repetitive_calls"       # Same tool called N times with similar args
+    INTROSPECTION_LOOP = "introspection_loop"   # Stuck calling list_tools, get_schema, etc.
+
+    # Progress stalls
+    ANNOUNCE_NO_ACTION = "announce_no_action"   # Model says "proceeding" but only reads
+    READ_ONLY_LOOP = "read_only_loop"           # Only calling read tools, avoiding writes
+    PLANNING_LOOP = "planning_loop"             # Infinite planning without execution
+
+    # Avoidance patterns
+    TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
+    ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
+
+
+class PatternSeverity(Enum):
+    """Severity levels for detected patterns."""
+
+    MINOR = "minor"           # 2-3 repetitions, just starting
+    MODERATE = "moderate"     # 4-5 repetitions, clear stall
+    SEVERE = "severe"         # 6+ repetitions, intervention needed
+
+
+@dataclass
+class ToolCall:
+    """Records a tool call for pattern detection."""
+
+    tool_name: str
+    args: Dict[str, Any]
+    timestamp: datetime
+    success: Optional[bool] = None  # Set after execution
+
+
+@dataclass
+class BehavioralPattern:
+    """Records a detected behavioral pattern."""
+
+    pattern_type: BehavioralPatternType
+    detected_at: datetime
+    turn_index: int
+    session_id: str
+
+    # Pattern specifics
+    tool_sequence: List[str]              # Recent tool calls leading to detection
+    repetition_count: int                 # How many times pattern repeated
+    duration_seconds: float               # How long pattern has persisted
+
+    # Context
+    model_name: str
+    last_model_text: Optional[str] = None        # What the model said (e.g., "Proceeding now")
+    expected_action: Optional[str] = None        # What tool should have been called
+
+    # Severity
+    severity: PatternSeverity = PatternSeverity.MINOR
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "pattern_type": self.pattern_type.value,
+            "detected_at": self.detected_at.isoformat(),
+            "turn_index": self.turn_index,
+            "session_id": self.session_id,
+            "tool_sequence": self.tool_sequence,
+            "repetition_count": self.repetition_count,
+            "duration_seconds": self.duration_seconds,
+            "model_name": self.model_name,
+            "last_model_text": self.last_model_text,
+            "expected_action": self.expected_action,
+            "severity": self.severity.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BehavioralPattern":
+        """Deserialize from dictionary."""
+        return cls(
+            pattern_type=BehavioralPatternType(data["pattern_type"]),
+            detected_at=datetime.fromisoformat(data["detected_at"]),
+            turn_index=data["turn_index"],
+            session_id=data["session_id"],
+            tool_sequence=data["tool_sequence"],
+            repetition_count=data["repetition_count"],
+            duration_seconds=data["duration_seconds"],
+            model_name=data["model_name"],
+            last_model_text=data.get("last_model_text"),
+            expected_action=data.get("expected_action"),
+            severity=PatternSeverity(data.get("severity", "minor")),
+        )
+
+    def to_display_lines(self) -> List[str]:
+        """Format pattern for display."""
+        severity_icons = {
+            PatternSeverity.MINOR: "⚡",
+            PatternSeverity.MODERATE: "⚠",
+            PatternSeverity.SEVERE: "🚨",
+        }
+        icon = severity_icons.get(self.severity, "")
+
+        lines = [
+            f"{icon} {self.pattern_type.value.replace('_', ' ').title()}",
+            f"  Severity: {self.severity.value}",
+            f"  Repetitions: {self.repetition_count}",
+        ]
+
+        if self.tool_sequence:
+            recent = self.tool_sequence[-5:]  # Last 5 tools
+            lines.append(f"  Recent tools: {' → '.join(recent)}")
+
+        if self.last_model_text:
+            truncated = self.last_model_text[:100]
+            if len(self.last_model_text) > 100:
+                truncated += "..."
+            lines.append(f"  Model said: \"{truncated}\"")
+
+        if self.expected_action:
+            lines.append(f"  Expected: {self.expected_action}")
+
+        return lines
+
+
+@dataclass
+class PatternDetectionConfig:
+    """Configuration for behavioral pattern detection."""
+
+    enabled: bool = True
+
+    # Repetition thresholds
+    repetitive_call_threshold: int = 3        # Same tool N times triggers detection
+    introspection_tool_names: Set[str] = field(
+        default_factory=lambda: {"list_tools", "get_tool_schemas", "askPermission"}
+    )
+    introspection_loop_threshold: int = 2     # N introspection calls without action
+
+    # Progress tracking
+    read_only_tools: Set[str] = field(
+        default_factory=lambda: {"readFile", "list_tools", "get_tool_schemas", "glob", "grep", "Read", "Glob", "Grep"}
+    )
+    action_tools: Set[str] = field(
+        default_factory=lambda: {"writeFile", "updateFile", "bash", "removeFile", "Write", "Edit", "Bash"}
+    )
+    max_reads_before_action: int = 5          # N reads without action = stall
+
+    # Time-based
+    max_turn_duration_seconds: float = 120.0  # Turn taking too long = possible stall
+
+    # Announce detection (requires text analysis)
+    announce_phrases: List[str] = field(
+        default_factory=lambda: [
+            "proceeding now",
+            "let me",
+            "i'll now",
+            "i will now",
+            "executing",
+            "running",
+            "starting",
+            "making the change",
+        ]
+    )

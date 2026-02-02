@@ -13,6 +13,7 @@ from ..base import (
 )
 from ..model_provider.types import ToolSchema
 from .types import (
+    BehavioralPattern,
     EscalationInfo,
     EscalationRule,
     FailureKey,
@@ -22,6 +23,7 @@ from .types import (
     ModelSwitchStrategy,
     ModelSwitchSuggestion,
     ModelToolProfile,
+    PatternDetectionConfig,
     ReliabilityConfig,
     ToolReliabilityState,
     TrustState,
@@ -32,6 +34,7 @@ from .persistence import (
     SessionSettings,
     SessionReliabilityState,
 )
+from .patterns import PatternDetector
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,12 @@ class ReliabilityPlugin:
         self._current_model: str = ""
         self._model_switch_config = ModelSwitchConfig()
         self._available_models: List[str] = []
+
+        # Behavioral pattern detection
+        self._pattern_config = PatternDetectionConfig()
+        self._pattern_detector: Optional[PatternDetector] = None
+        # on_pattern_detected: (pattern) -> None
+        self._on_pattern_detected: Optional[Callable[[BehavioralPattern], None]] = None
 
     @property
     def name(self) -> str:
@@ -149,6 +158,7 @@ class ReliabilityPlugin:
                 CommandCompletion("config", "Show current configuration"),
                 CommandCompletion("settings", "Show or save settings"),
                 CommandCompletion("model", "Model-specific reliability tracking"),
+                CommandCompletion("patterns", "Behavioral pattern detection"),
             ]
 
         if len(command_parts) == 2:
@@ -179,6 +189,14 @@ class ReliabilityPlugin:
                     CommandCompletion("suggest", "Enable model switch suggestions"),
                     CommandCompletion("auto", "Enable automatic model switching"),
                     CommandCompletion("disabled", "Disable model switching"),
+                ]
+            elif subcommand == "patterns":
+                return [
+                    CommandCompletion("status", "Show pattern detection status"),
+                    CommandCompletion("enable", "Enable pattern detection"),
+                    CommandCompletion("disable", "Disable pattern detection"),
+                    CommandCompletion("history", "Show detected patterns"),
+                    CommandCompletion("clear", "Clear pattern history"),
                 ]
 
         if len(command_parts) == 3:
@@ -331,6 +349,119 @@ class ReliabilityPlugin:
         self._model_switch_config = config
 
     # -------------------------------------------------------------------------
+    # Behavioral Pattern Detection
+    # -------------------------------------------------------------------------
+
+    def set_pattern_detection_config(self, config: PatternDetectionConfig) -> None:
+        """Set pattern detection configuration."""
+        self._pattern_config = config
+        if self._pattern_detector:
+            self._pattern_detector._config = config
+
+    def enable_pattern_detection(self, enabled: bool = True) -> None:
+        """Enable or disable behavioral pattern detection.
+
+        When enabled, the plugin will track tool calls and model outputs
+        to detect stall patterns like repetitive calls and introspection loops.
+
+        Args:
+            enabled: Whether to enable pattern detection
+        """
+        if enabled and not self._pattern_detector:
+            self._pattern_detector = PatternDetector(
+                config=self._pattern_config,
+                session_id=self._session_id,
+                model_name=self._current_model,
+            )
+            if self._on_pattern_detected:
+                self._pattern_detector.set_pattern_hook(self._on_pattern_detected)
+        elif not enabled:
+            self._pattern_detector = None
+
+    def set_pattern_hook(
+        self,
+        on_pattern_detected: Optional[Callable[[BehavioralPattern], None]] = None,
+    ) -> None:
+        """Set hook for pattern detection events.
+
+        Args:
+            on_pattern_detected: Called when a behavioral pattern is detected.
+                Signature: (pattern: BehavioralPattern) -> None
+        """
+        self._on_pattern_detected = on_pattern_detected
+        if self._pattern_detector:
+            self._pattern_detector.set_pattern_hook(on_pattern_detected)
+
+    def on_turn_start(self, turn_index: int) -> None:
+        """Called when a new turn begins. Resets pattern detection state.
+
+        Args:
+            turn_index: The index of the new turn
+        """
+        self._turn_index = turn_index
+        if self._pattern_detector:
+            self._pattern_detector.on_turn_start(turn_index)
+
+    def on_turn_end(self) -> Optional[BehavioralPattern]:
+        """Called when a turn ends. Checks for announce-no-action patterns.
+
+        Returns:
+            BehavioralPattern if detected, None otherwise
+        """
+        if self._pattern_detector:
+            return self._pattern_detector.on_turn_end()
+        return None
+
+    def on_tool_called(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+    ) -> Optional[BehavioralPattern]:
+        """Hook called BEFORE tool execution for pattern detection.
+
+        This should be called before on_tool_result to enable pattern
+        detection for repetitive calls, introspection loops, etc.
+
+        Args:
+            tool_name: Name of the tool being called
+            args: Arguments to the tool
+
+        Returns:
+            BehavioralPattern if a stall pattern is detected, None otherwise
+        """
+        if self._pattern_detector:
+            return self._pattern_detector.on_tool_called(tool_name, args)
+        return None
+
+    def on_model_text(self, text: str) -> None:
+        """Hook for model text output to track announcements.
+
+        This enables detection of "announce-no-action" patterns where
+        the model says "I'll do X" but doesn't follow through.
+
+        Args:
+            text: The text output by the model
+        """
+        if self._pattern_detector:
+            self._pattern_detector.on_model_text(text)
+
+    def get_pattern_detector(self) -> Optional[PatternDetector]:
+        """Get the pattern detector instance (if enabled)."""
+        return self._pattern_detector
+
+    def get_detected_patterns(self) -> List[BehavioralPattern]:
+        """Get all detected behavioral patterns."""
+        if self._pattern_detector:
+            return self._pattern_detector.get_detected_patterns()
+        return []
+
+    def get_pattern_summary(self) -> Dict[str, Any]:
+        """Get summary of detected patterns."""
+        if self._pattern_detector:
+            return self._pattern_detector.get_pattern_summary()
+        return {"total": 0, "by_type": {}, "by_severity": {}, "enabled": False}
+
+    # -------------------------------------------------------------------------
     # Core Failure Tracking
     # -------------------------------------------------------------------------
 
@@ -366,6 +497,10 @@ class ReliabilityPlugin:
         # Track model-specific reliability if model context is set
         if self._current_model:
             self._track_model_attempt(key_str, tool_name, is_failure)
+
+        # Notify pattern detector of tool result
+        if self._pattern_detector:
+            self._pattern_detector.on_tool_result(tool_name, success, result)
 
         # Get or create state
         state = self._get_or_create_state(key_str, tool_name)
@@ -1076,8 +1211,10 @@ class ReliabilityPlugin:
             return self._cmd_settings(args)
         elif subcommand == "model":
             return self._cmd_model(args)
+        elif subcommand == "patterns":
+            return self._cmd_patterns(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model"
+            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns"
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -1427,6 +1564,95 @@ class ReliabilityPlugin:
             )
 
         lines.append("-" * 60)
+        return "\n".join(lines)
+
+    def _cmd_patterns(self, args: str) -> str:
+        """Handle pattern detection commands."""
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "status":
+            return self._patterns_status()
+        elif parts[0] == "enable":
+            self.enable_pattern_detection(True)
+            return "Behavioral pattern detection ENABLED"
+        elif parts[0] == "disable":
+            self.enable_pattern_detection(False)
+            return "Behavioral pattern detection DISABLED"
+        elif parts[0] == "history":
+            return self._patterns_history(int(parts[1]) if len(parts) > 1 else 10)
+        elif parts[0] == "clear":
+            if self._pattern_detector:
+                self._pattern_detector.clear_history()
+            return "Pattern history cleared"
+        else:
+            return (
+                f"Unknown patterns subcommand: {parts[0]}\n"
+                "Usage: reliability patterns [status|enable|disable|history|clear]"
+            )
+
+    def _patterns_status(self) -> str:
+        """Show pattern detection status."""
+        enabled = self._pattern_detector is not None
+        summary = self.get_pattern_summary()
+
+        lines = [
+            "Behavioral Pattern Detection",
+            "-" * 60,
+            f"  Status: {'ENABLED' if enabled else 'DISABLED'}",
+        ]
+
+        if enabled and self._pattern_detector:
+            config = self._pattern_detector._config
+            lines.extend([
+                "",
+                "  Configuration:",
+                f"    Repetitive call threshold: {config.repetitive_call_threshold}",
+                f"    Introspection loop threshold: {config.introspection_loop_threshold}",
+                f"    Max reads before action: {config.max_reads_before_action}",
+            ])
+
+        lines.extend([
+            "",
+            f"  Total patterns detected: {summary.get('total', 0)}",
+        ])
+
+        if summary.get('by_type'):
+            lines.append("  By type:")
+            for ptype, count in sorted(summary['by_type'].items()):
+                lines.append(f"    - {ptype}: {count}")
+
+        if summary.get('by_severity'):
+            lines.append("  By severity:")
+            for sev, count in sorted(summary['by_severity'].items()):
+                lines.append(f"    - {sev}: {count}")
+
+        lines.append("-" * 60)
+        return "\n".join(lines)
+
+    def _patterns_history(self, limit: int = 10) -> str:
+        """Show detected pattern history."""
+        if not self._pattern_detector:
+            return "Pattern detection not enabled. Use 'reliability patterns enable' first."
+
+        patterns = self._pattern_detector.get_recent_patterns(limit)
+
+        if not patterns:
+            return "No patterns detected yet."
+
+        lines = [f"Recent Patterns (last {len(patterns)}):", "-" * 60]
+
+        for pattern in reversed(patterns):
+            time_str = pattern.detected_at.strftime("%H:%M:%S")
+            lines.append(f"  [{time_str}] {pattern.pattern_type.value}")
+            lines.append(f"    Severity: {pattern.severity.value}")
+            lines.append(f"    Repetitions: {pattern.repetition_count}")
+            if pattern.tool_sequence:
+                recent = pattern.tool_sequence[-3:]
+                lines.append(f"    Tools: {' → '.join(recent)}")
+            if pattern.expected_action:
+                lines.append(f"    Suggestion: {pattern.expected_action}")
+            lines.append("")
+
         return "\n".join(lines)
 
 

@@ -12,19 +12,27 @@ from .plugin import (
     wrap_permission_plugin,
 )
 from .types import (
+    # Core types
     EscalationInfo,
     EscalationRule,
     FailureKey,
     FailureRecord,
     FailureSeverity,
-    ModelSwitchConfig,
-    ModelSwitchStrategy,
-    ModelSwitchSuggestion,
-    ModelToolProfile,
     ReliabilityConfig,
     ToolReliabilityState,
     TrustState,
     classify_failure,
+    # Model reliability types
+    ModelSwitchConfig,
+    ModelSwitchStrategy,
+    ModelSwitchSuggestion,
+    ModelToolProfile,
+    # Behavioral pattern types
+    BehavioralPattern,
+    BehavioralPatternType,
+    PatternDetectionConfig,
+    PatternSeverity,
+    ToolCall,
 )
 from .persistence import (
     ReliabilityPersistence,
@@ -33,6 +41,7 @@ from .persistence import (
     WorkspaceReliabilityData,
     UserReliabilityData,
 )
+from .patterns import PatternDetector
 
 __all__ = [
     # Plugin
@@ -40,24 +49,33 @@ __all__ = [
     "ReliabilityPermissionWrapper",
     "create_plugin",
     "wrap_permission_plugin",
-    # Types
+    # Core types
     "EscalationInfo",
     "EscalationRule",
     "FailureKey",
     "FailureRecord",
     "FailureSeverity",
-    "ModelSwitchConfig",
-    "ModelSwitchStrategy",
-    "ModelSwitchSuggestion",
-    "ModelToolProfile",
     "ReliabilityConfig",
     "ToolReliabilityState",
     "TrustState",
     "classify_failure",
+    # Model reliability types
+    "ModelSwitchConfig",
+    "ModelSwitchStrategy",
+    "ModelSwitchSuggestion",
+    "ModelToolProfile",
+    # Behavioral pattern types
+    "BehavioralPattern",
+    "BehavioralPatternType",
+    "PatternDetectionConfig",
+    "PatternSeverity",
+    "ToolCall",
     # Persistence
     "ReliabilityPersistence",
     "SessionSettings",
     "SessionReliabilityState",
     "WorkspaceReliabilityData",
     "UserReliabilityData",
+    # Pattern detection
+    "PatternDetector",
 ]
