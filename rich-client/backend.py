@@ -630,9 +630,44 @@ class IPCBackend(Backend):
         return {}, False
 
     async def get_model_completions(self, args: List[str]) -> List[Any]:
-        # Return models from server state snapshot
-        # Format: (model_name, description) tuples for completion
-        return [(model, "") for model in self._available_models]
+        """Get completions for the model command.
+
+        Args:
+            args: Arguments typed so far.
+
+        Returns:
+            List of (value, description) tuples for completion.
+        """
+        # No args yet - show subcommands
+        if not args:
+            return [
+                ("list", "Show available models"),
+                ("select", "Switch to a model"),
+            ]
+
+        subcommand = args[0].lower() if args else ""
+
+        # Completing subcommand
+        if len(args) == 1:
+            subcommands = [
+                ("list", "Show available models"),
+                ("select", "Switch to a model"),
+            ]
+            return [
+                (cmd, desc)
+                for cmd, desc in subcommands
+                if cmd.startswith(subcommand)
+            ]
+
+        # Completing model name for 'select' subcommand
+        if subcommand == "select" and len(args) >= 2:
+            prefix = args[1] if len(args) > 1 else ""
+            models = self._available_models
+            if prefix:
+                models = [m for m in models if m.startswith(prefix)]
+            return [(m, "") for m in sorted(models)]
+
+        return []
 
     async def get_history(self) -> List[Any]:
         # Request history from server
