@@ -2040,6 +2040,9 @@ class SessionReliabilityState:
     # Live states (overlay on workspace)
     escalation_overrides: Dict[str, TrustState]  # Temporary escalations
 
+    # Session-level settings (override workspace/user, restored on reconnect)
+    session_settings: SessionSettings
+
     def serialize_for_reconnect(self) -> bytes:
         """Serialize for IPC persistence during disconnect."""
         ...
@@ -2048,6 +2051,34 @@ class SessionReliabilityState:
     def restore_from_reconnect(cls, data: bytes) -> "SessionReliabilityState":
         """Restore after client reconnects to server."""
         ...
+
+
+@dataclass
+class SessionSettings:
+    """Runtime settings for current session. Restored on reconnect."""
+
+    # Nudge settings
+    nudge_level: Optional[NudgeType] = None           # None = inherit from workspace/user
+    nudge_enabled: bool = True
+
+    # Recovery settings
+    recovery_mode: Optional[RecoveryMode] = None      # None = inherit
+
+    # Model switching
+    model_switch_strategy: Optional[ModelSwitchStrategy] = None  # None = inherit
+
+    # Pattern detection
+    pattern_detection_enabled: bool = True
+
+    def is_default(self) -> bool:
+        """Check if all settings are inherited (no overrides)."""
+        return (
+            self.nudge_level is None
+            and self.nudge_enabled
+            and self.recovery_mode is None
+            and self.model_switch_strategy is None
+            and self.pattern_detection_enabled
+        )
 
 
 @dataclass
@@ -2070,6 +2101,9 @@ class WorkspaceReliabilityData:
     # Workspace-specific config overrides
     config_overrides: Optional[ReliabilityConfig]
 
+    # Workspace-specific settings (override user defaults)
+    settings: Optional[SessionSettings] = None
+
     # Session tracking for decay
     session_history: List[SessionInfo]
 
@@ -2087,9 +2121,12 @@ class UserReliabilityData:
     global_model_behavioral_profiles: Dict[str, ModelBehavioralProfile]
     global_tool_patterns: Dict[str, ToolReliabilityState]  # Tools that fail everywhere
 
-    # User preferences
+    # User default settings
+    default_settings: SessionSettings
+
+    # Legacy fields (for backwards compat, prefer default_settings)
     recovery_mode: RecoveryMode
-    nudge_aggressiveness: NudgeType  # Max nudge level user wants
+    nudge_aggressiveness: NudgeType
     model_switch_strategy: ModelSwitchStrategy
     preferred_models: List[str]
 ```
@@ -2275,6 +2312,17 @@ reliability reset <failure_key>     # Manually reset a tool to TRUSTED
 reliability reset --all             # Reset all tools (requires confirmation)
 reliability history [--limit N]     # Show recent failure history
 reliability config                  # Show current configuration
+
+# Settings management
+reliability nudge gentle|direct|off # Set nudge level for this session
+reliability nudge --save workspace  # Save current nudge setting to workspace
+reliability nudge --save user       # Save current nudge setting as user default
+
+reliability settings                # Show effective settings (merged view)
+reliability settings --save workspace  # Save all current settings to workspace
+reliability settings --save user       # Save all current settings as user defaults
+reliability settings --clear workspace # Clear workspace overrides (inherit from user)
+reliability settings --clear session   # Clear session overrides (inherit from workspace)
 ```
 
 ### Command Output Examples
@@ -2298,4 +2346,188 @@ Reliability Status:
 
 > reliability recovery ask
 ✓ Recovery mode set to 'ask' - you'll be prompted before tools are restored
+
+> reliability settings
+
+Reliability Settings (effective):
+───────────────────────────────────────────────────────────────
+  Setting                Value           Source
+───────────────────────────────────────────────────────────────
+  nudge_level            direct          session (override)
+  nudge_enabled          true            user (default)
+  recovery_mode          ask             workspace
+  model_switch_strategy  suggest         user (default)
+  pattern_detection      true            user (default)
+───────────────────────────────────────────────────────────────
+
+> reliability nudge gentle
+✓ Nudge level set to 'gentle' for this session
+
+> reliability nudge --save workspace
+✓ Nudge level 'gentle' saved to workspace (.jaato/reliability.json)
+  Future sessions in this workspace will use this setting.
+
+> reliability settings --save user
+✓ Current settings saved as user defaults (~/.jaato/reliability.json)
+  Settings saved:
+    - nudge_level: gentle
+    - recovery_mode: ask
+    - model_switch_strategy: suggest
+
+> reliability settings --clear session
+✓ Session overrides cleared. Now inheriting from workspace/user settings.
+```
+
+### Settings Merge Implementation
+
+```python
+class ReliabilitySettingsManager:
+    """Manages settings across session/workspace/user levels."""
+
+    def __init__(
+        self,
+        user_data: UserReliabilityData,
+        workspace_data: WorkspaceReliabilityData,
+        session_state: SessionReliabilityState,
+    ):
+        self._user = user_data
+        self._workspace = workspace_data
+        self._session = session_state
+
+    def get_effective_settings(self) -> EffectiveSettings:
+        """Resolve settings with session > workspace > user priority."""
+        return EffectiveSettings(
+            nudge_level=self._resolve("nudge_level"),
+            nudge_enabled=self._resolve("nudge_enabled"),
+            recovery_mode=self._resolve("recovery_mode"),
+            model_switch_strategy=self._resolve("model_switch_strategy"),
+            pattern_detection_enabled=self._resolve("pattern_detection_enabled"),
+        )
+
+    def _resolve(self, setting: str) -> Tuple[Any, str]:
+        """Resolve a single setting, returning (value, source)."""
+
+        # Session override (highest priority)
+        session_val = getattr(self._session.session_settings, setting, None)
+        if session_val is not None:
+            return (session_val, "session")
+
+        # Workspace override
+        if self._workspace.settings:
+            workspace_val = getattr(self._workspace.settings, setting, None)
+            if workspace_val is not None:
+                return (workspace_val, "workspace")
+
+        # User default (lowest priority)
+        user_val = getattr(self._user.default_settings, setting, None)
+        if user_val is not None:
+            return (user_val, "user")
+
+        # Hardcoded fallback
+        return (self._get_hardcoded_default(setting), "default")
+
+    def save_to_workspace(self, settings: Optional[List[str]] = None):
+        """Save current session settings to workspace level."""
+
+        if self._workspace.settings is None:
+            self._workspace.settings = SessionSettings()
+
+        if settings is None:
+            # Save all non-default session settings
+            for field in fields(SessionSettings):
+                val = getattr(self._session.session_settings, field.name)
+                if val is not None:
+                    setattr(self._workspace.settings, field.name, val)
+        else:
+            # Save specific settings
+            for setting in settings:
+                val = getattr(self._session.session_settings, setting)
+                setattr(self._workspace.settings, setting, val)
+
+        self._persist_workspace()
+
+    def save_to_user(self, settings: Optional[List[str]] = None):
+        """Save current effective settings as user defaults."""
+
+        effective = self.get_effective_settings()
+
+        if settings is None:
+            # Save all
+            for field in fields(SessionSettings):
+                val, _ = getattr(effective, field.name)
+                setattr(self._user.default_settings, field.name, val)
+        else:
+            for setting in settings:
+                val, _ = getattr(effective, setting)
+                setattr(self._user.default_settings, setting, val)
+
+        self._persist_user()
+
+    def clear_session_overrides(self):
+        """Clear all session-level setting overrides."""
+        self._session.session_settings = SessionSettings()
+
+    def clear_workspace_overrides(self):
+        """Clear all workspace-level setting overrides."""
+        self._workspace.settings = None
+        self._persist_workspace()
+
+
+@dataclass
+class EffectiveSettings:
+    """Resolved settings with source tracking."""
+
+    nudge_level: Tuple[NudgeType, str]              # (value, source)
+    nudge_enabled: Tuple[bool, str]
+    recovery_mode: Tuple[RecoveryMode, str]
+    model_switch_strategy: Tuple[ModelSwitchStrategy, str]
+    pattern_detection_enabled: Tuple[bool, str]
+
+    def format_table(self) -> str:
+        """Format as table for display."""
+        lines = [
+            "Reliability Settings (effective):",
+            "─" * 60,
+            f"  {'Setting':<25} {'Value':<15} Source",
+            "─" * 60,
+        ]
+        for field in fields(self):
+            val, source = getattr(self, field.name)
+            source_display = f"{source}" + (" (override)" if source == "session" else " (default)" if source == "user" else "")
+            lines.append(f"  {field.name:<25} {str(val):<15} {source_display}")
+        lines.append("─" * 60)
+        return "\n".join(lines)
+```
+
+### Settings Persistence on Reconnect
+
+When a client reconnects, session settings are restored:
+
+```python
+def on_client_reconnect(self, session_id: str, client: IpcClient):
+    """Restore session state including settings on reconnect."""
+
+    if session_id in self._session_snapshots:
+        snapshot = self._session_snapshots.pop(session_id)
+        state = SessionReliabilityState.restore_from_reconnect(snapshot)
+
+        # Restore session settings
+        session.reliability_plugin.restore_session_state(state)
+
+        # Notify client what was restored
+        client.send(SessionRestoredEvent(
+            session_id=session_id,
+            turn_index=state.current_turn_index,
+            active_patterns=len(state.active_patterns),
+            pending_nudges=len(state.pending_nudges),
+            settings_restored=not state.session_settings.is_default(),
+        ))
+
+        if not state.session_settings.is_default():
+            # Inform user their settings were preserved
+            self._output_callback(
+                "reliability",
+                "✓ Session settings restored from before disconnect",
+                "write"
+            )
 ```
