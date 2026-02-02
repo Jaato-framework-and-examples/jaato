@@ -1,6 +1,6 @@
 # Simple Interactive Client
 
-A console-based interactive client that demonstrates the `askPermission` plugin behavior and supports multi-turn conversation.
+A console-based interactive client that demonstrates the permission plugin behavior and supports multi-turn conversation.
 
 ## Overview
 

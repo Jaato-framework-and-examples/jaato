@@ -1,6 +1,8 @@
 # Permission Plugin
 
-The permission plugin (`askPermission`) provides access control for tool execution in the jaato orchestration framework. It intercepts tool calls and enforces blacklist/whitelist policies, with support for interactive approval when policies are ambiguous.
+The permission plugin provides access control for tool execution in the jaato orchestration framework. It intercepts tool calls and enforces blacklist/whitelist policies, with support for interactive approval when policies are ambiguous.
+
+**Note:** The model should call tools directly. The permission middleware intercepts tool calls and prompts for approval when needed. The `askPermission` tool is no longer exposed to the model by default to prevent confusion (models tended to call `askPermission` instead of calling tools directly).
 
 ## Demo
 
@@ -51,17 +53,17 @@ The demo below shows the permission plugin intercepting a tool execution request
 4. **If allowed**: Original plugin executor runs
 5. **If denied**: Error returned to model
 
-### Dual Nature: Middleware vs Plugin
+### Permission Middleware
 
-The permission plugin is unique - it has two distinct roles controlled separately:
+The permission plugin functions as middleware that intercepts and controls tool execution:
 
 | Role | Purpose | Control |
 |------|---------|---------|
 | **Middleware** | Enforces permissions on ALL tool executions | `executor.set_permission_plugin()` |
-| **Plugin** | Exposes `askPermission` tool for model to query | Exposed by default via `registry.expose_all()` |
+| **User Commands** | Provides `permissions` command for runtime management | `registry.expose_tool("permission")` |
 
 ```python
-# 1. All plugins are exposed by default (including permission)
+# 1. Expose plugins (permission plugin provides user commands, not model tools)
 registry.expose_all({
     "cli": {"extra_paths": ["/usr/local/bin"]},
 })
@@ -72,17 +74,15 @@ permission_plugin.initialize(config)
 executor.set_permission_plugin(permission_plugin)
 ```
 
-**As middleware** (via `set_permission_plugin`):
+**How it works** (via `set_permission_plugin`):
 - Wraps `ToolExecutor.execute()` to check permissions before ANY tool runs
+- When the model calls a tool, the middleware checks policy and prompts for approval if needed
 - CLI plugin tools (`cli_based_tool`) → checked
 - MCP plugin tools (any MCP server tool) → checked
-- `askPermission` tool → always allowed (to prevent deadlock)
+- Subagent tools (`spawn_subagent`) → checked
 
-**As plugin** (via `registry.expose_all()`):
-- Exposes `askPermission` tool so the model can proactively query permissions
-- Exposed by default with all other plugins
-- Useful when you want the model to check before attempting blocked actions
-- Can be unexposed via `registry.unexpose_tool("permission")` if not needed
+**Key principle**: The model calls tools directly, and the middleware handles permission prompts.
+This avoids confusion where models call `askPermission` instead of the actual tool.
 
 ## Client Integration
 
