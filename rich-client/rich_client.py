@@ -4861,8 +4861,8 @@ Server Mode:
     if args.headless:
         if not args.connect:
             sys.exit("Error: --headless requires --connect")
-        if not args.prompt:
-            sys.exit("Error: --headless requires --prompt")
+        if not args.prompt and not args.initial_prompt:
+            sys.exit("Error: --headless requires --prompt or --initial-prompt")
 
     # Check TTY before proceeding (except for single prompt mode or headless)
     if not sys.stdout.isatty() and not args.prompt and not args.headless:
@@ -4878,7 +4878,7 @@ Server Mode:
         workspace = pathlib.Path(args.workspace) if args.workspace else pathlib.Path.cwd()
         asyncio.run(run_headless_mode(
             socket_path=args.connect,
-            prompt=args.prompt,
+            prompt=args.prompt or args.initial_prompt,
             workspace=workspace,
             auto_start=not args.no_auto_start,
             env_file=args.env_file,
