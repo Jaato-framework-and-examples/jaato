@@ -8,6 +8,7 @@ support for multiple AI providers (Google GenAI, Anthropic, etc.).
 """
 
 import threading
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -160,6 +161,11 @@ class Part:
         return cls(thought=thought)
 
 
+def _generate_message_id() -> str:
+    """Generate a unique message ID."""
+    return str(uuid.uuid4())
+
+
 @dataclass
 class Message:
     """A message in a conversation.
@@ -169,9 +175,11 @@ class Message:
     Attributes:
         role: The role of the message sender (user, model, or tool).
         parts: List of content parts (text, function calls, etc.).
+        message_id: Unique identifier for this message (for GC history-budget sync).
     """
     role: Role
     parts: List[Part] = field(default_factory=list)
+    message_id: str = field(default_factory=_generate_message_id)
 
     @classmethod
     def from_text(cls, role: Union[Role, str], text: str) -> 'Message':
