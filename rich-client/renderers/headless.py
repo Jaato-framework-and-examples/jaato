@@ -167,6 +167,8 @@ class HeadlessFileRenderer(Renderer):
         }
         symbol, style = status_styles.get(status, ("?", "yellow"))
 
+        # Ensure we're on a new line (streaming output may not end with newline)
+        console.print()
         console.print(f"[{style}]{symbol} Agent status: {status}[/{style}]")
         self._flush(agent_id)
 
@@ -272,6 +274,9 @@ class HeadlessFileRenderer(Renderer):
         # Remove from active tools
         if call_id and call_id in self._active_tools:
             del self._active_tools[call_id]
+
+        # Ensure we're on a new line (tool output may not end with newline)
+        console.print()
 
         # Format result
         if success:

@@ -123,11 +123,9 @@ async def run_headless_mode(
     print("[headless] Setting permission policy to auto-approve...", file=sys.stderr)
     await client.execute_command("permissions", ["default", "allow"])
 
-    # Set clarification channel to "auto" for main agent
-    # This auto-responds to clarifications (no user to ask)
-    # Subagents still use ParentBridgedChannel (forwarded to parent agent)
-    print("[headless] Setting clarification channel to auto...", file=sys.stderr)
-    await client.execute_command("clarification", ["channel", "auto"])
+    # Disable clarification tool - no user to answer questions in headless mode
+    print("[headless] Disabling clarification tool...", file=sys.stderr)
+    await client.execute_command("tools.disable", ["clarification"])
 
     async def handle_events():
         """Handle events from the server."""
