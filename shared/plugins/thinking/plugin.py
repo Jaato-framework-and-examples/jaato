@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from ..base import (
     CommandCompletion,
     CommandParameter,
+    HelpLines,
     OutputCallback,
     ToolSchema,
     UserCommand,
@@ -203,6 +204,10 @@ class ThinkingPlugin:
                     desc = "Disable thinking"
                 completions.append(CommandCompletion(name, desc))
 
+        # Add help completion
+        if not prefix or "help".startswith(prefix):
+            completions.append(CommandCompletion("help", "Show detailed help for this command"))
+
         return completions
 
     # ==================== Command Execution ====================
@@ -221,6 +226,10 @@ class ThinkingPlugin:
         # No argument - show current status
         if not preset_or_budget:
             return self._get_status()
+
+        # Handle help subcommand
+        if preset_or_budget.lower() == "help":
+            return self._cmd_help()
 
         # Try as preset name first
         preset = self._config.get_preset(preset_or_budget.lower())
@@ -245,6 +254,53 @@ class ThinkingPlugin:
             "available_presets": preset_names,
             "hint": "Use a preset name or a numeric budget (e.g., 50000)"
         }
+
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        # Build preset list dynamically
+        preset_lines = []
+        for name, preset in self._config.presets.items():
+            if preset.enabled:
+                preset_lines.append((f"    {name:<15} Enable thinking ({preset.budget:,} token budget)", "dim"))
+            else:
+                preset_lines.append((f"    {name:<15} Disable thinking", "dim"))
+
+        lines = [
+            ("Thinking Command", "bold"),
+            ("", ""),
+            ("Control extended thinking/reasoning mode. When enabled, the model", ""),
+            ("spends more tokens on internal reasoning before responding.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    thinking [preset | budget | help]", ""),
+            ("", ""),
+            ("ARGUMENTS", "bold"),
+            ("    (none)            Show current thinking mode status", "dim"),
+            ("    <preset>          Apply a named preset configuration", "dim"),
+            ("    <budget>          Set custom token budget (e.g., 50000)", "dim"),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("PRESETS", "bold"),
+        ]
+        lines.extend(preset_lines)
+        lines.extend([
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    thinking                  Show current status", "dim"),
+            ("    thinking high             Enable high thinking mode", "dim"),
+            ("    thinking off              Disable thinking", "dim"),
+            ("    thinking 25000            Set custom 25K token budget", "dim"),
+            ("", ""),
+            ("PROVIDER SUPPORT", "bold"),
+            ("    Anthropic     Extended thinking with configurable budget", "dim"),
+            ("    Google        Thinking mode (Gemini 2.0+ models)", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Thinking mode is user-controlled, not visible to the model", "dim"),
+            ("    - Higher budgets allow deeper reasoning but cost more tokens", "dim"),
+            ("    - Not all providers/models support thinking mode", "dim"),
+        ])
+        return HelpLines(lines=lines)
 
     def _get_status(self) -> Dict[str, Any]:
         """Get current thinking mode status."""
