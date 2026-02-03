@@ -2,9 +2,14 @@
 
 This module defines client-side commands that are handled locally
 (not forwarded to the server) in both IPC and direct modes.
+
+Also provides a unified command parser for routing user input to the
+appropriate handler (client command, server command, or model message).
 """
 
-from typing import List, Tuple
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Tuple, Optional
 
 
 # Client-only commands with descriptions (for help display)
@@ -157,3 +162,151 @@ def build_full_help_text(server_commands: List[dict] = None) -> List[Tuple[str, 
     lines.extend(build_keyboard_shortcuts_help_text())
 
     return lines
+
+
+# =============================================================================
+# Command Parsing and Routing
+# =============================================================================
+
+class CommandAction(Enum):
+    """Type of action to take for parsed user input."""
+    EXIT = "exit"              # Exit/quit the client
+    STOP = "stop"              # Stop model processing
+    CLEAR = "clear"            # Clear display (client-only, no-op in headless)
+    HELP = "help"              # Show help / request command list
+    CONTEXT = "context"        # Show context usage (client-only)
+    HISTORY = "history"        # Request conversation history
+    RESET = "reset"            # Reset/clear session history
+    SERVER_COMMAND = "server"  # Forward command to server
+    SEND_MESSAGE = "message"   # Send as message to model
+
+
+@dataclass
+class ParsedCommand:
+    """Result of parsing user input.
+
+    Attributes:
+        action: What kind of action to take.
+        command: Command name for SERVER_COMMAND (e.g., "tools.list", "permissions").
+        args: Command arguments for SERVER_COMMAND.
+        text: Original text for SEND_MESSAGE.
+    """
+    action: CommandAction
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    text: Optional[str] = None
+
+
+# Known server/plugin command prefixes
+SERVER_COMMAND_PREFIXES = {
+    "tools", "session", "permissions", "model", "mcp", "save", "resume",
+    "memory", "lsp", "todo", "waypoint", "background", "prompt-library",
+    "clarification", "multimodal", "notebook", "references", "sandbox",
+}
+
+
+def parse_user_input(
+    text: str,
+    server_commands: Optional[List[dict]] = None,
+) -> ParsedCommand:
+    """Parse user input and determine what action to take.
+
+    This function implements the same routing logic as the TUI, making it
+    reusable for command mode and other clients.
+
+    Args:
+        text: Raw user input text.
+        server_commands: Optional list of server commands for matching.
+            Each dict should have "name" key with the command name.
+
+    Returns:
+        ParsedCommand indicating what action to take.
+    """
+    text = text.strip()
+    if not text:
+        return ParsedCommand(action=CommandAction.SEND_MESSAGE, text="")
+
+    text_lower = text.lower()
+    parts = text.split()
+    cmd = parts[0].lower() if parts else ""
+    args = parts[1:] if len(parts) > 1 else []
+
+    # ==================== Client-only commands ====================
+
+    if text_lower in ("exit", "quit", "q"):
+        return ParsedCommand(action=CommandAction.EXIT)
+
+    if text_lower == "stop":
+        return ParsedCommand(action=CommandAction.STOP)
+
+    if text_lower == "clear":
+        return ParsedCommand(action=CommandAction.CLEAR)
+
+    if text_lower == "help":
+        return ParsedCommand(action=CommandAction.HELP)
+
+    if text_lower == "context":
+        return ParsedCommand(action=CommandAction.CONTEXT)
+
+    if text_lower == "history":
+        return ParsedCommand(action=CommandAction.HISTORY)
+
+    if cmd == "reset":
+        return ParsedCommand(
+            action=CommandAction.SERVER_COMMAND,
+            command="reset",
+            args=args,
+        )
+
+    # ==================== Server commands with subcommands ====================
+
+    if cmd == "tools":
+        subcmd = args[0] if args else "list"
+        subargs = args[1:] if len(args) > 1 else []
+        return ParsedCommand(
+            action=CommandAction.SERVER_COMMAND,
+            command=f"tools.{subcmd}",
+            args=subargs,
+        )
+
+    if cmd == "session":
+        subcmd = args[0] if args else "list"
+        subargs = args[1:] if len(args) > 1 else []
+        return ParsedCommand(
+            action=CommandAction.SERVER_COMMAND,
+            command=f"session.{subcmd}",
+            args=subargs,
+        )
+
+    # ==================== Known server/plugin commands ====================
+
+    if cmd in SERVER_COMMAND_PREFIXES:
+        return ParsedCommand(
+            action=CommandAction.SERVER_COMMAND,
+            command=cmd,
+            args=args,
+        )
+
+    # ==================== Match against server command list ====================
+
+    if server_commands:
+        for srv_cmd in server_commands:
+            cmd_name = srv_cmd.get("name", "").lower()
+            cmd_parts = cmd_name.split()
+            if not cmd_parts:
+                continue
+
+            base_cmd = cmd_parts[0]
+            if text_lower == base_cmd or text_lower.startswith(base_cmd + " "):
+                # Extract args after base command
+                input_parts = text.split()
+                command_args = input_parts[1:] if len(input_parts) > 1 else []
+                return ParsedCommand(
+                    action=CommandAction.SERVER_COMMAND,
+                    command=base_cmd,
+                    args=command_args,
+                )
+
+    # ==================== Default: send as message to model ====================
+
+    return ParsedCommand(action=CommandAction.SEND_MESSAGE, text=text)

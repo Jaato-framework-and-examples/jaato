@@ -1,14 +1,16 @@
 # rich-client/command_mode.py
-"""Command mode for sending commands to jaato sessions.
+"""Command mode for sending commands/messages to jaato sessions.
 
 Allows controlling headless sessions from another terminal:
     python rich_client.py --connect /tmp/jaato.sock --session <id> --cmd stop
     python rich_client.py --connect /tmp/jaato.sock --session <id> --cmd "permissions default deny"
+    python rich_client.py --connect /tmp/jaato.sock --session <id> --cmd "please summarize"
+
+Commands are processed using the same routing logic as the TUI.
 """
 
 import asyncio
 import sys
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -20,12 +22,14 @@ async def run_command_mode(
     auto_start: bool = True,
     env_file: str = ".env",
 ):
-    """Connect to a session and send a command.
+    """Connect to a session and send a command/message.
+
+    Uses shared command parsing logic from shared.client_commands.
 
     Args:
         socket_path: Path to the Unix domain socket.
         session_id: Session ID to attach to.
-        command: Command to send (e.g., 'stop', 'reset', 'permissions default deny').
+        command: Command or message to send.
         auto_start: Whether to auto-start the server if not running.
         env_file: Path to .env file for auto-started server.
     """
@@ -37,7 +41,11 @@ async def run_command_mode(
         ErrorEvent,
         ToolStatusEvent,
         HelpTextEvent,
+        SessionListEvent,
+        TurnCompletedEvent,
+        AgentOutputEvent,
     )
+    from shared.client_commands import parse_user_input, CommandAction
 
     client = IPCRecoveryClient(
         socket_path=socket_path,
@@ -59,59 +67,96 @@ async def run_command_mode(
             await client.disconnect()
             return
 
-        # Parse command - split into command name and args
-        parts = command.split()
-        cmd_name = parts[0] if parts else ""
-        cmd_args = parts[1:] if len(parts) > 1 else []
+        # Parse using shared logic
+        parsed = parse_user_input(command)
 
-        # Handle special commands that need different formatting
-        if cmd_name == "stop":
-            # Stop is a direct method, not a command
+        # Track if we need to wait for response
+        wait_for_response = False
+        wait_for_turn = False
+
+        # Execute based on action type
+        if parsed.action == CommandAction.EXIT:
             await client.stop()
             print(f"Sent stop signal to session '{session_id}'")
-            await client.disconnect()
-            return
 
-        # For other commands, use execute_command
-        # Format command with subcommand if present (e.g., "permissions default allow" -> "permissions", ["default", "allow"])
-        await client.execute_command(cmd_name, cmd_args)
+        elif parsed.action == CommandAction.STOP:
+            await client.stop()
+            print(f"Sent stop signal to session '{session_id}'")
 
-        # Wait briefly for response events
-        response_received = False
-        timeout = 5.0  # seconds
-        start_time = asyncio.get_event_loop().time()
+        elif parsed.action == CommandAction.CLEAR:
+            print("'clear' is a display-only command, not applicable in command mode")
 
-        async for event in client.events():
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                break
+        elif parsed.action == CommandAction.HELP:
+            await client.request_command_list()
+            wait_for_response = True
 
-            if isinstance(event, SystemMessageEvent):
-                print(event.message)
-                response_received = True
-                break
+        elif parsed.action == CommandAction.CONTEXT:
+            print("'context' requires display state, not available in command mode")
 
-            elif isinstance(event, ErrorEvent):
-                print(f"Error: {event.error}", file=sys.stderr)
-                if event.error_type:
-                    print(f"Type: {event.error_type}", file=sys.stderr)
-                response_received = True
-                break
+        elif parsed.action == CommandAction.HISTORY:
+            await client.request_history()
+            wait_for_response = True
 
-            elif isinstance(event, ToolStatusEvent):
-                if event.message:
+        elif parsed.action == CommandAction.SERVER_COMMAND:
+            await client.execute_command(parsed.command, parsed.args or [])
+            wait_for_response = True
+
+        elif parsed.action == CommandAction.SEND_MESSAGE:
+            if parsed.text:
+                print(f"Sending message to model in session '{session_id}'...")
+                await client.send_message(parsed.text)
+                wait_for_turn = True
+            else:
+                print("Empty message, nothing to send")
+
+        # Wait for response events if needed
+        if wait_for_response or wait_for_turn:
+            timeout = 30.0 if wait_for_turn else 5.0
+            start_time = asyncio.get_event_loop().time()
+
+            async for event in client.events():
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed > timeout:
+                    if wait_for_turn:
+                        print("\nTimeout waiting for model response (model may still be processing)")
+                    break
+
+                if isinstance(event, SystemMessageEvent):
                     print(event.message)
-                response_received = True
-                break
+                    if not wait_for_turn:
+                        break
 
-            elif isinstance(event, HelpTextEvent):
-                for line, style in event.lines:
-                    print(line)
-                response_received = True
-                break
+                elif isinstance(event, ErrorEvent):
+                    print(f"Error: {event.error}", file=sys.stderr)
+                    if event.error_type:
+                        print(f"Type: {event.error_type}", file=sys.stderr)
+                    break
 
-        if not response_received:
-            print(f"Command '{command}' sent to session '{session_id}'")
+                elif isinstance(event, ToolStatusEvent):
+                    if event.message:
+                        print(event.message)
+                    if not wait_for_turn:
+                        break
+
+                elif isinstance(event, HelpTextEvent):
+                    for line, style in event.lines:
+                        print(line)
+                    break
+
+                elif isinstance(event, SessionListEvent):
+                    print("Available sessions:")
+                    for s in event.sessions:
+                        status = "loaded" if s.get("is_loaded") else "saved"
+                        print(f"  {s.get('id', '?')} - {s.get('name', '')} [{status}]")
+                    break
+
+                elif isinstance(event, AgentOutputEvent):
+                    if event.source == "model":
+                        print(event.text, end="", flush=True)
+
+                elif isinstance(event, TurnCompletedEvent):
+                    print()  # Newline after model output
+                    break
 
     except ConnectionError as e:
         print(f"Connection error: {e}", file=sys.stderr)
