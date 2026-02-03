@@ -67,7 +67,7 @@ class GCResult:
     removal_list: List[GCRemovalItem] = field(default_factory=list)
 ```
 
-### 3. GCConfig: Add Target Threshold
+### 3. GCConfig: Add Target Threshold and Continuous Mode
 
 ```python
 # shared/plugins/gc/base.py
@@ -75,7 +75,7 @@ class GCResult:
 @dataclass
 class GCConfig:
     # Existing trigger settings
-    threshold_percent: float = 80.0  # When to trigger GC
+    threshold_percent: float = 80.0  # When to trigger GC (ignored in continuous mode)
 
     # NEW: Target after GC
     target_percent: float = field(
@@ -84,10 +84,16 @@ class GCConfig:
     """Target context usage after GC. GC will try to reach this level."""
 
     # NEW: Pressure threshold for touching PRESERVABLE content
-    pressure_percent: float = field(
-        default_factory=lambda: float(os.getenv('JAATO_GC_PRESSURE', '90.0'))
+    # When 0 or None: enables CONTINUOUS GC MODE (check after every turn)
+    pressure_percent: Optional[float] = field(
+        default_factory=lambda: float(os.getenv('JAATO_GC_PRESSURE', '90.0')) or None
     )
-    """When usage exceeds this, PRESERVABLE content may be collected."""
+    """When usage exceeds this, PRESERVABLE content may be collected.
+
+    When 0 or None: enables continuous GC mode - GC runs after every turn
+    if usage exceeds target_percent (threshold_percent is ignored).
+    Same priority order (EPHEMERAL → PARTIAL → PRESERVABLE) still applies.
+    """
 
     # Existing settings...
     max_turns: Optional[int] = None
@@ -96,6 +102,11 @@ class GCConfig:
     preserve_recent_turns: int = 5
     pinned_turn_indices: List[int] = field(default_factory=list)
     plugin_config: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def continuous_mode(self) -> bool:
+        """True if continuous GC is enabled (pressure_percent is 0 or None)."""
+        return not self.pressure_percent
 ```
 
 ### 4. GCPlugin Protocol: Accept Budget
@@ -176,6 +187,74 @@ def _apply_gc_removal_list(self, removal_list: List[GCRemovalItem]) -> None:
             if entry:
                 entry.tokens = 0
                 entry.children.clear()
+```
+
+---
+
+## GC Modes: Threshold vs Continuous
+
+The gc_budget plugin supports two operating modes:
+
+### Threshold Mode (Default)
+
+Traditional GC triggered when context usage exceeds a threshold.
+
+```
+pressure_percent = 90.0  (any non-zero value)
+
+Timeline:
+  [usage grows] → [hits threshold_percent (80%)] → [GC triggers] → [trims to target_percent (60%)]
+                                                                   ↓
+                                                            [usage grows again...]
+```
+
+**Behavior:**
+- Wait until `usage >= threshold_percent` to trigger GC
+- Trim down to `target_percent`
+- PRESERVABLE content only touched when `usage >= pressure_percent`
+
+### Continuous Mode
+
+Proactive GC that runs after every turn, keeping context lean.
+
+```
+pressure_percent = 0  (or None/omitted)
+
+Timeline:
+  [turn ends] → [usage > target_percent?] → [yes: GC trims to target] → [next turn]
+                                          → [no: skip GC] → [next turn]
+```
+
+**Behavior:**
+- After every turn, check if `usage > target_percent`
+- If so, trim back to `target_percent`
+- `threshold_percent` is ignored (no waiting for high usage)
+- Same priority order still applies (EPHEMERAL → PARTIAL → PRESERVABLE)
+- PRESERVABLE content is never touched (no pressure threshold)
+
+**Benefits:**
+- Predictable, gradual trimming
+- Avoids sudden large GC operations
+- Keeps context consistently lean
+- Good for long-running sessions
+
+### should_collect Implementation
+
+```python
+def should_collect(self, context_usage, config):
+    percent_used = context_usage.get('percent_used', 0)
+
+    # Continuous mode: collect if above target (checked after every turn)
+    if config.continuous_mode:
+        if percent_used > config.target_percent:
+            return True, GCTriggerReason.THRESHOLD
+        return False, None
+
+    # Threshold mode: collect when threshold exceeded
+    if percent_used >= config.threshold_percent:
+        return True, GCTriggerReason.THRESHOLD
+
+    return False, None
 ```
 
 ---
@@ -272,8 +351,11 @@ def collect(self, history, context_usage, config, reason, budget):
             ))
             tokens_freed += entry.total_tokens()
 
-    # Phase 3: PRESERVABLE (only if usage > pressure_percent)
-    if tokens_freed < tokens_to_free and context_usage['percent_used'] >= config.pressure_percent:
+    # Phase 3: PRESERVABLE (only in threshold mode when usage > pressure_percent)
+    # In continuous mode (pressure_percent=0/None), PRESERVABLE is never touched
+    if (tokens_freed < tokens_to_free
+        and config.pressure_percent
+        and context_usage['percent_used'] >= config.pressure_percent):
         preservable_candidates = self._get_preservable_candidates(budget)
         for entry in preservable_candidates:
             if tokens_freed >= tokens_to_free:
@@ -308,14 +390,30 @@ def collect(self, history, context_usage, config, reason, budget):
 
 ### Configuration
 
-```python
-# .jaato/gc.json
+**Threshold Mode** (default):
+```json
+// .jaato/gc.json
+{
+    "plugin": "gc_budget",
+    "config": {
+        "preserve_recent_turns": 5,
+        "threshold_percent": 80.0,
+        "target_percent": 60.0,
+        "pressure_percent": 90.0,
+        "notify_on_gc": true
+    }
+}
+```
+
+**Continuous Mode** (trim after every turn):
+```json
+// .jaato/gc.json
 {
     "plugin": "gc_budget",
     "config": {
         "preserve_recent_turns": 5,
         "target_percent": 60.0,
-        "pressure_percent": 90.0,
+        "pressure_percent": 0,
         "notify_on_gc": true
     }
 }
@@ -431,9 +529,15 @@ if "summary_tokens" in result.details:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `JAATO_GC_THRESHOLD` | 80.0 | Trigger GC when usage exceeds this % |
+| `JAATO_GC_THRESHOLD` | 80.0 | Trigger GC when usage exceeds this % (ignored in continuous mode) |
 | `JAATO_GC_TARGET` | 60.0 | Target usage % after GC |
-| `JAATO_GC_PRESSURE` | 90.0 | Start touching PRESERVABLE above this % |
+| `JAATO_GC_PRESSURE` | 90.0 | Start touching PRESERVABLE above this %; set to `0` for continuous mode |
+
+**Continuous mode via environment:**
+```bash
+export JAATO_GC_PRESSURE=0  # Enable continuous GC
+export JAATO_GC_TARGET=60   # Trim to 60% after every turn
+```
 
 ---
 
