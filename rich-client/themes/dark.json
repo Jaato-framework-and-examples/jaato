@@ -157,6 +157,9 @@
 
     "input_text": {"fg": "text"},
     "input_prompt": {"fg": "primary", "bold": true},
+    "search_prompt": {"fg": "warning", "bold": true},
+    "search_match": {"bg": "warning", "fg": "background", "bold": true},
+    "search_match_current": {"bg": "primary", "fg": "background", "bold": true},
 
     "budget_panel_border": {"fg": "primary"},
     "budget_popup_background": {"bg": "background"},

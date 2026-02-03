@@ -426,6 +426,9 @@ DEFAULT_SEMANTIC_STYLES = {
     # Input area
     "input_text": StyleSpec(fg="text"),
     "input_prompt": StyleSpec(fg="primary", bold=True),
+    "search_prompt": StyleSpec(fg="warning", bold=True),
+    "search_match": StyleSpec(bg="warning", fg="background", bold=True),
+    "search_match_current": StyleSpec(bg="primary", fg="background", bold=True),
 
     # Budget panel
     "budget_panel_border": StyleSpec(fg="primary"),
@@ -761,6 +764,7 @@ class ThemeConfig:
             # Input area
             "": "input_text",  # Default text style
             "prompt": "input_prompt",
+            "prompt.search": "search_prompt",
         }
 
         for pt_class, semantic_name in pt_mapping.items():

@@ -17,7 +17,7 @@ import textwrap
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 def _trace(msg: str) -> None:
@@ -97,6 +97,11 @@ _ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
 def _visible_len(text: str) -> int:
     """Calculate visible length of text, ignoring ANSI escape codes."""
     return len(_ANSI_ESCAPE_PATTERN.sub('', text))
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape codes from text."""
+    return _ANSI_ESCAPE_PATTERN.sub('', text)
 
 
 def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bool]:
@@ -336,6 +341,10 @@ class OutputBuffer:
         self._formatter_pipeline: Optional[Any] = None
         # Theme configuration for styling (optional)
         self._theme: Optional["ThemeConfig"] = None
+        # Search state
+        self._search_query: str = ""
+        self._search_matches: List[Tuple[int, int, int]] = []  # (line_index, start_pos, end_pos)
+        self._search_current_idx: int = 0
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -2025,6 +2034,301 @@ class OutputBuffer:
                f"before={lines_before_tree}, pending={has_pending_prompt}, offset={self._scroll_offset}")
 
         return self._scroll_offset != old_offset
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Search functionality
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def search(self, query: str) -> int:
+        """Search for text in all output lines.
+
+        Args:
+            query: The search query (case-insensitive).
+
+        Returns:
+            Number of matches found.
+        """
+        self._search_query = query
+        self._search_matches = []
+        self._search_current_idx = 0
+
+        # Invalidate line caches so highlighting is applied on next render
+        self._invalidate_line_caches()
+
+        if not query:
+            return 0
+
+        query_lower = query.lower()
+
+        # Search through all OutputLine items
+        for line_idx, item in enumerate(self._lines):
+            if isinstance(item, OutputLine):
+                # Strip ANSI codes for search
+                text = _strip_ansi(item.text).lower()
+                start = 0
+                while True:
+                    pos = text.find(query_lower, start)
+                    if pos == -1:
+                        break
+                    self._search_matches.append((line_idx, pos, pos + len(query)))
+                    start = pos + 1
+
+        # Jump to first match if found
+        if self._search_matches:
+            self._scroll_to_match(0)
+
+        return len(self._search_matches)
+
+    def search_next(self) -> bool:
+        """Navigate to the next search match.
+
+        Returns:
+            True if navigation occurred, False if no matches.
+        """
+        if not self._search_matches:
+            return False
+
+        self._search_current_idx = (self._search_current_idx + 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        # Invalidate cache so current match highlighting updates
+        self._invalidate_line_caches()
+        return True
+
+    def search_prev(self) -> bool:
+        """Navigate to the previous search match.
+
+        Returns:
+            True if navigation occurred, False if no matches.
+        """
+        if not self._search_matches:
+            return False
+
+        self._search_current_idx = (self._search_current_idx - 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        # Invalidate cache so current match highlighting updates
+        self._invalidate_line_caches()
+        return True
+
+    def clear_search(self) -> None:
+        """Clear search state."""
+        self._search_query = ""
+        self._search_matches = []
+        self._search_current_idx = 0
+        # Invalidate line caches so highlights are removed on next render
+        self._invalidate_line_caches()
+
+    def get_search_status(self) -> Tuple[str, int, int]:
+        """Get current search status for display.
+
+        Returns:
+            Tuple of (query, current_match_1_indexed, total_matches).
+        """
+        if not self._search_matches:
+            return (self._search_query, 0, 0)
+        return (self._search_query, self._search_current_idx + 1, len(self._search_matches))
+
+    def _scroll_to_match(self, match_idx: int) -> None:
+        """Scroll to show a specific search match.
+
+        Args:
+            match_idx: Index into _search_matches list.
+        """
+        if match_idx < 0 or match_idx >= len(self._search_matches):
+            return
+
+        line_idx, _, _ = self._search_matches[match_idx]
+
+        # Calculate display lines before this item
+        display_lines_before = 0
+        for i, item in enumerate(self._lines):
+            if i >= line_idx:
+                break
+            display_lines_before += self._get_item_display_lines(item)
+
+        # Calculate total display lines
+        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+
+        # Calculate scroll offset to center the match in the visible area
+        # scroll_offset is measured from bottom (0 = at bottom)
+        target_from_bottom = total_display_lines - display_lines_before - 1
+
+        # Aim to show match in the middle of the visible area
+        center_offset = max(0, self._visible_height // 2)
+        self._scroll_offset = max(0, target_from_bottom - center_offset)
+
+    def is_line_match(self, line_idx: int) -> bool:
+        """Check if a line contains any search matches.
+
+        Args:
+            line_idx: Index in _lines.
+
+        Returns:
+            True if line has matches.
+        """
+        return any(idx == line_idx for idx, _, _ in self._search_matches)
+
+    def get_line_matches(self, line_idx: int) -> List[Tuple[int, int, bool]]:
+        """Get search match positions for a specific line.
+
+        Args:
+            line_idx: Index in _lines.
+
+        Returns:
+            List of (start_pos, end_pos, is_current) tuples.
+        """
+        matches = []
+        for i, (idx, start, end) in enumerate(self._search_matches):
+            if idx == line_idx:
+                is_current = (i == self._search_current_idx)
+                matches.append((start, end, is_current))
+        return matches
+
+    def _highlight_text_with_matches(
+        self,
+        text: str,
+        matches: List[Tuple[int, int, bool]],
+        base_style: Optional[str] = None
+    ) -> Text:
+        """Apply search highlighting to text.
+
+        Args:
+            text: The text to highlight.
+            matches: List of (start_pos, end_pos, is_current) tuples.
+            base_style: Optional base style for non-highlighted text.
+
+        Returns:
+            Text object with highlighting applied.
+        """
+        if not matches:
+            result = Text()
+            result.append(text, style=base_style)
+            return result
+
+        # Sort matches by start position
+        sorted_matches = sorted(matches, key=lambda m: m[0])
+
+        result = Text()
+        pos = 0
+
+        for start, end, is_current in sorted_matches:
+            # Add text before this match
+            if start > pos:
+                result.append(text[pos:start], style=base_style)
+
+            # Add highlighted match
+            match_text = text[start:end]
+            if is_current:
+                style = self._style("search_match_current", "reverse bold yellow")
+            else:
+                style = self._style("search_match", "reverse yellow")
+            result.append(match_text, style=style)
+            pos = end
+
+        # Add remaining text after last match
+        if pos < len(text):
+            result.append(text[pos:], style=base_style)
+
+        return result
+
+    def _wrap_and_highlight_text(
+        self,
+        text: str,
+        line_idx: Optional[int],
+        wrap_width: int,
+        base_style: Optional[str] = None
+    ) -> Text:
+        """Wrap text and apply search highlighting.
+
+        This method handles the complexity of wrapping text while preserving
+        search highlight positions across wrapped line segments.
+
+        Args:
+            text: The text to wrap and highlight.
+            line_idx: Index in self._lines for looking up search matches.
+            wrap_width: Maximum width for wrapping.
+            base_style: Optional base style for non-highlighted text.
+
+        Returns:
+            Text object with wrapping and highlighting applied.
+        """
+        # Handle literal \n in text (escaped newlines) - convert to actual newlines
+        text = text.replace('\\n', '\n')
+
+        # Get matches for this line
+        matches: List[Tuple[int, int, bool]] = []
+        if line_idx is not None and self._search_query:
+            matches = self.get_line_matches(line_idx)
+
+        result = Text()
+
+        # Process each paragraph (split by newlines)
+        paragraphs = text.split('\n')
+        char_offset = 0  # Track position in original text
+
+        for p_idx, paragraph in enumerate(paragraphs):
+            if p_idx > 0:
+                result.append("\n")
+                char_offset += 1  # Account for the newline character
+
+            if not paragraph.strip():
+                # Empty paragraph
+                char_offset += len(paragraph)
+                continue
+
+            # Wrap this paragraph
+            available = max(20, wrap_width)
+            if len(paragraph) <= available:
+                wrapped_lines = [paragraph]
+            else:
+                wrapped_lines = textwrap.wrap(
+                    paragraph, width=available,
+                    break_long_words=True, break_on_hyphens=False
+                )
+                if not wrapped_lines:
+                    wrapped_lines = [paragraph]
+
+            # Track position within this paragraph for wrapping
+            para_pos = 0
+
+            for w_idx, wrapped_line in enumerate(wrapped_lines):
+                if w_idx > 0:
+                    result.append("\n")
+
+                # Find where this wrapped line is in the original paragraph
+                # textwrap may add/remove spaces, so we need to find the actual substring
+                line_start = paragraph.find(wrapped_line.lstrip(), para_pos)
+                if line_start == -1:
+                    line_start = para_pos
+
+                line_end = line_start + len(wrapped_line)
+                para_pos = line_end
+
+                # Calculate absolute positions in original text
+                abs_start = char_offset + line_start
+                abs_end = char_offset + line_end
+
+                # Find matches that overlap with this wrapped line
+                segment_matches: List[Tuple[int, int, bool]] = []
+                for match_start, match_end, is_current in matches:
+                    # Check if match overlaps with this segment
+                    if match_end > abs_start and match_start < abs_end:
+                        # Adjust positions relative to this segment
+                        rel_start = max(0, match_start - abs_start)
+                        rel_end = min(len(wrapped_line), match_end - abs_start)
+                        segment_matches.append((rel_start, rel_end, is_current))
+
+                # Apply highlighting to this segment
+                if segment_matches:
+                    highlighted = self._highlight_text_with_matches(
+                        wrapped_line, segment_matches, base_style
+                    )
+                    result.append_text(highlighted)
+                else:
+                    result.append(wrapped_line, style=base_style)
+
+            char_offset += len(paragraph)
+
+        return result
 
     def _measure_content_lines(self, content: str) -> int:
         """Count display lines for content (lines are truncated, not wrapped).
@@ -3805,6 +4109,10 @@ class OutputBuffer:
         # Include current block lines (streaming content) at the end
         all_items: List[Union[OutputLine, ToolBlock, ActiveToolsMarker]] = list(self._lines) + current_block_lines
 
+        # Build line index mapping for search highlighting (map item ID -> index in self._lines)
+        # This must be done before ActiveToolsMarker insertion to preserve original indices
+        line_idx_map: Dict[int, int] = {id(item): i for i, item in enumerate(self._lines)}
+
         # Insert ActiveToolsMarker at placeholder position if active tools exist
         if self._active_tools and self._tool_placeholder_index is not None:
             # Insert marker at the placeholder position
@@ -3910,6 +4218,10 @@ class OutputBuffer:
 
             # For OutputLine items, render based on source
             line = item
+            # Get line index for search highlighting
+            line_idx = line_idx_map.get(id(item))
+            search_active = bool(self._search_query)
+
             if line.source == "system":
                 # System messages resolve style through theme (semantic or fallback to raw)
                 resolved_style = self._style(line.style, line.style)
@@ -3930,19 +4242,27 @@ class OutputBuffer:
                     output.append(header_prefix, style=self._style("user_header", "bold green"))
                     output.append("─" * remaining, style=self._style("user_header_separator", "dim green"))
                     output.append("\n")
-                    # Then render the text content
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    # Then render the text content with search highlighting
+                    if search_active:
+                        content = self._wrap_and_highlight_text(line.text, line_idx, wrap_width)
+                        output.append_text(content)
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
                 else:
-                    # Non-turn-start - just render text
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    # Non-turn-start - just render text with search highlighting
+                    if search_active:
+                        content = self._wrap_and_highlight_text(line.text, line_idx, wrap_width)
+                        output.append_text(content)
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
             elif line.source == "model":
                 # Model output - use header line for turn start
                 # Text may contain ANSI codes from output formatter (syntax highlighting)
@@ -3956,44 +4276,56 @@ class OutputBuffer:
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
                     # Then render the text content (no prefix needed)
-                    # Use cache for expensive ANSI parsing
-                    cached = self._get_cached_line_content(line, wrap_width)
-                    if cached is not None:
-                        output.append_text(cached)
-                    elif has_ansi:
-                        # Text contains ANSI codes from syntax highlighting - wrap to width
-                        content = self._wrap_ansi_text(line.text, wrap_width)
-                        self._cache_line_content(line, content, wrap_width)
+                    # Skip cache when search is active (highlights change dynamically)
+                    if search_active and not has_ansi:
+                        # Use highlighting-aware wrapping
+                        content = self._wrap_and_highlight_text(line.text, line_idx, wrap_width)
                         output.append_text(content)
                     else:
-                        wrapped = wrap_text(line.text, 0)
-                        content = Text()
-                        for j, wrapped_line in enumerate(wrapped):
-                            if j > 0:
-                                content.append("\n")
-                            content.append(wrapped_line)
-                        self._cache_line_content(line, content, wrap_width)
-                        output.append_text(content)
+                        # Use cache for expensive ANSI parsing
+                        cached = self._get_cached_line_content(line, wrap_width)
+                        if cached is not None:
+                            output.append_text(cached)
+                        elif has_ansi:
+                            # Text contains ANSI codes from syntax highlighting - wrap to width
+                            content = self._wrap_ansi_text(line.text, wrap_width)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
+                        else:
+                            wrapped = wrap_text(line.text, 0)
+                            content = Text()
+                            for j, wrapped_line in enumerate(wrapped):
+                                if j > 0:
+                                    content.append("\n")
+                                content.append(wrapped_line)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
                 else:
                     # Non-turn-start - just render text, no prefix
-                    # Use cache for expensive ANSI parsing
-                    cached = self._get_cached_line_content(line, wrap_width)
-                    if cached is not None:
-                        output.append_text(cached)
-                    elif has_ansi:
-                        # Text contains ANSI codes from syntax highlighting - wrap to width
-                        content = self._wrap_ansi_text(line.text, wrap_width)
-                        self._cache_line_content(line, content, wrap_width)
+                    # Skip cache when search is active (highlights change dynamically)
+                    if search_active and not has_ansi:
+                        # Use highlighting-aware wrapping
+                        content = self._wrap_and_highlight_text(line.text, line_idx, wrap_width)
                         output.append_text(content)
                     else:
-                        wrapped = wrap_text(line.text, 0)
-                        content = Text()
-                        for j, wrapped_line in enumerate(wrapped):
-                            if j > 0:
-                                content.append("\n")
-                            content.append(wrapped_line)
-                        self._cache_line_content(line, content, wrap_width)
-                        output.append_text(content)
+                        # Use cache for expensive ANSI parsing
+                        cached = self._get_cached_line_content(line, wrap_width)
+                        if cached is not None:
+                            output.append_text(cached)
+                        elif has_ansi:
+                            # Text contains ANSI codes from syntax highlighting - wrap to width
+                            content = self._wrap_ansi_text(line.text, wrap_width)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
+                        else:
+                            wrapped = wrap_text(line.text, 0)
+                            content = Text()
+                            for j, wrapped_line in enumerate(wrapped):
+                                if j > 0:
+                                    content.append("\n")
+                                content.append(wrapped_line)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0

@@ -1769,11 +1769,11 @@ class RichClient:
         )
         if self._input_handler.has_completion:
             self._display.add_system_message(
-                "Tab completion enabled. Use @file to reference files, Tab for command suggestions.",
+                "Tab completion enabled. Use @file for files, %prompt for skills.",
                 style="system_info"
             )
         self._display.add_system_message(
-            "Type 'help' for commands, 'quit' to exit, Esc+Esc to clear input",
+            "Type 'help' for commands, Ctrl+G for editor, Ctrl+F for search.",
             style="system_info"
         )
         self._display.add_system_message("", style="system_info")
@@ -3691,11 +3691,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
-                            "Tab completion enabled. Use @file to reference files, Tab for command suggestions.",
+                            "Tab completion enabled. Use @file for files, %prompt for skills.",
                             style="system_info"
                         )
                     display.add_system_message(
-                        "Type 'help' for commands, 'quit' to exit",
+                        "Type 'help' for commands, Ctrl+G for editor, Ctrl+F for search.",
                         style="system_info"
                     )
                 display.refresh()
