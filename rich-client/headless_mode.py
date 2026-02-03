@@ -54,7 +54,7 @@ async def run_headless_mode(
     # Load env vars
     load_dotenv(env_file)
 
-    from ipc_client import IPCClient
+    from ipc_recovery import IPCRecoveryClient
     from server.events import (
         AgentOutputEvent,
         AgentCreatedEvent,
@@ -85,11 +85,12 @@ async def run_headless_mode(
     renderer = HeadlessFileRenderer(workspace=workspace, flush_immediately=True)
     renderer.start()
 
-    # Create IPC client
-    client = IPCClient(
+    # Create IPC client with recovery support
+    client = IPCRecoveryClient(
         socket_path=socket_path,
         auto_start=auto_start,
         env_file=env_file,
+        workspace_path=workspace,
     )
 
     # State tracking
@@ -115,7 +116,7 @@ async def run_headless_mode(
 
     # Request new session if specified (recommended for headless to ensure isolation)
     if new_session:
-        await client.new_session()
+        await client.create_session()
 
     # Set default permission policy to "allow" for headless mode
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses
