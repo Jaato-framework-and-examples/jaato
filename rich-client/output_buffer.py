@@ -99,6 +99,11 @@ def _visible_len(text: str) -> int:
     return len(_ANSI_ESCAPE_PATTERN.sub('', text))
 
 
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape codes from text."""
+    return _ANSI_ESCAPE_PATTERN.sub('', text)
+
+
 def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bool]:
     """Slice a string with ANSI codes to a visible width range.
 
@@ -336,6 +341,10 @@ class OutputBuffer:
         self._formatter_pipeline: Optional[Any] = None
         # Theme configuration for styling (optional)
         self._theme: Optional["ThemeConfig"] = None
+        # Search state
+        self._search_query: str = ""
+        self._search_matches: List[Tuple[int, int, int]] = []  # (line_index, start_pos, end_pos)
+        self._search_current_idx: int = 0
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -2025,6 +2034,145 @@ class OutputBuffer:
                f"before={lines_before_tree}, pending={has_pending_prompt}, offset={self._scroll_offset}")
 
         return self._scroll_offset != old_offset
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Search functionality
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def search(self, query: str) -> int:
+        """Search for text in all output lines.
+
+        Args:
+            query: The search query (case-insensitive).
+
+        Returns:
+            Number of matches found.
+        """
+        self._search_query = query
+        self._search_matches = []
+        self._search_current_idx = 0
+
+        if not query:
+            return 0
+
+        query_lower = query.lower()
+
+        # Search through all OutputLine items
+        for line_idx, item in enumerate(self._lines):
+            if isinstance(item, OutputLine):
+                # Strip ANSI codes for search
+                text = _strip_ansi(item.text).lower()
+                start = 0
+                while True:
+                    pos = text.find(query_lower, start)
+                    if pos == -1:
+                        break
+                    self._search_matches.append((line_idx, pos, pos + len(query)))
+                    start = pos + 1
+
+        # Jump to first match if found
+        if self._search_matches:
+            self._scroll_to_match(0)
+
+        return len(self._search_matches)
+
+    def search_next(self) -> bool:
+        """Navigate to the next search match.
+
+        Returns:
+            True if navigation occurred, False if no matches.
+        """
+        if not self._search_matches:
+            return False
+
+        self._search_current_idx = (self._search_current_idx + 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        return True
+
+    def search_prev(self) -> bool:
+        """Navigate to the previous search match.
+
+        Returns:
+            True if navigation occurred, False if no matches.
+        """
+        if not self._search_matches:
+            return False
+
+        self._search_current_idx = (self._search_current_idx - 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        return True
+
+    def clear_search(self) -> None:
+        """Clear search state."""
+        self._search_query = ""
+        self._search_matches = []
+        self._search_current_idx = 0
+
+    def get_search_status(self) -> Tuple[str, int, int]:
+        """Get current search status for display.
+
+        Returns:
+            Tuple of (query, current_match_1_indexed, total_matches).
+        """
+        if not self._search_matches:
+            return (self._search_query, 0, 0)
+        return (self._search_query, self._search_current_idx + 1, len(self._search_matches))
+
+    def _scroll_to_match(self, match_idx: int) -> None:
+        """Scroll to show a specific search match.
+
+        Args:
+            match_idx: Index into _search_matches list.
+        """
+        if match_idx < 0 or match_idx >= len(self._search_matches):
+            return
+
+        line_idx, _, _ = self._search_matches[match_idx]
+
+        # Calculate display lines before this item
+        display_lines_before = 0
+        for i, item in enumerate(self._lines):
+            if i >= line_idx:
+                break
+            display_lines_before += self._get_item_display_lines(item)
+
+        # Calculate total display lines
+        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+
+        # Calculate scroll offset to center the match in the visible area
+        # scroll_offset is measured from bottom (0 = at bottom)
+        target_from_bottom = total_display_lines - display_lines_before - 1
+
+        # Aim to show match in the middle of the visible area
+        center_offset = max(0, self._visible_height // 2)
+        self._scroll_offset = max(0, target_from_bottom - center_offset)
+
+    def is_line_match(self, line_idx: int) -> bool:
+        """Check if a line contains any search matches.
+
+        Args:
+            line_idx: Index in _lines.
+
+        Returns:
+            True if line has matches.
+        """
+        return any(idx == line_idx for idx, _, _ in self._search_matches)
+
+    def get_line_matches(self, line_idx: int) -> List[Tuple[int, int, bool]]:
+        """Get search match positions for a specific line.
+
+        Args:
+            line_idx: Index in _lines.
+
+        Returns:
+            List of (start_pos, end_pos, is_current) tuples.
+        """
+        matches = []
+        for i, (idx, start, end) in enumerate(self._search_matches):
+            if idx == line_idx:
+                is_current = (i == self._search_current_idx)
+                matches.append((start, end, is_current))
+        return matches
 
     def _measure_content_lines(self, content: str) -> int:
         """Count display lines for content (lines are truncated, not wrapped).

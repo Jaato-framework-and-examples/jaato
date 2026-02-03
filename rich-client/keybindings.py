@@ -165,6 +165,12 @@ DEFAULT_KEYBINDINGS = {
 
     # External editor
     "open_editor": "c-g",  # Open current input in external editor ($EDITOR)
+
+    # Search
+    "search": "c-f",          # Open search mode
+    "search_next": "enter",   # Next search match (when in search mode)
+    "search_prev": "s-enter", # Previous search match (when in search mode)
+    "search_close": "escape", # Close search mode
 }
 
 
@@ -327,6 +333,12 @@ class KeybindingConfig:
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
     open_editor: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["open_editor"])
+
+    # Search
+    search: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["search"])
+    search_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["search_next"])
+    search_prev: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["search_prev"])
+    search_close: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["search_close"])
 
     # Tool navigation
     tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])

@@ -575,6 +575,10 @@ class PTDisplay:
         # Custom prompt override (for exit confirmation, etc.)
         self._custom_prompt: Optional[str] = None
 
+        # Search mode state
+        self._search_mode: bool = False
+        self._search_query: str = ""
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -638,6 +642,9 @@ class PTDisplay:
             else:
                 # Update last valid input
                 self._last_valid_permission_input = current_text
+        elif self._search_mode:
+            # Search mode: update search results as user types
+            self._update_search()
         else:
             # Normal mode: retrigger completion for @file and %prompt on deletion
             # prompt_toolkit's complete_while_typing only triggers on insertion,
@@ -1000,6 +1007,42 @@ class PTDisplay:
             if buffer:
                 return buffer
         return self._output_buffer
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Search mode
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _open_search(self) -> None:
+        """Open search mode."""
+        self._search_mode = True
+        self._search_query = ""
+        # Clear any existing search state in output buffer
+        buffer = self._get_active_buffer()
+        buffer.clear_search()
+        # Clear the input buffer for search query entry
+        if self._input_buffer:
+            self._input_buffer.text = ""
+
+    def _close_search(self) -> None:
+        """Close search mode and clear search highlights."""
+        self._search_mode = False
+        self._search_query = ""
+        buffer = self._get_active_buffer()
+        buffer.clear_search()
+        # Clear the input buffer
+        if self._input_buffer:
+            self._input_buffer.text = ""
+
+    def _update_search(self) -> None:
+        """Update search results based on current input."""
+        if not self._search_mode or not self._input_buffer:
+            return
+
+        query = self._input_buffer.text
+        if query != self._search_query:
+            self._search_query = query
+            buffer = self._get_active_buffer()
+            buffer.search(query)
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -1622,6 +1665,43 @@ class PTDisplay:
             # This uses $EDITOR or $VISUAL, falling back to vi
             event.current_buffer.open_in_editor()
 
+        # Search mode keybindings
+        @kb.add(*keys.get_key_args("search"))
+        def handle_search(event):
+            """Handle Ctrl+F - toggle search mode."""
+            if getattr(self, '_pager_active', False):
+                return
+            if self._search_mode:
+                # Close search
+                self._close_search()
+            else:
+                # Open search
+                self._open_search()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_next"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_next(event):
+            """Handle Enter in search mode - go to next match."""
+            buffer = self._get_active_buffer()
+            buffer.search_next()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_prev"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_prev(event):
+            """Handle Shift+Enter in search mode - go to previous match."""
+            buffer = self._get_active_buffer()
+            buffer.search_prev()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_close"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_close(event):
+            """Handle Escape in search mode - close search."""
+            self._close_search()
+            self._app.invalidate()
+
         @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True)
         def handle_tool_nav_enter(event):
             """Handle Ctrl+N - enter/exit tool navigation mode."""
@@ -1773,13 +1853,32 @@ class PTDisplay:
             style="class:output-panel",
         )
 
-        # Input prompt label - changes based on mode (pager, waiting for channel, normal)
+        # Input prompt label - changes based on mode (pager, waiting for channel, search, normal)
         def get_prompt_text():
             # Custom prompt override (for exit confirmation, etc.)
             if getattr(self, '_custom_prompt', None):
                 return [("class:prompt.permission", self._custom_prompt)]
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
+            if getattr(self, '_search_mode', False):
+                # Show search status with match count and keybinding hints
+                buffer = self._get_active_buffer()
+                query, current, total = buffer.get_search_status()
+                if total > 0:
+                    return [
+                        ("class:prompt.search", f"Search ({current}/{total}) "),
+                        ("class:prompt", "[Enter: next, S-Enter: prev, Esc: close]> "),
+                    ]
+                elif query:
+                    return [
+                        ("class:prompt.search", "Search (no matches) "),
+                        ("class:prompt", "[Esc: close]> "),
+                    ]
+                else:
+                    return [
+                        ("class:prompt.search", "Search "),
+                        ("class:prompt", "[Enter: next, Esc: close]> "),
+                    ]
             if getattr(self, '_waiting_for_channel_input', False):
                 # 'v' hint is already shown in the output panel truncation indicator
                 return [("class:prompt.permission", "Answer> ")]
