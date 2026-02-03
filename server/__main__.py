@@ -291,6 +291,14 @@ class JaatoDaemon:
         if not self._session_manager:
             return
 
+        # Handle tool disable request (direct registry call, no response events)
+        from server.events import ToolDisableRequest
+        if isinstance(event, ToolDisableRequest):
+            session = self._session_manager.get_client_session(client_id)
+            if session and session.server and session.server.registry:
+                session.server.registry.disable_tool(event.tool_name)
+            return
+
         # Handle session management commands
         from server.events import CommandRequest
 

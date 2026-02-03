@@ -124,8 +124,9 @@ async def run_headless_mode(
     await client.execute_command("permissions", ["default", "allow"])
 
     # Disable clarification tool - no user to answer questions in headless mode
+    # Uses direct registry call (no response events to consume)
     print("[headless] Disabling clarification tool...", file=sys.stderr)
-    await client.execute_command("tools.disable", ["clarification"])
+    await client.disable_tool("clarification")
 
     async def handle_events():
         """Handle events from the server."""

@@ -715,6 +715,18 @@ class IPCClient:
             args=args or [],
         ))
 
+    async def disable_tool(self, tool_name: str) -> None:
+        """Disable a tool directly via registry.
+
+        This is a fire-and-forget request that doesn't generate response events.
+        Used by headless mode to disable tools before starting event handling.
+
+        Args:
+            tool_name: Name of the tool to disable.
+        """
+        from server.events import ToolDisableRequest
+        await self._send_event(ToolDisableRequest(tool_name=tool_name))
+
     async def request_command_list(self) -> None:
         """Request the list of available commands from server.
 

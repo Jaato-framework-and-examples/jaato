@@ -99,6 +99,9 @@ class EventType(str, Enum):
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
 
+    # Tool management (Client -> Server)
+    TOOL_DISABLE_REQUEST = "tools.disable"
+
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
@@ -746,6 +749,17 @@ class ToolStatusEvent(Event):
     tools: List[Dict[str, Any]] = field(default_factory=list)
     # ^ List of {name, description, enabled, plugin}
     message: str = ""  # Optional result message (for enable/disable operations)
+
+
+@dataclass
+class ToolDisableRequest(Event):
+    """Client request to disable a tool.
+
+    Directly calls registry.disable_tool() without generating response events.
+    Used by headless mode to disable tools before starting event handling.
+    """
+    type: EventType = field(default=EventType.TOOL_DISABLE_REQUEST)
+    tool_name: str = ""  # Tool to disable
 
 
 @dataclass
