@@ -161,12 +161,14 @@ async def run_headless_mode(
                 # Exit when main agent is done (finished processing)
                 if event.agent_id == "main" and event.status == "done":
                     should_exit = True
+                    break
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
                 # Exit when main agent completes
                 if event.agent_id == "main":
                     should_exit = True
+                    break
 
             elif isinstance(event, AgentOutputEvent):
                 renderer.on_agent_output(
