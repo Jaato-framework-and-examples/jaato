@@ -199,6 +199,7 @@ class MCPToolPlugin:
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
+        self._streaming_servers: set = set()  # servers with streaming: true in config
         # Interaction log
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
@@ -1255,28 +1256,39 @@ class MCPToolPlugin:
     def supports_streaming(self, tool_name: str) -> bool:
         """Check if an MCP tool supports streaming execution.
 
-        All MCP tools support streaming via progress notifications.
-        The server may or may not send progress updates, but we support
-        receiving them for any tool.
+        Streaming is only advertised for tools from servers that have
+        `streaming: true` in their .mcp.json configuration. This prevents
+        registering :stream variants for tools that won't actually send
+        progress notifications.
 
         Args:
-            tool_name: Name of the tool to check.
+            tool_name: Name of the tool to check (normalized with mcp__ prefix).
 
         Returns:
-            True - all MCP tools support streaming.
+            True if the tool's server has streaming enabled in config.
         """
-        # All MCP tools support streaming via progress_callback
-        # The server decides whether to send progress notifications
-        return True
+        # Parse server name from normalized tool name: mcp__{server}__{tool}
+        if tool_name.startswith("mcp__"):
+            parts = tool_name.split("__", 2)
+            if len(parts) >= 2:
+                server_name = parts[1]
+                return server_name in self._streaming_servers
+        return False
 
     def get_streaming_tool_names(self) -> List[str]:
         """Get list of MCP tools that support streaming.
 
+        Only returns tools from servers that have `streaming: true` in
+        their .mcp.json configuration.
+
         Returns:
-            List of all MCP tool names (all support streaming).
+            List of tool names from streaming-enabled servers.
         """
         tool_names = []
         for server_name, tools in self._tool_cache.items():
+            # Only include tools from servers with streaming enabled
+            if server_name not in self._streaming_servers:
+                continue
             for tool in tools:
                 normalized_name = self._normalize_tool_name(server_name, tool.name)
                 tool_names.append(normalized_name)
@@ -1531,6 +1543,9 @@ class MCPToolPlugin:
                 for idx, (name, spec) in enumerate(server_list, 1):
                     self._log_event(LOG_DEBUG, f"Processing server {idx}/{len(server_list)}", server=name)
                     await connect_server(manager, name, spec)
+                    # Track servers with streaming enabled
+                    if spec.get('streaming', False):
+                        self._streaming_servers.add(name)
 
                 # Cache tools and log summary
                 update_tool_cache(manager)
@@ -1684,12 +1699,16 @@ class MCPToolPlugin:
                                                   details=str(exc), include_traceback=True)
                             self._connected_servers.clear()
                             self._failed_servers.clear()
+                            self._streaming_servers.clear()
 
                             # Connect to all servers in new config
                             for name, spec in new_servers.items():
                                 success, error = await connect_server(manager, name, spec)
                                 if success:
                                     connected.append(name)
+                                    # Track servers with streaming enabled
+                                    if spec.get('streaming', False):
+                                        self._streaming_servers.add(name)
                                 else:
                                     failed[name] = error
 
