@@ -1949,9 +1949,11 @@ class JaatoServer:
             finally:
                 server._model_running = False
                 server._model_thread = None
+                # Emit "idle" if waiting for user input, "done" if truly finished
+                status = "idle" if server._waiting_for_channel_input else "done"
                 server.emit(AgentStatusChangedEvent(
                     agent_id="main",
-                    status="done",
+                    status=status,
                 ))
 
         self._model_thread = threading.Thread(target=model_thread, daemon=True)

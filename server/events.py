@@ -99,6 +99,9 @@ class EventType(str, Enum):
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
 
+    # Tool management (Client -> Server)
+    TOOL_DISABLE_REQUEST = "tools.disable"
+
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
@@ -185,10 +188,10 @@ class AgentOutputEvent(Event):
 
 @dataclass
 class AgentStatusChangedEvent(Event):
-    """Agent status change (active, done, error)."""
+    """Agent status change (active, idle, done, error)."""
     type: EventType = field(default=EventType.AGENT_STATUS_CHANGED)
     agent_id: str = ""
-    status: str = ""  # "active", "done", "error"
+    status: str = ""  # "active", "idle" (waiting for input), "done", "error"
     error: Optional[str] = None
 
 
@@ -749,6 +752,17 @@ class ToolStatusEvent(Event):
 
 
 @dataclass
+class ToolDisableRequest(Event):
+    """Client request to disable a tool.
+
+    Directly calls registry.disable_tool() without generating response events.
+    Used by headless mode to disable tools before starting event handling.
+    """
+    type: EventType = field(default=EventType.TOOL_DISABLE_REQUEST)
+    tool_name: str = ""  # Tool to disable
+
+
+@dataclass
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = field(default=EventType.HISTORY_REQUEST)
@@ -925,6 +939,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
+    EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
