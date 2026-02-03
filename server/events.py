@@ -440,6 +440,8 @@ class ContextUpdatedEvent(Event):
     # GC configuration (included for status bar display)
     gc_threshold: Optional[float] = None  # GC trigger threshold percentage
     gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
+    gc_target_percent: Optional[float] = None  # Target usage after GC
+    gc_continuous_mode: bool = False  # True if GC runs after every turn
 
 
 @dataclass

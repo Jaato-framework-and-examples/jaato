@@ -187,7 +187,9 @@ class AgentUIHooks(Protocol):
         self,
         agent_id: str,
         threshold: float,
-        strategy: str
+        strategy: str,
+        target_percent: Optional[float] = None,
+        continuous_mode: bool = False
     ) -> None:
         """Called when agent's GC configuration is set.
 
@@ -196,7 +198,9 @@ class AgentUIHooks(Protocol):
         Args:
             agent_id: Which agent's GC config is being set.
             threshold: GC trigger threshold percentage (e.g., 80.0).
-            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize").
+            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize", "budget").
+            target_percent: Target usage after GC (e.g., 60.0).
+            continuous_mode: True if GC runs after every turn.
         """
         ...
 

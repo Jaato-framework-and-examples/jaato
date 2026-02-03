@@ -178,6 +178,8 @@ class RichClient:
         # GC info for status bar (set during initialization if GC is configured)
         self._gc_threshold: Optional[float] = None
         self._gc_strategy: Optional[str] = None
+        self._gc_target_percent: Optional[float] = None
+        self._gc_continuous_mode: bool = False
 
         # UI hooks reference for signaling agent status changes
         self._ui_hooks: Optional[Any] = None
@@ -535,6 +537,8 @@ class RichClient:
             self._backend.set_gc_plugin(gc_plugin, gc_config)
             # Store threshold and strategy for status bar display
             self._gc_threshold = gc_config.threshold_percent
+            self._gc_target_percent = gc_config.target_percent
+            self._gc_continuous_mode = gc_config.continuous_mode
             # Get strategy name from plugin (e.g., "gc_truncate" -> "truncate")
             plugin_name = getattr(gc_plugin, 'name', 'gc')
             self._gc_strategy = plugin_name.replace('gc_', '') if plugin_name.startswith('gc_') else plugin_name
@@ -867,9 +871,9 @@ class RichClient:
                     output_tokens, turns, percent_used
                 )
 
-            def on_agent_gc_config(self, agent_id, threshold, strategy):
-                trace_fn(f"[on_agent_gc_config] agent_id={agent_id}, threshold={threshold}, strategy={strategy}")
-                registry.update_gc_config(agent_id, threshold, strategy)
+            def on_agent_gc_config(self, agent_id, threshold, strategy, target_percent=None, continuous_mode=False):
+                trace_fn(f"[on_agent_gc_config] agent_id={agent_id}, threshold={threshold}, strategy={strategy}, target={target_percent}, continuous={continuous_mode}")
+                registry.update_gc_config(agent_id, threshold, strategy, target_percent, continuous_mode)
                 if display:
                     display.refresh()
 
@@ -1734,8 +1738,14 @@ class RichClient:
         self._setup_agent_hooks()
 
         # Set GC config on main agent in registry (for per-agent status bar display)
-        if self._gc_threshold is not None and self._agent_registry:
-            self._agent_registry.update_gc_config("main", self._gc_threshold, self._gc_strategy)
+        if (self._gc_threshold is not None or self._gc_continuous_mode) and self._agent_registry:
+            self._agent_registry.update_gc_config(
+                "main",
+                self._gc_threshold,
+                self._gc_strategy,
+                self._gc_target_percent,
+                self._gc_continuous_mode,
+            )
 
         # Set up permission hooks for inline permission display in tool tree
         self._setup_permission_hooks()
@@ -3941,8 +3951,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         percent_used=event.percent_used,
                     )
                     # Update GC config if present in event
-                    if event.gc_threshold is not None:
-                        agent_registry.update_gc_config(agent_id, event.gc_threshold, event.gc_strategy)
+                    if event.gc_threshold is not None or event.gc_continuous_mode:
+                        agent_registry.update_gc_config(
+                            agent_id,
+                            event.gc_threshold,
+                            event.gc_strategy,
+                            event.gc_target_percent,
+                            event.gc_continuous_mode,
+                        )
                 # Also update display (fallback if no registry)
                 usage = {
                     "prompt_tokens": event.prompt_tokens,

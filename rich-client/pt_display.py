@@ -522,6 +522,8 @@ class PTDisplay:
         self._context_usage: Dict[str, Any] = {}
         self._gc_threshold: Optional[float] = None  # GC threshold percentage (e.g., 80.0)
         self._gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
+        self._gc_target_percent: Optional[float] = None  # Target usage after GC
+        self._gc_continuous_mode: bool = False  # True if GC runs after every turn
 
         # Session bar info
         self._session_id: str = ""
@@ -837,11 +839,13 @@ class PTDisplay:
         # Use selected agent's context and GC config if registry present
         if self._agent_registry:
             usage = self._agent_registry.get_selected_context_usage()
-            gc_threshold, gc_strategy = self._agent_registry.get_selected_gc_config()
+            gc_threshold, gc_strategy, gc_target_percent, gc_continuous_mode = self._agent_registry.get_selected_gc_config()
         else:
             usage = self._context_usage
             gc_threshold = self._gc_threshold
             gc_strategy = self._gc_strategy
+            gc_target_percent = self._gc_target_percent
+            gc_continuous_mode = self._gc_continuous_mode
 
         if usage:
             percent_used = usage.get('percent_used', 0)
@@ -849,7 +853,7 @@ class PTDisplay:
         else:
             percent_available = 100.0
 
-        # Build context string with token count and optional GC threshold hint
+        # Build context string with token count and optional GC hint
         if usage:
             total = usage.get('total_tokens', 0)
             # Format token count
@@ -858,15 +862,23 @@ class PTDisplay:
             else:
                 tokens_str = f"{total} used"
 
-            # Add GC threshold hint if configured
-            if gc_threshold is not None:
+            # Add GC hint if configured
+            if gc_continuous_mode and gc_target_percent is not None:
+                # Continuous mode: show target instead of threshold
+                target_available = 100 - gc_target_percent
+                context_str = f"{percent_available:.0f}% available ({tokens_str}, continuous →{target_available:.0f}%)"
+            elif gc_threshold is not None:
                 gc_trigger_available = 100 - gc_threshold
                 strategy = gc_strategy or "gc"
                 context_str = f"{percent_available:.0f}% available ({tokens_str}, {strategy} at {gc_trigger_available:.0f}%)"
             else:
                 context_str = f"{percent_available:.0f}% available ({tokens_str})"
+        elif gc_continuous_mode and gc_target_percent is not None:
+            # No usage yet but continuous GC is configured
+            target_available = 100 - gc_target_percent
+            context_str = f"{percent_available:.0f}% available (continuous →{target_available:.0f}%)"
         elif gc_threshold is not None:
-            # No usage yet but GC is configured
+            # No usage yet but threshold GC is configured
             gc_trigger_available = 100 - gc_threshold
             strategy = gc_strategy or "gc"
             context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
@@ -2096,16 +2108,22 @@ class PTDisplay:
     def set_gc_threshold(
         self,
         threshold: Optional[float],
-        strategy: Optional[str] = None
+        strategy: Optional[str] = None,
+        target_percent: Optional[float] = None,
+        continuous_mode: bool = False
     ) -> None:
         """Set the GC threshold percentage and strategy for status bar display.
 
         Args:
             threshold: GC trigger threshold percentage (e.g., 80.0), or None to hide.
             strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize").
+            target_percent: Target usage after GC (e.g., 60.0).
+            continuous_mode: True if GC runs after every turn.
         """
         self._gc_threshold = threshold
         self._gc_strategy = strategy
+        self._gc_target_percent = target_percent
+        self._gc_continuous_mode = continuous_mode
         self.refresh()
 
     def register_formatter(self, formatter: Any) -> None:

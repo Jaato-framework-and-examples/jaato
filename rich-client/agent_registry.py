@@ -45,6 +45,8 @@ class AgentInfo:
     # GC configuration (per-agent)
     gc_threshold: Optional[float] = None  # GC trigger threshold percentage
     gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
+    gc_target_percent: Optional[float] = None  # Target usage after GC
+    gc_continuous_mode: bool = False  # True if GC runs after every turn
 
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
@@ -475,7 +477,9 @@ class AgentRegistry:
         self,
         agent_id: str,
         threshold: Optional[float],
-        strategy: Optional[str] = None
+        strategy: Optional[str] = None,
+        target_percent: Optional[float] = None,
+        continuous_mode: bool = False
     ) -> None:
         """Update an agent's GC configuration.
 
@@ -483,24 +487,28 @@ class AgentRegistry:
             agent_id: The agent to update
             threshold: GC trigger threshold percentage (e.g., 80.0)
             strategy: GC strategy name (e.g., "truncate", "hybrid")
+            target_percent: Target usage after GC (e.g., 60.0)
+            continuous_mode: True if GC runs after every turn
         """
         with self._lock:
             agent = self._agents.get(agent_id)
             if agent:
                 agent.gc_threshold = threshold
                 agent.gc_strategy = strategy
+                agent.gc_target_percent = target_percent
+                agent.gc_continuous_mode = continuous_mode
 
-    def get_selected_gc_config(self) -> tuple[Optional[float], Optional[str]]:
+    def get_selected_gc_config(self) -> tuple[Optional[float], Optional[str], Optional[float], bool]:
         """Get selected agent's GC configuration.
 
         Returns:
-            Tuple of (gc_threshold, gc_strategy) for the selected agent.
+            Tuple of (gc_threshold, gc_strategy, gc_target_percent, gc_continuous_mode).
         """
         with self._lock:
             agent = self.get_selected_agent()
             if agent:
-                return agent.gc_threshold, agent.gc_strategy
-            return None, None
+                return agent.gc_threshold, agent.gc_strategy, agent.gc_target_percent, agent.gc_continuous_mode
+            return None, None, None, False
 
     def get_selected_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get selected agent's turn accounting."""
