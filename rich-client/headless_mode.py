@@ -306,6 +306,11 @@ async def run_headless_mode(
 
             # ==================== System Messages ====================
             elif isinstance(event, SystemMessageEvent):
+                # Check for session termination signal
+                if event.message == "[SESSION_TERMINATED]":
+                    print("[headless] Session terminated", file=sys.stderr)
+                    should_exit = True
+                    break
                 renderer.on_system_message(event.message, event.style or "system_info")
 
             # ==================== Turn Completion ====================

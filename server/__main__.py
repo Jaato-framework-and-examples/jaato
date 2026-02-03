@@ -408,6 +408,19 @@ class JaatoDaemon:
                     self._ipc_server.set_client_session(client_id, default_session_id)
                 return
 
+            elif cmd == "session.end":
+                # End session - stop agent and signal all attached clients to exit
+                session = self._session_manager.get_client_session(client_id)
+                if session and session.server:
+                    session.server.stop()
+                # Signal termination to all clients attached to this session
+                from server.events import SystemMessageEvent
+                self._session_manager._emit_to_session(
+                    session_id,
+                    SystemMessageEvent(message="[SESSION_TERMINATED]", style="system")
+                )
+                return
+
             elif cmd == "session.delete":
                 if event.args:
                     session_id_to_delete = event.args[0]
