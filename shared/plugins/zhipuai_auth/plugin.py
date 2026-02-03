@@ -4,9 +4,10 @@ Provides user commands for API key authentication with Z.AI GLM Coding Plan.
 This allows users to securely store and manage their Z.AI API credentials.
 
 Commands:
-    zhipuai-auth login       - Interactively enter and validate API key
-    zhipuai-auth logout      - Clear stored API credentials
-    zhipuai-auth status      - Show current authentication status
+    zhipuai-auth login            - Show instructions for getting API key
+    zhipuai-auth key <api_key>    - Validate and store API key
+    zhipuai-auth logout           - Clear stored API credentials
+    zhipuai-auth status           - Show current authentication status
 """
 
 from datetime import datetime
@@ -76,14 +77,14 @@ class ZhipuAIAuthPlugin:
         return [
             UserCommand(
                 name="zhipuai-auth",
-                description="Manage Zhipu AI (Z.AI) authentication (login, logout, status)",
+                description="Manage Zhipu AI (Z.AI) authentication (login, key, logout, status)",
                 share_with_model=False,
                 parameters=[
                     CommandParameter(
                         name="action",
-                        description="Action: login, logout, status, or help",
+                        description="Action: login, key <api_key>, logout, status, or help",
                         required=True,
-                        capture_rest=True,
+                        capture_rest=True,  # Capture "key ABC123" as single string
                     ),
                 ],
             ),
@@ -97,7 +98,8 @@ class ZhipuAIAuthPlugin:
             return []
 
         actions = [
-            CommandCompletion("login", "Enter and validate your Z.AI API key"),
+            CommandCompletion("login", "Show instructions for getting your Z.AI API key"),
+            CommandCompletion("key", "Validate and store your API key: key <api_key>"),
             CommandCompletion("logout", "Clear stored API credentials"),
             CommandCompletion("status", "Show current authentication status"),
             CommandCompletion("help", "Show detailed help for this command"),
@@ -117,10 +119,21 @@ class ZhipuAIAuthPlugin:
         if command != "zhipuai-auth":
             return f"Unknown command: {command}"
 
+        # Get raw action string (don't lowercase - API keys are case-sensitive)
         raw_action = args.get("action", "").strip()
         action_lower = raw_action.lower()
 
-        if action_lower == "login":
+        # Handle "key <api_key>" - extract key from raw string (preserve case)
+        if action_lower.startswith("key "):
+            api_key = raw_action[4:].strip()
+            return self._cmd_key(api_key)
+        elif action_lower == "key":
+            self._emit("Usage: zhipuai-auth key <your_api_key>\n")
+            self._emit("\nGet your API key from:\n")
+            self._emit("  International: https://z.ai/model-api\n")
+            self._emit("  China: https://open.bigmodel.cn/\n")
+            return ""
+        elif action_lower == "login":
             return self._cmd_login()
         elif action_lower == "logout":
             return self._cmd_logout()
@@ -132,10 +145,11 @@ class ZhipuAIAuthPlugin:
             self._emit(
                 f"Unknown action: '{raw_action}'\n\n"
                 "Available actions:\n"
-                "  login   - Enter and validate your Z.AI API key\n"
-                "  logout  - Clear stored API credentials\n"
-                "  status  - Show current authentication status\n"
-                "  help    - Show detailed help\n"
+                "  login       - Show instructions for getting your API key\n"
+                "  key <key>   - Validate and store your API key\n"
+                "  logout      - Clear stored API credentials\n"
+                "  status      - Show current authentication status\n"
+                "  help        - Show detailed help\n"
             )
             return ""
 
@@ -150,8 +164,10 @@ USAGE
     zhipuai-auth <action>
 
 ACTIONS
-    login             Interactively enter your Z.AI API key
-                      The key will be validated before saving
+    login             Show instructions for getting your Z.AI API key
+
+    key <api_key>     Validate and store your API key
+                      The key is validated via test request before saving
 
     logout            Clear stored API credentials
                       Removes the stored API key
@@ -161,18 +177,18 @@ ACTIONS
 
     help              Show this help message
 
-GETTING AN API KEY
-    1. International: Visit https://z.ai/model-api
-    2. China: Visit https://open.bigmodel.cn/
-    3. Sign up or log in to your account
-    4. Navigate to the API keys section
-    5. Generate a new API key
-    6. Copy and use it with 'zhipuai-auth login'
+AUTHENTICATION FLOW
+    1. Run 'zhipuai-auth login' to see instructions
+    2. Visit https://z.ai/model-api or https://open.bigmodel.cn/
+    3. Sign in and generate an API key
+    4. Run 'zhipuai-auth key <paste_key_here>'
+    5. Key is validated and saved for future use
 
 EXAMPLES
-    zhipuai-auth login              Enter your API key interactively
-    zhipuai-auth status             Check authentication status
-    zhipuai-auth logout             Clear stored credentials
+    zhipuai-auth login                      Show setup instructions
+    zhipuai-auth key abc123.xyz789          Store and validate API key
+    zhipuai-auth status                     Check authentication status
+    zhipuai-auth logout                     Clear stored credentials
 
 TOKEN STORAGE
     Credentials are stored in:
@@ -193,6 +209,7 @@ AVAILABLE MODELS
     glm-4-assistant       Optimized for agentic tasks
 
 NOTES
+    - API key format is typically: {id}.{secret}
     - API key is validated by making a test request before saving
     - Stored credentials are used automatically when connecting
     - Environment variable ZHIPUAI_API_KEY takes precedence"""
@@ -200,12 +217,8 @@ NOTES
         return ""
 
     def _cmd_login(self) -> str:
-        """Handle the login command - prompt for API key."""
-        from ..model_provider.zhipuai.auth import (
-            login_with_key,
-            get_stored_api_key,
-            DEFAULT_ZHIPUAI_BASE_URL,
-        )
+        """Handle the login command - show instructions."""
+        from ..model_provider.zhipuai.auth import get_stored_api_key
         from ..model_provider.zhipuai.env import resolve_api_key
 
         # Check if already authenticated
@@ -214,25 +227,66 @@ NOTES
             masked = existing_key[:8] + "..." + existing_key[-4:] if len(existing_key) > 12 else "***"
             self._emit(
                 f"Note: You already have a Z.AI API key configured ({masked}).\n"
-                "Proceeding will replace it.\n\n"
+                "Using 'zhipuai-auth key <new_key>' will replace it.\n\n"
             )
 
         self._emit("Zhipu AI (Z.AI) Authentication\n")
         self._emit("=" * 35 + "\n\n")
-        self._emit("Get your API key from:\n")
+        self._emit("Step 1: Get your API key from:\n")
         self._emit("  International: https://z.ai/model-api\n")
         self._emit("  China: https://open.bigmodel.cn/\n\n")
+        self._emit("Step 2: Copy your API key and run:\n")
+        self._emit("  zhipuai-auth key <paste_your_key_here>\n\n")
+        self._emit("The key will be validated and stored securely.\n")
 
-        # Since we can't do interactive input in plugin commands,
-        # we need to provide instructions for the user
-        self._emit(
-            "To authenticate, set your API key using one of these methods:\n\n"
-            "1. Environment variable (recommended for security):\n"
-            "   export ZHIPUAI_API_KEY='your-api-key-here'\n\n"
-            "2. Or use the provider config when starting jaato:\n"
-            "   --model-provider zhipuai --api-key 'your-key'\n\n"
-            "After setting the key, the provider will validate it on first use.\n"
+        return ""
+
+    def _cmd_key(self, api_key: str) -> str:
+        """Handle the key command - validate and store API key."""
+        from ..model_provider.zhipuai.auth import (
+            login_with_key,
+            validate_api_key,
+            get_stored_api_key,
         )
+        from ..model_provider.zhipuai.env import resolve_api_key
+
+        if not api_key:
+            self._emit("Error: No API key provided.\n")
+            self._emit("Usage: zhipuai-auth key <your_api_key>\n")
+            return ""
+
+        # Check if this would replace an existing key
+        existing_key = resolve_api_key() or get_stored_api_key()
+        if existing_key and existing_key == api_key:
+            self._emit("This API key is already configured.\n")
+            return ""
+
+        self._emit("Validating API key...\n")
+
+        # Validate the key
+        if validate_api_key(api_key):
+            # Store it
+            def on_message(msg: str) -> None:
+                self._emit(f"{msg}\n")
+
+            result = login_with_key(api_key, on_message=on_message)
+            if result:
+                self._emit("\n")
+                self._emit("Successfully authenticated with Z.AI.\n")
+                self._emit("Your API key has been stored securely.\n\n")
+                self._emit("You can now use the zhipuai provider:\n")
+                self._emit("  model zhipuai/glm-4.7\n")
+            else:
+                self._emit("\nFailed to store credentials.\n")
+        else:
+            self._emit("\nAPI key validation failed.\n\n")
+            self._emit("Please check that:\n")
+            self._emit("  - The key is correct and complete\n")
+            self._emit("  - Your Z.AI account is active\n")
+            self._emit("  - You have an active GLM Coding Plan subscription\n\n")
+            self._emit("Get your key from:\n")
+            self._emit("  https://z.ai/model-api (International)\n")
+            self._emit("  https://open.bigmodel.cn/ (China)\n")
 
         return ""
 
