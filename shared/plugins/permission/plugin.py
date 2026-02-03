@@ -395,6 +395,7 @@ class PermissionPlugin:
             CommandCompletion("suspend", "Suspend prompting (--turn for turn only)"),
             CommandCompletion("resume", "Resume normal prompting"),
             CommandCompletion("clear", "Reset all session modifications"),
+            CommandCompletion("help", "Show detailed help for this command"),
         ]
 
         # Policy options for "default" subcommand

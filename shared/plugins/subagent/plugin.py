@@ -19,7 +19,7 @@ from .config import (
     discover_profiles, expand_plugin_configs, _find_workspace_root,
     gc_profile_to_plugin_config
 )
-from ..base import UserCommand, CommandCompletion
+from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
@@ -852,17 +852,28 @@ class SubagentPlugin:
             UserCommand(
                 "profiles",
                 "List available subagent profiles",
-                share_with_model=True  # Model should know what profiles are available
+                share_with_model=True,  # Model should know what profiles are available
+                parameters=[
+                    CommandParameter(
+                        name="subcommand",
+                        description="Subcommand: help",
+                        required=False
+                    )
+                ]
             ),
         ]
 
     def get_command_completions(
         self, command: str, args: List[str]
     ) -> List[CommandCompletion]:
-        """Return completion options for subagent command arguments.
+        """Return completion options for subagent command arguments."""
+        if command != "profiles":
+            return []
 
-        The 'profiles' command takes no arguments, so no completions needed.
-        """
+        # No args yet - suggest help
+        if not args or (len(args) == 1 and "help".startswith(args[0].lower())):
+            return [CommandCompletion("help", "Show detailed help for this command")]
+
         return []
 
     def add_profile(self, profile: SubagentProfile) -> None:
@@ -989,15 +1000,20 @@ class SubagentPlugin:
         """
         self._plan_reporter = reporter
 
-    def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_list_profiles(self, args: Dict[str, Any]):
         """List available subagent profiles.
 
         Args:
-            args: Tool arguments (unused).
+            args: Tool arguments with optional 'subcommand'.
 
         Returns:
-            Dict containing list of available profiles.
+            Dict containing list of available profiles, or HelpLines for help.
         """
+        # Handle help subcommand
+        subcommand = args.get("subcommand", "").strip().lower()
+        if subcommand == "help":
+            return self._cmd_help()
+
         if not self._config or not self._config.profiles:
             return {
                 'profiles': [],
@@ -1022,6 +1038,50 @@ class SubagentPlugin:
             'inline_allowed': self._config.allow_inline,
             'inline_allowed_plugins': self._config.inline_allowed_plugins,
         }
+
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("Profiles Command", "bold"),
+            ("", ""),
+            ("List available subagent profiles. Subagents are specialized agents", ""),
+            ("that can be spawned to handle specific tasks with their own tools.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    profiles [help]", ""),
+            ("", ""),
+            ("ARGUMENTS", "bold"),
+            ("    (none)            List all available subagent profiles", "dim"),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    profiles                  List all available profiles", "dim"),
+            ("    profiles help             Show this help message", "dim"),
+            ("", ""),
+            ("PROFILE CONFIGURATION", "bold"),
+            ("    Profiles are defined in .jaato/subagents.json:", ""),
+            ("", ""),
+            ('    {', "dim"),
+            ('      "profiles": {', "dim"),
+            ('        "researcher": {', "dim"),
+            ('          "description": "Research and analysis tasks",', "dim"),
+            ('          "plugins": ["web_search", "web_fetch"],', "dim"),
+            ('          "max_turns": 10', "dim"),
+            ('        }', "dim"),
+            ('      }', "dim"),
+            ('    }', "dim"),
+            ("", ""),
+            ("MODEL TOOLS", "bold"),
+            ("    The model uses these tools to work with subagents:", ""),
+            ("    spawn_subagent        Create a new subagent for a task", "dim"),
+            ("    send_to_subagent      Send a message to an active subagent", "dim"),
+            ("    list_active_subagents List currently running subagents", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Subagents run asynchronously in the background", "dim"),
+            ("    - Without profiles, subagents inherit parent's plugins", "dim"),
+            ("    - Each profile can specify plugins, max turns, auto-approval", "dim"),
+        ])
 
     def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Send a message to a subagent for processing.

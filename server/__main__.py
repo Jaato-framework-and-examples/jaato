@@ -636,6 +636,7 @@ class JaatoDaemon:
             {"name": "session new", "description": "Create a new session"},
             {"name": "session attach", "description": "Attach to an existing session"},
             {"name": "session delete", "description": "Delete a session"},
+            {"name": "session help", "description": "Show detailed help for session command"},
         ]
         commands.extend(session_commands)
 
@@ -644,6 +645,7 @@ class JaatoDaemon:
             {"name": "tools list", "description": "List all tools with status"},
             {"name": "tools enable", "description": "Enable a tool (or 'all')"},
             {"name": "tools disable", "description": "Disable a tool (or 'all')"},
+            {"name": "tools help", "description": "Show detailed help for tools command"},
         ]
         commands.extend(tools_commands)
 
