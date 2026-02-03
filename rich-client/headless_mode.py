@@ -70,6 +70,7 @@ async def run_headless_mode(
         ToolCallEndEvent,
         ToolOutputEvent,
         ContextUpdatedEvent,
+        InstructionBudgetEvent,
         TurnCompletedEvent,
         SystemMessageEvent,
         InitProgressEvent,
@@ -97,6 +98,10 @@ async def run_headless_mode(
     model_running = False
     should_exit = False
     turn_completed = False
+    turn_count = 0
+
+    # Budget tracking for turn summaries
+    budget_snapshot = {}
 
     # Connect to server
     print(f"[headless] Connecting to server at {socket_path}...", file=sys.stderr)
@@ -282,6 +287,11 @@ async def run_headless_mode(
                     percent_used=event.percent_used or 0.0,
                 )
 
+            elif isinstance(event, InstructionBudgetEvent):
+                # Track budget for turn summaries (main agent only)
+                if event.agent_id == "main" or not event.agent_id:
+                    budget_snapshot.update(event.budget_snapshot)
+
             # ==================== Error/Retry Events ====================
             elif isinstance(event, ErrorEvent):
                 renderer.on_error(event.error, event.error_type or None)
@@ -300,7 +310,30 @@ async def run_headless_mode(
 
             # ==================== Turn Completion ====================
             elif isinstance(event, TurnCompletedEvent):
+                turn_count += 1
                 turn_completed = True
+                # Print budget summary by category at turn boundary
+                if budget_snapshot:
+                    total = budget_snapshot.get("total_tokens", 0)
+                    limit = budget_snapshot.get("context_limit", 0)
+                    pct = budget_snapshot.get("utilization_percent", 0)
+                    entries = budget_snapshot.get("entries", [])
+
+                    # Build category breakdown
+                    categories = []
+                    for entry in entries:
+                        source = entry.get("source_type", "unknown")
+                        tokens = entry.get("tokens", 0)
+                        if tokens > 0:
+                            categories.append(f"{source}:{tokens:,}")
+
+                    category_str = " | ".join(categories) if categories else "no data"
+                    print(
+                        f"[headless] Turn {turn_count} | {total:,}/{limit:,} tokens ({pct:.1f}%) | {category_str}",
+                        file=sys.stderr
+                    )
+                else:
+                    print(f"[headless] Turn {turn_count} completed", file=sys.stderr)
                 # Don't exit on turn completion alone - wait for agent to complete
                 # Turn completion just means one request-response cycle finished
 
