@@ -279,7 +279,7 @@ async def run_headless_mode(
 
             # ==================== Error/Retry Events ====================
             elif isinstance(event, ErrorEvent):
-                renderer.on_error(event.message, event.details)
+                renderer.on_error(event.error, event.error_type or None)
 
             elif isinstance(event, RetryEvent):
                 renderer.on_retry(
