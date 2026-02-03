@@ -939,6 +939,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
+    EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
