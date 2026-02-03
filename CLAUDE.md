@@ -409,6 +409,8 @@ The `open_editor` keybinding (Ctrl+G) opens the current input in your external e
 
 The `search` keybinding (Ctrl+F) opens search mode to find text in session output. When in search mode: Enter=next match, Ctrl+P=previous match, Escape=close search.
 
+Large pastes (>10 lines or >1000 chars) are automatically replaced with placeholders like `[paste #1: +50 lines]` to prevent UI freezing. The original content is stored and expanded when you submit the prompt.
+
 ## Rich Client Theming
 
 Built-in themes: `dark` (default), `light`, `high-contrast`

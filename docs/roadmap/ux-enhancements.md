@@ -196,11 +196,12 @@ As a user with a long session, I want to search for "authentication" to find whe
 
 ---
 
-## Ticket 4: Bracketed Paste Handling
+## Ticket 4: Bracketed Paste Handling [COMPLETED]
 
 **Priority**: Low
 **Effort**: Low-Medium
 **Dependencies**: None
+**Status**: Implemented
 
 ### Description
 
@@ -269,12 +270,12 @@ Add to settings:
 
 ### Acceptance Criteria
 
-- [ ] Large pastes (>10 lines) show placeholder
-- [ ] Placeholder shows line count
-- [ ] Content expands correctly on submit
-- [ ] Small pastes work normally
-- [ ] Thresholds configurable
-- [ ] Multiple pastes in same prompt work
+- [x] Large pastes (>10 lines) show placeholder
+- [x] Placeholder shows line count
+- [x] Content expands correctly on submit
+- [x] Small pastes work normally
+- [x] Thresholds configurable (via instance attributes)
+- [x] Multiple pastes in same prompt work
 
 ---
 
@@ -283,7 +284,7 @@ Add to settings:
 1. ~~**External Editor** - Quick win, built-in support~~ [COMPLETED]
 2. ~~**Fuzzy @file and %prompt** - High daily impact~~ [COMPLETED]
 3. ~~**Text Search** - Good for power users~~ [COMPLETED]
-4. **Bracketed Paste** - Polish feature
+4. ~~**Bracketed Paste** - Polish feature~~ [COMPLETED]
 
 ## Notes
 
