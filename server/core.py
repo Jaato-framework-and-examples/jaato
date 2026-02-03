@@ -795,7 +795,7 @@ class JaatoServer:
         with self._with_session_env(), self._in_workspace():
             self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-        gc_result = load_gc_from_file()
+            gc_result = load_gc_from_file()
         gc_threshold = None
         gc_strategy = None
         gc_target_percent = None
@@ -2298,7 +2298,7 @@ class JaatoServer:
                 with self._with_session_env(), self._in_workspace():
                     self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-                gc_result = load_gc_from_file()
+                    gc_result = load_gc_from_file()
                 gc_threshold = None
                 gc_strategy = None
                 gc_target_percent = None
