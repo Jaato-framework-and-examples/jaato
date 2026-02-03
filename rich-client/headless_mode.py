@@ -158,9 +158,15 @@ async def run_headless_mode(
             elif isinstance(event, AgentStatusChangedEvent):
                 model_running = event.status == "active"
                 renderer.on_agent_status_changed(event.agent_id, event.status)
+                # Exit when main agent is done (finished processing)
+                if event.agent_id == "main" and event.status == "done":
+                    should_exit = True
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
+                # Exit when main agent completes
+                if event.agent_id == "main":
+                    should_exit = True
 
             elif isinstance(event, AgentOutputEvent):
                 renderer.on_agent_output(
@@ -296,8 +302,8 @@ async def run_headless_mode(
             # ==================== Turn Completion ====================
             elif isinstance(event, TurnCompletedEvent):
                 turn_completed = True
-                should_exit = True
-                break
+                # Don't exit on turn completion alone - wait for agent to complete
+                # Turn completion just means one request-response cycle finished
 
     # Send the prompt
     print(f"[headless] Sending prompt...", file=sys.stderr)
