@@ -182,8 +182,10 @@ class GCProfileConfig:
     Defines the GC strategy and its configuration for a subagent or main agent.
 
     Attributes:
-        type: GC strategy type ('truncate', 'summarize', 'hybrid').
+        type: GC strategy type ('truncate', 'summarize', 'hybrid', 'budget').
         threshold_percent: Trigger GC when context usage exceeds this percentage.
+        target_percent: Target usage after GC (default: 60.0).
+        pressure_percent: When PRESERVABLE can be touched (0 = continuous mode).
         preserve_recent_turns: Number of recent turns to always preserve.
         notify_on_gc: Whether to inject a notification into history after GC.
         summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
@@ -192,11 +194,18 @@ class GCProfileConfig:
     """
     type: str = "truncate"
     threshold_percent: float = 80.0
+    target_percent: float = 60.0
+    pressure_percent: Optional[float] = 90.0  # 0 or None = continuous mode
     preserve_recent_turns: int = 5
     notify_on_gc: bool = True
     summarize_middle_turns: Optional[int] = None  # For hybrid strategy
     max_turns: Optional[int] = None
     plugin_config: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def continuous_mode(self) -> bool:
+        """True if continuous GC is enabled (pressure_percent is 0 or None)."""
+        return not self.pressure_percent
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GCProfileConfig':
@@ -204,6 +213,8 @@ class GCProfileConfig:
         return cls(
             type=data.get('type', 'truncate'),
             threshold_percent=data.get('threshold_percent', 80.0),
+            target_percent=data.get('target_percent', 60.0),
+            pressure_percent=data.get('pressure_percent', 90.0),
             preserve_recent_turns=data.get('preserve_recent_turns', 5),
             notify_on_gc=data.get('notify_on_gc', True),
             summarize_middle_turns=data.get('summarize_middle_turns'),

@@ -1815,7 +1815,11 @@ class SubagentPlugin:
                     if self._ui_hooks and hasattr(self._ui_hooks, 'on_agent_gc_config'):
                         strategy = profile.gc.type
                         self._ui_hooks.on_agent_gc_config(
-                            agent_id, profile.gc.threshold_percent, strategy
+                            agent_id,
+                            profile.gc.threshold_percent,
+                            strategy,
+                            target_percent=profile.gc.target_percent,
+                            continuous_mode=profile.gc.continuous_mode,
                         )
                 except ValueError as e:
                     logger.warning(
