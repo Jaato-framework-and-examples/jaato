@@ -92,9 +92,9 @@ async def run_command_mode(
                 break
 
             elif isinstance(event, ErrorEvent):
-                print(f"Error: {event.message}", file=sys.stderr)
-                if event.details:
-                    print(f"Details: {event.details}", file=sys.stderr)
+                print(f"Error: {event.error}", file=sys.stderr)
+                if event.error_type:
+                    print(f"Type: {event.error_type}", file=sys.stderr)
                 response_received = True
                 break
 

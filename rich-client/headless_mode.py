@@ -311,8 +311,8 @@ async def run_headless_mode(
     except Exception as e:
         print(f"[headless] Error: {e}", file=sys.stderr)
 
-    # Cleanup
+    # Cleanup - use close() for permanent shutdown (stops event stream)
     renderer.shutdown()
-    await client.disconnect()
+    await client.close()
 
     print(f"[headless] Output written to: {renderer.output_dir}", file=sys.stderr)
