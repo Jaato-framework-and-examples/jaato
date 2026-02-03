@@ -4854,8 +4854,28 @@ Server Mode:
         type=str,
         help="Workspace directory for headless output (default: current directory)"
     )
+    parser.add_argument(
+        "--session",
+        type=str,
+        metavar="SESSION_ID",
+        help="Attach to a specific session (use with --cmd to send commands to headless sessions)"
+    )
+    parser.add_argument(
+        "--cmd",
+        type=str,
+        metavar="COMMAND",
+        help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
+             "Requires --connect and --session."
+    )
 
     args = parser.parse_args()
+
+    # Validate --cmd requirements
+    if args.cmd:
+        if not args.connect:
+            sys.exit("Error: --cmd requires --connect")
+        if not args.session:
+            sys.exit("Error: --cmd requires --session to specify which session to send the command to")
 
     # Validate headless mode requirements
     if args.headless:
@@ -4864,8 +4884,21 @@ Server Mode:
         if not args.prompt and not args.initial_prompt:
             sys.exit("Error: --headless requires --prompt or --initial-prompt")
 
-    # Check TTY before proceeding (except for single prompt mode or headless)
-    if not sys.stdout.isatty() and not args.prompt and not args.headless:
+    # Command mode: send a command to a session and exit
+    if args.cmd:
+        import asyncio
+        from command_mode import run_command_mode
+        asyncio.run(run_command_mode(
+            socket_path=args.connect,
+            session_id=args.session,
+            command=args.cmd,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+        ))
+        return
+
+    # Check TTY before proceeding (except for single prompt mode, headless, or command mode)
+    if not sys.stdout.isatty() and not args.prompt and not args.headless and not args.cmd:
         sys.exit(
             "Error: rich-client requires an interactive terminal.\n"
             "Use --headless for non-TTY environments."
