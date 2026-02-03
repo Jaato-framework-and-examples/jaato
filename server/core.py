@@ -921,9 +921,15 @@ class JaatoServer:
         if self.registry:
             formatter_registry.set_tool_registry(self.registry)
 
-        # Try to load config from project or user directory
+        # Try to load config from project directory (workspace) or user directory
+        # Use workspace_path if available, otherwise fall back to relative path
+        if self._workspace_path:
+            project_config = os.path.join(self._workspace_path, ".jaato/formatters.json")
+        else:
+            project_config = ".jaato/formatters.json"
+
         config_loaded = (
-            formatter_registry.load_config(".jaato/formatters.json") or
+            formatter_registry.load_config(project_config) or
             formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
         )
 
@@ -963,8 +969,13 @@ class JaatoServer:
             if self.registry:
                 formatter_registry.set_tool_registry(self.registry)
             # Use same config loading as main pipeline
+            # Use workspace_path if available for project config
+            if self._workspace_path:
+                project_config = os.path.join(self._workspace_path, ".jaato/formatters.json")
+            else:
+                project_config = ".jaato/formatters.json"
             config_loaded = (
-                formatter_registry.load_config(".jaato/formatters.json") or
+                formatter_registry.load_config(project_config) or
                 formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
             )
             if not config_loaded:
