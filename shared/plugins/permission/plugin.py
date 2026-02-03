@@ -24,7 +24,7 @@ from .channels import (
     create_channel,
     get_default_permission_options,
 )
-from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
+from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
 from ...ui_utils import format_permission_options, format_tool_args_summary
 
 # Import TYPE_CHECKING to avoid circular imports
@@ -639,85 +639,85 @@ class PermissionPlugin:
 
         return "\n".join(lines)
 
-    def _permissions_help(self) -> str:
+    def _permissions_help(self) -> HelpLines:
         """Show detailed help for the permissions command."""
-        lines = []
-        lines.append("Permissions Command")
-        lines.append("")
-        lines.append("Manage tool execution permissions. Control which tools the model can use")
-        lines.append("and how permission prompts are handled.")
-        lines.append("")
-        lines.append("USAGE")
-        lines.append("    permissions [subcommand] [args]")
-        lines.append("")
-        lines.append("SUBCOMMANDS")
-        lines.append("    show              Display the current effective permission policy")
-        lines.append("                      Shows base config, session overrides, and status")
-        lines.append("                      (this is the default when no subcommand is given)")
-        lines.append("")
-        lines.append("    status            Quick view of current suspension state")
-        lines.append("                      Shows if permissions are suspended and why")
-        lines.append("")
-        lines.append("    check <tool>      Test what decision a tool would get")
-        lines.append("                      Shows ALLOW/DENY/ASK and the matching rule")
-        lines.append("")
-        lines.append("    allow <pattern>   Add tool or pattern to session whitelist")
-        lines.append("                      Patterns support wildcards (e.g., 'file_*')")
-        lines.append("")
-        lines.append("    deny <pattern>    Add tool or pattern to session blacklist")
-        lines.append("                      Blocked tools will fail without prompting")
-        lines.append("")
-        lines.append("    default <policy>  Set the session default policy")
-        lines.append("                      Options: allow, deny, ask")
-        lines.append("")
-        lines.append("    suspend           Suspend permission prompts until session goes idle")
-        lines.append("    suspend --turn    Suspend prompts for the current turn only")
-        lines.append("")
-        lines.append("    resume            Resume normal permission prompting")
-        lines.append("                      Clears any suspension state")
-        lines.append("")
-        lines.append("    clear             Reset all session permission modifications")
-        lines.append("                      Removes whitelist/blacklist entries and default")
-        lines.append("")
-        lines.append("    help              Show this help message")
-        lines.append("")
-        lines.append("EXAMPLES")
-        lines.append("    permissions                      Show current policy")
-        lines.append("    permissions allow Bash           Always allow Bash tool")
-        lines.append("    permissions deny file_edit*      Block all file edit tools")
-        lines.append("    permissions check web_search     Test what web_search would get")
-        lines.append("    permissions default allow        Auto-approve all tools")
-        lines.append("    permissions suspend              Stop prompting until idle")
-        lines.append("    permissions suspend --turn       Stop prompting this turn only")
-        lines.append("    permissions resume               Resume normal prompting")
-        lines.append("    permissions clear                Reset to base config")
-        lines.append("")
-        lines.append("PERMISSION PROMPT RESPONSES")
-        lines.append("    When prompted for permission, you can respond with:")
-        lines.append("    [y]es     - Allow this execution")
-        lines.append("    [n]o      - Deny this execution")
-        lines.append("    [a]lways  - Allow and remember for this session")
-        lines.append("    [never]   - Deny and block for this session")
-        lines.append("    [once]    - Allow just this once")
-        lines.append("    [t]urn    - Allow all remaining tools this turn")
-        lines.append("    [i]dle    - Allow until session goes idle")
-        lines.append("")
-        lines.append("PATTERN MATCHING")
-        lines.append("    Patterns support fnmatch-style wildcards:")
-        lines.append("    *         - Match any characters")
-        lines.append("    ?         - Match single character")
-        lines.append("    [seq]     - Match any character in seq")
-        lines.append("    [!seq]    - Match any character not in seq")
-        lines.append("")
-        lines.append("CONFIGURATION FILE")
-        lines.append("    Base permissions can be configured in .jaato/permissions.json:")
-        lines.append("")
-        lines.append('    {')
-        lines.append('      "default": "ask",')
-        lines.append('      "whitelist": ["introspection*", "todo*"],')
-        lines.append('      "blacklist": ["*dangerous*"]')
-        lines.append('    }')
-        return "\n".join(lines)
+        return HelpLines(lines=[
+            ("Permissions Command", "bold"),
+            ("", ""),
+            ("Manage tool execution permissions. Control which tools the model can use", ""),
+            ("and how permission prompts are handled.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    permissions [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    show              Display the current effective permission policy", "dim"),
+            ("                      Shows base config, session overrides, and status", "dim"),
+            ("                      (this is the default when no subcommand is given)", "dim"),
+            ("", ""),
+            ("    status            Quick view of current suspension state", "dim"),
+            ("                      Shows if permissions are suspended and why", "dim"),
+            ("", ""),
+            ("    check <tool>      Test what decision a tool would get", "dim"),
+            ("                      Shows ALLOW/DENY/ASK and the matching rule", "dim"),
+            ("", ""),
+            ("    allow <pattern>   Add tool or pattern to session whitelist", "dim"),
+            ("                      Patterns support wildcards (e.g., 'file_*')", "dim"),
+            ("", ""),
+            ("    deny <pattern>    Add tool or pattern to session blacklist", "dim"),
+            ("                      Blocked tools will fail without prompting", "dim"),
+            ("", ""),
+            ("    default <policy>  Set the session default policy", "dim"),
+            ("                      Options: allow, deny, ask", "dim"),
+            ("", ""),
+            ("    suspend           Suspend permission prompts until session goes idle", "dim"),
+            ("    suspend --turn    Suspend prompts for the current turn only", "dim"),
+            ("", ""),
+            ("    resume            Resume normal permission prompting", "dim"),
+            ("                      Clears any suspension state", "dim"),
+            ("", ""),
+            ("    clear             Reset all session permission modifications", "dim"),
+            ("                      Removes whitelist/blacklist entries and default", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    permissions                      Show current policy", "dim"),
+            ("    permissions allow Bash           Always allow Bash tool", "dim"),
+            ("    permissions deny file_edit*      Block all file edit tools", "dim"),
+            ("    permissions check web_search     Test what web_search would get", "dim"),
+            ("    permissions default allow        Auto-approve all tools", "dim"),
+            ("    permissions suspend              Stop prompting until idle", "dim"),
+            ("    permissions suspend --turn       Stop prompting this turn only", "dim"),
+            ("    permissions resume               Resume normal prompting", "dim"),
+            ("    permissions clear                Reset to base config", "dim"),
+            ("", ""),
+            ("PERMISSION PROMPT RESPONSES", "bold"),
+            ("    When prompted for permission, you can respond with:", ""),
+            ("    [y]es     - Allow this execution", "dim"),
+            ("    [n]o      - Deny this execution", "dim"),
+            ("    [a]lways  - Allow and remember for this session", "dim"),
+            ("    [never]   - Deny and block for this session", "dim"),
+            ("    [once]    - Allow just this once", "dim"),
+            ("    [t]urn    - Allow all remaining tools this turn", "dim"),
+            ("    [i]dle    - Allow until session goes idle", "dim"),
+            ("", ""),
+            ("PATTERN MATCHING", "bold"),
+            ("    Patterns support fnmatch-style wildcards:", ""),
+            ("    *         - Match any characters", "dim"),
+            ("    ?         - Match single character", "dim"),
+            ("    [seq]     - Match any character in seq", "dim"),
+            ("    [!seq]    - Match any character not in seq", "dim"),
+            ("", ""),
+            ("CONFIGURATION FILE", "bold"),
+            ("    Base permissions can be configured in .jaato/permissions.json:", ""),
+            ("", ""),
+            ('    {', "dim"),
+            ('      "default": "ask",', "dim"),
+            ('      "whitelist": ["introspection*", "todo*"],', "dim"),
+            ('      "blacklist": ["*dangerous*"]', "dim"),
+            ('    }', "dim"),
+        ])
 
     def _permissions_check(self, tool_name: str) -> str:
         """Check what decision a specific tool would get.

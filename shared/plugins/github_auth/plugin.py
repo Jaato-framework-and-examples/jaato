@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import (
     CommandCompletion,
     CommandParameter,
+    HelpLines,
     ToolPlugin,
     UserCommand,
 )
@@ -153,66 +154,66 @@ class GitHubAuthPlugin:
             )
             return ""
 
-    def _cmd_help(self) -> str:
-        """Return detailed help text."""
-        help_text = """GitHub Auth Command
-
-Authenticate with GitHub using OAuth device code flow. This enables access
-to GitHub Models API without requiring a personal access token.
-
-USAGE
-    github-auth <action>
-
-ACTIONS
-    login             Start the device code OAuth flow
-                      Opens browser to github.com/login/device
-                      Polls automatically for authorization
-
-    poll              Manually poll for authorization
-                      Use if automatic polling was interrupted
-
-    logout            Clear stored OAuth tokens
-                      Removes credentials from keychain/keyring
-
-    status            Show current authentication status
-                      Displays token type and expiration
-
-    help              Show this help message
-
-AUTHENTICATION FLOW
-    1. Run 'github-auth login'
-    2. Browser opens to github.com/login/device
-    3. Enter the displayed code (e.g., ABCD-1234)
-    4. Authorize the application
-    5. Token is automatically saved
-
-EXAMPLES
-    github-auth login         Start OAuth login
-    github-auth status        Check if authenticated
-    github-auth logout        Clear credentials
-
-TOKEN STORAGE
-    Tokens are securely stored in your system keychain:
-    - macOS: Keychain Access
-    - Linux: Secret Service (GNOME Keyring, KWallet)
-    - Windows: Credential Manager
-
-ALTERNATIVE: PERSONAL ACCESS TOKEN
-    If OAuth doesn't work, you can use a PAT:
-    1. Go to github.com/settings/tokens
-    2. Create token with 'models:read' scope
-    3. Set GITHUB_TOKEN environment variable
-
-ENVIRONMENT VARIABLES
-    GITHUB_TOKEN                  Personal access token (alternative to OAuth)
-    JAATO_GITHUB_ORGANIZATION     Organization for billing attribution
-
-NOTES
-    - OAuth tokens expire and auto-refresh when needed
-    - Device code flow works without exposing secrets
-    - Uses GitHub Copilot's OAuth client ID"""
-        self._emit(help_text)
-        return ""
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("GitHub Auth Command", "bold"),
+            ("", ""),
+            ("Authenticate with GitHub using OAuth device code flow. This enables access", ""),
+            ("to GitHub Models API without requiring a personal access token.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    github-auth <action>", ""),
+            ("", ""),
+            ("ACTIONS", "bold"),
+            ("    login             Start the device code OAuth flow", "dim"),
+            ("                      Opens browser to github.com/login/device", "dim"),
+            ("                      Polls automatically for authorization", "dim"),
+            ("", ""),
+            ("    poll              Manually poll for authorization", "dim"),
+            ("                      Use if automatic polling was interrupted", "dim"),
+            ("", ""),
+            ("    logout            Clear stored OAuth tokens", "dim"),
+            ("                      Removes credentials from keychain/keyring", "dim"),
+            ("", ""),
+            ("    status            Show current authentication status", "dim"),
+            ("                      Displays token type and expiration", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("AUTHENTICATION FLOW", "bold"),
+            ("    1. Run 'github-auth login'", ""),
+            ("    2. Browser opens to github.com/login/device", ""),
+            ("    3. Enter the displayed code (e.g., ABCD-1234)", ""),
+            ("    4. Authorize the application", ""),
+            ("    5. Token is automatically saved", ""),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    github-auth login         Start OAuth login", "dim"),
+            ("    github-auth status        Check if authenticated", "dim"),
+            ("    github-auth logout        Clear credentials", "dim"),
+            ("", ""),
+            ("TOKEN STORAGE", "bold"),
+            ("    Tokens are securely stored in your system keychain:", ""),
+            ("    - macOS: Keychain Access", "dim"),
+            ("    - Linux: Secret Service (GNOME Keyring, KWallet)", "dim"),
+            ("    - Windows: Credential Manager", "dim"),
+            ("", ""),
+            ("ALTERNATIVE: PERSONAL ACCESS TOKEN", "bold"),
+            ("    If OAuth doesn't work, you can use a PAT:", ""),
+            ("    1. Go to github.com/settings/tokens", "dim"),
+            ("    2. Create token with 'models:read' scope", "dim"),
+            ("    3. Set GITHUB_TOKEN environment variable", "dim"),
+            ("", ""),
+            ("ENVIRONMENT VARIABLES", "bold"),
+            ("    GITHUB_TOKEN                  Personal access token (alternative to OAuth)", "dim"),
+            ("    JAATO_GITHUB_ORGANIZATION     Organization for billing attribution", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - OAuth tokens expire and auto-refresh when needed", "dim"),
+            ("    - Device code flow works without exposing secrets", "dim"),
+            ("    - Uses GitHub Copilot's OAuth client ID", "dim"),
+        ])
 
     def _cmd_login(self) -> str:
         """Handle the login command - start device code flow."""

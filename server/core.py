@@ -45,7 +45,7 @@ from shared import (
 )
 from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
-from shared.plugins.base import parse_command_args
+from shared.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
 
 # Formatter pipeline for server-side output formatting
@@ -83,6 +83,7 @@ from .events import (
     TurnCompletedEvent,
     TurnProgressEvent,
     SystemMessageEvent,
+    HelpTextEvent,
     InitProgressEvent,
     ErrorEvent,
     RetryEvent,
@@ -2124,6 +2125,11 @@ class JaatoServer:
 
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
+
+            # Handle HelpLines result - emit HelpTextEvent for pager display
+            if isinstance(result, HelpLines):
+                self.emit(HelpTextEvent(lines=result.lines))
+                return {"result": "help displayed"}
 
             # Handle model change
             if command.lower() == "model" and isinstance(result, dict):

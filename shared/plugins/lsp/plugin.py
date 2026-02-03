@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import (
     UserCommand, CommandParameter, CommandCompletion,
-    ToolResultEnrichmentResult
+    ToolResultEnrichmentResult, HelpLines
 )
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
@@ -1371,86 +1371,89 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         elif subcommand == 'help' or subcommand == '':
             return self._cmd_help()
         else:
-            return f"Unknown subcommand: {subcommand}\n\n{self._cmd_help()}"
+            return f"Unknown subcommand: {subcommand}\n\nUse 'lsp help' for available commands."
 
-    def _cmd_help(self) -> str:
-        return """LSP Command
-
-Manage Language Server Protocol (LSP) servers. LSP servers provide language
-intelligence features like diagnostics, completions, and go-to-definition.
-
-USAGE
-    lsp [subcommand] [args]
-
-SUBCOMMANDS
-    list              List all configured LSP servers with their status
-                      (this is the default when no subcommand is given)
-
-    status            Show detailed connection status of all servers
-                      Includes capabilities and error information
-
-    connect <name>    Connect to a configured but disconnected server
-                      Server must be defined in .lsp.json
-
-    disconnect <name> Disconnect from a running server
-                      Keeps configuration, just stops the connection
-
-    reload            Reload configuration from .lsp.json
-                      Picks up external changes to the config file
-
-    logs [clear]      Show interaction logs for debugging
-                      Use 'clear' to reset the log buffer
-
-    help              Show this help message
-
-EXAMPLES
-    lsp                       List all configured servers
-    lsp status                Show detailed server status
-    lsp connect python        Connect to Python language server
-    lsp disconnect python     Disconnect Python server
-    lsp reload                Reload .lsp.json config
-    lsp logs                  Show interaction logs
-    lsp logs clear            Clear all logs
-
-CONFIGURATION FILE
-    LSP servers are configured in .lsp.json:
-
-    {
-      "languageServers": {
-        "python": {
-          "command": "pyright-langserver",
-          "args": ["--stdio"],
-          "languageId": "python",
-          "rootUri": "${workspaceFolder}"
-        },
-        "typescript": {
-          "command": "typescript-language-server",
-          "args": ["--stdio"],
-          "languageId": "typescript"
-        }
-      }
-    }
-
-SERVER CONFIGURATION OPTIONS
-    command           Path or name of the language server executable
-    args              Command-line arguments (usually ["--stdio"])
-    languageId        Language identifier (e.g., "python", "typescript")
-    rootUri           Workspace root (default: ${workspaceFolder})
-    initializationOptions
-                      Server-specific initialization options
-
-COMMON LANGUAGE SERVERS
-    Python:           pyright-langserver, pylsp, python-lsp-server
-    TypeScript/JS:    typescript-language-server
-    Rust:             rust-analyzer
-    Go:               gopls
-    C/C++:            clangd
-
-NOTES
-    - Servers auto-connect on startup if configured in .lsp.json
-    - LSP provides diagnostics, hover info, and completions to the model
-    - Failed servers show error details in 'lsp status'
-    - Use 'lsp logs' to debug communication issues"""
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("LSP Command", "bold"),
+            ("", ""),
+            ("Manage Language Server Protocol (LSP) servers. LSP servers provide language", ""),
+            ("intelligence features like diagnostics, completions, and go-to-definition.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    lsp [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list              List all configured LSP servers with their status", "dim"),
+            ("                      (this is the default when no subcommand is given)", "dim"),
+            ("", ""),
+            ("    status            Show detailed connection status of all servers", "dim"),
+            ("                      Includes capabilities and error information", "dim"),
+            ("", ""),
+            ("    connect <name>    Connect to a configured but disconnected server", "dim"),
+            ("                      Server must be defined in .lsp.json", "dim"),
+            ("", ""),
+            ("    disconnect <name> Disconnect from a running server", "dim"),
+            ("                      Keeps configuration, just stops the connection", "dim"),
+            ("", ""),
+            ("    reload            Reload configuration from .lsp.json", "dim"),
+            ("                      Picks up external changes to the config file", "dim"),
+            ("", ""),
+            ("    logs [clear]      Show interaction logs for debugging", "dim"),
+            ("                      Use 'clear' to reset the log buffer", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    lsp                       List all configured servers", "dim"),
+            ("    lsp status                Show detailed server status", "dim"),
+            ("    lsp connect python        Connect to Python language server", "dim"),
+            ("    lsp disconnect python     Disconnect Python server", "dim"),
+            ("    lsp reload                Reload .lsp.json config", "dim"),
+            ("    lsp logs                  Show interaction logs", "dim"),
+            ("    lsp logs clear            Clear all logs", "dim"),
+            ("", ""),
+            ("CONFIGURATION FILE", "bold"),
+            ("    LSP servers are configured in .lsp.json:", ""),
+            ("", ""),
+            ('    {', "dim"),
+            ('      "languageServers": {', "dim"),
+            ('        "python": {', "dim"),
+            ('          "command": "pyright-langserver",', "dim"),
+            ('          "args": ["--stdio"],', "dim"),
+            ('          "languageId": "python",', "dim"),
+            ('          "rootUri": "${workspaceFolder}"', "dim"),
+            ('        },', "dim"),
+            ('        "typescript": {', "dim"),
+            ('          "command": "typescript-language-server",', "dim"),
+            ('          "args": ["--stdio"],', "dim"),
+            ('          "languageId": "typescript"', "dim"),
+            ('        }', "dim"),
+            ('      }', "dim"),
+            ('    }', "dim"),
+            ("", ""),
+            ("SERVER CONFIGURATION OPTIONS", "bold"),
+            ("    command           Path or name of the language server executable", "dim"),
+            ("    args              Command-line arguments (usually [\"--stdio\"])", "dim"),
+            ("    languageId        Language identifier (e.g., \"python\", \"typescript\")", "dim"),
+            ("    rootUri           Workspace root (default: ${workspaceFolder})", "dim"),
+            ("    initializationOptions", "dim"),
+            ("                      Server-specific initialization options", "dim"),
+            ("", ""),
+            ("COMMON LANGUAGE SERVERS", "bold"),
+            ("    Python:           pyright-langserver, pylsp, python-lsp-server", "dim"),
+            ("    TypeScript/JS:    typescript-language-server", "dim"),
+            ("    Rust:             rust-analyzer", "dim"),
+            ("    Go:               gopls", "dim"),
+            ("    C/C++:            clangd", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Servers auto-connect on startup if configured in .lsp.json", "dim"),
+            ("    - LSP provides diagnostics, hover info, and completions to the model", "dim"),
+            ("    - Failed servers show error details in 'lsp status'", "dim"),
+            ("    - Use 'lsp logs' to debug communication issues", "dim"),
+        ])
 
     def _cmd_list(self) -> str:
         self._load_config_cache()

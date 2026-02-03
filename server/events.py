@@ -909,6 +909,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
     EventType.TURN_PROGRESS.value: TurnProgressEvent,
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
+    EventType.HELP_TEXT.value: HelpTextEvent,
     EventType.INIT_PROGRESS.value: InitProgressEvent,
     EventType.ERROR.value: ErrorEvent,
     EventType.RETRY.value: RetryEvent,

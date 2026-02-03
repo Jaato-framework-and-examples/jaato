@@ -10,6 +10,7 @@ import queue
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 from ..plugin import LSPToolPlugin, create_plugin, LogEntry, LOG_INFO, LOG_ERROR
+from ...base import HelpLines
 from ..lsp_client import (
     Position, Range, Location, Diagnostic, CompletionItem, Hover,
     SymbolInformation, ServerCapabilities, ServerConfig, LSPClient
@@ -486,24 +487,31 @@ class TestLSPToolPluginCommands:
         plugin = LSPToolPlugin()
         result = plugin.execute_user_command("lsp", {"subcommand": "help"})
 
-        assert "lsp list" in result
-        assert "lsp status" in result
-        assert "lsp connect" in result
-        assert "lsp disconnect" in result
-        assert "lsp reload" in result
-        assert ".lsp.json" in result
+        # Help now returns HelpLines for pager display
+        assert isinstance(result, HelpLines)
+        help_text = "\n".join(text for text, _ in result.lines)
+        assert "lsp" in help_text.lower()
+        assert "list" in help_text.lower()
+        assert "status" in help_text.lower()
+        assert "connect" in help_text.lower()
+        assert "disconnect" in help_text.lower()
+        assert "reload" in help_text.lower()
+        assert ".lsp.json" in help_text
 
     def test_execute_empty_subcommand(self):
         plugin = LSPToolPlugin()
         result = plugin.execute_user_command("lsp", {"subcommand": ""})
-        # Should show help
-        assert "lsp list" in result
+        # Should show help (HelpLines)
+        assert isinstance(result, HelpLines)
+        help_text = "\n".join(text for text, _ in result.lines)
+        assert "list" in help_text.lower()
 
     def test_execute_unknown_subcommand(self):
         plugin = LSPToolPlugin()
         result = plugin.execute_user_command("lsp", {"subcommand": "unknown"})
+        assert isinstance(result, str)
         assert "Unknown subcommand" in result
-        assert "lsp list" in result  # Should also show help
+        assert "lsp help" in result  # Suggests using help command
 
     def test_execute_list_no_config(self):
         plugin = LSPToolPlugin()

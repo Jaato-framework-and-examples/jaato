@@ -114,6 +114,20 @@ class PermissionDisplayInfo:
     warning_level: Optional[str] = None
 
 
+@dataclass
+class HelpLines:
+    """Styled help text for display in the pager.
+
+    Used by plugin commands to return help text with styling information.
+    The server detects this type and emits HelpTextEvent for pager display.
+
+    Attributes:
+        lines: List of (text, style) tuples where style is one of:
+               "bold", "dim", "" (normal), or semantic names.
+    """
+    lines: List[tuple]
+
+
 class CommandCompletion(NamedTuple):
     """A completion option for command arguments.
 

@@ -16,7 +16,7 @@ from typing import Dict, List, Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-from ..base import UserCommand, CommandParameter, CommandCompletion
+from ..base import UserCommand, CommandParameter, CommandCompletion, HelpLines
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
 
@@ -607,85 +607,87 @@ class MCPToolPlugin:
         elif subcommand == 'help' or subcommand == '':
             return self._cmd_help()
         else:
-            return f"Unknown subcommand: {subcommand}\n\n{self._cmd_help()}"
+            return f"Unknown subcommand: {subcommand}\n\nUse 'mcp help' for available commands."
 
-    def _cmd_help(self) -> str:
-        """Return help text for MCP commands."""
-        return """MCP Command
-
-Manage Model Context Protocol (MCP) servers. MCP servers provide additional
-tools and capabilities that the model can use during conversations.
-
-USAGE
-    mcp [subcommand] [args]
-
-SUBCOMMANDS
-    list              List all configured MCP servers with their status
-                      (this is the default when no subcommand is given)
-
-    status            Show detailed connection status of all servers
-                      Includes tool counts and error information
-
-    show <name>       Show full configuration for a specific server
-                      Displays command, args, env vars, and connection type
-
-    add <name> <cmd> [args...]
-                      Add a new MCP server to configuration
-                      Saves to .mcp.json and optionally auto-connects
-
-    remove <name>     Remove an MCP server from configuration
-                      Disconnects if running, then removes from .mcp.json
-
-    connect <name>    Connect to a configured but disconnected server
-                      Server must be defined in .mcp.json
-
-    disconnect <name> Disconnect from a running server
-                      Keeps configuration, just stops the connection
-
-    reload            Reload configuration from .mcp.json
-                      Picks up external changes to the config file
-
-    logs [server|clear]
-                      Show interaction logs for debugging
-                      Filter by server name or use 'clear' to reset
-
-    help              Show this help message
-
-EXAMPLES
-    mcp                           List all configured servers
-    mcp status                    Show connection status
-    mcp add github mcp-github     Add GitHub MCP server
-    mcp show github               Show GitHub server config
-    mcp connect github            Connect to GitHub server
-    mcp disconnect github         Disconnect GitHub server
-    mcp remove github             Remove GitHub from config
-    mcp logs                      Show all interaction logs
-    mcp logs github               Show logs for GitHub only
-    mcp logs clear                Clear all logs
-    mcp reload                    Reload .mcp.json config
-
-CONFIGURATION FILE
-    MCP servers are configured in .mcp.json:
-
-    {
-      "mcpServers": {
-        "ServerName": {
-          "type": "stdio",
-          "command": "mcp-server-command",
-          "args": ["--flag", "value"],
-          "env": {"VAR": "value"}
-        }
-      }
-    }
-
-CONNECTION TYPES
-    stdio             Communicate via stdin/stdout (most common)
-    sse               Server-sent events over HTTP
-
-NOTES
-    - Servers auto-connect on startup if configured in .mcp.json
-    - Failed servers show error details in 'mcp status'
-    - Tools from connected servers appear in the model's tool list"""
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("MCP Command", "bold"),
+            ("", ""),
+            ("Manage Model Context Protocol (MCP) servers. MCP servers provide additional", ""),
+            ("tools and capabilities that the model can use during conversations.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    mcp [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list              List all configured MCP servers with their status", "dim"),
+            ("                      (this is the default when no subcommand is given)", "dim"),
+            ("", ""),
+            ("    status            Show detailed connection status of all servers", "dim"),
+            ("                      Includes tool counts and error information", "dim"),
+            ("", ""),
+            ("    show <name>       Show full configuration for a specific server", "dim"),
+            ("                      Displays command, args, env vars, and connection type", "dim"),
+            ("", ""),
+            ("    add <name> <cmd> [args...]", "dim"),
+            ("                      Add a new MCP server to configuration", "dim"),
+            ("                      Saves to .mcp.json and optionally auto-connects", "dim"),
+            ("", ""),
+            ("    remove <name>     Remove an MCP server from configuration", "dim"),
+            ("                      Disconnects if running, then removes from .mcp.json", "dim"),
+            ("", ""),
+            ("    connect <name>    Connect to a configured but disconnected server", "dim"),
+            ("                      Server must be defined in .mcp.json", "dim"),
+            ("", ""),
+            ("    disconnect <name> Disconnect from a running server", "dim"),
+            ("                      Keeps configuration, just stops the connection", "dim"),
+            ("", ""),
+            ("    reload            Reload configuration from .mcp.json", "dim"),
+            ("                      Picks up external changes to the config file", "dim"),
+            ("", ""),
+            ("    logs [server|clear]", "dim"),
+            ("                      Show interaction logs for debugging", "dim"),
+            ("                      Filter by server name or use 'clear' to reset", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    mcp                           List all configured servers", "dim"),
+            ("    mcp status                    Show connection status", "dim"),
+            ("    mcp add github mcp-github     Add GitHub MCP server", "dim"),
+            ("    mcp show github               Show GitHub server config", "dim"),
+            ("    mcp connect github            Connect to GitHub server", "dim"),
+            ("    mcp disconnect github         Disconnect GitHub server", "dim"),
+            ("    mcp remove github             Remove GitHub from config", "dim"),
+            ("    mcp logs                      Show all interaction logs", "dim"),
+            ("    mcp logs github               Show logs for GitHub only", "dim"),
+            ("    mcp logs clear                Clear all logs", "dim"),
+            ("    mcp reload                    Reload .mcp.json config", "dim"),
+            ("", ""),
+            ("CONFIGURATION FILE", "bold"),
+            ("    MCP servers are configured in .mcp.json:", ""),
+            ("", ""),
+            ('    {', "dim"),
+            ('      "mcpServers": {', "dim"),
+            ('        "ServerName": {', "dim"),
+            ('          "type": "stdio",', "dim"),
+            ('          "command": "mcp-server-command",', "dim"),
+            ('          "args": ["--flag", "value"],', "dim"),
+            ('          "env": {"VAR": "value"}', "dim"),
+            ('        }', "dim"),
+            ('      }', "dim"),
+            ('    }', "dim"),
+            ("", ""),
+            ("CONNECTION TYPES", "bold"),
+            ("    stdio             Communicate via stdin/stdout (most common)", "dim"),
+            ("    sse               Server-sent events over HTTP", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Servers auto-connect on startup if configured in .mcp.json", "dim"),
+            ("    - Failed servers show error details in 'mcp status'", "dim"),
+            ("    - Tools from connected servers appear in the model's tool list", "dim"),
+        ])
 
     def _cmd_list(self) -> str:
         """List all configured MCP servers."""
