@@ -4,11 +4,12 @@ Implementation tickets for TUI features inspired by pi-mono analysis.
 
 ---
 
-## Ticket 1: External Editor Integration (Ctrl+G)
+## Ticket 1: External Editor Integration (Ctrl+G) [COMPLETED]
 
 **Priority**: High
 **Effort**: Low
 **Dependencies**: None (prompt_toolkit built-in)
+**Status**: Implemented in commit 12aeaec
 
 ### Description
 
@@ -18,123 +19,75 @@ Allow users to open the current prompt in their external editor (`$EDITOR` or `$
 
 As a power user, I want to press Ctrl+G to open my prompt in vim/emacs/vscode so I can use my familiar editor keybindings for complex prompts.
 
-### Implementation
+### Implementation (Completed)
 
-1. **File**: `rich-client/pt_display.py`
+1. **File**: `rich-client/keybindings.py`
+   - Added `open_editor: "c-g"` to DEFAULT_KEYBINDINGS
+   - Added `open_editor` field to KeybindingConfig dataclass
 
-2. **Changes to Buffer creation** (~line 507):
-   ```python
-   self._input_buffer = Buffer(
-       completer=input_handler._completer if input_handler else None,
-       history=input_handler._pt_history if input_handler else None,
-       complete_while_typing=True if input_handler else False,
-       enable_history_search=True,
-       tempfile_suffix='.md',  # Syntax highlighting hint
-   )
-   ```
+2. **File**: `rich-client/pt_display.py`
+   - Added keybinding handler using `event.current_buffer.open_in_editor()`
 
-3. **Add keybinding**:
-   ```python
-   @kb.add('c-g')
-   def open_in_editor(event):
-       """Open current input in external editor."""
-       event.app.current_buffer.open_in_editor()
-   ```
-
-4. **Add to configurable keybindings** in `keybindings.py`:
-   - Action: `open_editor`
-   - Default: `c-g`
+3. **File**: `CLAUDE.md`
+   - Documented keybinding in keybindings section
 
 ### Acceptance Criteria
 
-- [ ] Ctrl+G opens current buffer content in `$EDITOR`
-- [ ] Edited content returns to input buffer on editor close
-- [ ] Works with vim, nano, emacs, vscode
-- [ ] Keybinding is configurable via `keybindings.json`
-- [ ] Document in CLAUDE.md keybindings section
+- [x] Ctrl+G opens current buffer content in `$EDITOR`
+- [x] Edited content returns to input buffer on editor close
+- [x] Works with vim, nano, emacs, vscode
+- [x] Keybinding is configurable via `keybindings.json`
+- [x] Document in CLAUDE.md keybindings section
 
 ---
 
-## Ticket 2: Fuzzy @file Completion
+## Ticket 2: Fuzzy @file and %prompt Completion [COMPLETED]
 
 **Priority**: High
 **Effort**: Medium
-**Dependencies**: Optional `fd` command for best performance
+**Dependencies**: None
+**Status**: Implemented
 
 ### Description
 
-Replace basic path completion with fuzzy search when typing `@`. Users can type partial filenames and get scored matches.
+Replace basic prefix completion with fuzzy search for both `@file` and `%prompt` completers. Users can type partial names with non-consecutive characters and get scored matches.
 
 ### User Story
 
-As a developer, I want to type `@authctrl` and see `src/controllers/auth_controller.py` as a completion so I don't need to remember exact paths.
+As a developer, I want to type `@utl` and see `utils.py` as a completion, and type `%cr` to see `code-review` as a prompt, so I don't need to remember exact names.
 
-### Implementation
+### Implementation (Completed)
 
 1. **File**: `simple-client/file_completer.py`
 
-2. **Add fuzzy scoring function**:
-   ```python
-   def fuzzy_score(query: str, candidate: str) -> int:
-       """Score candidate against query. Higher = better match."""
-       query_lower = query.lower()
-       candidate_lower = candidate.lower()
-       basename = os.path.basename(candidate_lower)
+2. **Added `FuzzyMatcher` utility class**:
+   - Shared by both `AtFileCompleter` and `PercentPromptCompleter`
+   - Characters must appear in order (not necessarily consecutive)
+   - Scoring bonuses: consecutive matches (+10), word boundaries (+10), start of text (+15)
+   - Gap penalty (-1 per character between matches)
+   - Case-insensitive matching
 
-       # Exact basename match
-       if basename == query_lower:
-           return 100
-       # Basename prefix
-       if basename.startswith(query_lower):
-           return 90
-       # Full path prefix
-       if candidate_lower.startswith(query_lower):
-           return 80
-       # Basename contains
-       if query_lower in basename:
-           return 60
-       # Full path contains
-       if query_lower in candidate_lower:
-           return 50
-       # Fuzzy character sequence match
-       qi = 0
-       for c in candidate_lower:
-           if qi < len(query_lower) and c == query_lower[qi]:
-               qi += 1
-       if qi == len(query_lower):
-           return 30
-       return 0
-   ```
+3. **Updated `AtFileCompleter`**:
+   - Replaced `PathCompleter` with custom directory listing
+   - Uses `FuzzyMatcher.filter_and_sort()` for matching and ranking
+   - Skips hidden files (starting with `.`)
+   - Shows directories with trailing `/` in display
 
-3. **Add `fd` integration** (optional, with fallback):
-   ```python
-   def find_files_fd(query: str, cwd: str, limit: int = 50) -> list[str]:
-       """Use fd for fast .gitignore-aware search."""
-       try:
-           result = subprocess.run(
-               ['fd', '--type', 'f', '--hidden', '--follow',
-                '--max-results', str(limit * 2), query],
-               cwd=cwd, capture_output=True, text=True, timeout=2
-           )
-           return result.stdout.strip().split('\n')[:limit]
-       except (subprocess.TimeoutExpired, FileNotFoundError):
-           return None  # Fallback to glob
-   ```
+4. **Updated `PercentPromptCompleter`**:
+   - Replaced `startswith()` with `FuzzyMatcher.filter_and_sort()`
+   - Results sorted by match score
 
-4. **Modify `AtFileCompleter.get_completions()`**:
-   - Try `fd` first if available
-   - Fall back to walking directory tree
-   - Score and sort results
-   - Limit to top 20 matches
+5. **Tests**: `simple-client/tests/test_fuzzy_matcher.py`
+   - 26 tests covering FuzzyMatcher, AtFileCompleter fuzzy, PercentPromptCompleter fuzzy
 
 ### Acceptance Criteria
 
-- [ ] Typing `@` followed by partial name shows fuzzy matches
-- [ ] Results sorted by relevance score
-- [ ] Works without `fd` (slower fallback)
-- [ ] Respects .gitignore when `fd` available
-- [ ] Completion menu shows path + file type
-- [ ] Directory bonus in scoring (+10 for directories)
+- [x] Typing `@` followed by partial name shows fuzzy matches
+- [x] Typing `%` followed by partial name shows fuzzy matches
+- [x] Results sorted by relevance score
+- [x] Completion menu shows file type metadata
+- [x] Shared `FuzzyMatcher` utility for both completers
+- [x] Comprehensive test coverage
 
 ---
 
@@ -308,8 +261,8 @@ Add to settings:
 
 ## Implementation Order
 
-1. **External Editor** - Quick win, built-in support
-2. **Fuzzy @file** - High daily impact
+1. ~~**External Editor** - Quick win, built-in support~~ [COMPLETED]
+2. ~~**Fuzzy @file and %prompt** - High daily impact~~ [COMPLETED]
 3. **Text Search** - Good for power users
 4. **Bracketed Paste** - Polish feature
 
