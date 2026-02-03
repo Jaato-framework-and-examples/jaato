@@ -31,6 +31,7 @@ from ..base import (
     UserCommand,
     CommandCompletion,
     CommandParameter,
+    HelpLines,
     PromptEnrichmentResult,
 )
 from ..model_provider.types import ToolSchema
@@ -499,10 +500,11 @@ always navigate back to where you were.
                 CommandCompletion("delete", "Delete waypoint(s)"),
                 CommandCompletion("info", "Show waypoint details"),
                 CommandCompletion("list", "List all waypoints"),
+                CommandCompletion("help", "Show detailed help for this command"),
             ]
 
         action = args[0].lower() if args else ""
-        known_actions = ["create", "restore", "delete", "info", "list"]
+        known_actions = ["create", "restore", "delete", "info", "list", "help"]
 
         # Completing first arg (action) - only if not an exact match
         if len(args) == 1 and not args[0].startswith("w") and action not in known_actions:
@@ -611,7 +613,66 @@ always navigate back to where you were.
                 return {"error": "Usage: waypoint info <id>"}
             return self._waypoint_info(target)
 
-        return {"error": f"Unknown action: {action}. Try: create, restore, delete, info, list"}
+        # Handle help action
+        if action == "help":
+            return self._cmd_help()
+
+        return {"error": f"Unknown action: {action}. Use 'waypoint help' for available actions."}
+
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("Waypoint Command", "bold"),
+            ("", ""),
+            ("Mark your journey, return when needed. Waypoints capture the full context", ""),
+            ("of your collaboration - both code changes and conversation history.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    waypoint [action] [target]", ""),
+            ("", ""),
+            ("ACTIONS", "bold"),
+            ("    list              List all waypoints (default)", "dim"),
+            ("                      Shows ID, description, and timestamp", "dim"),
+            ("", ""),
+            ("    create <desc>     Create a new waypoint with description", "dim"),
+            ("                      Captures current conversation and file state", "dim"),
+            ("", ""),
+            ("    restore <id>      Restore to a waypoint", "dim"),
+            ("                      Reverts conversation and file changes", "dim"),
+            ("", ""),
+            ("    delete <id|all>   Delete waypoint(s)", "dim"),
+            ("                      Use 'all' to delete all user waypoints", "dim"),
+            ("", ""),
+            ("    info <id>         Show detailed waypoint information", "dim"),
+            ("                      Displays metadata and changed files", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    waypoint                          List all waypoints", "dim"),
+            ("    waypoint create \"before refactor\" Create waypoint with description", "dim"),
+            ("    waypoint restore w1               Restore to waypoint w1", "dim"),
+            ("    waypoint info w2                  Show details of waypoint w2", "dim"),
+            ("    waypoint delete w3                Delete waypoint w3", "dim"),
+            ("    waypoint delete all               Delete all user waypoints", "dim"),
+            ("", ""),
+            ("WAYPOINT IDS", "bold"),
+            ("    Waypoints are assigned sequential IDs: w1, w2, w3, etc.", ""),
+            ("    These IDs are stable and can be used for restore/delete.", "dim"),
+            ("", ""),
+            ("OWNERSHIP MODEL", "bold"),
+            ("    User-owned       Created via user command, protected from model", "dim"),
+            ("    Model-owned      Created via model tool, model has full control", "dim"),
+            ("", ""),
+            ("STORAGE", "bold"),
+            ("    Waypoints are stored in .jaato/waypoints/", ""),
+            ("    Each waypoint saves: conversation history, file backups, metadata", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Restoring undoes both conversation and file changes", "dim"),
+            ("    - Waypoints persist across sessions", "dim"),
+            ("    - Model can create waypoints for its own rollback purposes", "dim"),
+        ])
 
     def _list_waypoints(self, include_ownership: bool = False) -> Dict[str, Any]:
         """List all waypoints as a tree structure.

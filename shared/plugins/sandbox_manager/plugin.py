@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..base import UserCommand, CommandCompletion, CommandParameter
+from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
 
 
@@ -437,74 +437,75 @@ class SandboxManagerPlugin:
         else:
             return {"error": f"Unknown subcommand: {subcommand}. Use: list, add, remove, help"}
 
-    def _cmd_help(self) -> Dict[str, Any]:
-        """Return detailed help text."""
-        help_text = """Sandbox Command
-
-Manage sandbox path permissions. The sandbox restricts which paths the model
-can access for file operations and command execution.
-
-USAGE
-    sandbox [subcommand] [path]
-
-SUBCOMMANDS
-    list              Show all effective sandbox paths from all config levels
-                      Displays path, action (allow/deny), source, and timestamp
-                      (this is the default when no subcommand is given)
-
-    add <path>        Allow a path for the current session
-                      Path is added to session-level allowlist
-                      Takes precedence over workspace/global denials
-
-    remove <path>     Block a path for the current session
-                      Path is added to session-level denylist
-                      Takes precedence over workspace/global allowances
-
-    help              Show this help message
-
-EXAMPLES
-    sandbox                   List all sandbox paths
-    sandbox list              Same as above
-    sandbox add /tmp/scratch  Allow access to /tmp/scratch
-    sandbox add ~/projects    Allow access to home projects
-    sandbox remove /etc       Block access to /etc
-    sandbox remove ~/.ssh     Block access to SSH keys
-
-CONFIGURATION HIERARCHY
-    Sandbox paths are configured at three levels (later overrides earlier):
-
-    1. Global Config    ~/.jaato/sandbox.json
-                        System-wide defaults for all projects
-
-    2. Workspace Config .jaato/sandbox.json
-                        Project-specific settings
-
-    3. Session Config   .jaato/session/sandbox.json
-                        Temporary runtime modifications
-
-CONFIGURATION FILE FORMAT
-    {
-      "allowed_paths": ["/path/to/allow", "~/another/path"],
-      "denied_paths": ["/sensitive/path"]
-    }
-
-PATH FORMATS
-    /absolute/path          Absolute path
-    ~/relative/to/home      Home directory relative
-    ./relative/to/workspace Workspace relative (in workspace config)
-
-PRECEDENCE RULES
-    - Session rules override workspace rules
-    - Workspace rules override global rules
-    - Within a level, deny takes precedence over allow
-    - Explicit rules override pattern matches
-
-NOTES
-    - Session changes persist until the session ends
-    - Use 'sandbox list' to see the effective configuration
-    - Blocked paths will cause tool execution to fail
-    - Paths are normalized and resolved to absolute paths"""
-        return {"output": help_text}
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("Sandbox Command", "bold"),
+            ("", ""),
+            ("Manage sandbox path permissions. The sandbox restricts which paths the model", ""),
+            ("can access for file operations and command execution.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    sandbox [subcommand] [path]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list              Show all effective sandbox paths from all config levels", "dim"),
+            ("                      Displays path, action (allow/deny), source, and timestamp", "dim"),
+            ("                      (this is the default when no subcommand is given)", "dim"),
+            ("", ""),
+            ("    add <path>        Allow a path for the current session", "dim"),
+            ("                      Path is added to session-level allowlist", "dim"),
+            ("                      Takes precedence over workspace/global denials", "dim"),
+            ("", ""),
+            ("    remove <path>     Block a path for the current session", "dim"),
+            ("                      Path is added to session-level denylist", "dim"),
+            ("                      Takes precedence over workspace/global allowances", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    sandbox                   List all sandbox paths", "dim"),
+            ("    sandbox list              Same as above", "dim"),
+            ("    sandbox add /tmp/scratch  Allow access to /tmp/scratch", "dim"),
+            ("    sandbox add ~/projects    Allow access to home projects", "dim"),
+            ("    sandbox remove /etc       Block access to /etc", "dim"),
+            ("    sandbox remove ~/.ssh     Block access to SSH keys", "dim"),
+            ("", ""),
+            ("CONFIGURATION HIERARCHY", "bold"),
+            ("    Sandbox paths are configured at three levels (later overrides earlier):", ""),
+            ("", ""),
+            ("    1. Global Config    ~/.jaato/sandbox.json", "dim"),
+            ("                        System-wide defaults for all projects", "dim"),
+            ("", ""),
+            ("    2. Workspace Config .jaato/sandbox.json", "dim"),
+            ("                        Project-specific settings", "dim"),
+            ("", ""),
+            ("    3. Session Config   .jaato/session/sandbox.json", "dim"),
+            ("                        Temporary runtime modifications", "dim"),
+            ("", ""),
+            ("CONFIGURATION FILE FORMAT", "bold"),
+            ('    {', "dim"),
+            ('      "allowed_paths": ["/path/to/allow", "~/another/path"],', "dim"),
+            ('      "denied_paths": ["/sensitive/path"]', "dim"),
+            ('    }', "dim"),
+            ("", ""),
+            ("PATH FORMATS", "bold"),
+            ("    /absolute/path          Absolute path", "dim"),
+            ("    ~/relative/to/home      Home directory relative", "dim"),
+            ("    ./relative/to/workspace Workspace relative (in workspace config)", "dim"),
+            ("", ""),
+            ("PRECEDENCE RULES", "bold"),
+            ("    - Session rules override workspace rules", "dim"),
+            ("    - Workspace rules override global rules", "dim"),
+            ("    - Within a level, deny takes precedence over allow", "dim"),
+            ("    - Explicit rules override pattern matches", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Session changes persist until the session ends", "dim"),
+            ("    - Use 'sandbox list' to see the effective configuration", "dim"),
+            ("    - Blocked paths will cause tool execution to fail", "dim"),
+            ("    - Paths are normalized and resolved to absolute paths", "dim"),
+        ])
 
     def _cmd_list(self) -> Dict[str, Any]:
         """Execute 'sandbox list' command."""
