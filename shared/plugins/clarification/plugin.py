@@ -307,12 +307,7 @@ The tool returns responses keyed by question number (1-based):
             UserCommand(
                 name="clarification",
                 description="Configure clarification plugin: clarification channel <auto|queue>",
-                args=[
-                    {"name": "subcommand", "description": "Subcommand (channel)", "required": True},
-                    {"name": "value", "description": "Channel type (auto, queue)", "required": False},
-                ],
-                handler=self._execute_user_command,
-                share_with_model=False,  # User-only command
+                share_with_model=False,
             )
         ]
 
