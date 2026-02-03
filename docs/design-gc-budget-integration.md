@@ -188,16 +188,19 @@ The gc_budget plugin respects GC policies in this priority order:
 
 ```
 Removal Priority (first to go):
-1. EPHEMERAL entries (oldest first, keep most recent)
-   - Enrichments
-   - Working output in conversation
-   - Discoverable tool schemas
+1a. ENRICHMENT (bulk clear)
+    - All enrichment content removed at once
+    - Regenerated each turn anyway
+
+1b. Other EPHEMERAL entries (oldest first)
+    - Working output in conversation
+    - Discoverable tool schemas
 
 2. PARTIAL entries (conversation turns, oldest first)
    - Respect preserve_recent_turns
    - Respect pinned_turn_indices
 
-3. PRESERVABLE entries (only under extreme pressure)
+3. PRESERVABLE entries (only under extreme pressure > pressure_percent)
    - Clarification Q&A
    - Turn summaries
 
@@ -227,13 +230,24 @@ def collect(self, history, context_usage, config, reason, budget):
     removal_list = []
     tokens_freed = 0
 
-    # Phase 1: Remove EPHEMERAL entries (oldest first)
+    # Phase 1a: Bulk clear ENRICHMENT (always ephemeral, regenerated each turn)
+    enrichment_entry = budget.get_entry(InstructionSource.ENRICHMENT)
+    if enrichment_entry and enrichment_entry.total_tokens() > 0:
+        removal_list.append(GCRemovalItem(
+            source=InstructionSource.ENRICHMENT,
+            child_key=None,  # Bulk clear entire source
+            tokens_freed=enrichment_entry.total_tokens(),
+            reason="enrichment_bulk_clear"
+        ))
+        tokens_freed += enrichment_entry.total_tokens()
+
+    # Phase 1b: Remove other EPHEMERAL entries (oldest first, keep most recent)
     if tokens_freed < tokens_to_free:
-        ephemeral_candidates = self._get_ephemeral_candidates(budget)
-        # Sort by created_at (oldest first), but keep N most recent
+        ephemeral_candidates = self._get_ephemeral_candidates(budget, exclude_enrichment=True)
+        # Sort by created_at (oldest first)
         sorted_candidates = sorted(ephemeral_candidates, key=lambda e: e.created_at)
 
-        for entry in sorted_candidates[:-config.preserve_recent_ephemeral]:
+        for entry in sorted_candidates:
             if tokens_freed >= tokens_to_free:
                 break
             removal_list.append(GCRemovalItem(
@@ -284,6 +298,7 @@ def collect(self, history, context_usage, config, reason, budget):
         trigger_reason=reason,
         removal_list=removal_list,
         details={
+            "enrichment_cleared": any(r.reason == "enrichment_bulk_clear" for r in removal_list),
             "ephemeral_removed": sum(1 for r in removal_list if r.reason == "ephemeral"),
             "partial_removed": sum(1 for r in removal_list if r.reason == "partial_turn"),
             "preservable_removed": sum(1 for r in removal_list if r.reason == "preservable_under_pressure"),
@@ -299,7 +314,6 @@ def collect(self, history, context_usage, config, reason, budget):
     "plugin": "gc_budget",
     "config": {
         "preserve_recent_turns": 5,
-        "preserve_recent_ephemeral": 3,  # Keep N most recent ephemeral items
         "target_percent": 60.0,
         "pressure_percent": 90.0,
         "notify_on_gc": true
@@ -451,16 +465,84 @@ if "summary_tokens" in result.details:
 
 ---
 
-## Open Questions
+## Design Decisions (Resolved)
 
-1. **Enrichment GC**: Should enrichments be cleared in bulk or individually?
-   - Proposal: Bulk clear (they're regenerated each turn anyway)
+1. **Enrichment GC**: **Bulk clear**
+   - Enrichments are regenerated each turn, so remove all at once when GC triggers
 
-2. **Tool schema GC**: When discoverable tool schemas are GC'd, should we notify the model?
-   - Proposal: Yes, add to notification message
+2. **Tool schema notification**: **No notification needed**
+   - The model receives full accumulated context each turn; it won't see removed content anyway
 
-3. **Summary entry naming**: How to handle multiple GC cycles creating multiple summaries?
-   - Proposal: Use `gc_summary_1`, `gc_summary_2`, etc. or merge into one
+3. **Multiple summaries**: **Keep separate** (`gc_summary_1`, `gc_summary_2`, etc.)
+   - Preserves GC history and allows selective removal of older summaries
 
-4. **Timestamp precision**: Use `time.time()` (float seconds) or `datetime`?
-   - Proposal: `time.time()` for simplicity and JSON serialization
+4. **History-to-budget mapping**: **Track message IDs in both places**
+   - Add `message_id` field to Messages
+   - Reference `message_id` in budget entry metadata
+   - Enables precise mapping between history and budget entries
+
+5. **Timestamp precision**: `time.time()` (float seconds)
+   - Simple, JSON-serializable, sufficient precision
+
+---
+
+## Message ID Tracking
+
+To enable precise history-to-budget mapping, we add message IDs:
+
+### Message Enhancement
+
+```python
+# shared/plugins/model_provider/types.py
+
+@dataclass
+class Message:
+    role: Role
+    parts: List[Part]
+    message_id: Optional[str] = None  # NEW: Unique identifier
+
+    def __post_init__(self):
+        if self.message_id is None:
+            self.message_id = str(uuid.uuid4())
+```
+
+### Budget Entry Reference
+
+```python
+# shared/instruction_budget.py
+
+@dataclass
+class SourceEntry:
+    source: InstructionSource
+    tokens: int
+    gc_policy: GCPolicy
+    label: Optional[str] = None
+    children: Dict[str, "SourceEntry"] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[float] = None
+    message_ids: List[str] = field(default_factory=list)  # NEW: Associated message IDs
+```
+
+### GC Removal by Message ID
+
+```python
+# In gc_budget plugin
+
+def _apply_removals_to_history(self, history, removal_list, budget):
+    """Remove messages from history based on removal list."""
+
+    # Collect all message IDs to remove
+    ids_to_remove = set()
+    for item in removal_list:
+        entry = budget.get_child(item.source, item.child_key)
+        if entry and entry.message_ids:
+            ids_to_remove.update(entry.message_ids)
+
+    # Filter history
+    return [msg for msg in history if msg.message_id not in ids_to_remove]
+```
+
+This ensures:
+- Precise removal of exactly the messages tracked by budget entries
+- No reliance on position matching or content heuristics
+- Clean separation between GC decision (budget-based) and execution (history-based)
