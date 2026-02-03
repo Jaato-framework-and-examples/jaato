@@ -10,10 +10,116 @@ Integrates with prompt_toolkit for rich interactive completion.
 
 import os
 from pathlib import Path
-from typing import Iterable, Optional, Callable
+from typing import Iterable, Optional, Callable, Any
 
-from prompt_toolkit.completion import Completer, Completion, PathCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
+
+
+class FuzzyMatcher:
+    """Shared fuzzy matching utility for completers.
+
+    Provides fuzzy matching where pattern characters must appear in the
+    target text in order, but not necessarily consecutively. Scoring
+    rewards consecutive matches, word boundary matches, and start-of-text
+    matches.
+
+    Used by both @file and %prompt completers to share matching logic.
+    """
+
+    # Scoring constants
+    CONSECUTIVE_BONUS = 10      # Bonus for consecutive character matches
+    START_BONUS = 15            # Bonus for matching at start of text
+    BOUNDARY_BONUS = 10         # Bonus for matching after word boundary
+    GAP_PENALTY = 1             # Penalty per character gap between matches
+    WORD_SEPARATORS = '-_/.\\' # Characters that create word boundaries
+
+    @classmethod
+    def match(cls, pattern: str, text: str) -> tuple[bool, int]:
+        """Calculate fuzzy match score.
+
+        Args:
+            pattern: The search pattern (what user typed)
+            text: The text to match against (filename, prompt name, etc.)
+
+        Returns:
+            Tuple of (matches, score) where:
+            - matches: True if pattern fuzzy-matches text
+            - score: Higher is better match (for sorting). Only meaningful if matches=True.
+
+        Example:
+            >>> FuzzyMatcher.match("utl", "utils")
+            (True, 25)  # u-t-l found in order, consecutive bonus
+            >>> FuzzyMatcher.match("utl", "unit_test_lib")
+            (True, 35)  # matches at word boundaries
+            >>> FuzzyMatcher.match("xyz", "utils")
+            (False, 0)
+        """
+        if not pattern:
+            return True, 0  # Empty pattern matches everything
+
+        pattern_lower = pattern.lower()
+        text_lower = text.lower()
+
+        pi = 0  # pattern index
+        score = 0
+        prev_match_idx = -1
+
+        for ti, char in enumerate(text_lower):
+            if pi < len(pattern_lower) and char == pattern_lower[pi]:
+                # Found a match
+                if prev_match_idx >= 0:
+                    gap = ti - prev_match_idx - 1
+                    if gap == 0:
+                        score += cls.CONSECUTIVE_BONUS  # Consecutive match
+                    else:
+                        score -= gap * cls.GAP_PENALTY  # Gap penalty
+
+                # Boundary bonuses
+                if ti == 0:
+                    score += cls.START_BONUS  # Start of text
+                elif ti > 0 and text_lower[ti - 1] in cls.WORD_SEPARATORS:
+                    score += cls.BOUNDARY_BONUS  # After word boundary
+
+                prev_match_idx = ti
+                pi += 1
+
+        if pi == len(pattern_lower):
+            return True, score
+        return False, 0
+
+    @classmethod
+    def filter_and_sort(
+        cls,
+        pattern: str,
+        items: list[tuple[str, Any]],
+        key_func: Optional[Callable[[tuple[str, Any]], str]] = None,
+    ) -> list[tuple[str, Any, int]]:
+        """Filter items by fuzzy match and sort by score (descending).
+
+        Args:
+            pattern: The search pattern
+            items: List of (name, data) tuples to filter
+            key_func: Optional function to extract match key from item.
+                     Defaults to using item[0].
+
+        Returns:
+            List of (name, data, score) tuples, sorted by score descending.
+            Only items that match the pattern are included.
+        """
+        if key_func is None:
+            key_func = lambda x: x[0]
+
+        results = []
+        for item in items:
+            key = key_func(item)
+            matches, score = cls.match(pattern, key)
+            if matches:
+                results.append((item[0], item[1], score))
+
+        # Sort by score descending, then alphabetically for ties
+        results.sort(key=lambda x: (-x[2], x[0].lower()))
+        return results
 
 
 # Default commands available in the interactive client
@@ -250,10 +356,10 @@ class CommandCompleter(Completer):
 
 
 class AtFileCompleter(Completer):
-    """Complete file and folder paths after @ symbol.
+    """Complete file and folder paths after @ symbol with fuzzy matching.
 
     Triggers completion when user types @, providing:
-    - File and folder suggestions from the filesystem
+    - Fuzzy file and folder suggestions from the filesystem
     - Visual dropdown with arrow key navigation
     - Directory metadata indicator (user types / to explore contents)
     - Support for relative and absolute paths
@@ -262,6 +368,7 @@ class AtFileCompleter(Completer):
     Example usage:
         "Please review @src/utils.py and @tests/"
         "Load config from @~/projects/config.json"
+        "@utl" -> matches "utils.py" (fuzzy)
     """
 
     def __init__(
@@ -284,19 +391,12 @@ class AtFileCompleter(Completer):
         self.base_path = base_path or os.getcwd()
         self.file_filter = file_filter
 
-        # Internal path completer for the heavy lifting
-        self._path_completer = PathCompleter(
-            only_directories=only_directories,
-            expanduser=expanduser,
-            file_filter=file_filter,
-        )
-
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
         """Get completions for the current document.
 
-        Looks for @ patterns and provides file path completions.
+        Looks for @ patterns and provides fuzzy file path completions.
         """
         text = document.text_before_cursor
 
@@ -312,36 +412,129 @@ class AtFileCompleter(Completer):
         if path_text and path_text[0] == ' ':
             return
 
-        # Create a sub-document for path completion
-        path_doc = Document(text=path_text, cursor_position=len(path_text))
+        # Parse path into directory and partial filename
+        dir_path, partial_name = self._parse_path(path_text)
 
-        # Get completions from PathCompleter
-        for completion in self._path_completer.get_completions(path_doc, complete_event):
-            text = completion.text
+        # Get the directory to list
+        list_dir = self._get_list_directory(dir_path)
+        if not list_dir or not os.path.isdir(list_dir):
+            return
 
-            # Add metadata for directories
-            display_meta = completion.display_meta
-            full_path = self._resolve_path(path_text, completion.text)
-            is_dir = full_path and os.path.isdir(full_path)
+        # List directory contents and apply fuzzy matching
+        try:
+            entries = self._list_entries(list_dir)
+        except (OSError, PermissionError):
+            return
+
+        # Build items for fuzzy matching: (name, full_path)
+        items = [(name, os.path.join(list_dir, name)) for name in entries]
+
+        # Apply fuzzy matching
+        matched = FuzzyMatcher.filter_and_sort(partial_name, items)
+
+        # Calculate start position for replacement
+        start_pos = -len(partial_name) if partial_name else 0
+
+        # Yield completions
+        for name, full_path, score in matched:
+            is_dir = os.path.isdir(full_path)
+
+            # Skip files if only_directories is set
+            if self.only_directories and not is_dir:
+                continue
+
+            # Apply file filter if set
+            if self.file_filter and not is_dir:
+                if not self.file_filter(name):
+                    continue
 
             if is_dir:
-                # Don't append / to text - let user type it to explore folder contents
-                # But show / in display as visual indicator that it's a folder
-                display = text + "/" if not text.endswith("/") else text
-                if not display_meta:
-                    display_meta = "directory"
+                display = name + "/"
+                display_meta = "directory"
             else:
-                display = text
-                if not display_meta:
-                    if full_path and os.path.isfile(full_path):
-                        display_meta = self._get_file_type(full_path)
+                display = name
+                display_meta = self._get_file_type(full_path)
 
             yield Completion(
-                text,
-                start_position=completion.start_position,
+                name,
+                start_position=start_pos,
                 display=display,
                 display_meta=display_meta,
             )
+
+    def _parse_path(self, path_text: str) -> tuple[str, str]:
+        """Parse path into directory portion and partial filename.
+
+        Args:
+            path_text: The path text after @
+
+        Returns:
+            Tuple of (directory_path, partial_filename)
+            - directory_path: The directory portion (may be empty)
+            - partial_filename: The partial filename to fuzzy match
+        """
+        if not path_text:
+            return "", ""
+
+        # Handle home directory
+        if path_text.startswith("~"):
+            if self.expanduser:
+                path_text = os.path.expanduser(path_text)
+
+        # Split into directory and partial name
+        if path_text.endswith("/") or path_text.endswith(os.sep):
+            # Path ends with separator - list that directory
+            return path_text.rstrip("/").rstrip(os.sep), ""
+        elif "/" in path_text or os.sep in path_text:
+            # Has path separator - split
+            dir_part = os.path.dirname(path_text)
+            name_part = os.path.basename(path_text)
+            return dir_part, name_part
+        else:
+            # Just a partial name - search in base directory
+            return "", path_text
+
+    def _get_list_directory(self, dir_path: str) -> Optional[str]:
+        """Get the absolute directory path to list.
+
+        Args:
+            dir_path: The directory portion from path parsing
+
+        Returns:
+            Absolute path to the directory, or None if invalid
+        """
+        if not dir_path:
+            return self.base_path
+
+        # Handle home directory expansion
+        if dir_path.startswith("~") and self.expanduser:
+            dir_path = os.path.expanduser(dir_path)
+
+        # Make absolute if relative
+        if not os.path.isabs(dir_path):
+            dir_path = os.path.join(self.base_path, dir_path)
+
+        return os.path.normpath(dir_path)
+
+    def _list_entries(self, directory: str) -> list[str]:
+        """List directory entries, handling errors gracefully.
+
+        Args:
+            directory: Absolute path to directory
+
+        Returns:
+            Sorted list of entry names (files and directories)
+        """
+        entries = []
+        try:
+            for entry in os.scandir(directory):
+                # Skip hidden files (starting with .)
+                if entry.name.startswith('.'):
+                    continue
+                entries.append(entry.name)
+        except (OSError, PermissionError):
+            pass
+        return sorted(entries)
 
     def _find_at_position(self, text: str) -> int:
         """Find the position of @ that starts a file reference.
@@ -366,28 +559,6 @@ class AtFileCompleter(Completer):
                 return -1
 
         return at_pos
-
-    def _resolve_path(self, base: str, completion: str) -> Optional[str]:
-        """Resolve the full path for a completion."""
-        try:
-            # Combine base path fragment with completion
-            if base:
-                dir_part = os.path.dirname(base)
-                full_path = os.path.join(dir_part, completion) if dir_part else completion
-            else:
-                full_path = completion
-
-            # Expand user
-            if self.expanduser and full_path.startswith('~'):
-                full_path = os.path.expanduser(full_path)
-
-            # Make absolute if relative
-            if not os.path.isabs(full_path):
-                full_path = os.path.join(self.base_path, full_path)
-
-            return full_path
-        except Exception:
-            return None
 
     def _get_file_type(self, path: str) -> str:
         """Get a short description of the file type."""
@@ -420,16 +591,17 @@ class AtFileCompleter(Completer):
 
 
 class PercentPromptCompleter(Completer):
-    """Complete prompt/skill names after % symbol.
+    """Complete prompt/skill names after % symbol with fuzzy matching.
 
     Triggers completion when user types %, providing:
-    - Prompt/skill suggestions from the prompt library
+    - Fuzzy prompt/skill suggestions from the prompt library
     - Visual dropdown with arrow key navigation
     - Prompt descriptions as metadata
 
     Example usage:
         "Review @src/main.py using %code-review"
         "Generate an image with %gemini-image-generator"
+        "%cr" -> matches "code-review" (fuzzy)
     """
 
     def __init__(
@@ -457,7 +629,7 @@ class PercentPromptCompleter(Completer):
     ) -> Iterable[Completion]:
         """Get completions for the current document.
 
-        Looks for % patterns and provides prompt name completions.
+        Looks for % patterns and provides fuzzy prompt name completions.
         """
         text = document.text_before_cursor
 
@@ -485,8 +657,8 @@ class PercentPromptCompleter(Completer):
         if not prompts:
             return
 
-        # Filter prompts that match the typed text
-        prompt_lower = prompt_text.lower()
+        # Build items for fuzzy matching: (name, description)
+        items = []
         for prompt_info in prompts:
             # Handle both dict and object
             if isinstance(prompt_info, dict):
@@ -496,17 +668,24 @@ class PercentPromptCompleter(Completer):
                 name = getattr(prompt_info, 'name', '')
                 description = getattr(prompt_info, 'description', 'prompt')
 
-            if name.lower().startswith(prompt_lower):
-                # Truncate long descriptions
-                if len(description) > 50:
-                    description = description[:47] + "..."
+            if name:
+                items.append((name, description))
 
-                yield Completion(
-                    name,
-                    start_position=-len(prompt_text),
-                    display=f"%{name}",
-                    display_meta=description,
-                )
+        # Apply fuzzy matching
+        matched = FuzzyMatcher.filter_and_sort(prompt_text, items)
+
+        # Yield completions sorted by score
+        for name, description, score in matched:
+            # Truncate long descriptions
+            if len(description) > 50:
+                description = description[:47] + "..."
+
+            yield Completion(
+                name,
+                start_position=-len(prompt_text),
+                display=f"%{name}",
+                display_meta=description,
+            )
 
     def _find_percent_position(self, text: str) -> int:
         """Find the position of % that starts a prompt reference.

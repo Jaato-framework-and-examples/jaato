@@ -7,6 +7,7 @@ This approach renders Rich content to ANSI strings, then wraps them with
 prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 """
 
+import re
 import shutil
 import sys
 import time
@@ -17,6 +18,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -577,6 +579,17 @@ class PTDisplay:
         # Custom prompt override (for exit confirmation, etc.)
         self._custom_prompt: Optional[str] = None
 
+        # Search mode state
+        self._search_mode: bool = False
+        self._search_query: str = ""
+
+        # Paste registry for large paste handling
+        # Large pastes are stored here and replaced with placeholders
+        self._paste_registry: Dict[int, str] = {}
+        self._paste_counter: int = 0
+        self._paste_threshold_lines: int = 10  # Lines threshold for placeholder
+        self._paste_threshold_chars: int = 1000  # Character threshold for placeholder
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -627,6 +640,8 @@ class PTDisplay:
         """Called when input buffer text changes - invalidates layout for resize.
 
         In permission mode, this also validates input and reverts invalid characters.
+        Also triggers completion for @file and %prompt references on deletion,
+        since prompt_toolkit's complete_while_typing only triggers on insertion.
         """
         # In permission mode, validate input and revert if invalid
         if self._waiting_for_channel_input and self._valid_input_prefixes:
@@ -638,9 +653,57 @@ class PTDisplay:
             else:
                 # Update last valid input
                 self._last_valid_permission_input = current_text
+        elif self._search_mode:
+            # Search mode: update search results as user types
+            self._update_search()
+        else:
+            # Normal mode: retrigger completion for @file and %prompt on deletion
+            # prompt_toolkit's complete_while_typing only triggers on insertion,
+            # so we manually trigger when user is in a completion context
+            self._maybe_retrigger_completion()
 
         if self._app and self._app.is_running:
             self._app.invalidate()
+
+    def _maybe_retrigger_completion(self) -> None:
+        """Retrigger completion if user is in an @file or %prompt context.
+
+        This handles the case where user deletes characters - completion should
+        update to show matches for the shorter pattern.
+        """
+        if not self._input_buffer or not self._app:
+            return
+
+        text = self._input_buffer.document.text_before_cursor
+        if not text:
+            return
+
+        # Check if we're in a completion context (after @ or %)
+        # Find the last @ or % that looks like a reference start
+        in_completion_context = False
+
+        # Check for @file context
+        at_pos = text.rfind('@')
+        if at_pos != -1:
+            # Valid if @ is at start or preceded by whitespace/punctuation
+            if at_pos == 0 or not (text[at_pos - 1].isalnum() or text[at_pos - 1] in '._-'):
+                # Check no space immediately after @
+                if at_pos == len(text) - 1 or text[at_pos + 1] != ' ':
+                    in_completion_context = True
+
+        # Check for %prompt context
+        if not in_completion_context:
+            pct_pos = text.rfind('%')
+            if pct_pos != -1:
+                # Valid if % is at start or not preceded by alphanumeric
+                if pct_pos == 0 or not text[pct_pos - 1].isalnum():
+                    # Check no space immediately after %
+                    if pct_pos == len(text) - 1 or text[pct_pos + 1] != ' ':
+                        in_completion_context = True
+
+        # Trigger completion if in context and completion not already active
+        if in_completion_context and not self._input_buffer.complete_state:
+            self._input_buffer.start_completion()
 
     def _get_input_height(self) -> int:
         """Calculate dynamic height for input area based on content.
@@ -966,6 +1029,110 @@ class PTDisplay:
                 return buffer
         return self._output_buffer
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Search mode
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _open_search(self) -> None:
+        """Open search mode."""
+        self._search_mode = True
+        self._search_query = ""
+        # Clear any existing search state in output buffer
+        buffer = self._get_active_buffer()
+        buffer.clear_search()
+        # Clear the input buffer for search query entry
+        if self._input_buffer:
+            self._input_buffer.text = ""
+
+    def _close_search(self) -> None:
+        """Close search mode and clear search highlights."""
+        self._search_mode = False
+        self._search_query = ""
+        buffer = self._get_active_buffer()
+        buffer.clear_search()
+        # Clear the input buffer
+        if self._input_buffer:
+            self._input_buffer.text = ""
+        # Sync display to remove highlights
+        self._sync_output_display()
+
+    def _update_search(self) -> None:
+        """Update search results based on current input."""
+        if not self._search_mode or not self._input_buffer:
+            return
+
+        query = self._input_buffer.text
+        if query != self._search_query:
+            self._search_query = query
+            buffer = self._get_active_buffer()
+            buffer.search(query)
+            # Sync display to show highlighted content
+            self._sync_output_display()
+            # Invalidate to trigger redraw
+            if self._app:
+                self._app.invalidate()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Paste handling
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _register_paste(self, content: str) -> int:
+        """Register a large paste and return its ID.
+
+        Args:
+            content: The pasted content to store.
+
+        Returns:
+            Unique paste ID for the placeholder.
+        """
+        # Normalize line endings: \r\n -> \n, then \r -> \n
+        # Terminal pastes often use \r (carriage return) instead of \n
+        normalized = content.replace('\r\n', '\n').replace('\r', '\n')
+        self._paste_counter += 1
+        self._paste_registry[self._paste_counter] = normalized
+        return self._paste_counter
+
+    def _get_paste(self, paste_id: int) -> Optional[str]:
+        """Get and remove a registered paste by ID.
+
+        Args:
+            paste_id: The paste ID from the placeholder.
+
+        Returns:
+            The stored paste content, or None if not found.
+        """
+        return self._paste_registry.pop(paste_id, None)
+
+    def _expand_paste_placeholders(self, text: str) -> str:
+        """Expand paste placeholders with their original content.
+
+        Args:
+            text: Input text that may contain paste placeholders.
+
+        Returns:
+            Text with placeholders replaced by original paste content.
+        """
+        pattern = r'\[paste #(\d+): \+\d+ lines\]'
+
+        def replace(m: re.Match) -> str:
+            paste_id = int(m.group(1))
+            content = self._get_paste(paste_id)
+            return content if content is not None else m.group(0)
+
+        return re.sub(pattern, replace, text)
+
+    def _is_large_paste(self, data: str) -> bool:
+        """Check if pasted data exceeds thresholds.
+
+        Args:
+            data: The pasted text.
+
+        Returns:
+            True if paste should use placeholder.
+        """
+        line_count = len(data.splitlines()) if data else 0
+        return line_count > self._paste_threshold_lines or len(data) > self._paste_threshold_chars
+
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
         # Check for terminal resize and update dimensions if needed
@@ -1209,8 +1376,12 @@ class PTDisplay:
         kb = KeyBindings()
         keys = self._keybinding_config
 
+        # Condition for disabling keybindings when in search mode
+        # Search mode is modal - most keys should be captured by search handlers
+        not_in_search_mode = Condition(lambda: not getattr(self, '_search_mode', False))
+
         @kb.add(*keys.get_key_args("submit"), eager=True,
-                filter=Condition(lambda: not self._budget_captures_keys()))
+                filter=Condition(lambda: not self._budget_captures_keys()) & not_in_search_mode)
         def handle_enter(event):
             """Handle enter key - submit input, select permission option, or advance pager."""
             if getattr(self, '_pager_active', False):
@@ -1218,33 +1389,38 @@ class PTDisplay:
                 self._advance_pager_page()
                 return
             # Check for permission mode - if input is empty, select focused option
-            text = self._input_buffer.text.strip()
+            raw_text = self._input_buffer.text
+            text = raw_text.strip()
             if (not text and
                 getattr(self, '_waiting_for_channel_input', False) and
                 self._permission_response_options):
                 self._select_focused_permission_option()
                 return
             # Normal mode - submit input
+            # Expand paste placeholders BEFORE stripping to preserve line feeds in pasted content
+            expanded_text = self._expand_paste_placeholders(raw_text)
+            # Strip only leading/trailing whitespace from the final result
+            expanded_text = expanded_text.strip()
             # Add to history before reset (like PromptSession does)
-            if text and self._input_buffer.history:
-                self._input_buffer.history.append_string(text)
+            if expanded_text and self._input_buffer.history:
+                self._input_buffer.history.append_string(expanded_text)
             self._input_buffer.reset()
             if self._input_callback:
-                self._input_callback(text)
+                self._input_callback(expanded_text)
 
-        @kb.add(*keys.get_key_args("newline"))
+        @kb.add(*keys.get_key_args("newline"), filter=not_in_search_mode)
         def handle_alt_enter(event):
             """Handle Alt+Enter / Escape+Enter - insert newline for multi-line input."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.insert_text('\n')
 
-        @kb.add(*keys.get_key_args("clear_input"))
+        @kb.add(*keys.get_key_args("clear_input"), filter=not_in_search_mode)
         def handle_escape_escape(event):
             """Handle Escape+Escape - clear input buffer contents."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.reset()
 
-        @kb.add(*keys.get_key_args("tool_exit"))
+        @kb.add(*keys.get_key_args("tool_exit"), filter=not_in_search_mode)
         def handle_tool_exit(event):
             """Handle Escape - exit tool navigation mode if active."""
             buffer = self._get_active_buffer()
@@ -1256,7 +1432,7 @@ class PTDisplay:
             # Not in tool nav mode - let other handlers process escape
             # (escape+enter for newline, escape+escape for clear)
 
-        @kb.add(*keys.get_key_args("pager_quit"), eager=True)
+        @kb.add(*keys.get_key_args("pager_quit"), eager=True, filter=not_in_search_mode)
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
             if getattr(self, '_pager_active', False):
@@ -1267,7 +1443,7 @@ class PTDisplay:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
 
-        @kb.add(*keys.get_key_args("view_full"))
+        @kb.add(*keys.get_key_args("view_full"), filter=not_in_search_mode)
         def handle_v(event):
             """Handle 'v' key - view full prompt if truncated, otherwise type 'v'."""
             # Check if waiting for channel input with TRUNCATED pending prompt
@@ -1284,7 +1460,7 @@ class PTDisplay:
             # Normal mode - insert 'v' character
             event.current_buffer.insert_text("v")
 
-        @kb.add(*keys.get_key_args("pager_next"), eager=True)
+        @kb.add(*keys.get_key_args("pager_next"), eager=True, filter=not_in_search_mode)
         def handle_space(event):
             """Handle space key - pager advance, tool expand toggle, permission select, or insert space."""
             if getattr(self, '_pager_active', False):
@@ -1306,7 +1482,7 @@ class PTDisplay:
             event.current_buffer.insert_text(" ")
 
         @kb.add(*keys.get_key_args("permission_next"), eager=True,
-                filter=Condition(lambda: not self._budget_captures_keys()))
+                filter=Condition(lambda: not self._budget_captures_keys()) & not_in_search_mode)
         def handle_permission_next(event):
             """Handle TAB - cycle to next permission option, or complete in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1328,7 +1504,7 @@ class PTDisplay:
                     buff.start_completion()
 
         @kb.add(*keys.get_key_args("permission_prev"), eager=True,
-                filter=Condition(lambda: not self._budget_captures_keys()))
+                filter=Condition(lambda: not self._budget_captures_keys()) & not_in_search_mode)
         def handle_permission_prev(event):
             """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
@@ -1457,7 +1633,7 @@ class PTDisplay:
             self._sync_output_display()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("nav_up"), eager=True)
+        @kb.add(*keys.get_key_args("nav_up"), eager=True, filter=not_in_search_mode)
         def handle_up(event):
             """Handle Up arrow - scroll popup, tool nav, or history/completion."""
             # Budget panel takes priority when visible AND input is empty
@@ -1487,7 +1663,7 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
-        @kb.add(*keys.get_key_args("nav_down"), eager=True)
+        @kb.add(*keys.get_key_args("nav_down"), eager=True, filter=not_in_search_mode)
         def handle_down(event):
             """Handle Down arrow - scroll popup, tool nav, or history/completion."""
             # Budget panel takes priority when visible AND input is empty
@@ -1517,7 +1693,7 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_down()
 
-        @kb.add(*keys.get_key_args("toggle_plan"))
+        @kb.add(*keys.get_key_args("toggle_plan"), filter=not_in_search_mode)
         def handle_ctrl_p(event):
             """Handle Ctrl+P - toggle plan popup visibility."""
             # Check if current agent has a plan (registry or fallback)
@@ -1525,26 +1701,26 @@ class PTDisplay:
                 self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("toggle_budget"))
+        @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
         def handle_ctrl_b(event):
             """Handle Ctrl+B - toggle budget panel visibility."""
             self._budget_panel.toggle()
             self._app.invalidate()
 
-        # Budget panel navigation (only active when budget panel is visible)
-        @kb.add("tab", filter=Condition(lambda: self._budget_captures_keys()))
+        # Budget panel navigation (only active when budget panel is visible and not in search mode)
+        @kb.add("tab", filter=Condition(lambda: self._budget_captures_keys()) & not_in_search_mode)
         def handle_budget_tab(event):
             """Handle TAB in budget panel - cycle to next agent."""
             self._budget_panel.cycle_agent(forward=True)
             self._app.invalidate()
 
-        @kb.add("s-tab", filter=Condition(lambda: self._budget_captures_keys()))
+        @kb.add("s-tab", filter=Condition(lambda: self._budget_captures_keys()) & not_in_search_mode)
         def handle_budget_shift_tab(event):
             """Handle Shift+TAB in budget panel - cycle to previous agent."""
             self._budget_panel.cycle_agent(forward=False)
             self._app.invalidate()
 
-        @kb.add("escape", "left", filter=Condition(lambda: self._budget_captures_keys()))
+        @kb.add("escape", "left", filter=Condition(lambda: self._budget_captures_keys()) & not_in_search_mode)
         def handle_budget_escape(event):
             """Handle ESC+left in budget panel - drill up or close."""
             if not self._budget_panel.drill_up():
@@ -1552,13 +1728,13 @@ class PTDisplay:
                 self._budget_panel.hide()
             self._app.invalidate()
 
-        @kb.add("enter", filter=Condition(lambda: self._budget_captures_keys()))
+        @kb.add("enter", filter=Condition(lambda: self._budget_captures_keys()) & not_in_search_mode)
         def handle_budget_enter(event):
             """Handle Enter in budget panel - drill down into selected source."""
             self._budget_panel.drill_down()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("cycle_agents"))
+        @kb.add(*keys.get_key_args("cycle_agents"), filter=not_in_search_mode)
         def handle_f2(event):
             """Handle cycle_agents keybinding - cycle through agents."""
             if self._agent_registry:
@@ -1570,14 +1746,65 @@ class PTDisplay:
                     self._agent_tab_bar.show_popup()
                 self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("toggle_tools"))
+        @kb.add(*keys.get_key_args("toggle_tools"), filter=not_in_search_mode)
         def handle_ctrl_t(event):
             """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
             buffer = self._get_active_buffer()
             buffer.toggle_tools_expanded()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True)
+        @kb.add(*keys.get_key_args("open_editor"), filter=not_in_search_mode)
+        def handle_open_editor(event):
+            """Handle Ctrl+G - open current input in external editor ($EDITOR)."""
+            # Don't open editor in pager mode or when buffer is empty
+            if getattr(self, '_pager_active', False):
+                return
+            # Open the buffer in external editor
+            # This uses $EDITOR or $VISUAL, falling back to vi
+            event.current_buffer.open_in_editor()
+
+        # Search mode keybindings
+        @kb.add(*keys.get_key_args("search"))
+        def handle_search(event):
+            """Handle Ctrl+F - toggle search mode."""
+            if getattr(self, '_pager_active', False):
+                return
+            if self._search_mode:
+                # Close search
+                self._close_search()
+            else:
+                # Open search
+                self._open_search()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_next"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_next(event):
+            """Handle Enter in search mode - go to next match."""
+            buffer = self._get_active_buffer()
+            buffer.search_next()
+            # Sync display to update current match highlighting
+            self._sync_output_display()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_prev"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_prev(event):
+            """Handle Ctrl+P in search mode - go to previous match."""
+            buffer = self._get_active_buffer()
+            buffer.search_prev()
+            # Sync display to update current match highlighting
+            self._sync_output_display()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("search_close"),
+                filter=Condition(lambda: getattr(self, '_search_mode', False)))
+        def handle_search_close(event):
+            """Handle Escape in search mode - close search."""
+            self._close_search()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True, filter=not_in_search_mode)
         def handle_tool_nav_enter(event):
             """Handle Ctrl+N - enter/exit tool navigation mode."""
             buffer = self._get_active_buffer()
@@ -1589,7 +1816,7 @@ class PTDisplay:
                 buffer.enter_tool_navigation()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("tool_expand"), eager=True)
+        @kb.add(*keys.get_key_args("tool_expand"), eager=True, filter=not_in_search_mode)
         def handle_tool_expand(event):
             """Handle right arrow - expand selected tool's output or move cursor."""
             buffer = self._get_active_buffer()
@@ -1602,7 +1829,7 @@ class PTDisplay:
                 if buf.cursor_position < len(buf.text):
                     buf.cursor_position += 1
 
-        @kb.add(*keys.get_key_args("tool_collapse"), eager=True)
+        @kb.add(*keys.get_key_args("tool_collapse"), eager=True, filter=not_in_search_mode)
         def handle_tool_collapse(event):
             """Handle left arrow - collapse selected tool's output or move cursor."""
             buffer = self._get_active_buffer()
@@ -1615,10 +1842,25 @@ class PTDisplay:
                 if buf.cursor_position > 0:
                     buf.cursor_position -= 1
 
-        @kb.add(*keys.get_key_args("yank"))
+        @kb.add(*keys.get_key_args("yank"), filter=not_in_search_mode)
         def handle_ctrl_y(event):
             """Handle Ctrl+Y - yank (copy) last response to clipboard."""
             self._yank_last_response()
+
+        # Bracketed paste handler - detects large pastes and uses placeholders
+        @kb.add(Keys.BracketedPaste)
+        def handle_bracketed_paste(event):
+            """Handle bracketed paste - use placeholder for large pastes."""
+            data = event.data
+            if self._is_large_paste(data):
+                # Register the paste and insert placeholder
+                line_count = len(data.splitlines()) if data else 0
+                paste_id = self._register_paste(data)
+                placeholder = f"[paste #{paste_id}: +{line_count} lines]"
+                event.current_buffer.insert_text(placeholder)
+            else:
+                # Normal paste for small content
+                event.current_buffer.insert_text(data)
 
         # Agent tab bar at top (conditional - only if agent_registry present)
         agent_tab_bar = ConditionalContainer(
@@ -1728,13 +1970,32 @@ class PTDisplay:
             style="class:output-panel",
         )
 
-        # Input prompt label - changes based on mode (pager, waiting for channel, normal)
+        # Input prompt label - changes based on mode (pager, waiting for channel, search, normal)
         def get_prompt_text():
             # Custom prompt override (for exit confirmation, etc.)
             if getattr(self, '_custom_prompt', None):
                 return [("class:prompt.permission", self._custom_prompt)]
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
+            if getattr(self, '_search_mode', False):
+                # Show search status with match count and keybinding hints
+                buffer = self._get_active_buffer()
+                query, current, total = buffer.get_search_status()
+                if total > 0:
+                    return [
+                        ("class:prompt.search", f"Search ({current}/{total}) "),
+                        ("class:prompt", "[Enter: next, Ctrl+P: prev, Esc: close]> "),
+                    ]
+                elif query:
+                    return [
+                        ("class:prompt.search", "Search (no matches) "),
+                        ("class:prompt", "[Esc: close]> "),
+                    ]
+                else:
+                    return [
+                        ("class:prompt.search", "Search "),
+                        ("class:prompt", "[Enter: next, Esc: close]> "),
+                    ]
             if getattr(self, '_waiting_for_channel_input', False):
                 # 'v' hint is already shown in the output panel truncation indicator
                 return [("class:prompt.permission", "Answer> ")]
