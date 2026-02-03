@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from ..plugin import MCPToolPlugin, create_plugin
+from ...base import HelpLines
 
 
 class TestMCPPluginInitialization:
@@ -93,28 +94,33 @@ class TestMCPPluginUserCommands:
         assert len(commands[0].parameters) == 2
 
     def test_execute_user_command_help(self):
-        """Help subcommand should return help text."""
+        """Help subcommand should return HelpLines for pager display."""
         plugin = MCPToolPlugin()
         result = plugin.execute_user_command('mcp', {'subcommand': 'help'})
 
-        assert 'MCP Server Configuration Commands' in result
-        assert 'mcp list' in result
-        assert 'mcp add' in result
+        assert isinstance(result, HelpLines)
+        help_text = "\n".join(text for text, _ in result.lines)
+        assert 'MCP Command' in help_text
+        assert 'list' in help_text.lower()
+        assert 'add' in help_text.lower()
 
     def test_execute_user_command_empty(self):
-        """Empty subcommand should return help text."""
+        """Empty subcommand should return HelpLines for pager display."""
         plugin = MCPToolPlugin()
         result = plugin.execute_user_command('mcp', {'subcommand': ''})
 
-        assert 'MCP Server Configuration Commands' in result
+        assert isinstance(result, HelpLines)
+        help_text = "\n".join(text for text, _ in result.lines)
+        assert 'MCP Command' in help_text
 
     def test_execute_user_command_unknown_subcommand(self):
-        """Unknown subcommand should return error and help."""
+        """Unknown subcommand should return error string."""
         plugin = MCPToolPlugin()
         result = plugin.execute_user_command('mcp', {'subcommand': 'unknown'})
 
+        assert isinstance(result, str)
         assert 'Unknown subcommand: unknown' in result
-        assert 'MCP Server Configuration Commands' in result
+        assert 'mcp help' in result  # Suggests using help command
 
     def test_execute_user_command_unknown_command(self):
         """Unknown command should return error."""

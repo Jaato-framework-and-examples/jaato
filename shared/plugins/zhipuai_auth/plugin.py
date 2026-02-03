@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import (
     CommandCompletion,
     CommandParameter,
+    HelpLines,
     ToolPlugin,
     UserCommand,
 )
@@ -153,68 +154,68 @@ class ZhipuAIAuthPlugin:
             )
             return ""
 
-    def _cmd_help(self) -> str:
-        """Return detailed help text."""
-        help_text = """Zhipu AI (Z.AI) Auth Command
-
-Manage authentication for Zhipu AI's GLM Coding Plan. This plugin securely
-stores your API key for use with GLM models.
-
-USAGE
-    zhipuai-auth <action>
-
-ACTIONS
-    login             Show instructions for getting your Z.AI API key
-
-    key <api_key>     Validate and store your API key
-                      The key is validated via test request before saving
-
-    logout            Clear stored API credentials
-                      Removes the stored API key
-
-    status            Show current authentication status
-                      Displays masked key and configuration
-
-    help              Show this help message
-
-AUTHENTICATION FLOW
-    1. Run 'zhipuai-auth login' to see instructions
-    2. Visit https://z.ai/model-api or https://open.bigmodel.cn/
-    3. Sign in and generate an API key
-    4. Run 'zhipuai-auth key <paste_key_here>'
-    5. Key is validated and saved for future use
-
-EXAMPLES
-    zhipuai-auth login                      Show setup instructions
-    zhipuai-auth key abc123.xyz789          Store and validate API key
-    zhipuai-auth status                     Check authentication status
-    zhipuai-auth logout                     Clear stored credentials
-
-TOKEN STORAGE
-    Credentials are stored in:
-    - Project: .jaato/zhipuai_auth.json (if .jaato/ exists)
-    - User: ~/.jaato/zhipuai_auth.json (fallback)
-
-    Files are created with restricted permissions (600 on Unix).
-
-ENVIRONMENT VARIABLES
-    ZHIPUAI_API_KEY       API key (takes precedence over stored key)
-    ZHIPUAI_BASE_URL      Custom API endpoint (for enterprise users)
-
-AVAILABLE MODELS
-    glm-4.7               Latest model with native CoT reasoning (128K)
-    glm-4.7-flash         Fast inference variant
-    glm-4                 General purpose model
-    glm-4v                Vision-enabled multimodal model
-    glm-4-assistant       Optimized for agentic tasks
-
-NOTES
-    - API key format is typically: {id}.{secret}
-    - API key is validated by making a test request before saving
-    - Stored credentials are used automatically when connecting
-    - Environment variable ZHIPUAI_API_KEY takes precedence"""
-        self._emit(help_text)
-        return ""
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("Zhipu AI (Z.AI) Auth Command", "bold"),
+            ("", ""),
+            ("Manage authentication for Zhipu AI's GLM Coding Plan. This plugin securely", ""),
+            ("stores your API key for use with GLM models.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    zhipuai-auth <action>", ""),
+            ("", ""),
+            ("ACTIONS", "bold"),
+            ("    login             Show instructions for getting your Z.AI API key", "dim"),
+            ("", ""),
+            ("    key <api_key>     Validate and store your API key", "dim"),
+            ("                      The key is validated via test request before saving", "dim"),
+            ("", ""),
+            ("    logout            Clear stored API credentials", "dim"),
+            ("                      Removes the stored API key", "dim"),
+            ("", ""),
+            ("    status            Show current authentication status", "dim"),
+            ("                      Displays masked key and configuration", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("AUTHENTICATION FLOW", "bold"),
+            ("    1. Run 'zhipuai-auth login' to see instructions", ""),
+            ("    2. Visit https://z.ai/model-api or https://open.bigmodel.cn/", ""),
+            ("    3. Sign in and generate an API key", ""),
+            ("    4. Run 'zhipuai-auth key <paste_key_here>'", ""),
+            ("    5. Key is validated and saved for future use", ""),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    zhipuai-auth login                      Show setup instructions", "dim"),
+            ("    zhipuai-auth key abc123.xyz789          Store and validate API key", "dim"),
+            ("    zhipuai-auth status                     Check authentication status", "dim"),
+            ("    zhipuai-auth logout                     Clear stored credentials", "dim"),
+            ("", ""),
+            ("TOKEN STORAGE", "bold"),
+            ("    Credentials are stored in:", ""),
+            ("    - Project: .jaato/zhipuai_auth.json (if .jaato/ exists)", "dim"),
+            ("    - User: ~/.jaato/zhipuai_auth.json (fallback)", "dim"),
+            ("", ""),
+            ("    Files are created with restricted permissions (600 on Unix).", "dim"),
+            ("", ""),
+            ("ENVIRONMENT VARIABLES", "bold"),
+            ("    ZHIPUAI_API_KEY       API key (takes precedence over stored key)", "dim"),
+            ("    ZHIPUAI_BASE_URL      Custom API endpoint (for enterprise users)", "dim"),
+            ("", ""),
+            ("AVAILABLE MODELS", "bold"),
+            ("    glm-4.7               Latest model with native CoT reasoning (128K)", "dim"),
+            ("    glm-4.7-flash         Fast inference variant", "dim"),
+            ("    glm-4                 General purpose model", "dim"),
+            ("    glm-4v                Vision-enabled multimodal model", "dim"),
+            ("    glm-4-assistant       Optimized for agentic tasks", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - API key format is typically: {id}.{secret}", "dim"),
+            ("    - API key is validated by making a test request before saving", "dim"),
+            ("    - Stored credentials are used automatically when connecting", "dim"),
+            ("    - Environment variable ZHIPUAI_API_KEY takes precedence", "dim"),
+        ])
 
     def _cmd_login(self) -> str:
         """Handle the login command - show instructions."""

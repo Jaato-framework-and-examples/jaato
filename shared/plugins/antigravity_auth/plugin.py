@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import (
     CommandCompletion,
     CommandParameter,
+    HelpLines,
     ToolPlugin,
     UserCommand,
 )
@@ -161,85 +162,85 @@ class AntigravityAuthPlugin:
             )
             return ""
 
-    def _cmd_help(self) -> str:
-        """Return detailed help text."""
-        help_text = """Antigravity Auth Command
-
-Authenticate with Google for Antigravity backend access. This enables access
-to Gemini 3 and Claude models through Google's Antigravity IDE backend.
-
-USAGE
-    antigravity-auth <action>
-
-ACTIONS
-    login             Open browser to authenticate with Google
-                      Generates PKCE challenge and opens Google auth URL
-
-    code <auth_code>  Complete login with the authorization code
-                      Paste the code shown after browser authorization
-
-    logout            Clear stored OAuth tokens for all accounts
-                      Removes all credentials from keychain/keyring
-
-    status            Show current authentication status
-                      Displays active account and token info
-
-    accounts          List all authenticated Google accounts
-                      Shows which accounts have valid tokens
-
-    help              Show this help message
-
-AUTHENTICATION FLOW
-    1. Run 'antigravity-auth login'
-    2. Browser opens to Google's auth page
-    3. Sign in with your Google account
-    4. Copy the authorization code shown
-    5. Run 'antigravity-auth code <paste_code_here>'
-    6. Token is saved and ready to use
-
-EXAMPLES
-    antigravity-auth login              Start OAuth login
-    antigravity-auth code ABC123xyz     Complete login with code
-    antigravity-auth status             Check authentication status
-    antigravity-auth accounts           List all authenticated accounts
-    antigravity-auth logout             Clear all credentials
-
-MULTI-ACCOUNT SUPPORT
-    Multiple Google accounts can be authenticated simultaneously.
-    The system auto-rotates between accounts to distribute quota.
-    Each login adds a new account without removing existing ones.
-
-AVAILABLE MODELS (Antigravity quota)
-    antigravity-gemini-3-pro            Gemini 3 Pro
-    antigravity-gemini-3-flash          Gemini 3 Flash
-    antigravity-claude-sonnet-4-5       Claude Sonnet 4.5
-    antigravity-claude-sonnet-4-5-thinking
-                                        Claude Sonnet 4.5 with thinking
-
-AVAILABLE MODELS (Gemini CLI quota)
-    gemini-2.5-flash                    Gemini 2.5 Flash
-    gemini-2.5-pro                      Gemini 2.5 Pro
-    gemini-3-flash-preview              Gemini 3 Flash Preview
-    gemini-3-pro-preview                Gemini 3 Pro Preview
-
-TOKEN STORAGE
-    Tokens are securely stored in your system keychain:
-    - macOS: Keychain Access
-    - Linux: Secret Service (GNOME Keyring, KWallet)
-    - Windows: Credential Manager
-
-ENVIRONMENT VARIABLES
-    JAATO_ANTIGRAVITY_QUOTA         'antigravity' or 'gemini-cli' (default: antigravity)
-    JAATO_ANTIGRAVITY_THINKING_LEVEL  Gemini 3 thinking: minimal/low/medium/high
-    JAATO_ANTIGRAVITY_THINKING_BUDGET Claude thinking budget (default: 8192)
-    JAATO_ANTIGRAVITY_AUTO_ROTATE   Enable multi-account rotation (default: true)
-
-NOTES
-    - OAuth tokens auto-refresh when expired
-    - Auto-rotation distributes load across authenticated accounts
-    - Quota is separate between Antigravity and Gemini CLI backends"""
-        self._emit(help_text)
-        return ""
+    def _cmd_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("Antigravity Auth Command", "bold"),
+            ("", ""),
+            ("Authenticate with Google for Antigravity backend access. This enables access", ""),
+            ("to Gemini 3 and Claude models through Google's Antigravity IDE backend.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    antigravity-auth <action>", ""),
+            ("", ""),
+            ("ACTIONS", "bold"),
+            ("    login             Open browser to authenticate with Google", "dim"),
+            ("                      Generates PKCE challenge and opens Google auth URL", "dim"),
+            ("", ""),
+            ("    code <auth_code>  Complete login with the authorization code", "dim"),
+            ("                      Paste the code shown after browser authorization", "dim"),
+            ("", ""),
+            ("    logout            Clear stored OAuth tokens for all accounts", "dim"),
+            ("                      Removes all credentials from keychain/keyring", "dim"),
+            ("", ""),
+            ("    status            Show current authentication status", "dim"),
+            ("                      Displays active account and token info", "dim"),
+            ("", ""),
+            ("    accounts          List all authenticated Google accounts", "dim"),
+            ("                      Shows which accounts have valid tokens", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("AUTHENTICATION FLOW", "bold"),
+            ("    1. Run 'antigravity-auth login'", ""),
+            ("    2. Browser opens to Google's auth page", ""),
+            ("    3. Sign in with your Google account", ""),
+            ("    4. Copy the authorization code shown", ""),
+            ("    5. Run 'antigravity-auth code <paste_code_here>'", ""),
+            ("    6. Token is saved and ready to use", ""),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    antigravity-auth login              Start OAuth login", "dim"),
+            ("    antigravity-auth code ABC123xyz     Complete login with code", "dim"),
+            ("    antigravity-auth status             Check authentication status", "dim"),
+            ("    antigravity-auth accounts           List all authenticated accounts", "dim"),
+            ("    antigravity-auth logout             Clear all credentials", "dim"),
+            ("", ""),
+            ("MULTI-ACCOUNT SUPPORT", "bold"),
+            ("    Multiple Google accounts can be authenticated simultaneously.", ""),
+            ("    The system auto-rotates between accounts to distribute quota.", "dim"),
+            ("    Each login adds a new account without removing existing ones.", "dim"),
+            ("", ""),
+            ("AVAILABLE MODELS (Antigravity quota)", "bold"),
+            ("    antigravity-gemini-3-pro            Gemini 3 Pro", "dim"),
+            ("    antigravity-gemini-3-flash          Gemini 3 Flash", "dim"),
+            ("    antigravity-claude-sonnet-4-5       Claude Sonnet 4.5", "dim"),
+            ("    antigravity-claude-sonnet-4-5-thinking", "dim"),
+            ("                                        Claude Sonnet 4.5 with thinking", "dim"),
+            ("", ""),
+            ("AVAILABLE MODELS (Gemini CLI quota)", "bold"),
+            ("    gemini-2.5-flash                    Gemini 2.5 Flash", "dim"),
+            ("    gemini-2.5-pro                      Gemini 2.5 Pro", "dim"),
+            ("    gemini-3-flash-preview              Gemini 3 Flash Preview", "dim"),
+            ("    gemini-3-pro-preview                Gemini 3 Pro Preview", "dim"),
+            ("", ""),
+            ("TOKEN STORAGE", "bold"),
+            ("    Tokens are securely stored in your system keychain:", ""),
+            ("    - macOS: Keychain Access", "dim"),
+            ("    - Linux: Secret Service (GNOME Keyring, KWallet)", "dim"),
+            ("    - Windows: Credential Manager", "dim"),
+            ("", ""),
+            ("ENVIRONMENT VARIABLES", "bold"),
+            ("    JAATO_ANTIGRAVITY_QUOTA         'antigravity' or 'gemini-cli' (default: antigravity)", "dim"),
+            ("    JAATO_ANTIGRAVITY_THINKING_LEVEL  Gemini 3 thinking: minimal/low/medium/high", "dim"),
+            ("    JAATO_ANTIGRAVITY_THINKING_BUDGET Claude thinking budget (default: 8192)", "dim"),
+            ("    JAATO_ANTIGRAVITY_AUTO_ROTATE   Enable multi-account rotation (default: true)", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - OAuth tokens auto-refresh when expired", "dim"),
+            ("    - Auto-rotation distributes load across authenticated accounts", "dim"),
+            ("    - Quota is separate between Antigravity and Gemini CLI backends", "dim"),
+        ])
 
     def _cmd_login(self) -> str:
         """Handle the login command - step 1: open browser."""
