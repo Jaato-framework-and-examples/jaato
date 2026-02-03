@@ -15,6 +15,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool, CallToolResult, Implementation
 
+# Type alias for progress callback - matches MCP SDK's ProgressFnT protocol
+# Callable[[progress: float, total: float | None, message: str | None], Awaitable[None]]
+ProgressCallback = Any  # Avoid import complexity, validated at runtime
+
 # Client info sent to MCP servers during initialization
 _CLIENT_INFO = Implementation(name="jaato", version="0.1.0")
 
@@ -48,9 +52,28 @@ class ServerConnection:
         self.tools = result.tools
         return self.tools
     
-    async def call_tool(self, name: str, arguments: dict[str, Any] = None) -> CallToolResult:
-        """Call a tool on this server."""
-        return await self.session.call_tool(name, arguments or {})
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] = None,
+        progress_callback: ProgressCallback = None,
+    ) -> CallToolResult:
+        """Call a tool on this server.
+
+        Args:
+            name: Name of the tool to call.
+            arguments: Arguments to pass to the tool.
+            progress_callback: Optional async callback for progress notifications.
+                Signature: async def callback(progress: float, total: float | None, message: str | None) -> None
+
+        Returns:
+            CallToolResult from the MCP server.
+        """
+        return await self.session.call_tool(
+            name,
+            arguments or {},
+            progress_callback=progress_callback,
+        )
 
 
 class MCPClientManager:
@@ -156,9 +179,23 @@ class MCPClientManager:
         server: str,
         tool_name: str,
         arguments: dict[str, Any] = None,
+        progress_callback: ProgressCallback = None,
     ) -> CallToolResult:
-        """Call a tool on a specific server."""
-        return await self.get_connection(server).call_tool(tool_name, arguments)
+        """Call a tool on a specific server.
+
+        Args:
+            server: Name of the server to call the tool on.
+            tool_name: Name of the tool to call.
+            arguments: Arguments to pass to the tool.
+            progress_callback: Optional async callback for progress notifications.
+                Signature: async def callback(progress: float, total: float | None, message: str | None) -> None
+
+        Returns:
+            CallToolResult from the MCP server.
+        """
+        return await self.get_connection(server).call_tool(
+            tool_name, arguments, progress_callback=progress_callback
+        )
     
     async def find_tool(self, tool_name: str) -> tuple[str, Tool] | None:
         """Find which server has a given tool."""
@@ -172,13 +209,26 @@ class MCPClientManager:
         self,
         tool_name: str,
         arguments: dict[str, Any] = None,
+        progress_callback: ProgressCallback = None,
     ) -> CallToolResult:
-        """Call a tool, automatically finding which server has it."""
+        """Call a tool, automatically finding which server has it.
+
+        Args:
+            tool_name: Name of the tool to call.
+            arguments: Arguments to pass to the tool.
+            progress_callback: Optional async callback for progress notifications.
+                Signature: async def callback(progress: float, total: float | None, message: str | None) -> None
+
+        Returns:
+            CallToolResult from the MCP server.
+        """
         result = await self.find_tool(tool_name)
         if not result:
             raise ValueError(f"Tool '{tool_name}' not found on any server")
         server_name, _ = result
-        return await self.call_tool(server_name, tool_name, arguments)
+        return await self.call_tool(
+            server_name, tool_name, arguments, progress_callback=progress_callback
+        )
     
     def all_tools(self) -> dict[str, list[Tool]]:
         """Get all tools from all servers."""
