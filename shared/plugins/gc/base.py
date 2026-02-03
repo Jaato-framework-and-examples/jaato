@@ -4,12 +4,17 @@ This module defines the interface that all GC strategy plugins must implement,
 along with supporting types for configuration, results, and trigger reasons.
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from ..model_provider.types import Message
+
+if TYPE_CHECKING:
+    from shared.instruction_budget import InstructionBudget, InstructionSource
 
 
 class GCTriggerReason(Enum):
@@ -19,6 +24,27 @@ class GCTriggerReason(Enum):
     MANUAL = "manual"            # Explicitly requested by caller
     TURN_LIMIT = "turn_limit"    # Maximum turn count exceeded
     PRE_MESSAGE = "pre_message"  # Triggered before sending a message
+
+
+@dataclass
+class GCRemovalItem:
+    """Describes a single item to be removed from the instruction budget.
+
+    Used by GC plugins to report what was removed, so the session can
+    synchronize the budget with the actual history changes.
+
+    Attributes:
+        source: The instruction source type (CONVERSATION, ENRICHMENT, etc.).
+        child_key: Specific child key to remove (None = remove entire source).
+        tokens_freed: Estimated tokens freed by removing this item.
+        reason: Description of why this item was removed.
+        message_ids: Message IDs that were removed (for history sync).
+    """
+    source: "InstructionSource"
+    child_key: Optional[str] = None
+    tokens_freed: int = 0
+    reason: str = ""
+    message_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -55,10 +81,23 @@ class GCResult:
     error: Optional[str] = None
     """Error message if the operation failed."""
 
+    removal_list: List[GCRemovalItem] = field(default_factory=list)
+    """Structured list of items removed for budget synchronization.
+
+    Each item describes what was removed from the budget, allowing the
+    session to sync the InstructionBudget with the actual history changes.
+    """
+
     @property
     def tokens_freed(self) -> int:
         """Calculate tokens freed by this GC operation."""
         return max(0, self.tokens_before - self.tokens_after)
+
+
+def _get_pressure_percent() -> Optional[float]:
+    """Get pressure_percent from environment, returning None if 0."""
+    value = float(os.getenv('JAATO_GC_PRESSURE', '90.0'))
+    return value if value > 0 else None
 
 
 @dataclass
@@ -66,6 +105,11 @@ class GCConfig:
     """Configuration for context garbage collection.
 
     Controls when GC triggers and what content to preserve.
+
+    Supports two operating modes:
+    - Threshold Mode (default): GC triggers when usage >= threshold_percent
+    - Continuous Mode: GC runs after every turn if usage > target_percent
+      (enabled by setting pressure_percent to 0 or None)
     """
 
     # Trigger settings
@@ -75,6 +119,26 @@ class GCConfig:
     """Trigger GC when context usage exceeds this percentage.
 
     Can be overridden via JAATO_GC_THRESHOLD environment variable.
+    Ignored in continuous mode (when pressure_percent is 0 or None).
+    """
+
+    target_percent: float = field(
+        default_factory=lambda: float(os.getenv('JAATO_GC_TARGET', '60.0'))
+    )
+    """Target context usage after GC. GC will try to reach this level.
+
+    Can be overridden via JAATO_GC_TARGET environment variable.
+    """
+
+    pressure_percent: Optional[float] = field(default_factory=_get_pressure_percent)
+    """When usage exceeds this, PRESERVABLE content may be collected.
+
+    Can be overridden via JAATO_GC_PRESSURE environment variable.
+
+    When 0 or None: enables continuous GC mode - GC runs after every turn
+    if usage exceeds target_percent (threshold_percent is ignored).
+    Same priority order (EPHEMERAL → PARTIAL → PRESERVABLE) still applies,
+    but PRESERVABLE content is never touched in continuous mode.
     """
 
     max_turns: Optional[int] = None
@@ -96,6 +160,17 @@ class GCConfig:
     # Plugin-specific configuration
     plugin_config: Dict[str, Any] = field(default_factory=dict)
     """Additional configuration passed to the GC plugin."""
+
+    @property
+    def continuous_mode(self) -> bool:
+        """True if continuous GC is enabled (pressure_percent is 0 or None).
+
+        In continuous mode:
+        - GC runs after every turn if usage > target_percent
+        - threshold_percent is ignored
+        - PRESERVABLE content is never touched
+        """
+        return not self.pressure_percent
 
 
 @runtime_checkable
@@ -170,7 +245,8 @@ class GCPlugin(Protocol):
         history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
-        reason: GCTriggerReason
+        reason: GCTriggerReason,
+        budget: Optional["InstructionBudget"] = None,
     ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection on the conversation history.
 
@@ -179,9 +255,14 @@ class GCPlugin(Protocol):
             context_usage: Current context window usage statistics.
             config: GC configuration with thresholds and preservation settings.
             reason: The reason this collection was triggered.
+            budget: Optional InstructionBudget for policy-aware GC decisions.
+                If provided, plugins can use GC policies (LOCKED, PRESERVABLE,
+                EPHEMERAL) to make smarter removal decisions.
 
         Returns:
             Tuple of (new_history: List[Message], result: GCResult).
             The new_history should be a modified copy, not the original.
+            The result.removal_list should contain GCRemovalItem entries
+            describing what was removed, so the session can sync the budget.
         """
         ...

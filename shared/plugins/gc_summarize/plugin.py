@@ -18,6 +18,7 @@ from ..model_provider.types import Message
 from ..gc import (
     GCConfig,
     GCPlugin,
+    GCRemovalItem,
     GCResult,
     GCTriggerReason,
     Turn,
@@ -28,6 +29,13 @@ from ..gc import (
     get_preserved_indices,
     split_into_turns,
 )
+
+# Import for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from shared.instruction_budget import InstructionBudget
+
+from ...instruction_budget import InstructionSource
 
 
 # Default summarization prompt template
@@ -173,7 +181,8 @@ class SummarizeGCPlugin:
         history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
-        reason: GCTriggerReason
+        reason: GCTriggerReason,
+        budget: Optional["InstructionBudget"] = None,
     ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection by summarizing oldest turns.
 
@@ -182,9 +191,10 @@ class SummarizeGCPlugin:
             context_usage: Current context window usage stats.
             config: GC configuration.
             reason: Why this collection was triggered.
+            budget: Optional instruction budget for policy-aware decisions.
 
         Returns:
-            Tuple of (new_history, result).
+            Tuple of (new_history, result) with removal_list for budget sync.
         """
         self._trace(f"collect: reason={reason.value}, history_len={len(history)}")
         tokens_before = estimate_history_tokens(history)
@@ -264,12 +274,22 @@ class SummarizeGCPlugin:
         # Separate turns into to-summarize and to-preserve
         turns_to_summarize: List[Turn] = []
         turns_to_preserve: List[Turn] = []
+        removal_list: List[GCRemovalItem] = []
 
         for turn in turns:
             if turn.index in preserved_indices:
                 turns_to_preserve.append(turn)
             else:
                 turns_to_summarize.append(turn)
+                # Collect message IDs from the turn to be summarized
+                message_ids = [msg.message_id for msg in turn.contents]
+                removal_list.append(GCRemovalItem(
+                    source=InstructionSource.CONVERSATION,
+                    child_key=f"turn_{turn.index}",
+                    tokens_freed=turn.estimated_tokens,
+                    reason="summarized",
+                    message_ids=message_ids,
+                ))
 
         # Generate summary of old turns
         conversation_text = self._format_turns_for_summary(turns_to_summarize)
@@ -296,6 +316,7 @@ class SummarizeGCPlugin:
         tokens_after = estimate_history_tokens(new_history)
 
         # Build result
+        summary_tokens = estimate_history_tokens([summary_content])
         result = GCResult(
             success=True,
             items_collected=len(turns_to_summarize),
@@ -303,12 +324,14 @@ class SummarizeGCPlugin:
             tokens_after=tokens_after,
             plugin_name=self.name,
             trigger_reason=reason,
+            removal_list=removal_list,
             details={
                 "turns_before": total_turns,
                 "turns_after": len(turns_to_preserve) + 1,  # +1 for summary
                 "turns_summarized": len(turns_to_summarize),
                 "preserve_count": preserve_count,
                 "summary_length": len(summary_text),
+                "summary_tokens": summary_tokens,  # For budget sync
             }
         )
         self._trace(f"collect: summarized={len(turns_to_summarize)} turns, tokens {tokens_before}->{tokens_after}")

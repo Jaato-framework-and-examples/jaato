@@ -24,7 +24,7 @@ from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
-from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
+from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
 from .instruction_budget import (
     InstructionBudget,
@@ -1970,7 +1970,8 @@ NOTES
 
         # Use THRESHOLD as the reason since it was triggered by threshold crossing
         new_history, result = self._gc_plugin.collect(
-            history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD
+            history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD,
+            budget=self._instruction_budget,
         )
 
         if result.success:
@@ -1989,7 +1990,59 @@ NOTES
             self.reset_session(new_history)
             self._gc_history.append(result)
 
+            # Sync budget with GC changes
+            self._apply_gc_removal_list(result)
+            self._emit_instruction_budget_update()
+
         return result
+
+    def _apply_gc_removal_list(self, result: GCResult) -> None:
+        """Apply GC removal list to instruction budget.
+
+        This synchronizes the budget with the actual history changes made by GC.
+        Must be called after a successful GC operation.
+
+        Args:
+            result: The GCResult containing the removal_list.
+        """
+        if not self._instruction_budget or not result.removal_list:
+            return
+
+        for item in result.removal_list:
+            if item.child_key:
+                # Remove specific child entry
+                self._instruction_budget.remove_child(item.source, item.child_key)
+            else:
+                # Bulk clear entire source (e.g., ENRICHMENT)
+                entry = self._instruction_budget.get_entry(item.source)
+                if entry:
+                    entry.tokens = 0
+                    entry.children.clear()
+
+        # If summary was created (summarize/hybrid plugins), add summary entry
+        summary_tokens = result.details.get("summary_tokens")
+        if summary_tokens and summary_tokens > 0:
+            # Find or create a unique summary key
+            conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
+            if conv_entry:
+                # Count existing summaries to generate unique key
+                summary_count = sum(
+                    1 for key in conv_entry.children.keys()
+                    if key.startswith("gc_summary_")
+                )
+                summary_key = f"gc_summary_{summary_count + 1}"
+                self._instruction_budget.add_child(
+                    source=InstructionSource.CONVERSATION,
+                    child_key=summary_key,
+                    tokens=summary_tokens,
+                    gc_policy=GCPolicy.PRESERVABLE,
+                    label=f"Context Summary #{summary_count + 1}",
+                    metadata={"created_by": result.plugin_name},
+                )
+
+        self._trace(
+            f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
+        )
 
     def _enrich_and_clean_prompt(self, prompt: str) -> str:
         """Run prompt through enrichment pipeline and strip @references."""
@@ -4225,7 +4278,8 @@ NOTES
         )
 
         new_history, result = self._gc_plugin.collect(
-            history, context_usage, self._gc_config, GCTriggerReason.MANUAL
+            history, context_usage, self._gc_config, GCTriggerReason.MANUAL,
+            budget=self._instruction_budget,
         )
 
         if result.success:
@@ -4242,6 +4296,10 @@ NOTES
                 )
             self.reset_session(new_history)
             self._gc_history.append(result)
+
+            # Sync budget with GC changes
+            self._apply_gc_removal_list(result)
+            self._emit_instruction_budget_update()
 
         return result
 
@@ -4264,7 +4322,8 @@ NOTES
             )
             history = self.get_history()
             new_history, result = self._gc_plugin.collect(
-                history, context_usage, self._gc_config, reason
+                history, context_usage, self._gc_config, reason,
+                budget=self._instruction_budget,
             )
 
             if result.success:
@@ -4282,6 +4341,10 @@ NOTES
                     )
                 self.reset_session(new_history)
                 self._gc_history.append(result)
+
+                # Sync budget with GC changes
+                self._apply_gc_removal_list(result)
+                self._emit_instruction_budget_update()
 
             return result
 

@@ -33,6 +33,7 @@ from typing import Callable, Dict, Optional
 from .base import (
     GCConfig,
     GCPlugin,
+    GCRemovalItem,
     GCResult,
     GCTriggerReason,
 )
@@ -201,6 +202,7 @@ __all__ = [
     # Core types
     "GCPlugin",
     "GCConfig",
+    "GCRemovalItem",
     "GCResult",
     "GCTriggerReason",
     # Discovery

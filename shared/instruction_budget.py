@@ -7,6 +7,7 @@ allocation and enable intelligent garbage collection based on source importance.
 See docs/design-instruction-source-tracking.md for the full design.
 """
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Optional, List, Any
@@ -95,14 +96,27 @@ DEFAULT_TOOL_POLICIES: Dict[PluginToolType, GCPolicy] = {
 
 @dataclass
 class SourceEntry:
-    """A single instruction source with its token count and GC policy."""
+    """A single instruction source with its token count and GC policy.
+
+    Attributes:
+        source: The instruction source type.
+        tokens: Token count for this entry (excluding children).
+        gc_policy: Garbage collection policy for this entry.
+        label: Display label (e.g., tool name, turn description).
+        children: Child entries (e.g., per-tool for PLUGIN, per-turn for CONVERSATION).
+        metadata: Optional metadata for richer context.
+        created_at: Unix timestamp when this entry was created (for GC recency tracking).
+        message_ids: List of message IDs associated with this entry (for GC history sync).
+    """
     source: InstructionSource
     tokens: int
     gc_policy: GCPolicy
-    label: Optional[str] = None  # Display label (e.g., tool name, turn description)
+    label: Optional[str] = None
     children: Dict[str, "SourceEntry"] = field(default_factory=dict)
-    # Optional metadata for richer context
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # GC integration fields
+    created_at: Optional[float] = field(default_factory=time.time)
+    message_ids: List[str] = field(default_factory=list)
 
     def total_tokens(self) -> int:
         """Total tokens including children."""
@@ -181,6 +195,10 @@ class SourceEntry:
             result["label"] = self.label
         if self.metadata:
             result["metadata"] = self.metadata
+        if self.created_at is not None:
+            result["created_at"] = self.created_at
+        if self.message_ids:
+            result["message_ids"] = self.message_ids
         if self.children:
             result["children"] = {
                 key: child.to_dict() for key, child in self.children.items()
@@ -282,8 +300,21 @@ class InstructionBudget:
         gc_policy: GCPolicy,
         label: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        created_at: Optional[float] = None,
+        message_ids: Optional[List[str]] = None,
     ) -> Optional[SourceEntry]:
-        """Add a child entry to a source (e.g., tool to PLUGIN, turn to CONVERSATION)."""
+        """Add a child entry to a source (e.g., tool to PLUGIN, turn to CONVERSATION).
+
+        Args:
+            source: The parent source type.
+            child_key: Unique key for this child within the parent.
+            tokens: Token count for this child entry.
+            gc_policy: Garbage collection policy.
+            label: Display label (defaults to child_key).
+            metadata: Optional metadata dict.
+            created_at: Creation timestamp (defaults to current time).
+            message_ids: List of message IDs associated with this entry.
+        """
         parent = self.entries.get(source)
         if not parent:
             return None
@@ -293,6 +324,8 @@ class InstructionBudget:
             gc_policy=gc_policy,
             label=label or child_key,
             metadata=metadata or {},
+            created_at=created_at if created_at is not None else time.time(),
+            message_ids=message_ids or [],
         )
         parent.children[child_key] = child
         return child
@@ -361,6 +394,8 @@ class InstructionBudget:
                 label=data.get("label"),
                 children=children,
                 metadata=data.get("metadata", {}),
+                created_at=data.get("created_at"),
+                message_ids=data.get("message_ids", []),
             )
 
         # Parse and restore the conversation entry

@@ -86,6 +86,7 @@ ast_search = "shared.plugins.ast_search:create_plugin"
 gc_truncate = "shared.plugins.gc_truncate:create_plugin"
 gc_summarize = "shared.plugins.gc_summarize:create_plugin"
 gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
+gc_budget = "shared.plugins.gc_budget:create_plugin"
 
 [tool.setuptools.packages.find]
 where = ["."]
