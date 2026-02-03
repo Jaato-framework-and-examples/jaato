@@ -625,6 +625,8 @@ class PTDisplay:
         """Called when input buffer text changes - invalidates layout for resize.
 
         In permission mode, this also validates input and reverts invalid characters.
+        Also triggers completion for @file and %prompt references on deletion,
+        since prompt_toolkit's complete_while_typing only triggers on insertion.
         """
         # In permission mode, validate input and revert if invalid
         if self._waiting_for_channel_input and self._valid_input_prefixes:
@@ -636,9 +638,54 @@ class PTDisplay:
             else:
                 # Update last valid input
                 self._last_valid_permission_input = current_text
+        else:
+            # Normal mode: retrigger completion for @file and %prompt on deletion
+            # prompt_toolkit's complete_while_typing only triggers on insertion,
+            # so we manually trigger when user is in a completion context
+            self._maybe_retrigger_completion()
 
         if self._app and self._app.is_running:
             self._app.invalidate()
+
+    def _maybe_retrigger_completion(self) -> None:
+        """Retrigger completion if user is in an @file or %prompt context.
+
+        This handles the case where user deletes characters - completion should
+        update to show matches for the shorter pattern.
+        """
+        if not self._input_buffer or not self._app:
+            return
+
+        text = self._input_buffer.document.text_before_cursor
+        if not text:
+            return
+
+        # Check if we're in a completion context (after @ or %)
+        # Find the last @ or % that looks like a reference start
+        in_completion_context = False
+
+        # Check for @file context
+        at_pos = text.rfind('@')
+        if at_pos != -1:
+            # Valid if @ is at start or preceded by whitespace/punctuation
+            if at_pos == 0 or not (text[at_pos - 1].isalnum() or text[at_pos - 1] in '._-'):
+                # Check no space immediately after @
+                if at_pos == len(text) - 1 or text[at_pos + 1] != ' ':
+                    in_completion_context = True
+
+        # Check for %prompt context
+        if not in_completion_context:
+            pct_pos = text.rfind('%')
+            if pct_pos != -1:
+                # Valid if % is at start or not preceded by alphanumeric
+                if pct_pos == 0 or not text[pct_pos - 1].isalnum():
+                    # Check no space immediately after %
+                    if pct_pos == len(text) - 1 or text[pct_pos + 1] != ' ':
+                        in_completion_context = True
+
+        # Trigger completion if in context and completion not already active
+        if in_completion_context and not self._input_buffer.complete_state:
+            self._input_buffer.start_completion()
 
     def _get_input_height(self) -> int:
         """Calculate dynamic height for input area based on content.
