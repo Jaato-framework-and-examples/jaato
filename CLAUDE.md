@@ -407,7 +407,7 @@ Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p
 
 The `open_editor` keybinding (Ctrl+G) opens the current input in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). Useful for composing complex multi-line prompts.
 
-The `search` keybinding (Ctrl+F) opens search mode to find text in session output. When in search mode: Enter=next match, Shift+Enter=previous match, Escape=close search.
+The `search` keybinding (Ctrl+F) opens search mode to find text in session output. When in search mode: Enter=next match, Ctrl+P=previous match, Escape=close search.
 
 ## Rich Client Theming
 

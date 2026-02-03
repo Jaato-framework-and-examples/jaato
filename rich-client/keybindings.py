@@ -169,7 +169,7 @@ DEFAULT_KEYBINDINGS = {
     # Search
     "search": "c-f",          # Open search mode
     "search_next": "enter",   # Next search match (when in search mode)
-    "search_prev": "s-enter", # Previous search match (when in search mode)
+    "search_prev": "c-p",     # Previous search match (when in search mode)
     "search_close": "escape", # Close search mode
 }
 

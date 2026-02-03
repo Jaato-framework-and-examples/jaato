@@ -173,12 +173,12 @@ As a user with a long session, I want to search for "authentication" to find whe
    - Added helper: `_scroll_to_match()` to center current match in viewport
 
 2. **File**: `rich-client/keybindings.py`
-   - Added keybindings: `search`=c-f, `search_next`=enter, `search_prev`=s-enter, `search_close`=escape
+   - Added keybindings: `search`=c-f, `search_next`=enter, `search_prev`=c-p, `search_close`=escape
 
 3. **File**: `rich-client/pt_display.py`
    - Added search mode state and UI
    - Added keybinding handlers for search mode
-   - Search prompt shows status: `Search (1/5) [Enter: next, S-Enter: prev, Esc: close]>`
+   - Search prompt shows status: `Search (1/5) [Enter: next, Ctrl+P: prev, Esc: close]>`
 
 4. **File**: `rich-client/theme.py` and theme JSON files
    - Added styles: `search_prompt`, `search_match`, `search_match_current`
@@ -188,9 +188,9 @@ As a user with a long session, I want to search for "authentication" to find whe
 - [x] Ctrl+F opens search bar
 - [x] Incremental search as user types
 - [x] Match count displayed
-- [x] Enter/Shift+Enter navigate between matches
+- [x] Enter/Ctrl+P navigate between matches
 - [x] Output scrolls to show current match
-- [ ] Matches highlighted in output (styles defined but not yet applied during render)
+- [x] Matches highlighted in output
 - [x] Escape closes search
 - [x] Search is case-insensitive
 
