@@ -1,0 +1,69 @@
+"""Environment variable resolution for Zhipu AI provider.
+
+Zhipu AI (Z.AI) is a Chinese AI company offering the GLM family of models.
+This provider uses the Anthropic-compatible API for GLM Coding Plan users.
+"""
+
+import os
+from typing import Optional
+
+
+# Default Z.AI Anthropic-compatible API endpoint
+DEFAULT_ZHIPUAI_BASE_URL = "https://api.z.ai/api/anthropic/v1"
+
+# Default model for Zhipu AI
+DEFAULT_ZHIPUAI_MODEL = "glm-4.7"
+
+
+def resolve_api_key() -> Optional[str]:
+    """Resolve Zhipu AI API key from environment.
+
+    Checks:
+    1. ZHIPUAI_API_KEY environment variable
+
+    Returns:
+        API key if set, None otherwise.
+    """
+    return os.environ.get("ZHIPUAI_API_KEY")
+
+
+def resolve_base_url() -> str:
+    """Resolve Zhipu AI API base URL.
+
+    Checks:
+    1. ZHIPUAI_BASE_URL environment variable
+
+    Returns:
+        Base URL (default: https://api.z.ai/api/anthropic/v1).
+    """
+    return os.environ.get("ZHIPUAI_BASE_URL", DEFAULT_ZHIPUAI_BASE_URL)
+
+
+def resolve_model() -> Optional[str]:
+    """Resolve default model name from environment.
+
+    Checks:
+    1. ZHIPUAI_MODEL environment variable
+
+    Returns:
+        Model name if set, None otherwise.
+    """
+    return os.environ.get("ZHIPUAI_MODEL")
+
+
+def resolve_context_length() -> Optional[int]:
+    """Resolve custom context length override.
+
+    Checks:
+    1. ZHIPUAI_CONTEXT_LENGTH environment variable
+
+    Returns:
+        Context length in tokens if set, None otherwise.
+    """
+    val = os.environ.get("ZHIPUAI_CONTEXT_LENGTH")
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return None
