@@ -42,8 +42,6 @@ async def run_command_mode(
         ToolStatusEvent,
         HelpTextEvent,
         SessionListEvent,
-        TurnCompletedEvent,
-        AgentOutputEvent,
     )
     from shared.client_commands import parse_user_input, CommandAction
 
@@ -70,9 +68,8 @@ async def run_command_mode(
         # Parse using shared logic
         parsed = parse_user_input(command)
 
-        # Track if we need to wait for response
+        # Track if we need to wait for response (commands that return data)
         wait_for_response = False
-        wait_for_turn = False
 
         # Execute based on action type
         if parsed.action == CommandAction.EXIT:
@@ -103,28 +100,26 @@ async def run_command_mode(
 
         elif parsed.action == CommandAction.SEND_MESSAGE:
             if parsed.text:
-                print(f"Sending message to model in session '{session_id}'...")
+                print(f"Sent message to session '{session_id}'")
                 await client.send_message(parsed.text)
-                wait_for_turn = True
+                # Fire and forget - the session handles the response
+                # Don't wait for turn completion as this would hijack the session
             else:
                 print("Empty message, nothing to send")
 
-        # Wait for response events if needed
-        if wait_for_response or wait_for_turn:
-            timeout = 30.0 if wait_for_turn else 5.0
+        # Wait for response events if needed (only for commands that return data)
+        if wait_for_response:
+            timeout = 5.0
             start_time = asyncio.get_event_loop().time()
 
             async for event in client.events():
                 elapsed = asyncio.get_event_loop().time() - start_time
                 if elapsed > timeout:
-                    if wait_for_turn:
-                        print("\nTimeout waiting for model response (model may still be processing)")
                     break
 
                 if isinstance(event, SystemMessageEvent):
                     print(event.message)
-                    if not wait_for_turn:
-                        break
+                    break
 
                 elif isinstance(event, ErrorEvent):
                     print(f"Error: {event.error}", file=sys.stderr)
@@ -135,8 +130,7 @@ async def run_command_mode(
                 elif isinstance(event, ToolStatusEvent):
                     if event.message:
                         print(event.message)
-                    if not wait_for_turn:
-                        break
+                    break
 
                 elif isinstance(event, HelpTextEvent):
                     for line, style in event.lines:
@@ -148,14 +142,6 @@ async def run_command_mode(
                     for s in event.sessions:
                         status = "loaded" if s.get("is_loaded") else "saved"
                         print(f"  {s.get('id', '?')} - {s.get('name', '')} [{status}]")
-                    break
-
-                elif isinstance(event, AgentOutputEvent):
-                    if event.source == "model":
-                        print(event.text, end="", flush=True)
-
-                elif isinstance(event, TurnCompletedEvent):
-                    print()  # Newline after model output
                     break
 
     except ConnectionError as e:
