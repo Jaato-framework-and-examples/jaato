@@ -23,7 +23,7 @@ Environment variables:
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..anthropic.provider import AnthropicProvider
 from ..base import ProviderConfig
@@ -34,6 +34,13 @@ from .env import (
     resolve_base_url,
     resolve_context_length,
     resolve_model,
+)
+from .auth import (
+    get_stored_api_key,
+    get_stored_base_url,
+    login_interactive,
+    logout,
+    status as auth_status,
 )
 
 
@@ -129,13 +136,25 @@ class ZhipuAIProvider(AnthropicProvider):
         if config is None:
             config = ProviderConfig()
 
-        # Resolve API key from config or environment
-        self._api_key = config.api_key or resolve_api_key()
+        # Resolve API key from config, environment, or stored credentials
+        self._api_key = (
+            config.api_key
+            or resolve_api_key()
+            or get_stored_api_key()
+        )
         if not self._api_key:
             raise ZhipuAIAPIKeyNotFoundError()
 
-        # Resolve base URL from config or environment
-        self._base_url = config.extra.get("base_url") or resolve_base_url()
+        # Resolve base URL from config, environment, or stored credentials
+        self._base_url = (
+            config.extra.get("base_url")
+            or resolve_base_url()
+        )
+        # Check stored base_url only if using default (not overridden)
+        if self._base_url == DEFAULT_ZHIPUAI_BASE_URL:
+            stored_base_url = get_stored_base_url()
+            if stored_base_url:
+                self._base_url = stored_base_url
 
         # Ensure base URL doesn't have trailing slash
         self._base_url = self._base_url.rstrip("/")
@@ -271,18 +290,44 @@ class ZhipuAIProvider(AnthropicProvider):
         super()._handle_api_error(error)
 
     @staticmethod
-    def login(on_message=None) -> None:
-        """Interactive login not supported for Zhipu AI.
+    def login(
+        on_message: Optional[Callable[[str], None]] = None,
+        on_input: Optional[Callable[[str], str]] = None,
+    ) -> bool:
+        """Interactive login for Zhipu AI.
 
-        Zhipu AI uses API key authentication only.
-        Get your key at: https://open.bigmodel.cn/
+        Prompts user for API key and validates it.
+
+        Args:
+            on_message: Optional callback for status messages.
+            on_input: Optional callback for user input. If None, uses builtin input().
+
+        Returns:
+            True if login successful, False otherwise.
         """
-        if on_message:
-            on_message(
-                "Zhipu AI uses API key authentication.\n"
-                "Set ZHIPUAI_API_KEY environment variable.\n"
-                "Get your key at: https://open.bigmodel.cn/"
-            )
+        result = login_interactive(on_message=on_message, on_input=on_input)
+        return result is not None
+
+    @staticmethod
+    def logout(on_message: Optional[Callable[[str], None]] = None) -> None:
+        """Clear stored credentials.
+
+        Args:
+            on_message: Optional callback for status messages.
+        """
+        logout(on_message=on_message)
+
+    @staticmethod
+    def auth_status(on_message: Optional[Callable[[str], None]] = None) -> bool:
+        """Check authentication status.
+
+        Args:
+            on_message: Optional callback for status messages.
+
+        Returns:
+            True if valid credentials are stored.
+        """
+        return auth_status(on_message=on_message)
 
 
 def create_provider() -> ZhipuAIProvider:

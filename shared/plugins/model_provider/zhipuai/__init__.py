@@ -40,6 +40,19 @@ Example:
     provider.connect('glm-4.7')
 """
 
+from .auth import (
+    ZhipuAICredentials,
+    clear_credentials,
+    get_stored_api_key,
+    get_stored_base_url,
+    load_credentials,
+    login_interactive,
+    login_with_key,
+    logout,
+    save_credentials,
+    status as auth_status,
+    validate_api_key,
+)
 from .env import (
     DEFAULT_ZHIPUAI_BASE_URL,
     DEFAULT_ZHIPUAI_MODEL,
@@ -74,4 +87,16 @@ __all__ = [
     "resolve_context_length",
     "DEFAULT_ZHIPUAI_BASE_URL",
     "DEFAULT_ZHIPUAI_MODEL",
+    # Authentication
+    "ZhipuAICredentials",
+    "login_interactive",
+    "login_with_key",
+    "logout",
+    "auth_status",
+    "validate_api_key",
+    "save_credentials",
+    "load_credentials",
+    "clear_credentials",
+    "get_stored_api_key",
+    "get_stored_base_url",
 ]
