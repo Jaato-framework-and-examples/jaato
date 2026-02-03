@@ -353,7 +353,7 @@ class SessionManager:
             The session ID (empty string on failure).
         """
         # Generate session ID (matches Session Plugin format)
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now()
         session_id = timestamp.strftime("%Y%m%d_%H%M%S")
         name = session_name or f"Session {timestamp.strftime('%Y-%m-%d %H:%M')}"
 

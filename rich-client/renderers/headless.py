@@ -207,10 +207,17 @@ class HeadlessFileRenderer(Renderer):
 
         self._flush(agent_id)
 
-    def on_system_message(self, message: str, style: str = "system_info") -> None:
-        """Handle system messages."""
-        # Route to main agent's console
-        console = self._get_console("main")
+    def on_system_message(
+        self, message: str, style: str = "system_info", agent_id: str = "main"
+    ) -> None:
+        """Handle system messages.
+
+        Args:
+            message: The message to display.
+            style: Style name for formatting.
+            agent_id: Target agent's log (default: main).
+        """
+        console = self._get_console(agent_id)
 
         style_map = {
             "system_info": "cyan",
@@ -223,7 +230,7 @@ class HeadlessFileRenderer(Renderer):
         rich_style = style_map.get(style, "dim")
 
         console.print(f"[{rich_style}]{message}[/{rich_style}]")
-        self._flush("main")
+        self._flush(agent_id)
 
     # ==================== Tool Execution ====================
 

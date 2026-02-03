@@ -7,6 +7,7 @@ Output goes to per-agent files in {workspace}/jaato-headless-client-agents/
 """
 
 import asyncio
+import logging
 import os
 import pathlib
 import sys
@@ -15,6 +16,8 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from renderers.headless import HeadlessFileRenderer
+
+logger = logging.getLogger(__name__)
 
 
 async def run_headless_mode(
@@ -54,6 +57,17 @@ async def run_headless_mode(
     # Load env vars
     load_dotenv(env_file)
 
+    # Configure logging - redirect to JAATO_TRACE_LOG if set
+    trace_log_path = os.environ.get("JAATO_TRACE_LOG")
+    if trace_log_path:
+        file_handler = logging.FileHandler(trace_log_path)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        root_logger = logging.getLogger()
+        root_logger.handlers = [file_handler]
+        root_logger.setLevel(logging.DEBUG)
+
     from ipc_recovery import IPCRecoveryClient
     from server.events import (
         AgentOutputEvent,
@@ -76,6 +90,7 @@ async def run_headless_mode(
         InitProgressEvent,
         ErrorEvent,
         RetryEvent,
+        SessionInfoEvent,
     )
 
     # Determine workspace
@@ -100,8 +115,8 @@ async def run_headless_mode(
     turn_completed = False
     turn_count = 0
 
-    # Budget tracking for turn summaries
-    budget_snapshot = {}
+    # Budget tracking per agent (agent_id -> snapshot)
+    budget_snapshots: dict = {}
 
     # Connect to server
     print(f"[headless] Connecting to server at {socket_path}...", file=sys.stderr)
@@ -133,16 +148,31 @@ async def run_headless_mode(
     print("[headless] Disabling clarification tool...", file=sys.stderr)
     await client.disable_tool("clarification")
 
+    # Track if session_id has been printed (print once when SessionInfoEvent arrives)
+    session_id_printed = False
+    # Track if main agent has been activated (for initial "working on prompt" message)
+    main_agent_activated = False
+    print("[headless] Waiting for session acquisition...", file=sys.stderr)
+
     async def handle_events():
         """Handle events from the server."""
-        nonlocal model_running, should_exit, turn_completed
+        nonlocal model_running, should_exit, turn_completed, session_id_printed, main_agent_activated
 
         async for event in client.events():
             if should_exit:
                 break
 
+            # ==================== Session Info ====================
+            # Print session_id once when acquired, then "Sending prompt..."
+            if isinstance(event, SessionInfoEvent):
+                if not session_id_printed and event.session_id:
+                    print(f"[headless] Session ID: {event.session_id}", file=sys.stderr)
+                    print("[headless] Sending prompt...", file=sys.stderr)
+                    session_id_printed = True
+                continue
+
             # ==================== Init Progress ====================
-            if isinstance(event, InitProgressEvent):
+            elif isinstance(event, InitProgressEvent):
                 status_map = {"running": "...", "done": "OK", "error": "ERROR", "pending": "PENDING"}
                 status_text = status_map.get(event.status, event.status)
                 renderer.on_system_message(
@@ -163,6 +193,30 @@ async def run_headless_mode(
             elif isinstance(event, AgentStatusChangedEvent):
                 model_running = event.status == "active"
                 renderer.on_agent_status_changed(event.agent_id, event.status)
+                # Print initial activation message for main agent
+                if event.agent_id == "main" and event.status == "active" and not main_agent_activated:
+                    print("[headless] Main agent working on input prompt...", file=sys.stderr)
+                    main_agent_activated = True
+                # Print budget when agent becomes idle or done
+                if event.status in ("idle", "done"):
+                    agent_id = event.agent_id or "main"
+                    snapshot = budget_snapshots.get(agent_id)
+                    if snapshot:
+                        total = snapshot.get("total_tokens", 0)
+                        limit = snapshot.get("context_limit", 0)
+                        pct = snapshot.get("utilization_percent", 0)
+                        entries = snapshot.get("entries", {})
+                        categories = []
+                        for source_name, entry in entries.items():
+                            tokens = entry.get("tokens", 0)
+                            if tokens > 0:
+                                categories.append(f"{source_name}:{tokens:,}")
+                        category_str = " | ".join(categories) if categories else "no data"
+                        renderer.on_system_message(
+                            f"Budget: {total:,}/{limit:,} tokens ({pct:.1f}%) | {category_str}",
+                            style="system_info",
+                            agent_id=agent_id,
+                        )
                 # Don't exit on status changes - wait for AgentCompletedEvent
 
             elif isinstance(event, AgentCompletedEvent):
@@ -288,9 +342,12 @@ async def run_headless_mode(
                 )
 
             elif isinstance(event, InstructionBudgetEvent):
-                # Track budget for turn summaries (main agent only)
-                if event.agent_id == "main" or not event.agent_id:
-                    budget_snapshot.update(event.budget_snapshot)
+                # Track budget per agent
+                agent_id = event.agent_id or "main"
+                logger.debug(f"InstructionBudgetEvent: agent_id={agent_id}, snapshot keys={list(event.budget_snapshot.keys()) if event.budget_snapshot else 'None'}")
+                if event.budget_snapshot:
+                    budget_snapshots[agent_id] = event.budget_snapshot
+                    logger.debug(f"budget_snapshots[{agent_id}] updated: {event.budget_snapshot.get('total_tokens', 'N/A')} tokens")
 
             # ==================== Error/Retry Events ====================
             elif isinstance(event, ErrorEvent):
@@ -317,33 +374,12 @@ async def run_headless_mode(
             elif isinstance(event, TurnCompletedEvent):
                 turn_count += 1
                 turn_completed = True
-                # Print budget summary by category at turn boundary
-                if budget_snapshot:
-                    total = budget_snapshot.get("total_tokens", 0)
-                    limit = budget_snapshot.get("context_limit", 0)
-                    pct = budget_snapshot.get("utilization_percent", 0)
-                    entries = budget_snapshot.get("entries", [])
-
-                    # Build category breakdown
-                    categories = []
-                    for entry in entries:
-                        source = entry.get("source_type", "unknown")
-                        tokens = entry.get("tokens", 0)
-                        if tokens > 0:
-                            categories.append(f"{source}:{tokens:,}")
-
-                    category_str = " | ".join(categories) if categories else "no data"
-                    print(
-                        f"[headless] Turn {turn_count} | {total:,}/{limit:,} tokens ({pct:.1f}%) | {category_str}",
-                        file=sys.stderr
-                    )
-                else:
-                    print(f"[headless] Turn {turn_count} completed", file=sys.stderr)
-                # Don't exit on turn completion alone - wait for agent to complete
+                logger.debug(f"TurnCompletedEvent received: turn={turn_count}")
+                # Budget is printed on status change (idle/done), not here
+                # TurnCompletedEvent depends on model token reporting which isn't reliable
                 # Turn completion just means one request-response cycle finished
 
-    # Send the prompt
-    print(f"[headless] Sending prompt...", file=sys.stderr)
+    # Send the prompt (message printed in event handler after session_id)
     await client.send_message(prompt)
 
     # Wait for events until turn completes

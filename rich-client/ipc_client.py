@@ -58,6 +58,7 @@ from server.events import (
     HistoryRequest,
     HistoryEvent,
     ClientConfigRequest,
+    SessionInfoEvent,
 )
 
 
@@ -774,6 +775,11 @@ class IPCClient:
 
                 event = deserialize_event(message)
                 logger.debug(f"events(): received {type(event).__name__}")
+
+                # Auto-update session_id when receiving SessionInfoEvent
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+                    logger.debug(f"events(): session_id updated to {event.session_id}")
 
                 # Call callback if set
                 if self._on_event:
