@@ -1,0 +1,194 @@
+{
+  "guide_info": {
+    "title": "Jaato Rich Client User Guide",
+    "version": "1.0",
+    "authors": ["Jaato Development Team"],
+    "description": "Comprehensive user guide for the Jaato rich client TUI"
+  },
+  "chapters": [
+    {
+      "number": "01",
+      "filename": "01-introduction.md",
+      "title": "Introduction",
+      "description": "Overview of Jaato and the rich client, architecture, key features",
+      "depends_on": ["README.md", "CLAUDE.md"]
+    },
+    {
+      "number": "02",
+      "filename": "02-installation.md",
+      "title": "Installation",
+      "description": "System requirements, virtual environment setup, installing dependencies, verification",
+      "depends_on": ["requirements.txt", "CLAUDE.md", "README.md"]
+    },
+    {
+      "number": "03",
+      "filename": "03-quickstart.md",
+      "title": "Quick Start",
+      "description": "Starting server, launching client, first conversation, basic commands, exiting",
+      "depends_on": ["rich-client/rich_client.py", "server/__main__.py"]
+    },
+    {
+      "number": "04",
+      "filename": "04-authentication.md",
+      "title": "Authentication & Providers",
+      "description": "Provider overview, authentication methods, provider-specific setup for all supported providers",
+      "depends_on": [
+        "shared/plugins/model_provider/",
+        "rich-client/commands/auth_commands.py"
+      ]
+    },
+    {
+      "number": "05",
+      "filename": "05-user-interface.md",
+      "title": "User Interface",
+      "description": "TUI layout, input area, output buffer, status bar, panels, navigation",
+      "depends_on": [
+        "rich-client/output_buffer.py",
+        "rich-client/rich_client.py",
+        "rich-client/status_bar.py"
+      ]
+    },
+    {
+      "number": "06",
+      "filename": "06-basic-commands.md",
+      "title": "Basic Commands",
+      "description": "Essential user commands: sending messages, reset, model switching, theme, exit",
+      "depends_on": ["rich-client/commands/", "rich-client/rich_client.py"]
+    },
+    {
+      "number": "07",
+      "filename": "07-session-management.md",
+      "title": "Session Management",
+      "description": "Understanding sessions, multiple sessions, connecting to existing, persistence",
+      "depends_on": ["server/session_manager.py", "shared/jaato_session.py"]
+    },
+    {
+      "number": "08",
+      "filename": "08-permission-system.md",
+      "title": "Permission System",
+      "description": "Permission model, scopes (turn/idle/always/never), permission commands, security best practices",
+      "depends_on": ["shared/plugins/permission/", "rich-client/commands/permission_commands.py"]
+    },
+    {
+      "number": "09",
+      "filename": "09-vision-capture.md",
+      "title": "Vision Capture",
+      "description": "Screenshot command reference, formats (SVG/PNG), auto-capture, interval capture, use cases",
+      "depends_on": ["rich-client/commands/screenshot.py"]
+    },
+    {
+      "number": "10",
+      "filename": "10-keybindings.md",
+      "title": "Keybindings",
+      "description": "Default keybindings, keybinding reload command, external editor integration, search",
+      "depends_on": ["rich-client/keybinding_manager.py", "rich-client/rich_client.py"]
+    },
+    {
+      "number": "11",
+      "filename": "11-configuration.md",
+      "title": "Configuration Files",
+      "description": ".jaato directory structure, keybindings.json, theme.json, .mcp.json, config hierarchy",
+      "depends_on": [".jaato/", "rich-client/config.py", "CLAUDE.md"]
+    },
+    {
+      "number": "12",
+      "filename": "12-environment-variables.md",
+      "title": "Environment Variables",
+      "description": "Complete reference of all environment variables organized by category",
+      "depends_on": ["shared/", "server/", "rich-client/", "CLAUDE.md"]
+    },
+    {
+      "number": "13",
+      "filename": "13-theming.md",
+      "title": "Theming",
+      "description": "Built-in themes, theme switching, custom theme creation, color reference",
+      "depends_on": ["rich-client/theme.py"]
+    },
+    {
+      "number": "14",
+      "filename": "14-server-configuration.md",
+      "title": "Server Configuration",
+      "description": "Server modes (daemon/foreground), IPC socket, WebSocket, multi-client support, management",
+      "depends_on": ["server/__main__.py", "server/core.py", "server/ipc.py", "server/websocket.py"]
+    },
+    {
+      "number": "15",
+      "filename": "15-headless-mode.md",
+      "title": "Headless Mode",
+      "description": "Programmatic usage, API reference, code examples, CI/CD integration",
+      "depends_on": ["shared/jaato_client.py", "examples/"]
+    },
+    {
+      "number": "16",
+      "filename": "16-mcp-integration.md",
+      "title": "MCP Server Integration",
+      "description": "What is MCP, configuring .mcp.json, connecting to servers, available tools, debugging",
+      "depends_on": ["shared/mcp_context_manager.py", "shared/plugins/mcp/", ".mcp.json"]
+    },
+    {
+      "number": "17",
+      "filename": "17-advanced-features.md",
+      "title": "Advanced Features",
+      "description": "Parallel tool execution, deferred tool loading, garbage collection, token accounting",
+      "depends_on": [
+        "shared/ai_tool_runner.py",
+        "shared/token_accounting.py",
+        "shared/plugins/gc/"
+      ]
+    },
+    {
+      "number": "18",
+      "filename": "18-troubleshooting.md",
+      "title": "Troubleshooting",
+      "description": "Common issues, solutions, debugging techniques, log analysis",
+      "depends_on": ["CLAUDE.md"]
+    },
+    {
+      "number": "19",
+      "filename": "19-best-practices.md",
+      "title": "Best Practices",
+      "description": "Security best practices, performance optimization, effective prompting, workflow tips",
+      "depends_on": ["CLAUDE.md"]
+    }
+  ],
+  "appendices": [
+    {
+      "letter": "A",
+      "filename": "appendix-a-command-reference.md",
+      "title": "Command Quick Reference",
+      "description": "Auto-generated complete command reference table",
+      "generated": true,
+      "generator": "generate_docs.py"
+    },
+    {
+      "letter": "B",
+      "filename": "appendix-b-keybinding-reference.md",
+      "title": "Keybinding Quick Reference",
+      "description": "Auto-generated keybinding table",
+      "generated": true,
+      "generator": "generate_docs.py"
+    },
+    {
+      "letter": "C",
+      "filename": "appendix-c-environment-variables.md",
+      "title": "Environment Variables Complete List",
+      "description": "Auto-generated environment variable reference",
+      "generated": true,
+      "generator": "generate_docs.py"
+    },
+    {
+      "letter": "D",
+      "filename": "appendix-d-provider-comparison.md",
+      "title": "Provider Comparison Matrix",
+      "description": "Comparison of features across providers",
+      "depends_on": ["shared/plugins/model_provider/"]
+    },
+    {
+      "letter": "E",
+      "filename": "appendix-e-glossary.md",
+      "title": "Glossary",
+      "description": "Definitions of terms used throughout the guide",
+      "depends_on": []
+    }
+  ]
+}

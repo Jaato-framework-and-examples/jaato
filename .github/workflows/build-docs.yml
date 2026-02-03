@@ -1,0 +1,154 @@
+name: Build User Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'rich-client/**'
+      - 'shared/**'
+      - 'server/**'
+      - 'docs/user-guide/**'
+      - 'CLAUDE.md'
+      - 'requirements.txt'
+  pull_request:
+    paths:
+      - 'rich-client/**'
+      - 'shared/**'
+      - 'server/**'
+      - 'docs/user-guide/**'
+  workflow_dispatch:
+    inputs:
+      force_autodoc:
+        description: 'Force regenerate all chapters'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-pdf:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-fonts-extra \
+            texlive-xetex \
+            pandoc \
+            ghostscript
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Configure AI provider (optional)
+        if: secrets.GOOGLE_APPLICATION_CREDENTIALS != ''
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          LOCATION: ${{ secrets.GCP_LOCATION }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          # Write GCP credentials to file
+          echo "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > /tmp/gcp-credentials.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-credentials.json" >> $GITHUB_ENV
+
+      - name: Build documentation
+        run: |
+          cd docs/user-guide/scripts
+
+          BUILD_ARGS="--skip-screenshots"
+
+          # Add force autodoc flag if set
+          if [ "${{ github.event.inputs.force_autodoc }}" = "true" ]; then
+            BUILD_ARGS="$BUILD_ARGS --force-autodoc"
+          fi
+
+          # If no GCP credentials, skip autodoc
+          if [ -z "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}" ]; then
+            echo "No AI provider configured, skipping auto-documentation"
+            BUILD_ARGS="$BUILD_ARGS --skip-autodoc"
+          fi
+
+          ./build_pdf.sh $BUILD_ARGS --html
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: user-guide-pdf
+          path: docs/user-guide/user-guide.pdf
+          retention-days: 90
+
+      - name: Upload HTML artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: user-guide-html
+          path: docs/user-guide/user-guide.html
+          retention-days: 90
+
+      - name: Check PDF size
+        run: |
+          cd docs/user-guide
+          SIZE=$(du -h user-guide.pdf | cut -f1)
+          PAGES=$(pdfinfo user-guide.pdf 2>/dev/null | grep Pages | awk '{print $2}')
+          echo "📄 PDF: $SIZE, $PAGES pages"
+          echo "pdf_size=$SIZE" >> $GITHUB_OUTPUT
+          echo "pdf_pages=$PAGES" >> $GITHUB_OUTPUT
+
+      - name: Create release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            docs/user-guide/user-guide.pdf
+            docs/user-guide/user-guide.html
+          body: |
+            ## Jaato Rich Client User Guide
+
+            Documentation for version ${{ github.ref_name }}
+
+            ### Downloads
+            - [PDF](./user-guide.pdf)
+            - [HTML](./user-guide.html)
+
+            Auto-generated from codebase.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  validate-docs:
+    runs-on: ubuntu-latest
+    needs: build-pdf
+
+    steps:
+      - name: Download PDF
+        uses: actions/download-artifact@v3
+        with:
+          name: user-guide-pdf
+
+      - name: Validate PDF
+        run: |
+          # Check PDF is not corrupted
+          pdfinfo user-guide.pdf
+
+          # Check minimum page count (should have at least 20 pages)
+          PAGES=$(pdfinfo user-guide.pdf | grep Pages | awk '{print $2}')
+          if [ "$PAGES" -lt 20 ]; then
+            echo "❌ PDF has only $PAGES pages (expected at least 20)"
+            exit 1
+          fi
+
+          echo "✓ PDF is valid: $PAGES pages"
