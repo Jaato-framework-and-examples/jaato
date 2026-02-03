@@ -1078,9 +1078,6 @@ class PTDisplay:
         normalized = content.replace('\r\n', '\n').replace('\r', '\n')
         self._paste_counter += 1
         self._paste_registry[self._paste_counter] = normalized
-        cr_count = content.count('\r')
-        if cr_count > 0:
-            self._trace_paste(f"NORMALIZED: {cr_count} CR chars converted to LF")
         return self._paste_counter
 
     def _get_paste(self, paste_id: int) -> Optional[str]:
@@ -1108,14 +1105,9 @@ class PTDisplay:
         def replace(m: re.Match) -> str:
             paste_id = int(m.group(1))
             content = self._get_paste(paste_id)
-            self._trace_paste(f"EXPAND: id={paste_id}, found={content is not None}, content_len={len(content) if content else 0}")
-            if content:
-                self._trace_paste(f"EXPAND CONTENT: {repr(content)[:200]}")
             return content if content is not None else m.group(0)
 
-        result = re.sub(pattern, replace, text)
-        self._trace_paste(f"EXPAND RESULT: len={len(result)}, lines={len(result.splitlines())}")
-        return result
+        return re.sub(pattern, replace, text)
 
     def _is_large_paste(self, data: str) -> bool:
         """Check if pasted data exceeds thresholds.
@@ -1128,24 +1120,6 @@ class PTDisplay:
         """
         line_count = len(data.splitlines()) if data else 0
         return line_count > self._paste_threshold_lines or len(data) > self._paste_threshold_chars
-
-    def _trace_paste(self, msg: str) -> None:
-        """Write paste trace message to log file for debugging.
-
-        Enabled by setting JAATO_TRACE_LOG environment variable.
-        """
-        import os
-        from datetime import datetime
-        trace_path = os.environ.get('JAATO_TRACE_LOG')
-        if not trace_path:
-            return
-        try:
-            with open(trace_path, "a", encoding="utf-8") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [Paste] {msg}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -1866,15 +1840,11 @@ class PTDisplay:
         def handle_bracketed_paste(event):
             """Handle bracketed paste - use placeholder for large pastes."""
             data = event.data
-            # Trace paste data if JAATO_TRACE_LOG is set
-            self._trace_paste(f"PASTE DATA: len={len(data)}, lines={len(data.splitlines())}, repr={repr(data)[:200]}")
             if self._is_large_paste(data):
                 # Register the paste and insert placeholder
-                # Use splitlines() for accurate line count (handles various line endings)
                 line_count = len(data.splitlines()) if data else 0
                 paste_id = self._register_paste(data)
                 placeholder = f"[paste #{paste_id}: +{line_count} lines]"
-                self._trace_paste(f"PASTE REGISTERED: id={paste_id}, lines={line_count}")
                 event.current_buffer.insert_text(placeholder)
             else:
                 # Normal paste for small content
