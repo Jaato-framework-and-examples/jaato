@@ -12,17 +12,19 @@ import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Any, Callable, Optional, Tuple
+from typing import AsyncIterator, Dict, List, Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 from ..base import UserCommand, CommandParameter, CommandCompletion, HelpLines
 from ..model_provider.types import ToolSchema
+from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 
 
 # Message types for background thread communication
 MSG_CALL_TOOL = 'call_tool'
+MSG_CALL_TOOL_STREAMING = 'call_tool_streaming'  # Tool call with progress streaming
 MSG_LIST_SERVERS = 'list_servers'
 MSG_SERVER_STATUS = 'server_status'
 MSG_CONNECT_SERVER = 'connect_server'
@@ -197,6 +199,7 @@ class MCPToolPlugin:
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
+        self._streaming_servers: set = set()  # servers with streaming: true in config
         # Interaction log
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
@@ -1248,6 +1251,211 @@ class MCPToolPlugin:
             cleaned['items'] = self._clean_schema_for_vertex(cleaned['items'])
         return cleaned
 
+    # ==================== StreamingCapable Protocol ====================
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        """Check if an MCP tool supports streaming execution.
+
+        Streaming is only advertised for tools from servers that have
+        `streaming: true` in their .mcp.json configuration. This prevents
+        registering :stream variants for tools that won't actually send
+        progress notifications.
+
+        Args:
+            tool_name: Name of the tool to check (normalized with mcp__ prefix).
+
+        Returns:
+            True if the tool's server has streaming enabled in config.
+        """
+        # Parse server name from normalized tool name: mcp__{server}__{tool}
+        if tool_name.startswith("mcp__"):
+            parts = tool_name.split("__", 2)
+            if len(parts) >= 2:
+                server_name = parts[1]
+                return server_name in self._streaming_servers
+        return False
+
+    def get_streaming_tool_names(self) -> List[str]:
+        """Get list of MCP tools that support streaming.
+
+        Only returns tools from servers that have `streaming: true` in
+        their .mcp.json configuration.
+
+        Returns:
+            List of tool names from streaming-enabled servers.
+        """
+        tool_names = []
+        for server_name, tools in self._tool_cache.items():
+            # Only include tools from servers with streaming enabled
+            if server_name not in self._streaming_servers:
+                continue
+            for tool in tools:
+                normalized_name = self._normalize_tool_name(server_name, tool.name)
+                tool_names.append(normalized_name)
+        return tool_names
+
+    async def execute_streaming(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Execute an MCP tool and yield progress updates as StreamChunks.
+
+        This method is an async generator that yields StreamChunks as
+        progress notifications arrive from the MCP server.
+
+        Args:
+            tool_name: Name of the MCP tool to execute (with mcp__ prefix).
+            arguments: Arguments to pass to the tool.
+            on_chunk: Optional callback invoked for each chunk (for UI).
+
+        Yields:
+            StreamChunk objects as progress notifications arrive.
+
+        Raises:
+            ValueError: If tool doesn't exist.
+            RuntimeError: If streaming execution fails.
+        """
+        self._trace(f"execute_streaming: tool={tool_name}")
+
+        # Ensure MCP thread is running
+        if not self._initialized:
+            self.initialize()
+
+        if not self._tool_cache:
+            raise ValueError('MCP tools not available')
+
+        # Parse the normalized tool name to get the original tool name
+        # Format: mcp__{server}__{tool}
+        original_tool_name = tool_name
+        if tool_name.startswith("mcp__"):
+            # Extract original tool name (everything after second __)
+            parts = tool_name.split("__", 2)
+            if len(parts) >= 3:
+                original_tool_name = parts[2]
+
+        # Verify tool exists
+        found = False
+        for tools in self._tool_cache.values():
+            for t in tools:
+                if t.name == original_tool_name:
+                    found = True
+                    break
+            if found:
+                break
+
+        if not found:
+            raise ValueError(f"Tool '{tool_name}' not found on any MCP server")
+
+        # Create a queue for progress updates from the background thread
+        progress_queue: queue.Queue = queue.Queue()
+        sequence = 0
+
+        try:
+            # Send streaming request to MCP thread
+            self._request_queue.put((MSG_CALL_TOOL_STREAMING, {
+                'toolname': original_tool_name,
+                'args': arguments,
+                'progress_queue': progress_queue,
+            }))
+
+            # Yield progress chunks as they arrive
+            while True:
+                try:
+                    # Wait for progress update or completion signal
+                    msg_type, data = progress_queue.get(timeout=0.1)
+
+                    if msg_type == 'progress':
+                        # Progress notification from MCP server
+                        progress = data.get('progress', 0)
+                        total = data.get('total')
+                        message = data.get('message', '')
+
+                        # Format progress message
+                        if total is not None:
+                            content = f"Progress: {progress}/{total}"
+                        else:
+                            content = f"Progress: {progress}"
+                        if message:
+                            content = f"{content} - {message}"
+
+                        chunk = StreamChunk(
+                            content=content,
+                            chunk_type="progress",
+                            sequence=sequence,
+                            metadata={
+                                'progress': progress,
+                                'total': total,
+                                'message': message,
+                            },
+                        )
+                        sequence += 1
+
+                        if on_chunk:
+                            try:
+                                on_chunk(chunk)
+                            except Exception as e:
+                                self._trace(f"Chunk callback error: {e}")
+
+                        yield chunk
+
+                    elif msg_type == 'complete':
+                        # Tool execution completed - yield final result
+                        result = data.get('result')
+                        error = data.get('error')
+
+                        if error:
+                            chunk = StreamChunk(
+                                content=f"Error: {error}",
+                                chunk_type="error",
+                                sequence=sequence,
+                                metadata={'is_final': True, 'error': error},
+                            )
+                        else:
+                            # Extract content from result
+                            content_list = [
+                                getattr(c, 'text', None)
+                                for c in getattr(result, 'content', [])
+                            ]
+                            content_text = '\n'.join(
+                                c for c in content_list if c
+                            ) or 'Completed'
+
+                            chunk = StreamChunk(
+                                content=content_text,
+                                chunk_type="result",
+                                sequence=sequence,
+                                metadata={
+                                    'is_final': True,
+                                    'tool': tool_name,
+                                    'isError': getattr(result, 'isError', False),
+                                },
+                            )
+
+                        if on_chunk:
+                            try:
+                                on_chunk(chunk)
+                            except Exception as e:
+                                self._trace(f"Chunk callback error: {e}")
+
+                        yield chunk
+                        break
+
+                except queue.Empty:
+                    # No message yet, continue waiting
+                    # Could add timeout handling here if needed
+                    continue
+
+        except Exception as exc:
+            self._log_event(
+                LOG_ERROR,
+                f"Streaming execution failed: {tool_name}",
+                details=str(exc),
+                include_traceback=True
+            )
+            raise RuntimeError(f"Streaming execution failed: {exc}") from exc
+
     def _thread_main(self):
         """Background thread running the MCP event loop."""
 
@@ -1335,6 +1543,9 @@ class MCPToolPlugin:
                 for idx, (name, spec) in enumerate(server_list, 1):
                     self._log_event(LOG_DEBUG, f"Processing server {idx}/{len(server_list)}", server=name)
                     await connect_server(manager, name, spec)
+                    # Track servers with streaming enabled
+                    if spec.get('streaming', False):
+                        self._streaming_servers.add(name)
 
                 # Cache tools and log summary
                 update_tool_cache(manager)
@@ -1378,6 +1589,62 @@ class MCPToolPlugin:
                                 self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}", server=server_name,
                                               details=str(exc), include_traceback=True)
                                 self._response_queue.put(('error', str(exc)))
+
+                        elif msg_type == MSG_CALL_TOOL_STREAMING:
+                            # Streaming tool execution request with progress callback
+                            toolname = data.get('toolname')
+                            args = data.get('args', {})
+                            progress_queue = data.get('progress_queue')
+
+                            # Find which server provides this tool
+                            server_name = None
+                            for sname, tools in self._tool_cache.items():
+                                if any(t.name == toolname for t in tools):
+                                    server_name = sname
+                                    break
+
+                            self._log_event(LOG_DEBUG, f"Calling tool (streaming): {toolname}",
+                                          server=server_name,
+                                          details=f"args: {json.dumps(args, default=str)[:200]}")
+
+                            # Create progress callback that sends to the queue
+                            async def progress_callback(
+                                progress: float,
+                                total: float | None,
+                                message: str | None
+                            ) -> None:
+                                """Forward progress notifications to the streaming queue."""
+                                if progress_queue:
+                                    progress_queue.put(('progress', {
+                                        'progress': progress,
+                                        'total': total,
+                                        'message': message,
+                                    }))
+                                self._log_event(LOG_DEBUG, f"Progress: {progress}/{total}",
+                                              server=server_name,
+                                              details=message)
+
+                            try:
+                                res = await manager.call_tool_auto(
+                                    toolname, args, progress_callback=progress_callback
+                                )
+                                is_error = getattr(res, 'isError', False)
+                                if is_error:
+                                    self._log_event(LOG_WARN, f"Tool returned error: {toolname}",
+                                                  server=server_name)
+                                else:
+                                    self._log_event(LOG_DEBUG, f"Tool completed: {toolname}",
+                                                  server=server_name)
+                                # Signal completion
+                                if progress_queue:
+                                    progress_queue.put(('complete', {'result': res}))
+                            except Exception as exc:
+                                self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}",
+                                              server=server_name,
+                                              details=str(exc), include_traceback=True)
+                                # Signal error
+                                if progress_queue:
+                                    progress_queue.put(('complete', {'error': str(exc)}))
 
                         elif msg_type == MSG_CONNECT_SERVER:
                             # Connect to a specific server
@@ -1432,12 +1699,16 @@ class MCPToolPlugin:
                                                   details=str(exc), include_traceback=True)
                             self._connected_servers.clear()
                             self._failed_servers.clear()
+                            self._streaming_servers.clear()
 
                             # Connect to all servers in new config
                             for name, spec in new_servers.items():
                                 success, error = await connect_server(manager, name, spec)
                                 if success:
                                     connected.append(name)
+                                    # Track servers with streaming enabled
+                                    if spec.get('streaming', False):
+                                        self._streaming_servers.add(name)
                                 else:
                                     failed[name] = error
 
