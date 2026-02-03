@@ -158,10 +158,7 @@ async def run_headless_mode(
             elif isinstance(event, AgentStatusChangedEvent):
                 model_running = event.status == "active"
                 renderer.on_agent_status_changed(event.agent_id, event.status)
-                # Exit when main agent is done (finished processing)
-                if event.agent_id == "main" and event.status == "done":
-                    should_exit = True
-                    break
+                # Don't exit on status changes - wait for AgentCompletedEvent
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
