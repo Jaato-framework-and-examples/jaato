@@ -7,6 +7,7 @@ This approach renders Rich content to ANSI strings, then wraps them with
 prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 """
 
+import re
 import shutil
 import sys
 import time
@@ -17,6 +18,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -579,6 +581,13 @@ class PTDisplay:
         self._search_mode: bool = False
         self._search_query: str = ""
 
+        # Paste registry for large paste handling
+        # Large pastes are stored here and replaced with placeholders
+        self._paste_registry: Dict[int, str] = {}
+        self._paste_counter: int = 0
+        self._paste_threshold_lines: int = 10  # Lines threshold for placeholder
+        self._paste_threshold_chars: int = 1000  # Character threshold for placeholder
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -1051,6 +1060,93 @@ class PTDisplay:
             if self._app:
                 self._app.invalidate()
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Paste handling
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _register_paste(self, content: str) -> int:
+        """Register a large paste and return its ID.
+
+        Args:
+            content: The pasted content to store.
+
+        Returns:
+            Unique paste ID for the placeholder.
+        """
+        # Normalize line endings: \r\n -> \n, then \r -> \n
+        # Terminal pastes often use \r (carriage return) instead of \n
+        normalized = content.replace('\r\n', '\n').replace('\r', '\n')
+        self._paste_counter += 1
+        self._paste_registry[self._paste_counter] = normalized
+        cr_count = content.count('\r')
+        if cr_count > 0:
+            self._trace_paste(f"NORMALIZED: {cr_count} CR chars converted to LF")
+        return self._paste_counter
+
+    def _get_paste(self, paste_id: int) -> Optional[str]:
+        """Get and remove a registered paste by ID.
+
+        Args:
+            paste_id: The paste ID from the placeholder.
+
+        Returns:
+            The stored paste content, or None if not found.
+        """
+        return self._paste_registry.pop(paste_id, None)
+
+    def _expand_paste_placeholders(self, text: str) -> str:
+        """Expand paste placeholders with their original content.
+
+        Args:
+            text: Input text that may contain paste placeholders.
+
+        Returns:
+            Text with placeholders replaced by original paste content.
+        """
+        pattern = r'\[paste #(\d+): \+\d+ lines\]'
+
+        def replace(m: re.Match) -> str:
+            paste_id = int(m.group(1))
+            content = self._get_paste(paste_id)
+            self._trace_paste(f"EXPAND: id={paste_id}, found={content is not None}, content_len={len(content) if content else 0}")
+            if content:
+                self._trace_paste(f"EXPAND CONTENT: {repr(content)[:200]}")
+            return content if content is not None else m.group(0)
+
+        result = re.sub(pattern, replace, text)
+        self._trace_paste(f"EXPAND RESULT: len={len(result)}, lines={len(result.splitlines())}")
+        return result
+
+    def _is_large_paste(self, data: str) -> bool:
+        """Check if pasted data exceeds thresholds.
+
+        Args:
+            data: The pasted text.
+
+        Returns:
+            True if paste should use placeholder.
+        """
+        line_count = len(data.splitlines()) if data else 0
+        return line_count > self._paste_threshold_lines or len(data) > self._paste_threshold_chars
+
+    def _trace_paste(self, msg: str) -> None:
+        """Write paste trace message to log file for debugging.
+
+        Enabled by setting JAATO_TRACE_LOG environment variable.
+        """
+        import os
+        from datetime import datetime
+        trace_path = os.environ.get('JAATO_TRACE_LOG')
+        if not trace_path:
+            return
+        try:
+            with open(trace_path, "a", encoding="utf-8") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [Paste] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
+
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
         # Check for terminal resize and update dimensions if needed
@@ -1307,19 +1403,24 @@ class PTDisplay:
                 self._advance_pager_page()
                 return
             # Check for permission mode - if input is empty, select focused option
-            text = self._input_buffer.text.strip()
+            raw_text = self._input_buffer.text
+            text = raw_text.strip()
             if (not text and
                 getattr(self, '_waiting_for_channel_input', False) and
                 self._permission_response_options):
                 self._select_focused_permission_option()
                 return
             # Normal mode - submit input
+            # Expand paste placeholders BEFORE stripping to preserve line feeds in pasted content
+            expanded_text = self._expand_paste_placeholders(raw_text)
+            # Strip only leading/trailing whitespace from the final result
+            expanded_text = expanded_text.strip()
             # Add to history before reset (like PromptSession does)
-            if text and self._input_buffer.history:
-                self._input_buffer.history.append_string(text)
+            if expanded_text and self._input_buffer.history:
+                self._input_buffer.history.append_string(expanded_text)
             self._input_buffer.reset()
             if self._input_callback:
-                self._input_callback(text)
+                self._input_callback(expanded_text)
 
         @kb.add(*keys.get_key_args("newline"), filter=not_in_search_mode)
         def handle_alt_enter(event):
@@ -1759,6 +1860,25 @@ class PTDisplay:
         def handle_ctrl_y(event):
             """Handle Ctrl+Y - yank (copy) last response to clipboard."""
             self._yank_last_response()
+
+        # Bracketed paste handler - detects large pastes and uses placeholders
+        @kb.add(Keys.BracketedPaste)
+        def handle_bracketed_paste(event):
+            """Handle bracketed paste - use placeholder for large pastes."""
+            data = event.data
+            # Trace paste data if JAATO_TRACE_LOG is set
+            self._trace_paste(f"PASTE DATA: len={len(data)}, lines={len(data.splitlines())}, repr={repr(data)[:200]}")
+            if self._is_large_paste(data):
+                # Register the paste and insert placeholder
+                # Use splitlines() for accurate line count (handles various line endings)
+                line_count = len(data.splitlines()) if data else 0
+                paste_id = self._register_paste(data)
+                placeholder = f"[paste #{paste_id}: +{line_count} lines]"
+                self._trace_paste(f"PASTE REGISTERED: id={paste_id}, lines={line_count}")
+                event.current_buffer.insert_text(placeholder)
+            else:
+                # Normal paste for small content
+                event.current_buffer.insert_text(data)
 
         # Agent tab bar at top (conditional - only if agent_registry present)
         agent_tab_bar = ConditionalContainer(
