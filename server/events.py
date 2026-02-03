@@ -188,10 +188,10 @@ class AgentOutputEvent(Event):
 
 @dataclass
 class AgentStatusChangedEvent(Event):
-    """Agent status change (active, done, error)."""
+    """Agent status change (active, idle, done, error)."""
     type: EventType = field(default=EventType.AGENT_STATUS_CHANGED)
     agent_id: str = ""
-    status: str = ""  # "active", "done", "error"
+    status: str = ""  # "active", "idle" (waiting for input), "done", "error"
     error: Optional[str] = None
 
 
