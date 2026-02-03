@@ -130,6 +130,8 @@ class AgentState:
         # GC configuration (set when agent is created with GC)
         self.gc_threshold: Optional[float] = None
         self.gc_strategy: Optional[str] = None
+        self.gc_target_percent: Optional[float] = None
+        self.gc_continuous_mode: bool = False
         # Per-agent formatter pipeline for output formatting
         # Initialized lazily via JaatoServer._get_agent_pipeline()
         self.formatter_pipeline: Optional[Any] = None
@@ -796,10 +798,14 @@ class JaatoServer:
         gc_result = load_gc_from_file()
         gc_threshold = None
         gc_strategy = None
+        gc_target_percent = None
+        gc_continuous_mode = False
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._jaato.set_gc_plugin(gc_plugin, gc_config)
             gc_threshold = gc_config.threshold_percent
+            gc_target_percent = gc_config.target_percent
+            gc_continuous_mode = gc_config.continuous_mode
             gc_strategy = getattr(gc_plugin, 'name', 'gc')
             if gc_strategy.startswith('gc_'):
                 gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
@@ -841,6 +847,8 @@ class JaatoServer:
         if "main" in self._agents and gc_threshold is not None:
             self._agents["main"].gc_threshold = gc_threshold
             self._agents["main"].gc_strategy = gc_strategy
+            self._agents["main"].gc_target_percent = gc_target_percent
+            self._agents["main"].gc_continuous_mode = gc_continuous_mode
 
         # Emit initial context update so toolbar shows correct usage at startup
         # This must happen after _create_main_agent() so client has the agent registered
@@ -857,6 +865,8 @@ class JaatoServer:
                 turns=usage.get('turns', 0),
                 gc_threshold=gc_threshold,
                 gc_strategy=gc_strategy,
+                gc_target_percent=gc_target_percent,
+                gc_continuous_mode=gc_continuous_mode,
             ))
 
         self._emit_init_progress("Setting up session", "done", 6, total_steps)
@@ -1175,9 +1185,13 @@ class JaatoServer:
                 # Get GC config from agent state
                 gc_threshold = None
                 gc_strategy = None
+                gc_target_percent = None
+                gc_continuous_mode = False
                 if agent_id in server._agents:
                     gc_threshold = server._agents[agent_id].gc_threshold
                     gc_strategy = server._agents[agent_id].gc_strategy
+                    gc_target_percent = server._agents[agent_id].gc_target_percent
+                    gc_continuous_mode = server._agents[agent_id].gc_continuous_mode
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
                     total_tokens=total_tokens,
@@ -1189,19 +1203,25 @@ class JaatoServer:
                     turns=turns,
                     gc_threshold=gc_threshold,
                     gc_strategy=gc_strategy,
+                    gc_target_percent=gc_target_percent,
+                    gc_continuous_mode=gc_continuous_mode,
                 ))
 
-            def on_agent_gc_config(self, agent_id, threshold, strategy):
+            def on_agent_gc_config(self, agent_id, threshold, strategy, target_percent=None, continuous_mode=False):
                 # Store GC config in agent state
                 if agent_id in server._agents:
                     server._agents[agent_id].gc_threshold = threshold
                     server._agents[agent_id].gc_strategy = strategy
+                    server._agents[agent_id].gc_target_percent = target_percent
+                    server._agents[agent_id].gc_continuous_mode = continuous_mode
                     # Emit ContextUpdatedEvent with GC config so client gets notified
                     agent = server._agents[agent_id]
                     server.emit(ContextUpdatedEvent(
                         agent_id=agent_id,
                         gc_threshold=threshold,
                         gc_strategy=strategy,
+                        gc_target_percent=target_percent,
+                        gc_continuous_mode=continuous_mode,
                         # Include current context usage if available
                         total_tokens=agent.context_usage.get('total_tokens', 0),
                         prompt_tokens=agent.context_usage.get('prompt_tokens', 0),
@@ -1834,9 +1854,13 @@ class JaatoServer:
                 # Get GC config from main agent state
                 gc_threshold = None
                 gc_strategy = None
+                gc_target_percent = None
+                gc_continuous_mode = False
                 if "main" in server._agents:
                     gc_threshold = server._agents["main"].gc_threshold
                     gc_strategy = server._agents["main"].gc_strategy
+                    gc_target_percent = server._agents["main"].gc_target_percent
+                    gc_continuous_mode = server._agents["main"].gc_continuous_mode
                 server.emit(ContextUpdatedEvent(
                     agent_id="main",
                     total_tokens=usage.total_tokens,
@@ -1848,6 +1872,8 @@ class JaatoServer:
                     turns=turns,
                     gc_threshold=gc_threshold,
                     gc_strategy=gc_strategy,
+                    gc_target_percent=gc_target_percent,
+                    gc_continuous_mode=gc_continuous_mode,
                 ))
 
         def gc_threshold_callback(percent_used: float, threshold: float) -> None:
@@ -1876,9 +1902,13 @@ class JaatoServer:
                         # Get GC config from main agent state
                         gc_threshold = None
                         gc_strategy = None
+                        gc_target_percent = None
+                        gc_continuous_mode = False
                         if "main" in server._agents:
                             gc_threshold = server._agents["main"].gc_threshold
                             gc_strategy = server._agents["main"].gc_strategy
+                            gc_target_percent = server._agents["main"].gc_target_percent
+                            gc_continuous_mode = server._agents["main"].gc_continuous_mode
                         server.emit(ContextUpdatedEvent(
                             agent_id="main",
                             total_tokens=usage.get('total_tokens', 0),
@@ -1890,6 +1920,8 @@ class JaatoServer:
                             turns=usage.get('turns', 0),
                             gc_threshold=gc_threshold,
                             gc_strategy=gc_strategy,
+                            gc_target_percent=gc_target_percent,
+                            gc_continuous_mode=gc_continuous_mode,
                         ))
 
             except KeyboardInterrupt:
@@ -2269,10 +2301,14 @@ class JaatoServer:
                 gc_result = load_gc_from_file()
                 gc_threshold = None
                 gc_strategy = None
+                gc_target_percent = None
+                gc_continuous_mode = False
                 if gc_result:
                     gc_plugin, gc_config = gc_result
                     self._jaato.set_gc_plugin(gc_plugin, gc_config)
                     gc_threshold = gc_config.threshold_percent
+                    gc_target_percent = gc_config.target_percent
+                    gc_continuous_mode = gc_config.continuous_mode
                     gc_strategy = getattr(gc_plugin, 'name', 'gc')
                     if gc_strategy.startswith('gc_'):
                         gc_strategy = gc_strategy[3:]
@@ -2312,6 +2348,8 @@ class JaatoServer:
                 if "main" in self._agents and gc_threshold is not None:
                     self._agents["main"].gc_threshold = gc_threshold
                     self._agents["main"].gc_strategy = gc_strategy
+                    self._agents["main"].gc_target_percent = gc_target_percent
+                    self._agents["main"].gc_continuous_mode = gc_continuous_mode
 
                 # Emit initial context update so toolbar shows correct usage
                 if self._jaato:
@@ -2327,6 +2365,8 @@ class JaatoServer:
                         turns=usage.get('turns', 0),
                         gc_threshold=gc_threshold,
                         gc_strategy=gc_strategy,
+                        gc_target_percent=gc_target_percent,
+                        gc_continuous_mode=gc_continuous_mode,
                     ))
 
                 self._emit_init_progress("Setting up session", "done", 6, 6)

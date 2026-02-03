@@ -5,7 +5,7 @@
   "pressure_percent": 90.0,
   "preserve_recent_turns": 5,
   "summarize_middle_turns": 10,
-  "notify_on_gc": true,
+  "notify_on_gc": false,
   "notification_template": "Context cleaned: {truncated} turns removed, {summarized} turns summarized, {kept} recent turns preserved.",
   "auto_trigger": true,
   "check_before_send": true,
