@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import shutil
+import sys
 import threading
 import time
 
@@ -88,7 +89,7 @@ class EnvironmentPlugin:
                                 "'shell' = shell type, "
                                 "'arch' = CPU architecture, "
                                 "'cwd' = current working directory, "
-                                "'terminal' = terminal emulation and capabilities, "
+                                "'terminal' = terminal emulation, capabilities, and TTY detection,"
                                 "'context' = token usage and GC thresholds, "
                                 "'session' = current session identifier and agent info, "
                                 "'datetime' = current date, time, timezone, and UTC offset, "
@@ -179,10 +180,15 @@ class EnvironmentPlugin:
         return info
 
     def _get_shell_info(self) -> Dict[str, Any]:
-        """Get shell information."""
+        """Get shell information.
+
+        Distinguishes between:
+        - default: The user's configured login shell ($SHELL on Unix, cmd on Windows)
+        - current: The actual shell executing commands (detected via parent process)
+        """
         system = platform.system()
 
-        info = {
+        info: Dict[str, Any] = {
             "default": None,
             "current": None,
             "path_separator": os.pathsep,
@@ -192,27 +198,92 @@ class EnvironmentPlugin:
         if system == "Windows":
             # Windows: check for PowerShell vs cmd
             info["default"] = "cmd"
-            comspec = os.environ.get("ComSpec", "")
-            if "powershell" in comspec.lower():
-                info["current"] = "powershell"
-            elif "pwsh" in comspec.lower():
-                info["current"] = "pwsh"  # PowerShell Core
+
+            # Detect actual shell by checking PowerShell-specific env vars
+            # PSModulePath is set by PowerShell but not cmd
+            if os.environ.get("PSModulePath"):
+                # Distinguish PowerShell Core (pwsh) from Windows PowerShell
+                ps_version = os.environ.get("PSVersionTable", "")
+                if "Core" in ps_version or shutil.which("pwsh"):
+                    # Check if running in pwsh specifically
+                    # PSEdition env var or parent process would tell us
+                    info["current"] = "pwsh"
+                else:
+                    info["current"] = "powershell"
             else:
-                info["current"] = "cmd"
+                comspec = os.environ.get("ComSpec", "")
+                if "powershell" in comspec.lower():
+                    info["current"] = "powershell"
+                elif "pwsh" in comspec.lower():
+                    info["current"] = "pwsh"
+                else:
+                    info["current"] = "cmd"
 
             # Check if PowerShell is available
             info["powershell_available"] = shutil.which("powershell") is not None
             info["pwsh_available"] = shutil.which("pwsh") is not None
 
         else:
-            # Unix-like: check SHELL env var
+            # Unix-like: $SHELL is the login shell, not necessarily current
             shell_path = os.environ.get("SHELL", "/bin/sh")
             shell_name = os.path.basename(shell_path)
             info["default"] = shell_name
-            info["current"] = shell_name
             info["path"] = shell_path
 
+            # Try to detect the actual running shell via parent process
+            current_shell = self._detect_current_shell_unix()
+            info["current"] = current_shell if current_shell else shell_name
+
         return info
+
+    def _detect_current_shell_unix(self) -> Optional[str]:
+        """Detect the actual running shell on Unix-like systems.
+
+        Checks parent process to determine what shell is actually executing,
+        rather than relying on $SHELL which only indicates the login shell.
+
+        Returns:
+            Shell name (e.g., 'bash', 'zsh', 'fish') or None if detection fails.
+        """
+        import subprocess
+
+        try:
+            ppid = os.getppid()
+
+            # Try /proc filesystem first (Linux)
+            proc_comm = f"/proc/{ppid}/comm"
+            if os.path.exists(proc_comm):
+                with open(proc_comm, 'r') as f:
+                    comm = f.read().strip()
+                    # comm contains just the executable name
+                    if comm in ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'):
+                        return comm
+                    # Sometimes it's the full command, extract basename
+                    basename = os.path.basename(comm)
+                    if basename in ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'):
+                        return basename
+
+            # Fallback: use ps command (works on macOS and other Unix)
+            result = subprocess.run(
+                ['ps', '-p', str(ppid), '-o', 'comm='],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                comm = result.stdout.strip()
+                # ps may return full path or just name
+                basename = os.path.basename(comm)
+                # Handle common variations like '-bash' (login shell indicator)
+                if basename.startswith('-'):
+                    basename = basename[1:]
+                if basename in ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'):
+                    return basename
+
+        except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+
+        return None
 
     def _get_arch_info(self) -> Dict[str, str]:
         """Get architecture information."""
@@ -237,8 +308,17 @@ class EnvironmentPlugin:
         return info
 
     def _get_terminal_info(self) -> Dict[str, Any]:
-        """Get terminal emulation and capability information."""
+        """Get terminal emulation and capability information.
+
+        Detects whether stdout is connected to a real terminal (TTY) to
+        distinguish interactive sessions from headless contexts where
+        output goes to a file or pipe.
+        """
+        # Detect if stdout is connected to a TTY
+        is_interactive = sys.stdout.isatty()
+
         info: Dict[str, Any] = {
+            "interactive": is_interactive,
             "term": os.environ.get("TERM"),
             "term_program": os.environ.get("TERM_PROGRAM"),
             "colorterm": os.environ.get("COLORTERM"),
@@ -255,24 +335,28 @@ class EnvironmentPlugin:
         info["multiplexer"] = multiplexer
 
         # Detect color capability
-        term = (info["term"] or "").lower()
-        colorterm = (info["colorterm"] or "").lower()
-        if colorterm in ("truecolor", "24bit") or "truecolor" in colorterm:
-            info["color_depth"] = "24bit"
-        elif "256color" in term or "256" in colorterm:
-            info["color_depth"] = "256"
-        elif term and term != "dumb":
-            info["color_depth"] = "basic"
-        else:
+        # When not interactive (headless/file output), colors are meaningless
+        if not is_interactive:
             info["color_depth"] = "none"
+        else:
+            term = (info["term"] or "").lower()
+            colorterm = (info["colorterm"] or "").lower()
+            if colorterm in ("truecolor", "24bit") or "truecolor" in colorterm:
+                info["color_depth"] = "24bit"
+            elif "256color" in term or "256" in colorterm:
+                info["color_depth"] = "256"
+            elif term and term != "dumb":
+                info["color_depth"] = "basic"
+            else:
+                info["color_depth"] = "none"
 
         # Detect if running in common terminal emulators
         term_program = info["term_program"] or ""
         if term_program:
             info["emulator"] = term_program
-        elif "xterm" in term:
+        elif "xterm" in (info["term"] or "").lower():
             info["emulator"] = "xterm-compatible"
-        elif "linux" in term:
+        elif "linux" in (info["term"] or "").lower():
             info["emulator"] = "linux-console"
         else:
             info["emulator"] = None

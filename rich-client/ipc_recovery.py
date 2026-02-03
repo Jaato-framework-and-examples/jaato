@@ -496,6 +496,17 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.execute_command(command, args)
 
+    async def disable_tool(self, tool_name: str) -> None:
+        """Disable a tool directly via registry.
+
+        This is a fire-and-forget request that doesn't generate response events.
+        Used by headless mode to disable tools before starting event handling.
+        """
+        self._check_can_send()
+
+        if self._client:
+            await self._client.disable_tool(tool_name)
+
     async def request_command_list(self) -> None:
         """Request the list of available commands."""
         self._check_can_send()

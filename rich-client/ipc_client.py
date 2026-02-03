@@ -58,6 +58,7 @@ from server.events import (
     HistoryRequest,
     HistoryEvent,
     ClientConfigRequest,
+    SessionInfoEvent,
 )
 
 
@@ -715,6 +716,18 @@ class IPCClient:
             args=args or [],
         ))
 
+    async def disable_tool(self, tool_name: str) -> None:
+        """Disable a tool directly via registry.
+
+        This is a fire-and-forget request that doesn't generate response events.
+        Used by headless mode to disable tools before starting event handling.
+
+        Args:
+            tool_name: Name of the tool to disable.
+        """
+        from server.events import ToolDisableRequest
+        await self._send_event(ToolDisableRequest(tool_name=tool_name))
+
     async def request_command_list(self) -> None:
         """Request the list of available commands from server.
 
@@ -762,6 +775,11 @@ class IPCClient:
 
                 event = deserialize_event(message)
                 logger.debug(f"events(): received {type(event).__name__}")
+
+                # Auto-update session_id when receiving SessionInfoEvent
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+                    logger.debug(f"events(): session_id updated to {event.session_id}")
 
                 # Call callback if set
                 if self._on_event:

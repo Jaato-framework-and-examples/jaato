@@ -4397,7 +4397,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     continue
 
                 text = text.strip()
-                if not text:
+                # Allow empty input for clarification (optional answers without default)
+                if not text and not pending_clarification_request:
                     continue
 
                 # Handle permission response
@@ -4437,7 +4438,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     )
                     continue
 
-                # Handle commands
+                # Handle commands using shared parser
+                from shared.client_commands import parse_user_input, CommandAction
+
                 text_lower = text.lower()
                 cmd_parts = text.split()
                 cmd = cmd_parts[0].lower() if cmd_parts else ""
@@ -4494,95 +4497,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.add_system_message("Returning to session.", style="hint")
                         continue
 
-                # Client-only commands
-                if text_lower in ("exit", "quit", "q"):
-                    # Show confirmation dialog for session lifecycle
-                    pending_exit_confirmation = True
-
-                    display.add_system_message("", style="hint")
-                    if model_running:
-                        display.add_system_message("Task in progress. What would you like to do?", style="system_warning")
-                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="hint")
-                        display.add_system_message("  [d] Detach (task continues in background)", style="hint")
-                        display.add_system_message("  [e] End session (cancel task and delete session)", style="hint")
-                        display.add_system_message("  [r] Return to session", style="hint")
-                        display.add_system_message("", style="hint")
-                        display.set_prompt("Choice [c/d/e/r]: ")
-                        # Create simple response options for input filtering
-                        exit_options = [
-                            type('Option', (), {'short': 'c', 'full': 'cancel', 'description': 'Cancel task'})(),
-                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
-                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
-                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
-                        ]
-                    else:
-                        display.add_system_message("Exit options:", style="system_info")
-                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="hint")
-                        display.add_system_message("  [e] End session (delete session from server)", style="hint")
-                        display.add_system_message("  [r] Return to session", style="hint")
-                        display.add_system_message("", style="hint")
-                        display.set_prompt("Choice [d/e/r]: ")
-                        exit_options = [
-                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
-                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
-                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
-                        ]
-                    display.set_waiting_for_channel_input(True, exit_options)
-                    continue
-                elif text_lower == "stop":
-                    await client.stop()
-                    continue
-                elif text_lower == "clear":
-                    display.clear_output()
-                    continue
-                elif text_lower == "help":
-                    # Show full help with pager using shared help text
-                    from shared.client_commands import build_full_help_text
-                    help_lines = build_full_help_text(server_commands)
-                    display.show_lines(help_lines)
-                    continue
-                elif text_lower == "context":
-                    # Show context usage (client-side, from agent registry)
-                    selected_agent = agent_registry.get_selected_agent()
-                    if not selected_agent:
-                        display.show_lines([("Context tracking not available", "yellow")])
-                    else:
-                        usage = selected_agent.context_usage
-                        lines = [
-                            ("─" * 50, "dim"),
-                            (f"Context Usage: {selected_agent.name}", "bold"),
-                            (f"  Agent: {selected_agent.agent_id}", "dim"),
-                            (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
-                            (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
-                            (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
-                            (f"  Turns: {usage.get('turns', 0)}", "dim"),
-                            (f"  Percent used: {usage.get('percent_used', 0):.1f}%", "dim"),
-                            ("─" * 50, "dim"),
-                        ]
-                        display.show_lines(lines)
-                    continue
-
-                # Tools command - forward to server
-                elif cmd == "tools":
-                    subcmd = args[0] if args else "list"
-                    subargs = args[1:] if len(args) > 1 else []
-                    await client.execute_command(f"tools.{subcmd}", subargs)
-                    continue
-
-                # Session subcommands - forward to server as session.<subcommand>
-                elif cmd == "session":
-                    subcmd = args[0] if args else "list"
-                    subargs = args[1:] if len(args) > 1 else []
-                    await client.execute_command(f"session.{subcmd}", subargs)
-                    continue
-
-                # History command - request from server
-                elif cmd == "history":
-                    await client.request_history()
-                    continue
-
+                # ==================== TUI-specific commands (not in shared parser) ====================
                 # Keybindings command - handle locally using shared function
-                elif cmd == "keybindings":
+                if cmd == "keybindings":
                     from shared.ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
                     continue
@@ -4679,57 +4596,92 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.add_system_message(f"Available: reload, {', '.join(sorted(available))}", "hint")
                     continue
 
-                # Other server commands (reset, plugin commands) - forward directly
-                elif cmd in ("reset",):
-                    await client.execute_command(cmd, args)
-                    continue
+                # ==================== Use shared parser for all other commands ====================
+                parsed = parse_user_input(text, server_commands)
 
-                # Check if input matches any server/plugin command
-                # (mcp, permissions, model, save, resume, etc.)
-                # Server expects base command name + args (e.g., "model" + ["list"])
-                matched_base_command = None
-                command_args = []
-                if server_commands:
-                    input_lower = text.lower()
-                    input_parts = text.split()
+                if parsed.action == CommandAction.EXIT:
+                    # TUI-specific: Show confirmation dialog for session lifecycle
+                    pending_exit_confirmation = True
 
-                    # Try to match input against known commands
-                    # Commands are like "model", "model list", "mcp status", etc.
-                    for srv_cmd in server_commands:
-                        cmd_name = srv_cmd.get("name", "").lower()
-                        cmd_parts = cmd_name.split()
+                    display.add_system_message("", style="hint")
+                    if model_running:
+                        display.add_system_message("Task in progress. What would you like to do?", style="system_warning")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="hint")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="hint")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
+                        display.set_prompt("Choice [c/d/e/r]: ")
+                        exit_options = [
+                            type('Option', (), {'short': 'c', 'full': 'cancel', 'description': 'Cancel task'})(),
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    else:
+                        display.add_system_message("Exit options:", style="system_info")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="hint")
+                        display.add_system_message("  [e] End session (delete session from server)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
+                        display.set_prompt("Choice [d/e/r]: ")
+                        exit_options = [
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    display.set_waiting_for_channel_input(True, exit_options)
 
-                        if not cmd_parts:
-                            continue
+                elif parsed.action == CommandAction.STOP:
+                    await client.stop()
 
-                        base_cmd = cmd_parts[0]  # e.g., "model", "mcp"
+                elif parsed.action == CommandAction.CLEAR:
+                    display.clear_output()
 
-                        # Check if input starts with this base command
-                        if input_lower == base_cmd or input_lower.startswith(base_cmd + " "):
-                            matched_base_command = base_cmd
-                            # All parts after base command are args
-                            if len(input_parts) > 1:
-                                command_args = input_parts[1:]
-                            else:
-                                command_args = []
-                            break
+                elif parsed.action == CommandAction.HELP:
+                    from shared.client_commands import build_full_help_text
+                    help_lines = build_full_help_text(server_commands)
+                    display.show_lines(help_lines)
 
-                if matched_base_command:
-                    # Forward to server as base command + args
-                    await client.execute_command(matched_base_command, command_args)
-                    continue
+                elif parsed.action == CommandAction.CONTEXT:
+                    # TUI-specific: Use local agent_registry for context
+                    selected_agent = agent_registry.get_selected_agent()
+                    if not selected_agent:
+                        display.show_lines([("Context tracking not available", "yellow")])
+                    else:
+                        usage = selected_agent.context_usage
+                        lines = [
+                            ("─" * 50, "dim"),
+                            (f"Context Usage: {selected_agent.name}", "bold"),
+                            (f"  Agent: {selected_agent.agent_id}", "dim"),
+                            (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
+                            (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
+                            (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
+                            (f"  Turns: {usage.get('turns', 0)}", "dim"),
+                            (f"  Percent used: {usage.get('percent_used', 0):.1f}%", "dim"),
+                            ("─" * 50, "dim"),
+                        ]
+                        display.show_lines(lines)
 
-                # Send message to model
-                model_running = True
-                display.add_to_history(text)
+                elif parsed.action == CommandAction.HISTORY:
+                    await client.request_history()
 
-                # Inject any pending system hints (hidden from display)
-                pending_hints = _pop_ipc_system_hints(display)
-                if pending_hints:
-                    hints_text = "\n".join(pending_hints)
-                    text = f"{hints_text}\n\n{text}"
+                elif parsed.action == CommandAction.SERVER_COMMAND:
+                    await client.execute_command(parsed.command, parsed.args or [])
 
-                await client.send_message(text)
+                elif parsed.action == CommandAction.SEND_MESSAGE:
+                    if parsed.text:
+                        model_running = True
+                        display.add_to_history(text)
+
+                        # Inject any pending system hints (hidden from display)
+                        pending_hints = _pop_ipc_system_hints(display)
+                        message_text = parsed.text
+                        if pending_hints:
+                            hints_text = "\n".join(pending_hints)
+                            message_text = f"{hints_text}\n\n{message_text}"
+
+                        await client.send_message(message_text)
 
             except asyncio.CancelledError:
                 break
@@ -4842,15 +4794,81 @@ Server Mode:
         action="store_true",
         help="Start with a new session instead of resuming the default (only with --connect)"
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode with file output (requires --connect and --prompt). "
+             "Output goes to {workspace}/jaato-headless-client-agents/"
+    )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        help="Workspace directory for headless output (default: current directory)"
+    )
+    parser.add_argument(
+        "--session",
+        type=str,
+        metavar="SESSION_ID",
+        help="Attach to a specific session (use with --cmd to send commands to headless sessions)"
+    )
+    parser.add_argument(
+        "--cmd",
+        type=str,
+        metavar="COMMAND",
+        help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
+             "Requires --connect and --session."
+    )
 
     args = parser.parse_args()
 
-    # Check TTY before proceeding (except for single prompt mode)
-    if not sys.stdout.isatty() and not args.prompt:
+    # Validate --cmd requirements
+    if args.cmd:
+        if not args.connect:
+            sys.exit("Error: --cmd requires --connect")
+        if not args.session:
+            sys.exit("Error: --cmd requires --session to specify which session to send the command to")
+
+    # Validate headless mode requirements
+    if args.headless:
+        if not args.connect:
+            sys.exit("Error: --headless requires --connect")
+        if not args.prompt and not args.initial_prompt:
+            sys.exit("Error: --headless requires --prompt or --initial-prompt")
+
+    # Command mode: send a command to a session and exit
+    if args.cmd:
+        import asyncio
+        from command_mode import run_command_mode
+        asyncio.run(run_command_mode(
+            socket_path=args.connect,
+            session_id=args.session,
+            command=args.cmd,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+        ))
+        return
+
+    # Check TTY before proceeding (except for single prompt mode, headless, or command mode)
+    if not sys.stdout.isatty() and not args.prompt and not args.headless and not args.cmd:
         sys.exit(
             "Error: rich-client requires an interactive terminal.\n"
-            "Use simple-client for non-TTY environments."
+            "Use --headless for non-TTY environments."
         )
+
+    # Headless mode: file-based output, auto-approve permissions
+    if args.headless:
+        import asyncio
+        from headless_mode import run_headless_mode
+        workspace = pathlib.Path(args.workspace) if args.workspace else pathlib.Path.cwd()
+        asyncio.run(run_headless_mode(
+            socket_path=args.connect,
+            prompt=args.prompt or args.initial_prompt,
+            workspace=workspace,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+            new_session=args.new_session,
+        ))
+        return
 
     # Connection mode: connect to server via IPC
     if args.connect:
