@@ -171,14 +171,25 @@ def load_gc_from_file(
             gc_init_config['agent_name'] = agent_name
         if data.get('summarize_middle_turns') is not None:
             gc_init_config['summarize_middle_turns'] = data['summarize_middle_turns']
+        if data.get('target_percent') is not None:
+            gc_init_config['target_percent'] = data['target_percent']
+        if 'pressure_percent' in data:
+            gc_init_config['pressure_percent'] = data['pressure_percent']
         # Merge plugin-specific config
         gc_init_config.update(data.get('plugin_config') or {})
 
         gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
 
         # Create GCConfig for the client
+        # Handle pressure_percent specially: 0 means continuous mode, use None
+        pressure_percent = data.get('pressure_percent')
+        if pressure_percent == 0:
+            pressure_percent = None
+
         gc_config = GCConfig(
             threshold_percent=data.get('threshold_percent', 80.0),
+            target_percent=data.get('target_percent', 60.0),
+            pressure_percent=pressure_percent,
             max_turns=data.get('max_turns'),
             preserve_recent_turns=data.get('preserve_recent_turns', 5),
             plugin_config=data.get('plugin_config') or {},
