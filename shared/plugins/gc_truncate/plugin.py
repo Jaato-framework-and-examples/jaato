@@ -17,6 +17,7 @@ from ..model_provider.types import Message
 from ..gc import (
     GCConfig,
     GCPlugin,
+    GCRemovalItem,
     GCResult,
     GCTriggerReason,
     Turn,
@@ -26,6 +27,13 @@ from ..gc import (
     get_preserved_indices,
     split_into_turns,
 )
+
+# Import for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from shared.instruction_budget import InstructionBudget
+
+from ...instruction_budget import InstructionSource
 
 
 class TruncateGCPlugin:
@@ -144,7 +152,8 @@ class TruncateGCPlugin:
         history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
-        reason: GCTriggerReason
+        reason: GCTriggerReason,
+        budget: Optional["InstructionBudget"] = None,
     ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection by truncating oldest turns.
 
@@ -153,9 +162,10 @@ class TruncateGCPlugin:
             context_usage: Current context window usage stats.
             config: GC configuration.
             reason: Why this collection was triggered.
+            budget: Optional instruction budget for policy-aware decisions.
 
         Returns:
-            Tuple of (new_history, result).
+            Tuple of (new_history, result) with removal_list for budget sync.
         """
         self._trace(f"collect: reason={reason.value}, history_len={len(history)}")
         tokens_before = estimate_history_tokens(history)
@@ -221,12 +231,22 @@ class TruncateGCPlugin:
         # Filter turns - keep only preserved ones
         kept_turns: List[Turn] = []
         removed_count = 0
+        removal_list: List[GCRemovalItem] = []
 
         for turn in turns:
             if turn.index in preserved_indices:
                 kept_turns.append(turn)
             else:
                 removed_count += 1
+                # Collect message IDs from the removed turn
+                message_ids = [msg.message_id for msg in turn.contents]
+                removal_list.append(GCRemovalItem(
+                    source=InstructionSource.CONVERSATION,
+                    child_key=f"turn_{turn.index}",
+                    tokens_freed=turn.estimated_tokens,
+                    reason="truncated",
+                    message_ids=message_ids,
+                ))
 
         # Flatten back to history
         new_history = flatten_turns(kept_turns)
@@ -240,6 +260,7 @@ class TruncateGCPlugin:
             tokens_after=tokens_after,
             plugin_name=self.name,
             trigger_reason=reason,
+            removal_list=removal_list,
             details={
                 "turns_before": total_turns,
                 "turns_after": len(kept_turns),

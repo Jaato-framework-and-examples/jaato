@@ -18,6 +18,7 @@ from ..model_provider.types import Message
 from ..gc import (
     GCConfig,
     GCPlugin,
+    GCRemovalItem,
     GCResult,
     GCTriggerReason,
     Turn,
@@ -27,6 +28,13 @@ from ..gc import (
     flatten_turns,
     split_into_turns,
 )
+
+# Import for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from shared.instruction_budget import InstructionBudget
+
+from ...instruction_budget import InstructionSource
 
 
 class HybridGCPlugin:
@@ -160,7 +168,8 @@ class HybridGCPlugin:
         history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
-        reason: GCTriggerReason
+        reason: GCTriggerReason,
+        budget: Optional["InstructionBudget"] = None,
     ) -> Tuple[List[Message], GCResult]:
         """Perform hybrid garbage collection.
 
@@ -174,9 +183,10 @@ class HybridGCPlugin:
             context_usage: Current context window usage stats.
             config: GC configuration.
             reason: Why this collection was triggered.
+            budget: Optional instruction budget for policy-aware decisions.
 
         Returns:
-            Tuple of (new_history, result).
+            Tuple of (new_history, result) with removal_list for budget sync.
         """
         self._trace(f"collect: reason={reason.value}, history_len={len(history)}")
         tokens_before = estimate_history_tokens(history)
@@ -250,6 +260,7 @@ class HybridGCPlugin:
         turns_truncated = len(ancient_turns)
         turns_summarized = 0
         summary_text = ""
+        removal_list: List[GCRemovalItem] = []
 
         # If we have middle turns and a summarizer, summarize them
         turns_to_summarize = ancient_turns + middle_turns
@@ -262,6 +273,17 @@ class HybridGCPlugin:
                 new_history_parts.append(summary_content)
                 turns_summarized = len(turns_to_summarize)
                 turns_truncated = 0  # Everything was summarized, not truncated
+
+                # Build removal list for summarized turns
+                for turn in turns_to_summarize:
+                    message_ids = [msg.message_id for msg in turn.contents]
+                    removal_list.append(GCRemovalItem(
+                        source=InstructionSource.CONVERSATION,
+                        child_key=f"turn_{turn.index}",
+                        tokens_freed=turn.estimated_tokens,
+                        reason="summarized",
+                        message_ids=message_ids,
+                    ))
             except Exception as e:
                 # Summarization failed - fall back to truncation
                 self._trace(f"collect: summarization failed - {e}")
@@ -278,12 +300,24 @@ class HybridGCPlugin:
             # No summarizer - just truncate
             turns_truncated = len(turns_to_summarize)
 
+            # Build removal list for truncated turns
+            for turn in turns_to_summarize:
+                message_ids = [msg.message_id for msg in turn.contents]
+                removal_list.append(GCRemovalItem(
+                    source=InstructionSource.CONVERSATION,
+                    child_key=f"turn_{turn.index}",
+                    tokens_freed=turn.estimated_tokens,
+                    reason="truncated",
+                    message_ids=message_ids,
+                ))
+
         # Add recent turns
         new_history_parts.extend(flatten_turns(recent_turns))
 
         tokens_after = estimate_history_tokens(new_history_parts)
 
         # Build result
+        summary_tokens = estimate_history_tokens([summary_content]) if summary_text else 0
         result = GCResult(
             success=True,
             items_collected=turns_truncated + turns_summarized,
@@ -291,6 +325,7 @@ class HybridGCPlugin:
             tokens_after=tokens_after,
             plugin_name=self.name,
             trigger_reason=reason,
+            removal_list=removal_list,
             details={
                 "turns_before": total_turns,
                 "turns_after": len(recent_turns) + (1 if summary_text else 0),
@@ -299,6 +334,7 @@ class HybridGCPlugin:
                 "preserve_recent": preserve_recent,
                 "summarize_middle": summarize_middle,
                 "had_summarizer": self._summarizer is not None,
+                "summary_tokens": summary_tokens,  # For budget sync
             }
         )
         self._trace(f"collect: truncated={turns_truncated}, summarized={turns_summarized}, tokens {tokens_before}->{tokens_after}")
