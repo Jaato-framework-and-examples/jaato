@@ -65,6 +65,23 @@ async def run_command_mode(
             await client.disconnect()
             return
 
+        # Wait for server to confirm attachment before sending messages
+        # This ensures the server has registered us with the session
+        timeout = 5.0
+        start = asyncio.get_event_loop().time()
+        async for event in client.events():
+            if asyncio.get_event_loop().time() - start > timeout:
+                print("Warning: Attach confirmation timeout", file=sys.stderr)
+                break
+            if isinstance(event, SystemMessageEvent):
+                # Server sends "Attached to session: <id>" on successful attach
+                if "Attached to session" in event.message:
+                    break
+            elif isinstance(event, ErrorEvent):
+                print(f"Error: {event.error}", file=sys.stderr)
+                await client.disconnect()
+                return
+
         # Parse using shared logic
         parsed = parse_user_input(command)
 
