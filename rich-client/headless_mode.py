@@ -217,7 +217,13 @@ async def run_headless_mode(
                             style="system_info",
                             agent_id=agent_id,
                         )
-                # Don't exit on status changes - wait for AgentCompletedEvent
+                # Exit when main agent finishes (status "done" means model
+                # completed without pending channel input).
+                # AgentCompletedEvent is only emitted for subagents, so the
+                # main agent's "done" status is the real exit signal.
+                if event.agent_id == "main" and event.status == "done":
+                    should_exit = True
+                    break
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
