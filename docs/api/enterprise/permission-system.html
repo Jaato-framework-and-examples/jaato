@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Permission System - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero {
+      margin-bottom: 48px;
+    }
+    .detail-hero .lead {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.6;
+      max-width: 720px;
+    }
+    .infography-full {
+      margin: 32px 0;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .infography-full img {
+      width: 100%;
+      display: block;
+      background: var(--color-bg-secondary);
+    }
+    .infography-full .infography-caption {
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--color-text-secondary);
+      border-top: 1px solid var(--color-border);
+      text-align: center;
+    }
+    .detail-content h2 {
+      margin-top: 48px;
+    }
+    .detail-content h3 {
+      margin-top: 32px;
+    }
+    .detail-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content th,
+    .detail-content td {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      font-size: 14px;
+    }
+    .detail-content th {
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .detail-content td {
+      color: var(--color-text-secondary);
+    }
+    .detail-content code {
+      font-size: 13px;
+      padding: 2px 6px;
+      background: var(--color-bg-secondary);
+      border-radius: 4px;
+    }
+    .detail-content pre {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content pre code {
+      background: none;
+      padding: 0;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #0ea5e9;
+      text-decoration: none;
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--color-border);
+    }
+    .back-link:hover {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html">Model Harness</a></li>
+          <li><a href="instruction-sources.html">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html" class="active">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html">GC System</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>Permission System</h1>
+        <p class="lead">
+          JAATO implements a comprehensive permission system that gates tool execution, ensuring models cannot perform sensitive operations without explicit approval. The system supports multiple approval scopes, configurable policies (whitelist/blacklist), and various approval channels (console, webhook, file-based).
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/jaato_permission_system.png" target="_blank">
+          <img src="../assets/images/enterprise/jaato_permission_system.png" alt="Permission System Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="response-options">Response Options &amp; Scopes</h2>
+        <p>
+          When a tool requires permission, the user can respond with various approval scopes, from narrowest to widest:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Short</th><th>Full</th><th>Decision</th><th>Scope</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>y</code></td><td><code>yes</code></td><td>ALLOW</td><td>This call + learn the tool</td></tr>
+            <tr><td><code>once</code></td><td><code>once</code></td><td>ALLOW_ONCE</td><td>This call only, don't learn</td></tr>
+            <tr><td><code>n</code></td><td><code>no</code></td><td>DENY</td><td>Block this call</td></tr>
+            <tr><td><code>t</code></td><td><code>turn</code></td><td>ALLOW_TURN</td><td>Allow all tools until the model finishes its current response</td></tr>
+            <tr><td><code>i</code></td><td><code>idle</code></td><td>ALLOW_UNTIL_IDLE</td><td>Allow all tools until the session goes idle</td></tr>
+            <tr><td><code>a</code></td><td><code>always</code></td><td>ALLOW_SESSION</td><td>Add this tool to session whitelist</td></tr>
+            <tr><td><code>never</code></td><td><code>never</code></td><td>DENY_SESSION</td><td>Add this tool to session blacklist</td></tr>
+            <tr><td><code>all</code></td><td><code>all</code></td><td>ALLOW_ALL</td><td>Pre-approve all future requests for this session</td></tr>
+          </tbody>
+        </table>
+        <p>
+          The key distinction between <strong>turn</strong> and <strong>idle</strong>: turn approval clears when the model finishes its current response, while idle approval persists across consecutive model turns until the session becomes inactive (no user input, no model activity).
+        </p>
+
+        <h2 id="evaluation-order">Policy Evaluation Order</h2>
+        <p>
+          Permission decisions follow a strict, deterministic pipeline. Each step either produces a final decision or defers to the next:
+        </p>
+        <ol>
+          <li><strong>Suspension check</strong> &mdash; Is idle/turn/all suspension active? &rarr; ALLOW</li>
+          <li><strong>Sanitization</strong> &mdash; Shell injection, dangerous commands, path scope violations? &rarr; DENY</li>
+          <li><strong>Session blacklist</strong> &mdash; Tool in runtime blacklist? &rarr; DENY</li>
+          <li><strong>Static blacklist</strong> &mdash; Tool matches <code>permissions.json</code> blacklist pattern? &rarr; DENY</li>
+          <li><strong>Session whitelist</strong> &mdash; Tool in runtime whitelist? &rarr; ALLOW</li>
+          <li><strong>Static whitelist</strong> &mdash; Tool matches <code>permissions.json</code> whitelist pattern? &rarr; ALLOW</li>
+          <li><strong>Default policy</strong> &mdash; <code>"allow"</code>, <code>"deny"</code>, or <code>"ask"</code></li>
+        </ol>
+        <p>
+          <strong>Key principle:</strong> Blacklist always wins. If a tool appears in both the blacklist and whitelist, it is denied. Session rules override static configuration.
+        </p>
+
+        <h2 id="auto-approved">Auto-Approved Tools</h2>
+        <p>
+          Certain tools bypass the permission system entirely because they are inherently safe:
+        </p>
+        <ul>
+          <li><strong>Read-only operations</strong> &mdash; <code>readFile</code>, <code>web_search</code>, <code>get_environment</code></li>
+          <li><strong>Pure computations</strong> &mdash; <code>calculate</code></li>
+          <li><strong>User-initiated actions</strong> &mdash; Authentication commands, <code>answerClarification</code></li>
+          <li><strong>Reversible operations</strong> &mdash; <code>undoFileChange</code></li>
+          <li><strong>Meta-commands</strong> &mdash; <code>permissions</code> (managing the permission system itself)</li>
+        </ul>
+        <p>
+          Plugins declare their auto-approved tools via <code>get_auto_approved_tools()</code>. These are collected by the registry and added to the permission plugin's whitelist during initialization.
+        </p>
+
+        <h2 id="channels">Permission Channels</h2>
+        <p>
+          The permission system is channel-agnostic. Different deployment scenarios use different channels to handle user interaction:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Channel</th><th>Use Case</th><th>Communication</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>ConsoleChannel</strong></td><td>Interactive terminal</td><td>stdin/stdout</td></tr>
+            <tr><td><strong>QueueChannel</strong></td><td>TUI applications</td><td>Queue-based I/O</td></tr>
+            <tr><td><strong>WebhookChannel</strong></td><td>External approval systems</td><td>HTTP POST/response</td></tr>
+            <tr><td><strong>FileChannel</strong></td><td>Separate approval processes</td><td>File-based</td></tr>
+            <tr><td><strong>ParentBridgedChannel</strong></td><td>Subagent mode</td><td>Parent agent forwarding (thread-isolated)</td></tr>
+          </tbody>
+        </table>
+        <p>
+          The <strong>WebhookChannel</strong> enables enterprise approval workflows: JAATO posts a permission request to an external system, which performs review (possibly by a human or policy engine) and returns a decision.
+        </p>
+
+        <h2 id="thread-safety">Thread Safety &amp; Parallel Execution</h2>
+        <p>
+          When multiple tools execute in parallel and require permission, a channel lock ensures serialized prompts. Only one permission prompt is shown to the user at a time. Other threads wait for the lock, and upon acquiring it, re-check suspension state (another thread may have set "all" approval in the meantime).
+        </p>
+        <p>
+          Each tool call carries a unique <code>call_id</code> for matching permission requests to responses, which is essential when multiple permissions are pending simultaneously.
+        </p>
+
+        <h2 id="sanitization">Sanitization (Security Layer)</h2>
+        <p>
+          An optional security layer runs before whitelist/blacklist evaluation. It checks for:
+        </p>
+        <ul>
+          <li><strong>Shell injection</strong> &mdash; Prevents command injection via <code>; rm -rf /</code>, <code>$(malicious)</code>, backtick execution</li>
+          <li><strong>Dangerous commands</strong> &mdash; Blocks destructive operations like <code>sudo</code>, <code>rm</code>, <code>chmod 777</code>, <code>kill -9</code></li>
+          <li><strong>Path scope</strong> &mdash; Restricts file access to allowed directories, preventing <code>../../etc/passwd</code> traversal</li>
+        </ul>
+        <p>
+          Sanitization violations result in immediate denial, regardless of whitelist or approval status. This provides defense-in-depth against prompt injection attacks that might trick the model into executing harmful operations.
+        </p>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
