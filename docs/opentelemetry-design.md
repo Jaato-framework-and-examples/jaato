@@ -920,6 +920,9 @@ pip install -r requirements.txt -r requirements-telemetry.txt
 
 # Or via extras
 pip install -e ".[telemetry]"
+
+# All optional dependencies (dev, ast, kaggle, vision, etc.)
+pip install -e ".[all]"
 ```
 
 ## 12. Backend-Specific Notes

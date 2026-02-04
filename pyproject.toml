@@ -63,6 +63,9 @@ kaggle = [
 vision = [
     "cairosvg>=2.7.0",  # SVG to PNG conversion for screenshots
 ]
+all = [
+    "jaato[dev,ast,kaggle,vision]",
+]
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group

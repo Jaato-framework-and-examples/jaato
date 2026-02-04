@@ -447,7 +447,11 @@ pip install git+https://github.com/apanoia/jaato.git@abc1234
 # For development/editable install
 git clone https://github.com/apanoia/jaato.git
 cd jaato
-pip install -e .</code></pre>
+pip install -e .
+
+# With optional extras
+pip install -e ".[vision]"    # PNG screenshots (requires libcairo2-dev on Linux)
+pip install -e ".[all]"       # all optional dependencies</code></pre>
         </div>
         <p style="margin-top: 16px;">
           Once released to PyPI, you'll be able to install with: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">pip install jaato</code>
@@ -507,6 +511,9 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Or install via pyproject.toml with all extras
+pip install -e ".[all]"
 
 # Run tests to verify setup
 pytest</code></pre>

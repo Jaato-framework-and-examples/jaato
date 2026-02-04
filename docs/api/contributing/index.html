@@ -129,6 +129,9 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
+# Or install via pyproject.toml with all extras
+pip install -e ".[all]"
+
 # Run tests
 pytest
 
@@ -153,6 +156,9 @@ pytest
           <p>
             The project uses <code>pytest</code> for testing and includes several
             development dependencies defined in <code>requirements.txt</code>.
+            Optional extras (dev tools, vision/PNG support, AST search) are defined
+            in <code>pyproject.toml</code> and can be installed with
+            <code>pip install -e ".[all]"</code>.
           </p>
 
           <h3>Verify Your Setup</h3>
