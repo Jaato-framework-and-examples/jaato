@@ -71,6 +71,7 @@ from .events import (
     ToolOutputEvent,
     PermissionInputModeEvent,
     PermissionResolvedEvent,
+    PermissionStatusEvent,
     ClarificationInputModeEvent,
     ClarificationResolvedEvent,
     ReferenceSelectionRequestedEvent,
@@ -1493,10 +1494,23 @@ class JaatoServer:
                 method=method,
             ))
 
+            # Emit updated permission status (a/t/i responses change the policy)
+            server.emit_permission_status()
+
         self.permission_plugin.set_permission_hooks(
             on_requested=on_permission_requested,
             on_resolved=on_permission_resolved,
         )
+
+    def emit_permission_status(self) -> None:
+        """Emit current permission status for client toolbar updates."""
+        if not self.permission_plugin:
+            return
+        status = self.permission_plugin.get_permission_status()
+        self.emit(PermissionStatusEvent(
+            effective_default=status.get("effective_default", "ask"),
+            suspension_scope=status.get("suspension_scope"),
+        ))
 
     def _setup_clarification_hooks(self) -> None:
         """Set up clarification lifecycle hooks."""
@@ -2141,6 +2155,10 @@ class JaatoServer:
                         message=f"Model changed to: {self._model_name}",
                         style="info",
                     ))
+
+            # Handle permission status change
+            if command.lower() == "permissions":
+                self.emit_permission_status()
 
             # Handle auth completion - if auth was pending and user ran the matching auth command
             if self._auth_pending and self._auth_plugin_command and command.lower() == self._auth_plugin_command.lower():

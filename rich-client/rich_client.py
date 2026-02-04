@@ -3330,6 +3330,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         AgentCompletedEvent,
         PermissionInputModeEvent,
         PermissionResolvedEvent,
+        PermissionStatusEvent,
         ClarificationInputModeEvent,
         ClarificationResolvedEvent,
         ReferenceSelectionRequestedEvent,
@@ -3771,6 +3772,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     if buffer:
                         buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
                         display.refresh()
+
+            elif isinstance(event, PermissionStatusEvent):
+                # Update toolbar with current permission status from server
+                display.set_permission_status(
+                    effective_default=event.effective_default,
+                    suspension_scope=event.suspension_scope,
+                )
 
             elif isinstance(event, ClarificationInputModeEvent):
                 # New unified flow: content already emitted via AgentOutputEvent,

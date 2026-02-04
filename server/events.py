@@ -44,6 +44,7 @@ class EventType(str, Enum):
     PERMISSION_INPUT_MODE = "permission.input_mode"  # Signal client to enter permission input mode
     PERMISSION_RESOLVED = "permission.resolved"
     PERMISSION_RESPONSE = "permission.response"  # Client -> Server
+    PERMISSION_STATUS = "permission.status"  # Server -> Client (status bar update)
 
     # Clarification flow (Server <-> Client)
     CLARIFICATION_REQUESTED = "clarification.requested"
@@ -290,6 +291,18 @@ class PermissionResolvedEvent(Event):
     tool_name: str = ""
     granted: bool = False
     method: str = ""  # "user", "whitelist", "blacklist", "default"
+
+
+@dataclass
+class PermissionStatusEvent(Event):
+    """Permission status update for client toolbar display.
+
+    Emitted after permission commands (default/suspend/resume) and
+    permission resolutions that change the effective policy.
+    """
+    type: EventType = field(default=EventType.PERMISSION_STATUS)
+    effective_default: str = "ask"  # "allow", "deny", or "ask"
+    suspension_scope: Optional[str] = None  # "turn", "idle", "session", or None
 
 
 @dataclass
@@ -906,6 +919,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
     EventType.PERMISSION_INPUT_MODE.value: PermissionInputModeEvent,
     EventType.PERMISSION_RESOLVED.value: PermissionResolvedEvent,
+    EventType.PERMISSION_STATUS.value: PermissionStatusEvent,
     EventType.CLARIFICATION_REQUESTED.value: ClarificationRequestedEvent,
     EventType.CLARIFICATION_INPUT_MODE.value: ClarificationInputModeEvent,
     EventType.CLARIFICATION_QUESTION.value: ClarificationQuestionEvent,
