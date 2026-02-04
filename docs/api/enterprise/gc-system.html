@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GC System - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero { margin-bottom: 48px; }
+    .detail-hero .lead { font-size: 18px; color: var(--color-text-secondary); line-height: 1.6; max-width: 720px; }
+    .infography-full { margin: 32px 0; border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; }
+    .infography-full img { width: 100%; display: block; background: var(--color-bg-secondary); }
+    .infography-full .infography-caption { padding: 12px 20px; font-size: 13px; color: var(--color-text-secondary); border-top: 1px solid var(--color-border); text-align: center; }
+    .detail-content h2 { margin-top: 48px; }
+    .detail-content h3 { margin-top: 32px; }
+    .detail-content table { width: 100%; border-collapse: collapse; margin: 16px 0 24px 0; }
+    .detail-content th, .detail-content td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--color-border); font-size: 14px; }
+    .detail-content th { font-weight: 600; color: var(--color-text); }
+    .detail-content td { color: var(--color-text-secondary); }
+    .detail-content code { font-size: 13px; padding: 2px 6px; background: var(--color-bg-secondary); border-radius: 4px; }
+    .detail-content pre { background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px 20px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 16px 0 24px 0; }
+    .detail-content pre code { background: none; padding: 0; }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: #0ea5e9; text-decoration: none; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--color-border); }
+    .back-link:hover { color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html">Model Harness</a></li>
+          <li><a href="instruction-sources.html">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html" class="active">GC System</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>Context Garbage Collection System</h1>
+        <p class="lead">
+          JAATO implements a pluggable context garbage collection system that prevents context window overflow during long-running agentic sessions. Four strategy plugins share a common <code>GCPlugin</code> protocol. The most advanced strategy, <code>gc_budget</code>, uses the <code>InstructionBudget</code> for policy-aware removal across a five-tier priority system and supports continuous collection mode for predictable context trimming.
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/jaato_gc_system.png" target="_blank">
+          <img src="../assets/images/enterprise/jaato_gc_system.png" alt="GC System Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="four-strategies">Four GC Strategies</h2>
+        <table>
+          <thead>
+            <tr><th>Strategy</th><th>Approach</th><th>Content Discrimination</th><th>Best For</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>gc_truncate</strong></td><td>Remove oldest turns entirely</td><td>None &mdash; all turns equal</td><td>Simple sessions, minimal overhead</td></tr>
+            <tr><td><strong>gc_summarize</strong></td><td>Compress old turns into summary</td><td>None &mdash; all turns equal</td><td>Long sessions needing context continuity</td></tr>
+            <tr><td><strong>gc_hybrid</strong></td><td>Generational: truncate ancient, summarize middle, preserve recent</td><td>Age-based tiers</td><td>Balanced approach</td></tr>
+            <tr><td><strong>gc_budget</strong></td><td>Policy-aware: remove by GC policy tier</td><td>Policy-based tiers (5 levels)</td><td>Enterprise, long-running agents</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="gc-policies">GC Policy Tiers</h2>
+        <p>
+          The <code>InstructionBudget</code> assigns a <code>GCPolicy</code> to every tracked instruction source. These policies determine removal priority during budget-aware garbage collection:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Policy</th><th>Indicator</th><th>Removal Behavior</th><th>Examples</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>LOCKED</strong></td><td>&#x1F512;</td><td>Never removed</td><td>System instructions, user's original request, core tool schemas</td></tr>
+            <tr><td><strong>PRESERVABLE</strong></td><td>&#x25D1;</td><td>Only under extreme pressure</td><td>Clarification Q&amp;A, turn summaries, GC summaries</td></tr>
+            <tr><td><strong>PARTIAL</strong></td><td>&#x25D0;</td><td>Container with mixed children</td><td>CONVERSATION source, PLUGIN source</td></tr>
+            <tr><td><strong>EPHEMERAL</strong></td><td>&#x25CB;</td><td>First candidates for removal</td><td>Enrichment data, discoverable tool schemas, verbose output</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="five-phase">Five-Phase Removal (gc_budget)</h2>
+        <p>
+          The <code>gc_budget</code> plugin executes removal in strict priority order, stopping as soon as enough tokens are freed:
+        </p>
+        <ol>
+          <li><strong>Phase 1a: ENRICHMENT</strong> &mdash; Bulk clear entire enrichment source (regenerated every turn)</li>
+          <li><strong>Phase 1b: EPHEMERAL</strong> &mdash; Remove other ephemeral entries, oldest first</li>
+          <li><strong>Phase 2: PARTIAL turns</strong> &mdash; Remove old conversation turns, respecting <code>preserve_recent_turns</code> and pinned indices</li>
+          <li><strong>Phase 3: PRESERVABLE</strong> &mdash; Only if usage exceeds <code>pressure_percent</code>; never in continuous mode</li>
+          <li><strong>LOCKED</strong> &mdash; Never removed under any circumstances</li>
+        </ol>
+
+        <h2 id="continuous-mode">Continuous vs Threshold Mode</h2>
+        <table>
+          <thead>
+            <tr><th>Aspect</th><th>Threshold Mode (default)</th><th>Continuous Mode</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Trigger</strong></td><td>Usage &ge; <code>threshold_percent</code> (80%)</td><td>Usage &gt; <code>target_percent</code> (60%) after every turn</td></tr>
+            <tr><td><strong>Enable</strong></td><td><code>pressure_percent</code> &gt; 0</td><td><code>pressure_percent</code> = 0 or None</td></tr>
+            <tr><td><strong>Collection size</strong></td><td>Large, infrequent</td><td>Small, every turn</td></tr>
+            <tr><td><strong>PRESERVABLE</strong></td><td>Touched under extreme pressure</td><td>Never touched</td></tr>
+            <tr><td><strong>Pattern</strong></td><td>Sawtooth (80% &rarr; 60% &rarr; 80%)</td><td>Gentle ripple around target</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="session-integration">Session Integration</h2>
+        <p>
+          GC integrates at three points during each turn: a <strong>pre-send check</strong> before the message is sent, <strong>streaming threshold monitoring</strong> during token generation, and <strong>post-turn collection</strong> if the threshold was crossed. After collection, the session synchronizes the <code>InstructionBudget</code> using the <code>GCRemovalItem</code> list returned by the plugin, then emits a budget update event for the UI.
+        </p>
+
+        <h2 id="coherence">Coherence Preservation</h2>
+        <ul>
+          <li><strong>preserve_recent_turns</strong> &mdash; Last N turns are never removed (default: 5)</li>
+          <li><strong>pinned_turn_indices</strong> &mdash; Specific turns that are never removed</li>
+          <li><strong>LOCKED policy</strong> &mdash; User's original request and system instructions are never collected</li>
+          <li><strong>Summary chain</strong> &mdash; GC summaries are marked PRESERVABLE and bridge removed history to current context</li>
+          <li><strong>Turn boundaries</strong> &mdash; GC operates on complete turns, never splitting a turn partially</li>
+        </ul>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

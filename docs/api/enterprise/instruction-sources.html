@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instruction Sources - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero {
+      margin-bottom: 48px;
+    }
+    .detail-hero .lead {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.6;
+      max-width: 720px;
+    }
+    .infography-full {
+      margin: 32px 0;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .infography-full img {
+      width: 100%;
+      display: block;
+      background: var(--color-bg-secondary);
+    }
+    .infography-full .infography-caption {
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--color-text-secondary);
+      border-top: 1px solid var(--color-border);
+      text-align: center;
+    }
+    .detail-content h2 {
+      margin-top: 48px;
+    }
+    .detail-content h3 {
+      margin-top: 32px;
+    }
+    .detail-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content th,
+    .detail-content td {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      font-size: 14px;
+    }
+    .detail-content th {
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .detail-content td {
+      color: var(--color-text-secondary);
+    }
+    .detail-content code {
+      font-size: 13px;
+      padding: 2px 6px;
+      background: var(--color-bg-secondary);
+      border-radius: 4px;
+    }
+    .detail-content pre {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content pre code {
+      background: none;
+      padding: 0;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #0ea5e9;
+      text-decoration: none;
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--color-border);
+    }
+    .back-link:hover {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html">Model Harness</a></li>
+          <li><a href="instruction-sources.html" class="active">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html">GC System</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>Instruction Sources &amp; Priority Hierarchy</h1>
+        <p class="lead">
+          JAATO assembles model instructions from multiple sources in a carefully layered architecture. Instructions are combined at runtime in a specific priority order, while runtime messages follow a separate priority queue for agent communication.
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/jaato_instruction_sources.png" target="_blank">
+          <img src="../assets/images/enterprise/jaato_instruction_sources.png" alt="Instruction Sources Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="assembly-order">System Instruction Assembly Order</h2>
+        <p>
+          When a session is configured, system instructions are assembled in a fixed order from first to last in the final prompt. Each layer adds context that shapes the model's behavior:
+        </p>
+
+        <table>
+          <thead>
+            <tr><th>Layer</th><th>Source</th><th>Est. Tokens</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1. Base Instructions</strong></td>
+              <td><code>.jaato/system_instructions.md</code></td>
+              <td>0&ndash;500+</td>
+              <td>Behavioral rules that apply to all agents (transparency, operational constraints)</td>
+            </tr>
+            <tr>
+              <td><strong>2. Session Instructions</strong></td>
+              <td><code>session.configure()</code> parameter</td>
+              <td>0&ndash;1,000+</td>
+              <td>Task-specific guidance provided programmatically</td>
+            </tr>
+            <tr>
+              <td><strong>3. Plugin Instructions</strong></td>
+              <td>Each plugin's <code>get_system_instructions()</code></td>
+              <td>200&ndash;3,000+</td>
+              <td>Tool-specific usage guides (how to use readFile, run, etc.)</td>
+            </tr>
+            <tr>
+              <td><strong>4. Permission Instructions</strong></td>
+              <td>Permission plugin</td>
+              <td>~100&ndash;200</td>
+              <td>Permission requirements and constraints</td>
+            </tr>
+            <tr>
+              <td><strong>5. Task Completion</strong></td>
+              <td>Framework constant (always)</td>
+              <td>~30</td>
+              <td>Encourages agentic continuation without unnecessary pauses</td>
+            </tr>
+            <tr>
+              <td><strong>6. Parallel Tool Guidance</strong></td>
+              <td>Conditional on <code>JAATO_PARALLEL_TOOLS=true</code></td>
+              <td>~60</td>
+              <td>Instructs model to batch independent tool calls</td>
+            </tr>
+            <tr>
+              <td><strong>7. Sandbox Guidance</strong></td>
+              <td>Conditional on workspace root</td>
+              <td>~70</td>
+              <td>File operation restrictions in sandboxed environments</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="token-budget">Token Budget Overview</h2>
+        <p>
+          The total instruction overhead depends on which plugins are enabled:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Configuration</th><th>Estimated Tokens</th><th>Use Case</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Minimal</strong></td><td>~500&ndash;800</td><td>Single simple plugin (e.g., web_search only)</td></tr>
+            <tr><td><strong>Typical</strong></td><td>~2,000&ndash;2,500</td><td>Standard setup with 4&ndash;5 common plugins</td></tr>
+            <tr><td><strong>Full</strong></td><td>~3,500&ndash;4,500</td><td>All plugins + sandbox + extensive base instructions</td></tr>
+          </tbody>
+        </table>
+        <p>
+          With <code>JAATO_DEFERRED_TOOLS=true</code> (the default), initial context is smaller because only core tools are loaded upfront. The model discovers other tools via introspection as needed.
+        </p>
+
+        <h3>Plugin Token Breakdown</h3>
+        <table>
+          <thead>
+            <tr><th>Plugin</th><th>Tokens</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>cli</code></td><td>~800</td><td>Shell access, examples, backgrounding</td></tr>
+            <tr><td><code>file_edit</code></td><td>~700</td><td>CRUD operations, multiFileEdit, backups</td></tr>
+            <tr><td><code>subagent</code></td><td>~875</td><td>Complex orchestration, event handling</td></tr>
+            <tr><td><code>filesystem_query</code></td><td>~300</td><td>glob_files, grep_content</td></tr>
+            <tr><td><code>web_search</code></td><td>~225</td><td>Internet search</td></tr>
+            <tr><td><code>web_fetch</code></td><td>~200</td><td>URL fetching</td></tr>
+            <tr><td><code>mcp</code></td><td>~400</td><td>Model Context Protocol servers</td></tr>
+            <tr><td><code>memory</code></td><td>~250</td><td>Session memory management</td></tr>
+            <tr><td><code>references</code></td><td>~150</td><td>@file reference handling</td></tr>
+            <tr><td><code>permission</code></td><td>~100</td><td>Permission system rules</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="enrichment-pipeline">Prompt Enrichment Pipeline</h2>
+        <p>
+          User prompts are processed through an enrichment pipeline before being sent to the model. Plugins subscribe to this pipeline and are called in priority order (lower numbers run first):
+        </p>
+        <pre><code>User Prompt &rarr; references(20) &rarr; template(40) &rarr; multimodal(60) &rarr; memory(80) &rarr; session(90) &rarr; Enriched Prompt</code></pre>
+        <p>
+          Each plugin receives the output of the previous plugin, enabling chained transformations. For example, the <code>references</code> plugin injects <code>@file</code> content, then the <code>template</code> plugin extracts embedded templates from that injected content.
+        </p>
+
+        <table>
+          <thead>
+            <tr><th>Priority</th><th>Plugin</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>20</td><td><code>references</code></td><td>Injects MODULE.md and other @reference content</td></tr>
+            <tr><td>40</td><td><code>template</code></td><td>Extracts embedded templates from injected content</td></tr>
+            <tr><td>60</td><td><code>multimodal</code></td><td>Handles @image references</td></tr>
+            <tr><td>80</td><td><code>memory</code></td><td>Adds memory hints based on prompt content</td></tr>
+            <tr><td>90</td><td><code>session</code></td><td>Adds session description hints</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="runtime-messages">Runtime Message Priority</h2>
+        <p>
+          During agent execution, messages between agents are queued with priority-based processing. High-priority messages (from <code>PARENT</code>, <code>USER</code>, <code>SYSTEM</code>) can interrupt the model mid-turn, while low-priority messages (from <code>CHILD</code> agents) are queued and processed when the agent becomes idle.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Source Type</th><th>Priority</th><th>Processing Mode</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>PARENT</code></td><td>HIGH</td><td>Mid-turn interrupt</td></tr>
+            <tr><td><code>USER</code></td><td>HIGH</td><td>Mid-turn interrupt</td></tr>
+            <tr><td><code>SYSTEM</code></td><td>HIGH</td><td>Mid-turn interrupt</td></tr>
+            <tr><td><code>CHILD</code></td><td>LOW</td><td>Process when idle (FIFO within group)</td></tr>
+          </tbody>
+        </table>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

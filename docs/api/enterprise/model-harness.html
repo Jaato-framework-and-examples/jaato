@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Model Harness - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero {
+      margin-bottom: 48px;
+    }
+    .detail-hero .lead {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.6;
+      max-width: 720px;
+    }
+    .infography-full {
+      margin: 32px 0;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .infography-full img {
+      width: 100%;
+      display: block;
+      background: var(--color-bg-secondary);
+    }
+    .infography-full .infography-caption {
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--color-text-secondary);
+      border-top: 1px solid var(--color-border);
+      text-align: center;
+    }
+    .detail-content h2 {
+      margin-top: 48px;
+    }
+    .detail-content h3 {
+      margin-top: 32px;
+    }
+    .detail-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content th,
+    .detail-content td {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      font-size: 14px;
+    }
+    .detail-content th {
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .detail-content td {
+      color: var(--color-text-secondary);
+    }
+    .detail-content code {
+      font-size: 13px;
+      padding: 2px 6px;
+      background: var(--color-bg-secondary);
+      border-radius: 4px;
+    }
+    .detail-content pre {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content pre code {
+      background: none;
+      padding: 0;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #0ea5e9;
+      text-decoration: none;
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--color-border);
+    }
+    .back-link:hover {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html" class="active">Model Harness</a></li>
+          <li><a href="instruction-sources.html">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html">GC System</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>Model Harness Architecture</h1>
+        <p class="lead">
+          A model harness is the complete runtime environment that wraps an AI model, transforming raw language model capabilities into a controlled, capable, and safe agentic system. JAATO's harness comprises three interconnected layers: Instructions, Tools, and Permissions.
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/jaato_model_harness.png" target="_blank">
+          <img src="../assets/images/enterprise/jaato_model_harness.png" alt="Model Harness Architecture Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="what-is-a-harness">What is a Model Harness?</h2>
+        <p>
+          A model harness is the infrastructure that <strong>configures</strong> the model with context, instructions, and capabilities; <strong>mediates</strong> all interactions between the model and the external world; <strong>enforces</strong> safety boundaries and operational constraints; and <strong>tracks</strong> resource usage, actions, and outcomes.
+        </p>
+        <p>
+          Without a harness, a model can only generate text. With it, the model gains structured tool use, permission-gated actions, project-aware context, auditable execution, and configurable boundaries.
+        </p>
+
+        <table>
+          <thead>
+            <tr><th>Challenge</th><th>Without Harness</th><th>With Harness</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Capability</strong></td><td>Text generation only</td><td>Execute code, edit files, search web</td></tr>
+            <tr><td><strong>Context</strong></td><td>No project knowledge</td><td>Understands codebase, conventions, goals</td></tr>
+            <tr><td><strong>Safety</strong></td><td>No control over actions</td><td>Permissions gate sensitive operations</td></tr>
+            <tr><td><strong>Consistency</strong></td><td>Unpredictable behavior</td><td>Instructions enforce consistent behavior</td></tr>
+            <tr><td><strong>Accountability</strong></td><td>No audit trail</td><td>All actions logged with metadata</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="three-layers">The Three Harness Layers</h2>
+        <p>
+          JAATO's harness consists of three complementary layers, each serving a distinct purpose:
+        </p>
+
+        <h3>Layer 1: Instructions (The Mind)</h3>
+        <p>
+          Instructions shape the model's understanding, behavior, and decision-making. They define <em>what the model knows</em>.
+        </p>
+        <ul>
+          <li><strong>Base system instructions</strong> &mdash; Behavioral rules from <code>.jaato/system_instructions.md</code></li>
+          <li><strong>Session-specific instructions</strong> &mdash; Programmatic customization per task</li>
+          <li><strong>Plugin instructions</strong> &mdash; Tool usage guides contributed by each plugin</li>
+          <li><strong>Framework constants</strong> &mdash; Task completion guidance, parallel tool hints</li>
+          <li><strong>Prompt enrichment</strong> &mdash; Dynamic injection of references, templates, and memory</li>
+        </ul>
+
+        <h3>Layer 2: Tools (The Hands)</h3>
+        <p>
+          Tools give the model the ability to affect the world beyond text generation. They define <em>what the model can do</em>.
+        </p>
+        <ul>
+          <li><strong>Core tools</strong> &mdash; Always available (~14 tools, ~1,200 tokens): introspection, file reading, shell access, TODO system</li>
+          <li><strong>Discoverable tools</strong> &mdash; Loaded on-demand via introspection (~85+ tools): file editing, web search, subagents, and more</li>
+          <li><strong>MCP server tools</strong> &mdash; External integrations via the Model Context Protocol (dynamic count)</li>
+        </ul>
+
+        <h3>Layer 3: Permissions (The Guardrails)</h3>
+        <p>
+          Permissions ensure the model's capabilities are exercised safely and with appropriate oversight. They define <em>what the model is allowed to do</em>.
+        </p>
+        <ul>
+          <li><strong>Auto-approved tools</strong> &mdash; Safe, read-only operations pass without prompting</li>
+          <li><strong>Policy evaluation</strong> &mdash; Deterministic pipeline: Sanitization &rarr; Blacklist &rarr; Whitelist &rarr; Default</li>
+          <li><strong>User approval channels</strong> &mdash; Interactive console, webhook, or file-based approval</li>
+          <li><strong>Suspension scopes</strong> &mdash; Turn, idle, and session-wide approval scopes</li>
+        </ul>
+
+        <h2 id="layer-interactions">Layer Interactions</h2>
+        <p>
+          The layers are not independent &mdash; they form a coordinated system:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Interaction</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Instructions &rarr; Tools</td><td>Plugin instructions teach the model how to use each tool</td></tr>
+            <tr><td>Instructions &rarr; Permissions</td><td>Base instructions can mandate permission-seeking behavior</td></tr>
+            <tr><td>Tools &rarr; Permissions</td><td>Each tool call is gated by the permission system</td></tr>
+            <tr><td>Permissions &rarr; Instructions</td><td>Permission decisions inject metadata into tool results</td></tr>
+            <tr><td>Tools &rarr; Instructions</td><td>Tool schemas consume part of the model's context budget</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="request-lifecycle">Request Lifecycle</h2>
+        <p>
+          A typical request flows through all three layers. For example, when a user asks "Add logging to the authentication module":
+        </p>
+        <ol>
+          <li><strong>Prompt enrichment</strong> (Instructions layer) &mdash; Injects references and memory hints</li>
+          <li><strong>Model generation</strong> &mdash; Guided by system instructions, decides to read auth files first</li>
+          <li><strong>Tool call: <code>readFile</code></strong> (Tools layer) &mdash; File reading capability</li>
+          <li><strong>Permission check</strong> (Permissions layer) &mdash; <code>readFile</code> is auto-approved, no user prompt</li>
+          <li><strong>Model continues</strong> &mdash; Analyzes code, decides to update the file</li>
+          <li><strong>Tool call: <code>updateFile</code></strong> (Tools layer) &mdash; File modification capability</li>
+          <li><strong>Permission check</strong> (Permissions layer) &mdash; <code>updateFile</code> requires explicit user approval; diff is displayed</li>
+          <li><strong>User approves</strong> &mdash; File is updated, permission metadata recorded</li>
+          <li><strong>Model responds</strong> &mdash; Confirms the change to the user</li>
+        </ol>
+
+        <h2 id="safety-capability">Safety vs Capability Trade-off</h2>
+        <p>
+          The harness operates on a spectrum from maximum safety to maximum autonomy. JAATO's default is a balanced position:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Dimension</th><th>Conservative</th><th>Balanced (Default)</th><th>Permissive</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Tools</strong></td><td>Core only</td><td>Core + discoverable on-demand</td><td>All loaded upfront</td></tr>
+            <tr><td><strong>Permissions</strong></td><td>Ask for everything</td><td>Auto-read, ask-write</td><td>Auto-all</td></tr>
+            <tr><td><strong>Instructions</strong></td><td>Extensive guardrails</td><td>Standard guidance</td><td>Minimal</td></tr>
+            <tr><td><strong>Scope</strong></td><td>Single approval</td><td>Turn/idle scopes</td><td>Session-wide</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="harness-profiles">Harness Profiles</h2>
+        <p>
+          Three common profiles illustrate how the layers can be tuned:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Profile</th><th>Instructions</th><th>Tools</th><th>Permissions</th><th>Use Case</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Supervised</strong></td>
+              <td>Detailed behavioral constraints</td>
+              <td>Core only, discoverable disabled</td>
+              <td>Ask for every write</td>
+              <td>Sensitive production systems, learning scenarios</td>
+            </tr>
+            <tr>
+              <td><strong>Collaborative</strong></td>
+              <td>Standard guidance</td>
+              <td>Core + discoverable on-demand</td>
+              <td>Auto-read, ask-write with turn/idle scopes</td>
+              <td>General development, code review, refactoring</td>
+            </tr>
+            <tr>
+              <td><strong>Autonomous</strong></td>
+              <td>Minimal, goal-focused</td>
+              <td>All tools loaded upfront</td>
+              <td>Suspended for session</td>
+              <td>Trusted automation, batch processing, CI/CD</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="token-budget">Token Budget</h2>
+        <p>
+          The harness consumes context tokens. In a typical collaborative session, the overhead is approximately 3,700 tokens &mdash; about 3% of a 128K context window or 12% of a 32K window. Key optimization levers:
+        </p>
+        <ul>
+          <li><code>JAATO_DEFERRED_TOOLS=true</code> (default) &mdash; saves ~7,000 tokens by loading tool schemas on demand</li>
+          <li>Minimal base instructions &mdash; saves ~300 tokens</li>
+          <li>Fewer plugins &mdash; saves ~200-800 per plugin</li>
+          <li>GC (garbage collection) &mdash; reclaims conversation tokens when context is full</li>
+        </ul>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
