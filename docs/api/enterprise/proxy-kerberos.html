@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proxy &amp; Kerberos - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero { margin-bottom: 48px; }
+    .detail-hero .lead { font-size: 18px; color: var(--color-text-secondary); line-height: 1.6; max-width: 720px; }
+    .infography-full { margin: 32px 0; border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; }
+    .infography-full img { width: 100%; display: block; background: var(--color-bg-secondary); }
+    .infography-full .infography-caption { padding: 12px 20px; font-size: 13px; color: var(--color-text-secondary); border-top: 1px solid var(--color-border); text-align: center; }
+    .detail-content h2 { margin-top: 48px; }
+    .detail-content h3 { margin-top: 32px; }
+    .detail-content table { width: 100%; border-collapse: collapse; margin: 16px 0 24px 0; }
+    .detail-content th, .detail-content td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--color-border); font-size: 14px; }
+    .detail-content th { font-weight: 600; color: var(--color-text); }
+    .detail-content td { color: var(--color-text-secondary); }
+    .detail-content code { font-size: 13px; padding: 2px 6px; background: var(--color-bg-secondary); border-radius: 4px; }
+    .detail-content pre { background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: 8px; padding: 16px 20px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 16px 0 24px 0; }
+    .detail-content pre code { background: none; padding: 0; }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: #0ea5e9; text-decoration: none; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--color-border); }
+    .back-link:hover { color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html">Model Harness</a></li>
+          <li><a href="instruction-sources.html">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html" class="active">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html">GC System</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>Proxy &amp; Kerberos Authentication</h1>
+        <p class="lead">
+          JAATO provides unified proxy support and Kerberos/SPNEGO authentication for enterprise environments where outbound traffic must traverse HTTP proxies. The <code>shared/http/</code> module abstracts proxy configuration across three HTTP libraries (urllib, requests, httpx) and provides exact host matching via <code>JAATO_NO_PROXY</code> and transparent Kerberos token generation via <code>pyspnego</code>.
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/jaato_proxy_kerberos.png" target="_blank">
+          <img src="../assets/images/enterprise/jaato_proxy_kerberos.png" alt="Proxy and Kerberos Authentication Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="configuration">Proxy Configuration</h2>
+        <table>
+          <thead>
+            <tr><th>Variable</th><th>Standard</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>HTTPS_PROXY</code></td><td>Yes</td><td>Proxy URL for HTTPS requests</td></tr>
+            <tr><td><code>HTTP_PROXY</code></td><td>Yes</td><td>Proxy URL for HTTP requests</td></tr>
+            <tr><td><code>NO_PROXY</code></td><td>Yes</td><td>Hosts to bypass proxy (suffix matching)</td></tr>
+            <tr><td><code>JAATO_NO_PROXY</code></td><td>JAATO-specific</td><td>Hosts to bypass proxy (exact matching)</td></tr>
+            <tr><td><code>JAATO_KERBEROS_PROXY</code></td><td>JAATO-specific</td><td>Enable Kerberos/SPNEGO proxy auth</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="exact-matching">Exact Host Matching</h2>
+        <p>
+          Standard <code>NO_PROXY</code> uses suffix matching, which can produce unintended bypasses (e.g., <code>.corp.com</code> matches <code>malicious-corp.com</code>). <code>JAATO_NO_PROXY</code> uses exact matching: only explicitly listed hostnames bypass the proxy. Both can be used simultaneously &mdash; <code>JAATO_NO_PROXY</code> is checked first.
+        </p>
+
+        <h2 id="spnego-flow">SPNEGO Authentication Flow</h2>
+        <p>
+          When <code>JAATO_KERBEROS_PROXY=true</code>, the module generates SPNEGO tokens using the system's Kerberos credentials via <code>pyspnego</code>. A <code>PreAuthProxyHandler</code> attaches the token proactively to avoid the 407 round-trip, while a <code>KerberosProxyHandler</code> handles 407 responses reactively if the pre-auth token is stale.
+        </p>
+
+        <h2 id="multi-library">Multi-Library Adapters</h2>
+        <p>
+          The <code>shared/http/</code> module provides factory functions for consistent proxy behavior across all three HTTP libraries used in the codebase:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Library</th><th>Factory Function</th><th>Used By</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>urllib</td><td><code>get_url_opener()</code></td><td>OAuth flows, device code polling</td></tr>
+            <tr><td>requests</td><td><code>get_requests_session()</code></td><td>GitHub Copilot client, web fetch</td></tr>
+            <tr><td>httpx</td><td><code>get_httpx_client()</code> / <code>get_httpx_async_client()</code></td><td>Anthropic, Google Antigravity, GitHub OAuth</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="platform-support">Platform Support</h2>
+        <table>
+          <thead>
+            <tr><th>Platform</th><th>Kerberos Backend</th><th>Credential Source</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Windows</td><td>SSPI (native)</td><td>Domain login (automatic)</td></tr>
+            <tr><td>macOS</td><td>GSS.framework</td><td><code>kinit</code> or Kerberos ticket cache</td></tr>
+            <tr><td>Linux</td><td>MIT Kerberos</td><td><code>kinit</code> (must have valid ticket)</td></tr>
+          </tbody>
+        </table>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

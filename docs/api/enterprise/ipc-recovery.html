@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPC Recovery - Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .detail-hero {
+      margin-bottom: 48px;
+    }
+    .detail-hero .lead {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.6;
+      max-width: 720px;
+    }
+    .infography-full {
+      margin: 32px 0;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .infography-full img {
+      width: 100%;
+      display: block;
+      background: var(--color-bg-secondary);
+    }
+    .infography-full .infography-caption {
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--color-text-secondary);
+      border-top: 1px solid var(--color-border);
+      text-align: center;
+    }
+    .detail-content h2 {
+      margin-top: 48px;
+    }
+    .detail-content h3 {
+      margin-top: 32px;
+    }
+    .detail-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content th,
+    .detail-content td {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      font-size: 14px;
+    }
+    .detail-content th {
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .detail-content td {
+      color: var(--color-text-secondary);
+    }
+    .detail-content code {
+      font-size: 13px;
+      padding: 2px 6px;
+      background: var(--color-bg-secondary);
+      border-radius: 4px;
+    }
+    .detail-content pre {
+      background: var(--color-bg-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 16px 0 24px 0;
+    }
+    .detail-content pre code {
+      background: none;
+      padding: 0;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #0ea5e9;
+      text-decoration: none;
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--color-border);
+    }
+    .back-link:hover {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Architecture Overview</a></li>
+          <li><a href="model-harness.html">Model Harness</a></li>
+          <li><a href="instruction-sources.html">Instruction Sources</a></li>
+          <li><a href="tool-system.html">Tool System</a></li>
+          <li><a href="permission-system.html">Permission System</a></li>
+          <li><a href="event-protocol.html">Event Protocol</a></li>
+          <li><a href="ipc-recovery.html" class="active">IPC Recovery</a></li>
+          <li><a href="multi-provider.html">Multi-Provider</a></li>
+          <li><a href="subagent-architecture.html">Subagent Architecture</a></li>
+          <li><a href="opentelemetry.html">OpenTelemetry</a></li>
+          <li><a href="proxy-kerberos.html">Proxy &amp; Kerberos</a></li>
+          <li><a href="gc-system.html">GC System</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="detail-hero">
+        <h1>IPC Connection Recovery</h1>
+        <p class="lead">
+          When a client connects to the JAATO server via IPC, the connection may be interrupted by server restarts, crashes, or network issues. The IPC recovery mechanism provides automatic reconnection with exponential backoff, preserving the user's session and conversation state.
+        </p>
+      </section>
+
+      <div class="infography-full">
+        <a href="../assets/images/enterprise/ipc-recovery.png" target="_blank">
+          <img src="../assets/images/enterprise/ipc-recovery.png" alt="IPC Recovery Infography">
+        </a>
+        <div class="infography-caption">Click to open full-size image in a new tab</div>
+      </div>
+
+      <section class="detail-content">
+
+        <h2 id="state-machine">Connection State Machine</h2>
+        <p>
+          The recovery system is modeled as a state machine with six states:
+        </p>
+        <table>
+          <thead>
+            <tr><th>State</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong><code>DISCONNECTED</code></strong></td><td>Initial state, or recovery gave up after max attempts</td></tr>
+            <tr><td><strong><code>CONNECTING</code></strong></td><td>Attempting initial connection to the server</td></tr>
+            <tr><td><strong><code>CONNECTED</code></strong></td><td>Active connection, events flowing normally</td></tr>
+            <tr><td><strong><code>RECONNECTING</code></strong></td><td>Connection lost, automatic recovery in progress</td></tr>
+            <tr><td><strong><code>DISCONNECTING</code></strong></td><td>Graceful disconnect initiated by client</td></tr>
+            <tr><td><strong><code>CLOSED</code></strong></td><td>Terminal state, no more connection attempts</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Key Transitions</h3>
+        <table>
+          <thead>
+            <tr><th>From</th><th>To</th><th>Trigger</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>DISCONNECTED</code></td><td><code>CONNECTING</code></td><td><code>connect()</code> called</td></tr>
+            <tr><td><code>CONNECTING</code></td><td><code>CONNECTED</code></td><td>Successful handshake</td></tr>
+            <tr><td><code>CONNECTED</code></td><td><code>RECONNECTING</code></td><td>Connection lost (reset, timeout, etc.)</td></tr>
+            <tr><td><code>RECONNECTING</code></td><td><code>CONNECTING</code></td><td>Backoff timer fires</td></tr>
+            <tr><td><code>RECONNECTING</code></td><td><code>CLOSED</code></td><td>Max attempts exceeded</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="backoff">Exponential Backoff</h2>
+        <p>
+          The recovery mechanism uses exponential backoff with jitter to avoid thundering herd problems when multiple clients reconnect simultaneously:
+        </p>
+        <pre><code>delay = min(max_delay, base_delay * 2^(attempt - 1))
+jitter = delay * jitter_factor * random(-1, 1)
+final_delay = max(0.1, delay + jitter)</code></pre>
+
+        <p>
+          With default configuration (<code>base_delay=1.0</code>, <code>max_delay=60.0</code>, <code>jitter_factor=0.3</code>):
+        </p>
+        <table>
+          <thead>
+            <tr><th>Attempt</th><th>Base Delay</th><th>With Jitter (&#177;30%)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>1.0s</td><td>0.7s &ndash; 1.3s</td></tr>
+            <tr><td>2</td><td>2.0s</td><td>1.4s &ndash; 2.6s</td></tr>
+            <tr><td>3</td><td>4.0s</td><td>2.8s &ndash; 5.2s</td></tr>
+            <tr><td>4</td><td>8.0s</td><td>5.6s &ndash; 10.4s</td></tr>
+            <tr><td>5</td><td>16.0s</td><td>11.2s &ndash; 20.8s</td></tr>
+            <tr><td>6</td><td>32.0s</td><td>22.4s &ndash; 41.6s</td></tr>
+            <tr><td>7+</td><td>60.0s (capped)</td><td>42.0s &ndash; 78.0s</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="configuration">Configuration</h2>
+        <p>
+          Recovery behavior is configurable via JSON files and environment variables. Configuration is loaded and merged in precedence order: environment variables > project config (<code>.jaato/client.json</code>) > user config (<code>~/.jaato/client.json</code>) > built-in defaults.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Option</th><th>Default</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>enabled</code></td><td><code>true</code></td><td>Enable automatic reconnection</td></tr>
+            <tr><td><code>max_attempts</code></td><td><code>10</code></td><td>Maximum reconnection attempts before giving up</td></tr>
+            <tr><td><code>base_delay</code></td><td><code>1.0</code></td><td>Initial backoff delay in seconds</td></tr>
+            <tr><td><code>max_delay</code></td><td><code>60.0</code></td><td>Maximum backoff delay (caps exponential growth)</td></tr>
+            <tr><td><code>jitter_factor</code></td><td><code>0.3</code></td><td>Random jitter range (0.3 = &#177;30%)</td></tr>
+            <tr><td><code>connection_timeout</code></td><td><code>5.0</code></td><td>Timeout for each connection attempt</td></tr>
+            <tr><td><code>reattach_session</code></td><td><code>true</code></td><td>Auto-reattach to previous session after reconnect</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="session-preservation">Session Preservation</h2>
+        <p>
+          After successful reconnection, the client sends a <code>session.attach</code> command with the stored session ID. The server loads the session from disk (if evicted from memory), sends a <code>SessionInfoEvent</code> with full state, and the client continues normal operation.
+        </p>
+        <h3>What is preserved</h3>
+        <ul>
+          <li>Session ID for reattachment</li>
+          <li>Conversation history (persisted on server disk)</li>
+          <li>Tool states (managed by server)</li>
+        </ul>
+        <h3>What is lost</h3>
+        <ul>
+          <li>Active IPC connection (replaced by new connection)</li>
+          <li>In-flight requests (pending permission responses, etc.)</li>
+          <li>Real-time event stream (restarted after reconnect)</li>
+        </ul>
+
+        <h2 id="error-classification">Error Classification</h2>
+        <p>
+          The recovery mechanism classifies errors to determine whether to retry:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Category</th><th>Examples</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Transient</strong> (will retry)</td>
+              <td><code>ConnectionRefusedError</code>, <code>ConnectionResetError</code>, <code>asyncio.TimeoutError</code></td>
+              <td>Retry with backoff</td>
+            </tr>
+            <tr>
+              <td><strong>Permanent</strong> (no retry)</td>
+              <td><code>FileNotFoundError</code> (socket deleted), "Permission denied", "Authentication failed"</td>
+              <td>Transition to CLOSED</td>
+            </tr>
+          </tbody>
+        </table>
+
+      </section>
+
+      <a href="index.html" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Enterprise Overview
+      </a>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
