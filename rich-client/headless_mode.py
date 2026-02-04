@@ -114,6 +114,7 @@ async def run_headless_mode(
     should_exit = False
     turn_completed = False
     turn_count = 0
+    active_subagents: set = set()  # Track running subagent IDs
 
     # Budget tracking per agent (agent_id -> snapshot)
     budget_snapshots: dict = {}
@@ -156,7 +157,7 @@ async def run_headless_mode(
 
     async def handle_events():
         """Handle events from the server."""
-        nonlocal model_running, should_exit, turn_completed, session_id_printed, main_agent_activated
+        nonlocal model_running, should_exit, turn_completed, session_id_printed, main_agent_activated, active_subagents
 
         async for event in client.events():
             if should_exit:
@@ -189,6 +190,8 @@ async def run_headless_mode(
                     profile_name=event.profile_name,
                     parent_agent_id=event.parent_agent_id,
                 )
+                if event.agent_id != "main":
+                    active_subagents.add(event.agent_id)
 
             elif isinstance(event, AgentStatusChangedEvent):
                 model_running = event.status == "active"
@@ -217,20 +220,22 @@ async def run_headless_mode(
                             style="system_info",
                             agent_id=agent_id,
                         )
-                # Exit when main agent finishes (status "done" means model
-                # completed without pending channel input).
+                # Exit when main agent finishes and no subagents are running.
                 # AgentCompletedEvent is only emitted for subagents, so the
-                # main agent's "done" status is the real exit signal.
-                if event.agent_id == "main" and event.status == "done":
+                # main agent's "done" status is the real exit signal. But we
+                # must wait for all subagents to complete first — subagent
+                # results are injected back into the parent session, which
+                # triggers new turns on the main agent.
+                if event.agent_id == "main" and event.status == "done" and not active_subagents:
                     should_exit = True
                     break
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
-                # Exit when main agent completes
-                if event.agent_id == "main":
-                    should_exit = True
-                    break
+                active_subagents.discard(event.agent_id)
+                # If main agent already finished and this was the last subagent,
+                # the main agent will get a new turn from the injected result.
+                # So we don't exit here — we wait for the next main "done".
 
             elif isinstance(event, AgentOutputEvent):
                 renderer.on_agent_output(
