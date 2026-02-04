@@ -34,7 +34,7 @@
 
     .persona-cards {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 24px;
       margin-top: 48px;
     }
@@ -86,6 +86,11 @@
     .persona-card.persona-contributor {
       --persona-color: #f59e0b;
       --persona-color-light: #fbbf24;
+    }
+
+    .persona-card.persona-architect {
+      --persona-color: #0ea5e9;
+      --persona-color-light: #38bdf8;
     }
 
     .persona-icon {
@@ -411,6 +416,32 @@
 
           <a href="contributing/index.html" class="persona-cta">
             Start Contributing
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </a>
+        </div>
+
+        <!-- Enterprise IT Architect -->
+        <div class="persona-card persona-architect">
+          <div class="persona-icon">🏢</div>
+          <div class="persona-subtitle">For IT Architects</div>
+          <h3>Assessing jaato</h3>
+          <p>
+            Evaluate jaato's architecture for enterprise readiness. Review the model harness,
+            event protocol, permission system, and recovery mechanisms.
+          </p>
+
+          <div class="persona-what">You'll review:</div>
+          <ul>
+            <li>Model harness architecture and instruction assembly</li>
+            <li>Server-client event protocol and transport layers</li>
+            <li>Permission system and safety controls</li>
+            <li>Tool system, deferred loading, and discoverability</li>
+            <li>Context management and garbage collection</li>
+            <li>IPC recovery and interrupted turn handling</li>
+          </ul>
+
+          <a href="enterprise/index.html" class="persona-cta">
+            Explore Architecture
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
           </a>
         </div>
