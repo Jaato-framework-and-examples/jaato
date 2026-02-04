@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enterprise Architecture - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    .infography-intro {
+      margin-bottom: 48px;
+    }
+
+    .infography-intro .lead {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.6;
+      max-width: 720px;
+    }
+
+    .infography-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 24px;
+      margin-top: 32px;
+    }
+
+    .infography-card {
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--color-bg);
+      transition: all 0.2s ease;
+    }
+
+    .infography-card:hover {
+      border-color: #0ea5e9;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      transform: translateY(-4px);
+    }
+
+    .infography-card a {
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+
+    .infography-card .infography-thumb {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: cover;
+      display: block;
+      background: var(--color-bg-secondary);
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .infography-card .infography-body {
+      padding: 20px 24px;
+    }
+
+    .infography-card h3 {
+      font-size: 18px;
+      margin: 0 0 8px 0;
+      color: var(--color-text);
+    }
+
+    .infography-card p {
+      font-size: 14px;
+      color: var(--color-text-secondary);
+      margin: 0 0 16px 0;
+      line-height: 1.5;
+    }
+
+    .infography-card .infography-link {
+      font-size: 14px;
+      font-weight: 500;
+      color: #0ea5e9;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .infography-card:hover .infography-link {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Enterprise</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html" class="active">Architecture Overview</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Contributing</div>
+        <ul class="sidebar-nav">
+          <li><a href="../contributing/index.html">Getting Started</a></li>
+          <li><a href="../contributing/architecture.html">Architecture</a></li>
+          <li><a href="../contributing/code-style.html">Code Style</a></li>
+          <li><a href="../contributing/testing.html">Testing</a></li>
+          <li><a href="../contributing/pull-requests.html">Pull Requests</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="infography-intro">
+        <h1>Enterprise Architecture</h1>
+        <p class="lead">
+          A visual guide to jaato's architecture for enterprise readiness assessment.
+          Each infography covers a key subsystem — from the model harness and permission controls
+          to the event protocol and recovery mechanisms.
+        </p>
+      </section>
+
+      <section>
+        <h2>Architecture Infographies</h2>
+        <div class="infography-grid">
+
+          <!-- Model Harness -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/jaato_model_harness.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/jaato_model_harness.png" alt="Model Harness Architecture">
+              <div class="infography-body">
+                <h3>Model Harness</h3>
+                <p>How instructions, tools, and permissions form a controlled agentic system around the LLM.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+          <!-- Instruction Sources -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/jaato_instruction_sources.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/jaato_instruction_sources.png" alt="Instruction Sources">
+              <div class="infography-body">
+                <h3>Instruction Sources</h3>
+                <p>System instruction assembly, token budgets, and the enrichment pipeline.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+          <!-- Tool System -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/jaato_tool_system.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/jaato_tool_system.png" alt="Tool System">
+              <div class="infography-body">
+                <h3>Tool System</h3>
+                <p>Tool architecture, deferred loading, discoverability, and plugin registration.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+          <!-- Permission System -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/jaato_permission_system.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/jaato_permission_system.png" alt="Permission System">
+              <div class="infography-body">
+                <h3>Permission System</h3>
+                <p>Permission evaluation, approval channels, and safety controls for tool execution.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+          <!-- Event Protocol -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/jaato_event_protocol.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/jaato_event_protocol.png" alt="Event Protocol">
+              <div class="infography-body">
+                <h3>Event Protocol</h3>
+                <p>Server-client event protocol, transport layers, and UI mapping.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+          <!-- IPC Recovery -->
+          <div class="infography-card">
+            <a href="../assets/images/enterprise/ipc-recovery.png" target="_blank">
+              <img class="infography-thumb" src="../assets/images/enterprise/ipc-recovery.png" alt="IPC Recovery">
+              <div class="infography-body">
+                <h3>IPC Recovery</h3>
+                <p>Session recovery and interrupted turn handling for resilient client-server operation.</p>
+                <span class="infography-link">
+                  View Full Size
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </span>
+              </div>
+            </a>
+          </div>
+
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
