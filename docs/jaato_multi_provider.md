@@ -240,7 +240,7 @@ shared/plugins/model_provider/
 | **Anthropic** | API Key, OAuth (PKCE), OAuth Token | Yes | Yes (Extended) | Yes (90% savings) | Yes | Native |
 | **GitHub Models** | PAT, Device Code OAuth | Yes | No | No | Yes | Native |
 | **Antigravity** | Google OAuth (PKCE) | Yes | Yes (Gemini 3 / Claude) | No | No | Native |
-| **Claude CLI** | CLI subscription login | Yes | No | Yes (built-in) | No | Delegated or Passthrough |
+| **Claude CLI** | CLI subscription login | Yes | Yes (native) | Yes (native) | No | Yes (via jaato) |
 | **Ollama** | None (local) | Yes | No | No | No | Native (v0.14+) |
 | **ZhipuAI** | API Key | Yes | No | No | Yes | Native |
 
@@ -268,6 +268,8 @@ shared/plugins/model_provider/
 │                                                                      │
 │  CLI Subscription           Claude CLI                              │
 │  ─────────────────          Uses `claude login` credentials         │
+│                             Embeds the official CLI — fully          │
+│                             compliant with Anthropic ToS             │
 │                                                                      │
 │  No Auth Required           Ollama                                   │
 │  ──────────────────         Local server, no credentials needed     │
