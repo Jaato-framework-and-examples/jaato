@@ -20,7 +20,7 @@ from .models import (
     PlanStatus, StepStatus, TodoPlan, TodoStep,
     TaskEventType, TaskEvent, TaskRef, EventFilter, Subscription
 )
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import ToolSchema, EditableContent
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
@@ -265,6 +265,11 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                editable=EditableContent(
+                    parameters=["title", "steps"],
+                    format="yaml",
+                    template="# Edit the plan below. Steps are executed in order.\n",
+                ),
             ),
             ToolSchema(
                 name="startPlan",
