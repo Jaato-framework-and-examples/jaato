@@ -200,6 +200,8 @@ class JaatoServer:
         self._channel_input_queue: queue.Queue[str] = queue.Queue()
         self._waiting_for_channel_input: bool = False
         self._pending_permission_request_id: Optional[str] = None
+        # Edited arguments from client-side editing (set before "e" is put in queue)
+        self._pending_edited_arguments: Optional[Dict[str, Any]] = None
         self._pending_clarification_request_id: Optional[str] = None
         self._pending_reference_selection_request_id: Optional[str] = None
 
@@ -1469,6 +1471,20 @@ class JaatoServer:
                 except Exception:
                     pass  # Content formatting failed, tool tree will show minimal status
 
+            # Check if edit option is available (indicates editable tool)
+            has_edit = any(opt.get("action") == "edit" for opt in options_dicts)
+            editable_metadata = None
+            if has_edit and server.permission_plugin and hasattr(server.permission_plugin, '_get_tool_schema'):
+                try:
+                    schema = server.permission_plugin._get_tool_schema(tool_name)
+                    if schema and schema.editable:
+                        editable_metadata = {
+                            "parameters": schema.editable.parameters if hasattr(schema.editable, 'parameters') else [],
+                            "format": schema.editable.format if hasattr(schema.editable, 'format') else "yaml",
+                        }
+                except Exception:
+                    pass
+
             # Emit control event to signal input mode (lightweight, no content)
             server.emit(PermissionInputModeEvent(
                 agent_id=server._current_tool_agent_id,
@@ -1476,6 +1492,8 @@ class JaatoServer:
                 tool_name=tool_name,
                 call_id=call_id,
                 response_options=options_dicts,
+                tool_args=tool_args if has_edit else None,
+                editable_metadata=editable_metadata,
             ))
 
         def on_permission_resolved(tool_name: str, request_id: str,
@@ -1755,7 +1773,29 @@ class JaatoServer:
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
                     cancel_token=cancel_token_proxy,
+                    edit_callback=self._create_edit_callback(),
                 )
+
+    def _create_edit_callback(self) -> Callable:
+        """Create edit callback for permission plugin in server mode.
+
+        In server mode, editing happens on the client side. The client opens
+        the external editor and sends back the edited arguments via
+        PermissionResponseRequest.edited_arguments. This callback retrieves
+        those pre-stored edited arguments.
+
+        Returns:
+            Callback that returns client-provided edited arguments.
+        """
+        server = self
+
+        def edit_callback(arguments: Dict[str, Any], editable: Any) -> Optional[Dict[str, Any]]:
+            """Return edited arguments provided by the client."""
+            edited = server._pending_edited_arguments
+            server._pending_edited_arguments = None  # Consume
+            return edited
+
+        return edit_callback
 
     # =========================================================================
     # Client Request Handlers
@@ -1973,12 +2013,15 @@ class JaatoServer:
         self._model_thread = threading.Thread(target=model_thread, daemon=True)
         self._model_thread.start()
 
-    def respond_to_permission(self, request_id: str, response: str) -> None:
+    def respond_to_permission(self, request_id: str, response: str,
+                              edited_arguments: Optional[Dict[str, Any]] = None) -> None:
         """Respond to a permission request.
 
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
+            edited_arguments: Optional edited tool arguments (when response is "e"
+                and the client handled editing locally).
         """
         if self._pending_permission_request_id != request_id:
             self.emit(ErrorEvent(
@@ -1986,6 +2029,11 @@ class JaatoServer:
                 error_type="StateError",
             ))
             return
+
+        # Store edited arguments before putting response in queue so the
+        # edit_callback can retrieve them synchronously
+        if edited_arguments is not None:
+            self._pending_edited_arguments = edited_arguments
 
         self._channel_input_queue.put(response)
 

@@ -418,6 +418,8 @@ class ToolExecutor:
                     'reason': perm_info.get('reason', ''),
                     'method': perm_info.get('method', 'unknown'),
                 }
+                if perm_info.get('was_edited'):
+                    permission_meta['was_edited'] = True
                 # Record permission check to ledger
                 if self._ledger is not None:
                     self._ledger._record('permission-check', {
@@ -431,6 +433,11 @@ class ToolExecutor:
                     if debug:
                         print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
                     return False, {'error': f"Permission denied: {perm_info.get('reason', '')}", '_permission': permission_meta}
+                # Use edited arguments if the user modified them during permission
+                if perm_info.get('was_edited') and perm_info.get('modified_args'):
+                    args = perm_info['modified_args']
+                    if debug:
+                        print(f"[ai_tool_runner] using edited args for {name}")
                 if debug:
                     print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
             except Exception as perm_exc:

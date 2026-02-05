@@ -352,7 +352,8 @@ class JaatoWSServer:
         elif isinstance(event, PermissionResponseRequest):
             self._jaato_server.respond_to_permission(
                 event.request_id,
-                event.response
+                event.response,
+                edited_arguments=event.edited_arguments,
             )
 
         elif isinstance(event, ClarificationResponseRequest):
