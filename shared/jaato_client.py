@@ -29,16 +29,20 @@ from .plugins.model_provider.types import (
 )
 
 
-def get_default_provider() -> str:
-    """Get the default provider from environment or fallback.
+def get_default_provider() -> Optional[str]:
+    """Get the default provider from environment.
 
-    Checks JAATO_PROVIDER env var, falls back to 'google_genai'.
+    Checks JAATO_PROVIDER env var, returns None if not set.
     """
-    return os.environ.get("JAATO_PROVIDER", "google_genai")
+    return os.environ.get("JAATO_PROVIDER")
 
 
-# Default provider name (for backwards compatibility)
-DEFAULT_PROVIDER = "google_genai"
+def get_default_model() -> Optional[str]:
+    """Get the default model from environment.
+
+    Checks MODEL_NAME env var, returns None if not set.
+    """
+    return os.environ.get("MODEL_NAME")
 
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
@@ -64,8 +68,8 @@ class JaatoClient:
     shared runtime and create additional sessions.
 
     Usage:
-        # Basic setup (unchanged from before)
-        client = JaatoClient()
+        # Basic setup
+        client = JaatoClient(provider_name="google_genai")
         client.connect(project_id, location, model_name)
         client.configure_tools(registry, permission_plugin, ledger)
 
@@ -90,12 +94,11 @@ class JaatoClient:
 
         Args:
             provider_name: Name of the model provider to use.
-                If not specified, reads from JAATO_PROVIDER env var,
-                falling back to 'google_genai'.
+                If not specified, reads from JAATO_PROVIDER env var.
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
-        self._provider_name: str = provider_name or get_default_provider()
+        self._provider_name: Optional[str] = provider_name or get_default_provider()
 
         # Store model name for session creation
         self._model_name: Optional[str] = None
@@ -138,7 +141,7 @@ class JaatoClient:
         return self._model_name
 
     @property
-    def provider_name(self) -> str:
+    def provider_name(self) -> Optional[str]:
         """Get the model provider name."""
         return self._provider_name
 
@@ -320,13 +323,19 @@ class JaatoClient:
         For AI Studio (API key): Only model is required.
         For Vertex AI: project, location, and model are all required.
 
+        If model is not provided, falls back to MODEL_NAME env var.
+
         Args:
             project: Cloud project ID (required for Vertex AI).
             location: Provider region (required for Vertex AI).
             model: Model name (e.g., 'gemini-2.5-flash').
         """
+        model = model or get_default_model()
         if not model:
-            raise ValueError("model is required")
+            raise ValueError("model is required (pass it explicitly or set MODEL_NAME env var)")
+
+        if not self._provider_name:
+            raise ValueError("provider is required (pass it to JaatoClient() or set JAATO_PROVIDER env var)")
 
         # Create runtime and connect
         self._runtime = JaatoRuntime(provider_name=self._provider_name)
@@ -1003,4 +1012,4 @@ class JaatoClient:
         return None
 
 
-__all__ = ['JaatoClient', 'DEFAULT_PROVIDER', 'get_default_provider']
+__all__ = ['JaatoClient', 'get_default_provider', 'get_default_model']

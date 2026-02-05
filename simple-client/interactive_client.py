@@ -176,7 +176,7 @@ class InteractiveClient:
 
         # Initialize JaatoClient
         try:
-            self._jaato = JaatoClient()
+            self._jaato = JaatoClient(provider_name="google_genai")
             if api_key:
                 self.log(f"[client] Connecting to AI Studio")
                 self._jaato.connect(model=model_name)
