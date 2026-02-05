@@ -264,13 +264,8 @@ class AutoDocGenerator:
 
         try:
             # Connect to provider
-            # Let the framework handle provider-specific requirements
-            import os
-            client.connect(
-                project=os.getenv("PROJECT_ID"),
-                location=os.getenv("LOCATION", "us-central1"),
-                model=self.model
-            )
+            # Framework reads provider-specific env vars (PROJECT_ID, ANTHROPIC_API_KEY, etc.)
+            client.connect(model=self.model)
 
             # Don't configure tools - we want pure text generation
             # client.configure_tools() is NOT called
