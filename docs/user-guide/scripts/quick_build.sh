@@ -36,8 +36,8 @@ Examples:
     $0 pdf                           # Just compile PDF
 
 Environment Variables:
-    JAATO_DOC_PROVIDER   AI provider (default: google_genai)
-    JAATO_DOC_MODEL      Model name (default: gemini-2.5-flash)
+    JAATO_PROVIDER   AI provider (default: google_genai)
+    MODEL_NAME       Model name (required for auto-documentation)
 
 EOF
 }
@@ -63,13 +63,7 @@ case "$1" in
         echo -e "${BLUE}  Auto-Documentation${NC}"
         echo -e "${BLUE}══════════════════════════════════════${NC}"
 
-        PROVIDER="${JAATO_DOC_PROVIDER:-google_genai}"
-        MODEL="${JAATO_DOC_MODEL:-gemini-2.5-flash}"
-
-        "$SCRIPT_DIR/auto_document.py" \
-            --provider "$PROVIDER" \
-            --model "$MODEL" \
-            "$@"
+        "$SCRIPT_DIR/auto_document.py" "$@"
         ;;
 
     chapter)
@@ -83,13 +77,7 @@ case "$1" in
         echo -e "${BLUE}  Generate Chapter: $2${NC}"
         echo -e "${BLUE}══════════════════════════════════════${NC}"
 
-        PROVIDER="${JAATO_DOC_PROVIDER:-google_genai}"
-        MODEL="${JAATO_DOC_MODEL:-gemini-2.5-flash}"
-
-        "$SCRIPT_DIR/auto_document.py" \
-            --provider "$PROVIDER" \
-            --model "$MODEL" \
-            --chapter "$2"
+        "$SCRIPT_DIR/auto_document.py" --chapter "$2"
         ;;
 
     pdf)

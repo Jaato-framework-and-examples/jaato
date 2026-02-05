@@ -51,14 +51,10 @@ class AutoDocGenerator:
     def __init__(
         self,
         chapters_dir: Path,
-        state_file: Path,
-        provider: str = "google_genai",
-        model: str = "gemini-2.5-flash"
+        state_file: Path
     ):
         self.chapters_dir = chapters_dir
         self.state_file = state_file
-        self.provider = provider
-        self.model = model
         self.repo_root = REPO_ROOT
 
         # Load or initialize state
@@ -260,17 +256,25 @@ class AutoDocGenerator:
         print(f"  Prompt: {prompt[:100]}...")
 
         # Initialize Jaato client in headless mode
-        # Provider is identified here via provider_name parameter
-        client = JaatoClient(provider_name=self.provider)
+        # Provider from JAATO_PROVIDER env var (default: google_genai)
+        # Model from MODEL_NAME env var (provider-specific default if not set)
+        import os
+        model = os.getenv("MODEL_NAME")
+        if not model:
+            raise ValueError(
+                "MODEL_NAME environment variable is required for documentation generation"
+            )
+
+        client = JaatoClient()  # Reads JAATO_PROVIDER from env
 
         try:
-            # Connect to provider - just pass model
+            # Connect to provider
             # Each provider plugin reads its own env vars:
             # - Google: PROJECT_ID, LOCATION, GOOGLE_APPLICATION_CREDENTIALS
             # - Anthropic: ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
             # - GitHub: GITHUB_TOKEN
             # - Ollama: OLLAMA_HOST
-            client.connect(model=self.model)
+            client.connect(model=model)
 
             # Don't configure tools - we want pure text generation
             # client.configure_tools() is NOT called
@@ -536,16 +540,6 @@ def main():
         help="State file for tracking generation"
     )
     parser.add_argument(
-        "--provider",
-        default="google_genai",
-        help="AI provider to use"
-    )
-    parser.add_argument(
-        "--model",
-        default="gemini-2.5-flash",
-        help="Model name"
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="Force regenerate all chapters"
@@ -557,11 +551,20 @@ def main():
 
     args = parser.parse_args()
 
+    # Check required environment variables
+    import os
+    provider = os.getenv("JAATO_PROVIDER", "google_genai")
+    model = os.getenv("MODEL_NAME")
+
+    print(f"Using provider: {provider}")
+    if model:
+        print(f"Using model: {model}")
+    else:
+        print("⚠️  MODEL_NAME not set - will use provider default if available")
+
     generator = AutoDocGenerator(
         chapters_dir=args.chapters_dir,
-        state_file=args.state_file,
-        provider=args.provider,
-        model=args.model
+        state_file=args.state_file
     )
 
     if args.chapter:
