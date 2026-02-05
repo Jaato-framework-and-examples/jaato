@@ -24,6 +24,7 @@ class GCTriggerReason(Enum):
     MANUAL = "manual"            # Explicitly requested by caller
     TURN_LIMIT = "turn_limit"    # Maximum turn count exceeded
     PRE_MESSAGE = "pre_message"  # Triggered before sending a message
+    CONTEXT_LIMIT = "context_limit"  # Model rejected request due to context limit exceeded
 
 
 @dataclass
