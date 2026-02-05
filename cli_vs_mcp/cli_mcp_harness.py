@@ -442,7 +442,7 @@ Domain parameters (passed via --domain-params JSON):
     model_name = args.model_name or os.environ["MODEL_NAME"]
 
     # Initialize JaatoClient for Vertex AI
-    jaato = JaatoClient()
+    jaato = JaatoClient(provider_name="google_genai")
     jaato.connect(project_id, location, model_name)
 
     # Load templates for the selected domain

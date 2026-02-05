@@ -91,7 +91,7 @@ def create_jaato_client(
         creds = service_account.Credentials.from_service_account_file(creds_path)
         print(f"[auth] SA: {creds.service_account_email}")
 
-    jaato = JaatoClient()
+    jaato = JaatoClient(provider_name="google_genai")
     jaato.connect(project_id, loc, model)
     return jaato
 

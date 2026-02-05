@@ -68,8 +68,8 @@ class JaatoClient:
     shared runtime and create additional sessions.
 
     Usage:
-        # Basic setup (unchanged from before)
-        client = JaatoClient()
+        # Basic setup
+        client = JaatoClient(provider_name="google_genai")
         client.connect(project_id, location, model_name)
         client.configure_tools(registry, permission_plugin, ledger)
 

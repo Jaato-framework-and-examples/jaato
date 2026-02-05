@@ -51,7 +51,7 @@ class BenchmarkRunner:
         if self._config.verbose:
             print(f"Connecting to {self._config.model_name}...")
 
-        self._client = JaatoClient()
+        self._client = JaatoClient(provider_name="google_genai")
         self._client.connect(
             self._config.project_id,
             self._config.location,
