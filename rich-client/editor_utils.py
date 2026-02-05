@@ -106,8 +106,23 @@ def format_for_editing(
                 lines.append("")
         content = "\n".join(lines)
     else:
-        # Plain text - just stringify
-        content = str(editable_args)
+        # Plain text format
+        # For single parameter, just show the raw value
+        # For multiple parameters, show key: value pairs
+        if len(editable_args) == 1:
+            # Single parameter - just the value
+            content = str(list(editable_args.values())[0])
+        else:
+            # Multiple parameters - simple key: value format
+            lines = []
+            for key, value in editable_args.items():
+                if isinstance(value, list):
+                    lines.append(f"{key}:")
+                    for item in value:
+                        lines.append(f"  - {item}")
+                else:
+                    lines.append(f"{key}: {value}")
+            content = "\n".join(lines)
 
     # Prepend template if provided
     if template:
