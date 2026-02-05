@@ -1613,7 +1613,10 @@ class SessionManager:
             threading.Thread(target=run_message, daemon=True).start()
 
         elif isinstance(event, PermissionResponseRequest):
-            server.respond_to_permission(event.request_id, event.response)
+            server.respond_to_permission(
+                event.request_id, event.response,
+                edited_arguments=event.edited_arguments,
+            )
 
         elif isinstance(event, ClarificationResponseRequest):
             server.respond_to_clarification(event.request_id, event.response)

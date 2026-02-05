@@ -40,7 +40,7 @@ import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parents[1]
@@ -450,12 +450,14 @@ class IPCRecoveryClient:
         self,
         request_id: str,
         response: str,
+        edited_arguments: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a permission request."""
         self._check_can_send()
 
         if self._client:
-            await self._client.respond_to_permission(request_id, response)
+            await self._client.respond_to_permission(request_id, response,
+                                                     edited_arguments=edited_arguments)
 
     async def respond_to_clarification(
         self,

@@ -652,16 +652,19 @@ class IPCClient:
         self,
         request_id: str,
         response: str,
+        edited_arguments: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a permission request.
 
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
+            edited_arguments: Optional edited tool arguments (when response is "e").
         """
         await self._send_event(PermissionResponseRequest(
             request_id=request_id,
             response=response,
+            edited_arguments=edited_arguments,
         ))
 
     async def respond_to_clarification(
