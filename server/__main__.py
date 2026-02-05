@@ -709,21 +709,27 @@ class JaatoDaemon:
                                         if hasattr(plugin, 'get_command_completions'):
                                             subcommands = plugin.get_command_completions(cmd.name, [])
                                             if subcommands:
+                                                # Skip second-level expansion for plugins with dynamic
+                                                # argument completions (e.g., memory IDs change at runtime
+                                                # and are refreshed via MemoryListEvent + PluginCommandCompleter)
+                                                has_dynamic_completions = hasattr(plugin, 'get_memory_metadata')
+
                                                 # Add expanded subcommands
                                                 for sub in subcommands:
                                                     commands.append({
                                                         "name": f"{cmd.name} {sub.value}",
                                                         "description": sub.description or "",
                                                     })
-                                                    # Check for second-level completions
-                                                    sub_completions = plugin.get_command_completions(
-                                                        cmd.name, [sub.value, ""]
-                                                    )
-                                                    for sub2 in sub_completions:
-                                                        commands.append({
-                                                            "name": f"{cmd.name} {sub.value} {sub2.value}",
-                                                            "description": sub2.description or "",
-                                                        })
+                                                    if not has_dynamic_completions:
+                                                        # Check for second-level completions
+                                                        sub_completions = plugin.get_command_completions(
+                                                            cmd.name, [sub.value, ""]
+                                                        )
+                                                        for sub2 in sub_completions:
+                                                            commands.append({
+                                                                "name": f"{cmd.name} {sub.value} {sub2.value}",
+                                                                "description": sub2.description or "",
+                                                            })
                                             else:
                                                 # No subcommands, add base command
                                                 commands.append({

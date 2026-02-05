@@ -43,7 +43,7 @@ from shared import (
     active_cert_bundle,
 )
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
-from shared.plugins.base import parse_command_args
+from shared.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
 from shared.plugins.vision_capture import (
@@ -431,6 +431,11 @@ class RichClient:
 
         # Skip pager for empty results (command handles its own output via callback)
         if result is None or result == "":
+            return
+
+        # HelpLines go directly to pager (same as help subcommands)
+        if isinstance(result, HelpLines):
+            self._display.show_lines(result.lines)
             return
 
         lines = [(f"[{command_name}]", "bold")]
@@ -3422,6 +3427,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionListEvent,
         SessionInfoEvent,
         SessionDescriptionUpdatedEvent,
+        MemoryListEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
@@ -3540,6 +3546,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     available_sessions: list = []  # Sessions from server for completion
     available_tools: list = []  # Tools from server for completion
     available_models: list = []  # Models from server for completion
+    available_memories: list = []  # Memories from server for completion
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -3586,16 +3593,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     except ImportError:
         pass  # Prompt library not available
 
-    # Set up command completion provider for model command
-    def model_completion_provider(command: str, args: list) -> list:
-        """Provide completions for model command."""
+    # Set up command completion provider for model and memory commands
+    # Note: memory subcommands (list, remove, edit, help) are already provided
+    # by CommandCompleter via CommandListEvent. This provider only handles
+    # argument-level completions (memory IDs) that CommandCompleter can't provide.
+    def command_completion_provider(command: str, args: list) -> list:
+        """Provide completions for model and memory argument-level completions."""
         if command == "model":
             return [(model, "") for model in available_models]
+        elif command in ("memory remove", "memory edit"):
+            # Memory ID completions for remove/edit subcommands
+            partial = args[0].lower() if args else ""
+            return [
+                (m["id"], m.get("description", "")[:40])
+                for m in available_memories
+                if m["id"].lower().startswith(partial)
+            ]
         return []
 
     input_handler.set_command_completion_provider(
-        model_completion_provider,
-        {"model"}  # Commands that need subcommand completion
+        command_completion_provider,
+        {"model", "memory remove", "memory edit"}  # Commands that need argument completion
     )
 
     def on_input(text: str) -> None:
@@ -4219,6 +4237,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                     display.show_lines(lines)
 
+            elif isinstance(event, MemoryListEvent):
+                # Store memories for completion cache
+                nonlocal available_memories
+                available_memories = event.memories
+
             elif isinstance(event, SessionInfoEvent):
                 # Store state snapshot for local use (completion, display)
                 # Note: available_sessions already declared nonlocal in SessionListEvent handler
@@ -4229,6 +4252,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_tools = event.tools
                 if event.models:
                     available_models = event.models
+                if event.memories:
+                    available_memories = event.memories
 
                 # Track session ID for recovery reattachment
                 if event.session_id:

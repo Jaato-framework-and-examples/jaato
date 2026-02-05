@@ -278,6 +278,19 @@ class MemoryPlugin:
 
         return []
 
+    def get_memory_metadata(self) -> List[Dict[str, Any]]:
+        """Return lightweight memory metadata for completion caches.
+
+        Returns:
+            List of dicts with id, description, and tags for each memory.
+        """
+        if not self._storage:
+            return []
+        return [
+            {"id": m.id, "description": m.description, "tags": m.tags}
+            for m in self._storage.load_all()
+        ]
+
     def _get_memory_id_completions(self, partial: str) -> List[CommandCompletion]:
         """Get memory ID completions matching partial input."""
         if not self._storage:
@@ -550,36 +563,38 @@ class MemoryPlugin:
                 "  help              - Show detailed help"
             )
 
-    def _memory_list(self) -> str:
-        """List all stored memories."""
+    def _memory_list(self) -> HelpLines:
+        """List all stored memories.
+
+        Returns HelpLines for pager display (same pattern as session list).
+        """
         if not self._storage:
-            return "Error: Memory plugin not initialized."
+            return HelpLines(lines=[("Error: Memory plugin not initialized.", "error")])
 
         memories = self._storage.load_all()
 
         if not memories:
-            return "No memories stored yet."
+            return HelpLines(lines=[("No memories stored yet.", "dim")])
 
         lines = []
-        lines.append("Stored Memories")
-        lines.append("═" * 15)
-        lines.append("")
+        lines.append(("Stored Memories", "bold"))
+        lines.append(("═" * 15, "bold"))
+        lines.append(("", ""))
 
         for mem in memories:
-            # Format: ID | Description | Tags | Usage
             tags_str = ", ".join(mem.tags[:3])
             if len(mem.tags) > 3:
                 tags_str += f" +{len(mem.tags) - 3} more"
 
-            lines.append(f"ID: {mem.id}")
-            lines.append(f"  Description: {mem.description}")
-            lines.append(f"  Tags: {tags_str}")
-            lines.append(f"  Created: {mem.timestamp[:10]}")
-            lines.append(f"  Used: {mem.usage_count} times")
-            lines.append("")
+            lines.append((f"ID: {mem.id}", ""))
+            lines.append((f"  Description: {mem.description}", "dim"))
+            lines.append((f"  Tags: {tags_str}", "dim"))
+            lines.append((f"  Created: {mem.timestamp[:10]}", "dim"))
+            lines.append((f"  Used: {mem.usage_count} times", "dim"))
+            lines.append(("", ""))
 
-        lines.append(f"Total: {len(memories)} memories")
-        return "\n".join(lines)
+        lines.append((f"Total: {len(memories)} memories", "bold"))
+        return HelpLines(lines=lines)
 
     def _memory_remove(self, memory_id: str) -> str:
         """Remove a memory by ID."""

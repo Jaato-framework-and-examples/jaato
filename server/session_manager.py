@@ -1448,6 +1448,13 @@ class SessionManager:
         # Client fetches models when user requests completions
         models_data = []
 
+        # Get memory metadata from the session's server for completion cache
+        memories_data = []
+        if session.server:
+            mem_plugin = session.server._find_plugin_for_command("memory")
+            if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
+                memories_data = mem_plugin.get_memory_metadata()
+
         return SessionInfoEvent(
             session_id=session.session_id,
             session_name=session.name,
@@ -1457,6 +1464,7 @@ class SessionManager:
             tools=tools_data,
             models=models_data,
             user_inputs=session.user_inputs,  # Command history for prompt restoration
+            memories=memories_data,
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:

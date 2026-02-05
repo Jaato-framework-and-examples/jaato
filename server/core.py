@@ -98,6 +98,7 @@ from .events import (
     MidTurnPromptQueuedEvent,
     MidTurnPromptInjectedEvent,
     MidTurnInterruptEvent,
+    MemoryListEvent,
     serialize_event,
     deserialize_event,
 )
@@ -2141,6 +2142,13 @@ class JaatoServer:
 
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
+
+            # After memory commands, push updated memory list for completion cache
+            # (must run before HelpLines early return so memory list/help also refresh)
+            if command.lower() == "memory":
+                mem_plugin = self._find_plugin_for_command("memory")
+                if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
+                    self.emit(MemoryListEvent(memories=mem_plugin.get_memory_metadata()))
 
             # Handle HelpLines result - emit HelpTextEvent for pager display
             if isinstance(result, HelpLines):

@@ -88,6 +88,9 @@ class EventType(str, Enum):
     SESSION_INFO = "session.info"  # Full state snapshot on connect/attach
     SESSION_DESCRIPTION_UPDATED = "session.description_updated"  # Description changed
 
+    # Memory management (Server -> Client)
+    MEMORY_LIST = "memory.list"  # Memory list for completion cache and pager display
+
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
     STOP = "session.stop"
@@ -579,6 +582,14 @@ class SessionListEvent(Event):
 
 
 @dataclass
+class MemoryListEvent(Event):
+    """List of available memories - for completion cache and pager display."""
+    type: EventType = field(default=EventType.MEMORY_LIST)
+    memories: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {id: str, description: str, tags: List[str]}
+
+
+@dataclass
 class SessionInfoEvent(Event):
     """Session state snapshot - sent on connect/attach with all data client needs.
 
@@ -605,6 +616,8 @@ class SessionInfoEvent(Event):
     # ^ ["gemini-2.5-flash", "gemini-2.5-pro", ...]
     user_inputs: List[str] = field(default_factory=list)
     # ^ Command history for prompt restoration on reconnect
+    memories: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ [{id, description, tags}, ...] for memory command completions
 
 
 @dataclass
@@ -943,6 +956,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.RETRY.value: RetryEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
+    EventType.MEMORY_LIST.value: MemoryListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
