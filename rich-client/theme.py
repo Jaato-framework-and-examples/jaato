@@ -438,6 +438,12 @@ DEFAULT_SEMANTIC_STYLES = {
     "budget_gc_preservable": StyleSpec(fg="warning"),
     "budget_gc_partial": StyleSpec(fg="#5f87ff"),  # Blue
     "budget_gc_ephemeral": StyleSpec(dim=True),
+
+    # Tool output popup
+    "tool_output_popup_border": StyleSpec(fg="#5fafaf"),  # Teal/cyan
+    "tool_output_popup_background": StyleSpec(bg="background"),
+    "tool_output_popup_scroll": StyleSpec(dim=True),
+    "tool_output_popup_hint": StyleSpec(dim=True, italic=True),
 }
 
 
