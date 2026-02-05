@@ -555,8 +555,11 @@ class TestContextLimitRecovery:
             ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
         ]
 
-        # Request truncation with overflow
-        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=500)
+        # Request truncation: current=128500, limit=128000
+        # Target is 80% of limit = 102400, so we need to remove 26100 tokens
+        truncated = session._truncate_results_to_fit(
+            tool_results, current_tokens=128500, limit_tokens=128000
+        )
 
         # Should have truncated
         assert truncated[0].result != large_content
@@ -580,9 +583,12 @@ class TestContextLimitRecovery:
             ToolResult(call_id="1", name="echo", result=small_content, is_error=False)
         ]
 
-        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=100)
+        # Even with context exceeded, small results should not be truncated
+        truncated = session._truncate_results_to_fit(
+            tool_results, current_tokens=128100, limit_tokens=128000
+        )
 
-        # Should NOT be truncated
+        # Should NOT be truncated (too small to be worth it)
         assert truncated[0].result == small_content
 
     def test_truncate_targets_largest_first(self):
@@ -601,17 +607,19 @@ class TestContextLimitRecovery:
             ToolResult(call_id="2", name="large_tool", result=large_content, is_error=False),
         ]
 
-        # Request truncation
-        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=500)
+        # Request truncation with context exceeded
+        truncated = session._truncate_results_to_fit(
+            tool_results, current_tokens=128500, limit_tokens=128000
+        )
 
-        # Small should be unchanged
+        # Small should be unchanged (too small to truncate)
         assert truncated[0].result == small_content
         # Large should be truncated
         assert truncated[1].result != large_content
         assert "[NOTICE:" in truncated[1].result
 
-    def test_truncate_with_zero_overflow_uses_aggressive_default(self):
-        """Test that unknown overflow (0) triggers aggressive truncation."""
+    def test_truncate_with_unparseable_tokens_uses_aggressive_default(self):
+        """Test that unparseable token counts trigger aggressive truncation."""
         from ..plugins.model_provider.types import ToolResult
 
         mock_runtime = MagicMock()
@@ -622,8 +630,10 @@ class TestContextLimitRecovery:
             ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
         ]
 
-        # overflow_tokens=0 should still trigger truncation (aggressive default)
-        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=0)
+        # When token counts can't be parsed (0, 0), use aggressive default (50% of results)
+        truncated = session._truncate_results_to_fit(
+            tool_results, current_tokens=0, limit_tokens=0
+        )
 
         assert truncated[0].result != large_content
         assert "[NOTICE:" in truncated[0].result
@@ -642,8 +652,10 @@ class TestContextLimitRecovery:
             ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
         ]
 
-        # Request truncation
-        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=20000)
+        # Request truncation with significant overflow
+        truncated = session._truncate_results_to_fit(
+            tool_results, current_tokens=148000, limit_tokens=128000
+        )
 
         # Should have truncated using char-based method
         assert truncated[0].result != large_content
@@ -689,3 +701,74 @@ class TestContextLimitRecovery:
         mock_runtime.ledger._record.assert_called_once()
         call_args = mock_runtime.ledger._record.call_args
         assert call_args[0][0] == 'context-limit-truncation'
+
+    def test_try_gc_for_context_recovery_with_gc_plugin(self):
+        """Test that GC is attempted during context limit recovery when plugin is available."""
+        from ..plugins.gc import GCConfig, GCResult, GCTriggerReason
+
+        mock_runtime = MagicMock()
+        mock_runtime.ledger = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Set up a mock GC plugin
+        mock_gc_plugin = MagicMock()
+        mock_gc_result = GCResult(
+            success=True,
+            items_collected=2,
+            tokens_freed=5000,
+            details="Freed 2 old turns"
+        )
+        mock_gc_plugin.collect.return_value = ([], mock_gc_result)
+
+        session._gc_plugin = mock_gc_plugin
+        session._gc_config = GCConfig()
+
+        # Attempt GC recovery
+        result = session._try_gc_for_context_recovery(on_output=None)
+
+        # Should have called the GC plugin
+        assert mock_gc_plugin.collect.called
+        # Should return True (GC helped)
+        assert result is True
+        # Should have been called with CONTEXT_LIMIT reason
+        call_args = mock_gc_plugin.collect.call_args
+        assert call_args[0][3] == GCTriggerReason.CONTEXT_LIMIT
+
+    def test_try_gc_for_context_recovery_without_gc_plugin(self):
+        """Test that GC recovery gracefully handles missing GC plugin."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # No GC plugin configured
+        session._gc_plugin = None
+        session._gc_config = None
+
+        # Should return False without error
+        result = session._try_gc_for_context_recovery(on_output=None)
+        assert result is False
+
+    def test_try_gc_for_context_recovery_gc_frees_nothing(self):
+        """Test that GC recovery returns False when GC frees nothing."""
+        from ..plugins.gc import GCConfig, GCResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Set up a mock GC plugin that frees nothing
+        mock_gc_plugin = MagicMock()
+        mock_gc_result = GCResult(
+            success=True,
+            items_collected=0,
+            tokens_freed=0,
+            details="Nothing to collect"
+        )
+        mock_gc_plugin.collect.return_value = ([], mock_gc_result)
+
+        session._gc_plugin = mock_gc_plugin
+        session._gc_config = GCConfig()
+
+        # Attempt GC recovery
+        result = session._try_gc_for_context_recovery(on_output=None)
+
+        # Should return False (GC didn't help)
+        assert result is False
