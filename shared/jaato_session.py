@@ -21,7 +21,7 @@ from .message_queue import MessageQueue, QueuedMessage, SourceType
 logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
-from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
+from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
@@ -3341,91 +3341,294 @@ NOTES
                 tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
             )
         except Exception as e:
-            # Check if this is a token limit error
-            error_str = str(e).lower()
-            if 'token' in error_str and ('exceed' in error_str or 'limit' in error_str or 'maximum' in error_str):
-                # Extract numbers from error message (e.g., "181145 exceeds the limit of 128000")
-                import re
-                numbers = re.findall(r'\d+', str(e))
-                current_tokens = int(numbers[0]) if len(numbers) >= 1 else 200000
-                limit_tokens = int(numbers[1]) if len(numbers) >= 2 else 128000
-                overflow = current_tokens - limit_tokens
+            if not is_context_limit_error(e):
+                raise
 
-                self._trace(f"TOKEN_LIMIT_ERROR: current={current_tokens}, limit={limit_tokens}, overflow={overflow}")
+            # Extract token counts from error message
+            # Look for patterns like "373112 exceeds the limit of 128000" or
+            # "token count of 373112 exceeds ... limit of 128000"
+            import re
+            error_str = str(e).replace(',', '')
 
-                # Truncate results to reduce by at least the overflow amount (plus 10% safety margin)
-                truncated_results = self._truncate_results_to_fit(tool_results, overflow * 1.1)
+            # Try to find "X exceeds ... limit of Y" pattern
+            match = re.search(r'(\d{4,})\s+exceeds.*?limit.*?(\d{4,})', error_str, re.I)
+            if match:
+                current_tokens = int(match.group(1))
+                limit_tokens = int(match.group(2))
+            else:
+                # Fallback: find all large numbers (>1000) and assume first two are current/limit
+                large_numbers = [int(n) for n in re.findall(r'\d+', error_str) if int(n) > 1000]
+                current_tokens = large_numbers[0] if len(large_numbers) >= 1 else 0
+                limit_tokens = large_numbers[1] if len(large_numbers) >= 2 else 0
 
-                if truncated_results != tool_results:
-                    self._trace(f"TOKEN_LIMIT_ERROR: Retrying with truncated results")
-                    return self._do_send_tool_results(
-                        truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+            overflow = current_tokens - limit_tokens if current_tokens > limit_tokens else 0
+
+            self._trace(
+                f"CONTEXT_LIMIT_RECOVERY: {type(e).__name__}: "
+                f"current={current_tokens}, limit={limit_tokens}, overflow={overflow}"
+            )
+
+            # Truncate tool results, keeping first lines of content
+            truncated_results = self._truncate_results_to_fit(tool_results, overflow)
+
+            # Check if any result was actually modified
+            any_modified = any(
+                orig.result != trunc.result
+                for orig, trunc in zip(tool_results, truncated_results)
+            )
+            if not any_modified:
+                self._trace("CONTEXT_LIMIT_RECOVERY: No results were truncated — re-raising")
+                raise
+
+            # Notify output callback about the recovery action
+            if on_output:
+                truncated_names = [
+                    orig.name
+                    for orig, trunc in zip(tool_results, truncated_results)
+                    if orig.result != trunc.result
+                ]
+                if truncated_names:
+                    names_str = ", ".join(truncated_names)
+                    on_output(
+                        "system",
+                        f"[Context limit exceeded — truncated tool results for: {names_str}. Retrying.]",
+                        "write",
                     )
-                # If truncation didn't help, re-raise
-            raise
 
-    def _truncate_results_to_fit(self, tool_results: List[ToolResult], tokens_to_remove: float) -> List[ToolResult]:
-        """Truncate tool results to reduce token count by the specified amount.
+            self._trace("CONTEXT_LIMIT_RECOVERY: Retrying with truncated results")
 
-        Strategy: Truncate from largest results first, proportionally.
+            # Remove the original tool results from provider history
+            # (they were added before the API call that failed)
+            self._remove_tool_results_from_history(len(tool_results))
+
+            # Update instruction budget to reflect the reduced content
+            self._sync_budget_after_truncation(tool_results, truncated_results)
+
+            return self._do_send_tool_results(
+                truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+            )
+
+    def _remove_tool_results_from_history(self, count: int) -> None:
+        """Remove the last N tool result messages from provider history.
+
+        Called during context limit recovery to remove the original (too-large)
+        tool results before retrying with truncated versions.
         """
-        if tokens_to_remove <= 0:
-            return tool_results
+        if not self._provider:
+            return
 
+        # Access provider's internal history directly (get_history() returns a copy)
+        history = getattr(self._provider, '_history', None)
+        if history is None:
+            self._trace("CONTEXT_LIMIT_RECOVERY: Cannot access provider history for cleanup")
+            return
+
+        # Remove the last `count` messages that are tool results
+        removed = 0
+        while removed < count and history:
+            last_msg = history[-1]
+            # Check if it's a tool result message
+            is_tool_result = (
+                last_msg.role == Role.TOOL or
+                any(p.function_response is not None for p in last_msg.parts)
+            )
+            if is_tool_result:
+                history.pop()
+                removed += 1
+                self._trace(f"CONTEXT_LIMIT_RECOVERY: Removed tool result from history ({removed}/{count})")
+            else:
+                # Hit a non-tool message, stop
+                break
+
+    _TRUNCATION_PRESERVE_LINES = 20  # Lines to keep from the start of truncated results
+    _TRUNCATION_PRESERVE_CHARS = 2000  # Minimum characters to keep when using char-based truncation
+    _TRUNCATION_NOTICE = (
+        "\n\n[NOTICE: This tool result was automatically truncated because it caused "
+        "the prompt to exceed the model's context window. Only the first {kept} "
+        "of {total} are shown above ({removed_tokens} estimated tokens removed). "
+        "If you need more content, re-invoke the tool with offset/limit parameters "
+        "to read in smaller chunks.]"
+    )
+
+    def _truncate_results_to_fit(
+        self, tool_results: List[ToolResult], overflow_tokens: float
+    ) -> List[ToolResult]:
+        """Truncate tool results to reduce token count, preserving first lines.
+
+        Strategy:
+        - Targets the largest results first (they are the most likely culprits).
+        - Preserves the first N lines of content so the model retains useful context.
+        - Appends a notice informing the model about the truncation.
+        - Never removes the tool result itself (models expect one response per call).
+
+        Args:
+            tool_results: The original tool results.
+            overflow_tokens: Estimated tokens to remove (0 means unknown — use
+                aggressive default).
+
+        Returns:
+            A new list of tool results with large ones truncated.
+        """
         # Estimate size of each result
         result_sizes = []
         for i, tr in enumerate(tool_results):
             result_str = str(tr.result) if tr.result is not None else ""
             estimated_tokens = len(result_str) / 4  # ~4 chars per token
-            result_sizes.append((i, estimated_tokens, tr))
-
-        # Sort by size descending (largest first)
-        result_sizes.sort(key=lambda x: x[1], reverse=True)
+            result_sizes.append((i, estimated_tokens, result_str))
 
         total_tokens = sum(size for _, size, _ in result_sizes)
-        tokens_remaining_to_remove = tokens_to_remove
 
-        truncated = list(tool_results)  # Copy
+        self._trace(
+            f"CONTEXT_LIMIT_RECOVERY: truncate called with overflow={overflow_tokens}, "
+            f"total_tokens={total_tokens}, num_results={len(tool_results)}"
+        )
 
-        for idx, size, tr in result_sizes:
-            if tokens_remaining_to_remove <= 0:
+        # If overflow is unknown or unreliable, be aggressive: cut 50% of total
+        if overflow_tokens <= 0:
+            overflow_tokens = total_tokens * 0.5
+            self._trace(f"CONTEXT_LIMIT_RECOVERY: using aggressive default overflow={overflow_tokens}")
+
+        # Add 15% safety margin
+        target_removal = overflow_tokens * 1.15
+
+        # Sort indices by size descending to truncate largest first
+        sized_indices = sorted(
+            range(len(result_sizes)),
+            key=lambda j: result_sizes[j][1],
+            reverse=True,
+        )
+
+        truncated = list(tool_results)  # shallow copy
+        tokens_removed = 0.0
+        preserve_lines = self._TRUNCATION_PRESERVE_LINES
+
+        for j in sized_indices:
+            if tokens_removed >= target_removal:
                 break
 
-            # Calculate how much to remove from this result
-            # Remove proportionally more from larger results
-            proportion = size / total_tokens if total_tokens > 0 else 1
-            tokens_to_cut = min(size * 0.9, tokens_remaining_to_remove * proportion * 1.5)  # Cut up to 90% of this result
+            idx, size, result_str = result_sizes[j]
+            tr = tool_results[idx]
 
-            if tokens_to_cut > size * 0.5:  # If cutting more than 50%, replace with error message
-                error_msg = (
-                    f"[Result truncated: {tr.name} returned ~{int(size):,} tokens which contributed to "
-                    f"exceeding the input limit. Use chunked reading with offset/limit parameters, "
-                    f"or process in smaller pieces.]"
+            # Skip small results (< 200 tokens estimated) — not worth truncating
+            if size < 200:
+                self._trace(f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} (size={size} < 200)")
+                continue
+
+            # Split into lines and try line-based truncation first
+            lines = result_str.split('\n')
+
+            # Calculate how much content to keep (in characters)
+            # Keep enough to preserve context but remove overflow + safety margin
+            chars_to_remove = int(target_removal * 4)  # tokens -> chars
+            chars_to_keep = max(2000, len(result_str) - chars_to_remove)  # Keep at least 2000 chars
+
+            if len(lines) > preserve_lines:
+                # Line-based truncation: keep first N lines
+                kept_lines = lines[:preserve_lines]
+                kept_text = '\n'.join(kept_lines)
+                truncation_unit = "lines"
+                truncation_kept = preserve_lines
+                truncation_total = len(lines)
+            elif len(result_str) > chars_to_keep:
+                # Character-based truncation: content has few lines but is large
+                # Keep first chars_to_keep characters
+                kept_text = result_str[:chars_to_keep]
+                # Try to break at a word boundary
+                last_space = kept_text.rfind(' ', max(0, chars_to_keep - 200))
+                if last_space > chars_to_keep // 2:
+                    kept_text = kept_text[:last_space]
+                truncation_unit = "characters"
+                truncation_kept = len(kept_text)
+                truncation_total = len(result_str)
+                self._trace(
+                    f"CONTEXT_LIMIT_RECOVERY: using char-based truncation for result {idx} "
+                    f"(lines={len(lines)}, chars={len(result_str)} -> {len(kept_text)})"
                 )
-                truncated[idx] = ToolResult(
-                    call_id=tr.call_id,
-                    name=tr.name,
-                    result=error_msg,
-                    is_error=True,
-                    attachments=None
-                )
-                tokens_remaining_to_remove -= size
             else:
-                # Partial truncation - keep beginning and note truncation
-                result_str = str(tr.result) if tr.result is not None else ""
-                chars_to_keep = int((size - tokens_to_cut) * 4)
-                truncated_content = result_str[:chars_to_keep]
-                truncated_content += f"\n\n[... truncated {int(tokens_to_cut):,} tokens to fit context limit ...]"
-                truncated[idx] = ToolResult(
-                    call_id=tr.call_id,
-                    name=tr.name,
-                    result=truncated_content,
-                    is_error=tr.is_error,
-                    attachments=tr.attachments
+                self._trace(
+                    f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} "
+                    f"(lines={len(lines)}, chars={len(result_str)} — already small enough)"
                 )
-                tokens_remaining_to_remove -= tokens_to_cut
+                continue
+
+            kept_tokens = len(kept_text) / 4
+            removed_tokens = size - kept_tokens
+
+            if removed_tokens <= 0:
+                continue
+
+            # Build the truncated content with notice
+            notice = self._TRUNCATION_NOTICE.format(
+                kept=f"{truncation_kept} {truncation_unit}",
+                total=f"{truncation_total} {truncation_unit}",
+                removed_tokens=f"{int(removed_tokens):,}",
+            )
+            truncated_content = kept_text + notice
+
+            truncated[idx] = ToolResult(
+                call_id=tr.call_id,
+                name=tr.name,
+                result=truncated_content,
+                is_error=tr.is_error,
+                attachments=None,  # Drop attachments to reduce size
+            )
+            tokens_removed += removed_tokens
 
         return truncated
+
+    def _sync_budget_after_truncation(
+        self,
+        original_results: List[ToolResult],
+        truncated_results: List[ToolResult],
+    ) -> None:
+        """Update instruction budget to reflect token savings from truncation.
+
+        Adjusts the CONVERSATION source entry by the difference in estimated
+        tokens between original and truncated results.
+        """
+        if not self._instruction_budget:
+            return
+
+        original_tokens = sum(
+            len(str(tr.result)) / 4 if tr.result is not None else 0
+            for tr in original_results
+        )
+        truncated_tokens = sum(
+            len(str(tr.result)) / 4 if tr.result is not None else 0
+            for tr in truncated_results
+        )
+        saved_tokens = int(original_tokens - truncated_tokens)
+
+        if saved_tokens <= 0:
+            return
+
+        # Adjust the conversation entry — the provider's history will be updated
+        # by the provider itself when it receives the truncated results, so we
+        # just need to adjust our budget tracking to match.
+        conv_entry = self._instruction_budget.get_entry(
+            InstructionSource.CONVERSATION
+        )
+        if conv_entry:
+            current = conv_entry.total_tokens()
+            conv_entry.tokens = max(0, conv_entry.tokens - saved_tokens)
+            self._trace(
+                f"CONTEXT_LIMIT_RECOVERY: Budget adjusted by -{saved_tokens} tokens "
+                f"(conversation: {current} -> {conv_entry.total_tokens()})"
+            )
+
+        # Record truncation event in ledger
+        if self._runtime.ledger:
+            self._runtime.ledger._record('context-limit-truncation', {
+                'original_tokens': int(original_tokens),
+                'truncated_tokens': int(truncated_tokens),
+                'saved_tokens': saved_tokens,
+                'results_affected': sum(
+                    1 for o, t in zip(original_results, truncated_results)
+                    if o.result != t.result
+                ),
+            })
+
+        self._emit_instruction_budget_update()
 
     def _do_send_tool_results(
         self,

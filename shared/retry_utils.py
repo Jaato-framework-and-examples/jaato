@@ -60,25 +60,36 @@ except ImportError:
 
 # Import GitHub Models errors for detection
 try:
-    from .plugins.model_provider.github_models.errors import RateLimitError as GitHubRateLimitError
+    from .plugins.model_provider.github_models.errors import (
+        RateLimitError as GitHubRateLimitError,
+        ContextLimitError as GitHubContextLimitError,
+        PayloadTooLargeError as GitHubPayloadTooLargeError,
+    )
     GITHUB_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (GitHubRateLimitError,)
+    GITHUB_CONTEXT_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (
+        GitHubContextLimitError, GitHubPayloadTooLargeError,
+    )
 except ImportError:
     GITHUB_RATE_LIMIT_CLASSES = ()
+    GITHUB_CONTEXT_LIMIT_CLASSES = ()
 
 # Import Anthropic errors for detection
 try:
     from .plugins.model_provider.anthropic.errors import (
         RateLimitError as AnthropicRateLimitError,
         OverloadedError as AnthropicOverloadedError,
+        ContextLimitError as AnthropicContextLimitError,
     )
     ANTHROPIC_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicRateLimitError,)
     ANTHROPIC_TRANSIENT_CLASSES: Tuple[Type[Exception], ...] = (
         AnthropicRateLimitError,
         AnthropicOverloadedError,
     )
+    ANTHROPIC_CONTEXT_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicContextLimitError,)
 except ImportError:
     ANTHROPIC_RATE_LIMIT_CLASSES = ()
     ANTHROPIC_TRANSIENT_CLASSES = ()
+    ANTHROPIC_CONTEXT_LIMIT_CLASSES = ()
 
 # Import Google GenAI SDK errors for detection (newer python-genai SDK)
 # These are different from google.api_core.exceptions used by older libraries
@@ -88,6 +99,13 @@ try:
     GENAI_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (genai_errors.ClientError,)
 except ImportError:
     GENAI_RATE_LIMIT_CLASSES = ()
+
+# Import Antigravity errors for context limit detection
+try:
+    from .plugins.model_provider.antigravity.errors import ContextLimitError as AntigravityContextLimitError
+    ANTIGRAVITY_CONTEXT_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AntigravityContextLimitError,)
+except ImportError:
+    ANTIGRAVITY_CONTEXT_LIMIT_CLASSES = ()
 
 
 T = TypeVar('T')
@@ -163,6 +181,57 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
         "rate_limit": rate_like,
         "infra": infra_like,
     }
+
+
+def is_context_limit_error(exc: Exception) -> bool:
+    """Check if an exception indicates a context/prompt size limit was exceeded.
+
+    Checks typed ContextLimitError from all providers first, then falls back
+    to string pattern matching for unrecognized providers or raw HTTP errors.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        True if the error indicates context/prompt size exceeded.
+    """
+    # Check typed ContextLimitError from known providers
+    if ANTHROPIC_CONTEXT_LIMIT_CLASSES and isinstance(exc, ANTHROPIC_CONTEXT_LIMIT_CLASSES):
+        return True
+    if GITHUB_CONTEXT_LIMIT_CLASSES and isinstance(exc, GITHUB_CONTEXT_LIMIT_CLASSES):
+        return True
+    if ANTIGRAVITY_CONTEXT_LIMIT_CLASSES and isinstance(exc, ANTIGRAVITY_CONTEXT_LIMIT_CLASSES):
+        return True
+
+    # Check Google api_core InvalidArgument (input too large)
+    try:
+        from google.api_core import exceptions as _google_exc
+        if isinstance(exc, _google_exc.InvalidArgument):
+            lower = str(exc).lower()
+            if any(p in lower for p in ("token", "size", "length", "too large", "exceed")):
+                return True
+    except ImportError:
+        pass
+
+    # Check Google GenAI ClientError for input size errors
+    if GENAI_RATE_LIMIT_CLASSES and isinstance(exc, GENAI_RATE_LIMIT_CLASSES):
+        lower = str(exc).lower()
+        if any(p in lower for p in ("token", "too large", "max size", "context_length", "input")):
+            if any(p in lower for p in ("exceed", "limit", "maximum", "too large")):
+                return True
+
+    # Fallback: string pattern matching for any provider
+    error_str = str(exc).lower()
+    has_size_keyword = any(p in error_str for p in (
+        "token", "context", "prompt", "input size", "payload",
+    ))
+    has_limit_keyword = any(p in error_str for p in (
+        "exceed", "limit", "maximum", "too large", "too long",
+    ))
+    # Also check for HTTP 413 (Payload Too Large)
+    has_413 = "413" in error_str and "payload" in error_str
+
+    return (has_size_keyword and has_limit_keyword) or has_413
 
 
 def get_retry_after(exc: Exception) -> Optional[float]:

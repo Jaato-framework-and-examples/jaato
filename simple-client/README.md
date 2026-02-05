@@ -25,6 +25,10 @@ This client allows you to:
    ```bash
    python3 -m venv .venv
    .venv/bin/pip install -r requirements.txt
+
+   # Or install via pyproject.toml (with optional extras)
+   .venv/bin/pip install .            # base dependencies
+   .venv/bin/pip install ".[all]"     # all optional dependencies
    ```
 
 ## Usage
