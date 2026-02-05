@@ -48,6 +48,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server.session_manager import SessionManager
+from server.session_logging import configure_session_logging
 from server.events import Event
 
 
@@ -70,12 +71,16 @@ LOG_BACKUP_COUNT = 5  # Keep 5 backup files
 def configure_logging(
     log_file: Optional[str] = None,
     verbose: bool = False,
+    enable_session_logging: bool = True,
 ) -> None:
-    """Configure logging with optional file rotation.
+    """Configure logging with optional file rotation and per-session routing.
 
     Args:
         log_file: Path to log file. If provided, uses RotatingFileHandler.
         verbose: If True, use DEBUG level; otherwise INFO.
+        enable_session_logging: If True, also route logs to per-session files.
+            Session logs go to {workspace}/JAATO_SESSION_LOG_DIR/ based on
+            the JAATO_SESSION_LOG_DIR env var in each workspace's .env file.
     """
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -102,6 +107,13 @@ def configure_logging(
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter(fmt))
         root.addHandler(handler)
+
+    # Add session routing handler for per-session/client log files
+    if enable_session_logging:
+        configure_session_logging(
+            level=level,
+            formatter=logging.Formatter(fmt),
+        )
 
 
 logger = logging.getLogger(__name__)
