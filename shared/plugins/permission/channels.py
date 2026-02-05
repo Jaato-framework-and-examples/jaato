@@ -161,11 +161,11 @@ def get_permission_options_with_edit() -> List['PermissionResponseOption']:
 
     Use this for tools that have editable content declared.
 
-    Returns a copy with the edit option appended at the end.
+    Returns a copy with the edit option inserted after 'yes' and 'no'.
     """
     options = list(DEFAULT_PERMISSION_OPTIONS)
-    # Append edit option at the end
-    options.append(EDIT_PERMISSION_OPTION)
+    # Insert edit option after 'no' (index 2)
+    options.insert(2, EDIT_PERMISSION_OPTION)
     return options
 
 
@@ -1066,7 +1066,6 @@ class QueueChannel(ConsoleChannel):
             ChannelResponse with EDIT decision and edited arguments if successful,
             or DENY if no edit callback or edit was cancelled.
         """
-        logger.debug(f"_handle_edit_request: editable={request.editable}, edit_callback={self._edit_callback is not None}")
         # Check if tool has editable content and we have an edit callback
         if not request.editable:
             return ChannelResponse(
