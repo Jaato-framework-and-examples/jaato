@@ -997,6 +997,7 @@ class PermissionPlugin:
                 # Get tool schema to check for editable content
                 tool_schema = self._get_tool_schema(tool_name)
                 editable = tool_schema.editable if tool_schema else None
+                self._trace(f"check_permission: tool_schema={tool_schema is not None}, editable={editable is not None}")
 
                 # Get permission options (with edit if tool is editable)
                 response_options = self._get_permission_options_for_tool(tool_name)
@@ -1026,9 +1027,9 @@ class PermissionPlugin:
                         timeout=self._config.channel_timeout if self._config else 30,
                         context=request_context,
                         response_options=response_options,
+                        editable=editable,
                     )
-                    # Attach editable metadata for the channel/client to use
-                    request.editable = editable
+                    # Set additional metadata for the channel/client
                     request.was_edited = was_edited
                     request.original_arguments = original_args if was_edited else None
 
