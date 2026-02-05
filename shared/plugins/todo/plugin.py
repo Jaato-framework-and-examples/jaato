@@ -750,14 +750,15 @@ class TodoPlugin:
     def get_auto_approved_tools(self) -> List[str]:
         """Return TODO tools as auto-approved (no security implications).
 
-        Note: startPlan is intentionally excluded - it requires user permission
-        to confirm they want the model to proceed with the proposed plan.
+        Note: createPlan and startPlan are intentionally excluded:
+        - createPlan: Requires permission so user can review/edit the proposed plan
+        - startPlan: Requires permission to confirm user wants to proceed
 
         The 'plan' user command is also included since it's just a status query.
         """
         return [
-            # Core plan management
-            "createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep", "plan",
+            # Core plan management (createPlan excluded - requires permission for editing)
+            "updateStep", "getPlanStatus", "completePlan", "addStep", "plan",
             # Cross-agent collaboration (read/write plan state, no side effects)
             "subscribeToTasks", "addDependentStep", "completeStepWithOutput",
             "getBlockedSteps", "getTaskEvents", "listSubscriptions", "unsubscribe",
