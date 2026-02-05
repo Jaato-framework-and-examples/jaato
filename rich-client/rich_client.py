@@ -270,13 +270,16 @@ class RichClient:
         """Create callback for editing tool content in external editor.
 
         This callback is invoked when user selects 'e' (edit) at a permission
-        prompt for a tool that has editable content.
+        prompt for a tool that has editable content. It runs from the model
+        thread (background), so we schedule the TUI suspension on the app's
+        event loop via run_in_terminal.
 
         Returns:
             Callback function that takes (arguments, editable_metadata) and
             returns edited arguments dict, or None if edit was cancelled.
         """
         from editor_utils import edit_tool_content
+        import asyncio
 
         def edit_callback(arguments: Dict[str, Any], editable: Any) -> Optional[Dict[str, Any]]:
             """Open external editor for tool content.
@@ -295,43 +298,48 @@ class RichClient:
             if hasattr(self, '_session_dir') and self._session_dir:
                 session_dir = self._session_dir
 
-            # Temporarily suspend the TUI display for external editor
-            if self._display:
-                self._display.suspend()
+            result = None
 
-            try:
-                result = edit_tool_content(arguments, editable, session_dir)
+            def run_editor():
+                nonlocal result
+                try:
+                    result = edit_tool_content(arguments, editable, session_dir)
+                except Exception as e:
+                    from editor_utils import EditResult
+                    result = EditResult(
+                        success=False, arguments=arguments, was_modified=False, error=str(e)
+                    )
 
-                if result.success:
-                    if result.was_modified:
-                        self._trace(f"edit_callback: content was modified")
-                        return result.arguments
-                    else:
-                        self._trace(f"edit_callback: content unchanged")
-                        return arguments  # Return original if unchanged
+            # Use prompt_toolkit's run_in_terminal to properly suspend the TUI.
+            # This callback runs from the model thread, so schedule onto the
+            # app's event loop and block until complete.
+            app = getattr(self._display, '_app', None) if self._display else None
+            if app and getattr(app, 'loop', None):
+                from prompt_toolkit.application import run_in_terminal
+                future = asyncio.run_coroutine_threadsafe(
+                    run_in_terminal(run_editor, in_executor=False),
+                    app.loop,
+                )
+                future.result(timeout=600)  # Block until editor completes
+            else:
+                run_editor()
+
+            if result and result.success:
+                if result.was_modified:
+                    self._trace(f"edit_callback: content was modified")
+                    return result.arguments
                 else:
-                    self._trace(f"edit_callback: edit failed: {result.error}")
-                    # Show error to user
-                    if self._display:
-                        self._display.add_system_message(
-                            f"Edit failed: {result.error}",
-                            style="system_error"
-                        )
-                    return None
-
-            except Exception as e:
-                self._trace(f"edit_callback: exception: {e}")
+                    self._trace(f"edit_callback: content unchanged")
+                    return arguments
+            else:
+                error_msg = result.error if result else "Unknown error"
+                self._trace(f"edit_callback: edit failed: {error_msg}")
                 if self._display:
                     self._display.add_system_message(
-                        f"Edit error: {e}",
+                        f"Edit failed: {error_msg}",
                         style="system_error"
                     )
                 return None
-
-            finally:
-                # Resume TUI display
-                if self._display:
-                    self._display.resume()
 
         return edit_callback
 
@@ -3342,6 +3350,70 @@ def _do_vision_capture_ipc(display, agent_registry, context):
         return None
 
 
+async def _handle_client_side_edit(
+    pending_request: dict,
+    display: Any,
+) -> Optional[Dict[str, Any]]:
+    """Handle editing of tool content on the client side (IPC mode).
+
+    Opens the external editor with the tool arguments and returns the
+    edited arguments, or None if the edit was cancelled.
+
+    Uses prompt_toolkit's run_in_terminal() to temporarily exit the TUI,
+    run the editor, and restore the display automatically.
+
+    Args:
+        pending_request: The pending permission request dict with tool_args and editable_metadata.
+        display: The PTDisplay instance (must have _app for run_in_terminal).
+
+    Returns:
+        Edited arguments dict, or None if cancelled.
+    """
+    from editor_utils import edit_tool_content
+    from prompt_toolkit.application import run_in_terminal
+
+    tool_args = pending_request.get("tool_args")
+    editable_meta = pending_request.get("editable_metadata")
+
+    if not tool_args or not editable_meta:
+        return None
+
+    # Reconstruct an EditableContent-like object from metadata
+    class _EditableProxy:
+        def __init__(self, meta: dict):
+            self.parameters = meta.get("parameters", [])
+            self.format = meta.get("format", "yaml")
+            self.template = meta.get("template")
+
+    editable = _EditableProxy(editable_meta)
+
+    result = None
+
+    def run_editor():
+        nonlocal result
+        try:
+            result = edit_tool_content(tool_args, editable)
+        except Exception as e:
+            from editor_utils import EditResult
+            result = EditResult(
+                success=False, arguments=tool_args, was_modified=False, error=str(e)
+            )
+
+    # run_in_terminal properly suspends the TUI, runs the editor,
+    # and restores the display. It's already an awaitable.
+    await run_in_terminal(run_editor, in_executor=False)
+
+    if result and result.success:
+        return result.arguments if result.was_modified else tool_args
+    else:
+        if result and result.error and display:
+            display.add_system_message(
+                f"Edit failed: {result.error}",
+                style="system_error"
+            )
+        return None
+
+
 async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
                        initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
                        new_session: bool = False):
@@ -3812,6 +3884,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 pending_permission_request = {
                     "request_id": event.request_id,
                     "options": event.response_options,
+                    "tool_args": getattr(event, 'tool_args', None),
+                    "editable_metadata": getattr(event, 'editable_metadata', None),
                 }
                 # Update tool tree to show simple "awaiting approval" status
                 buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
@@ -4481,6 +4555,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Handle permission response
                 if pending_permission_request:
+                    # Check if user wants to edit content (client-side editing)
+                    if text.lower() in ("e", "edit") and pending_permission_request.get("tool_args") is not None:
+                        ipc_trace(f"Edit requested for {pending_permission_request['request_id']}, opening editor locally")
+                        edited_args = await _handle_client_side_edit(
+                            pending_permission_request, display,
+                        )
+                        if edited_args is not None:
+                            # Send edit response with edited arguments
+                            ipc_trace(f"Sending edit response with edited args")
+                            await client.respond_to_permission(
+                                pending_permission_request["request_id"],
+                                "e",
+                                edited_arguments=edited_args,
+                            )
+                        else:
+                            # Edit was cancelled - don't send anything, re-show prompt
+                            ipc_trace(f"Edit cancelled, re-showing prompt")
+                            display.set_waiting_for_channel_input(True, pending_permission_request.get("options"))
+                            display.refresh()
+                        continue
+
                     ipc_trace(f"Sending permission response: {text} for {pending_permission_request['request_id']}")
                     await client.respond_to_permission(
                         pending_permission_request["request_id"],

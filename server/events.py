@@ -280,6 +280,10 @@ class PermissionInputModeEvent(Event):
     call_id: Optional[str] = None  # Unique ID for matching tool call (parallel execution)
     response_options: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {key, label, action, description?}
+    # Tool arguments for client-side editing (when edit option is available)
+    tool_args: Optional[Dict[str, Any]] = None
+    # Editable content metadata: {parameters: [...], format: "yaml"|"json"|"text"}
+    editable_metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -688,6 +692,8 @@ class PermissionResponseRequest(Event):
     type: EventType = field(default=EventType.PERMISSION_RESPONSE)
     request_id: str = ""
     response: str = ""  # "y", "n", "a", "never", etc.
+    # Edited tool arguments (set when response is "e" and client handled editing)
+    edited_arguments: Optional[Dict[str, Any]] = None
 
 
 @dataclass
