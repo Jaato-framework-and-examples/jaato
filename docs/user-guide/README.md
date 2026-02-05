@@ -116,10 +116,9 @@ brew install pandoc
 Generate a specific chapter:
 
 ```bash
-./docs/user-guide/scripts/auto_document.py \
-    --chapter 06-basic-commands.md \
-    --provider google_genai \
-    --model gemini-2.5-flash
+export JAATO_PROVIDER=google_genai
+export MODEL_NAME=gemini-2.5-flash
+./docs/user-guide/scripts/auto_document.py --chapter 06-basic-commands.md
 ```
 
 Generate all missing/stale chapters:
@@ -268,26 +267,39 @@ rm docs/user-guide/generated/doc-state.json
 
 ### Provider Configuration
 
-Auto-documentation uses the same provider setup as normal Jaato usage.
+Auto-documentation uses the same provider setup as normal Jaato usage via environment variables.
 
-For Google GenAI (default):
+**Google GenAI (default):**
 ```bash
+export JAATO_PROVIDER=google_genai
+export MODEL_NAME=gemini-2.5-flash
 export PROJECT_ID=your-project
 export LOCATION=us-central1
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 ```
 
-For Anthropic:
+**Anthropic:**
 ```bash
+export JAATO_PROVIDER=anthropic
+export MODEL_NAME=claude-sonnet-4
 export ANTHROPIC_API_KEY=your-key
-./docs/user-guide/scripts/auto_document.py --provider anthropic --model claude-sonnet-4
 ```
 
-For Ollama (free, local):
+**Ollama (free, local):**
 ```bash
 ollama serve
 ollama pull qwen2.5:32b
-./docs/user-guide/scripts/auto_document.py --provider ollama --model qwen2.5:32b
+
+export JAATO_PROVIDER=ollama
+export MODEL_NAME=qwen2.5:32b
+export OLLAMA_HOST=http://localhost:11434
+```
+
+**GitHub Models:**
+```bash
+export JAATO_PROVIDER=github_models
+export MODEL_NAME=openai/gpt-4o
+export GITHUB_TOKEN=your-token
 ```
 
 ## Troubleshooting
