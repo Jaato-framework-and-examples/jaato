@@ -1,0 +1,12 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-020-compensation-java-spring
+# Purpose: SAGA compensation pattern (distributed transactions)
+# Note: No pom-*.tpl existed; minimal extra dependencies
+#       Uses base Spring Boot from mod-015
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  dependencies: []
+  # Compensation pattern uses only base Spring Boot dependencies
+  # already provided by mod-015-hexagonal-base

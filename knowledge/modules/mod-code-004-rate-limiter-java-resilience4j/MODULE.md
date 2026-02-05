@@ -12,9 +12,15 @@ tags:
   - rate-limiter
   - throttling
   - fault-tolerance
-used_by:
-  - skill-code-004-add-rate-limiter-java-resilience4j
-  - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  pattern: annotation
+  capability: resilience
+  feature: rate-limiter
 ---
 
 # MOD-004: Rate Limiter Pattern - Java/Resilience4j
@@ -72,9 +78,9 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
-    
+
     @RateLimiter(name = "{rateLimiterName}")
     public {ReturnType} {methodName}({ParamType} {paramName}) {
         log.debug("Calling external service: {}", {paramName});
@@ -100,16 +106,16 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
     private final {QueueService} queueService;
-    
+
     @RateLimiter(name = "{rateLimiterName}", fallbackMethod = "{methodName}Fallback")
     public {ReturnType} {methodName}({ParamType} {paramName}) {
         log.debug("Calling external service: {}", {paramName});
         return client.{clientMethod}({paramName});
     }
-    
+
     private {ReturnType} {methodName}Fallback({ParamType} {paramName}, RequestNotPermitted ex) {
         log.warn("Rate limit exceeded for {}. Queueing.", {paramName});
         queueService.enqueue({paramName});
@@ -136,9 +142,9 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
-    
+
     /**
      * Order: RateLimiter (outer) -> CircuitBreaker -> Retry (inner)
      */
@@ -149,7 +155,7 @@ public class {Service}ApplicationService {
         log.debug("Calling external service: {}", {paramName});
         return client.{clientMethod}({paramName});
     }
-    
+
     private {ReturnType} {methodName}Fallback({ParamType} {paramName}, Exception ex) {
         log.warn("Service unavailable for {}. Error: {}", {paramName}, ex.getClass().getSimpleName());
         return {defaultValue};
@@ -172,7 +178,7 @@ resilience4j:
         limitRefreshPeriod: 1s
         timeoutDuration: 0
         registerHealthIndicator: true
-    
+
     instances:
       {rateLimiterName}:
         baseConfig: default
@@ -211,20 +217,20 @@ import jakarta.servlet.http.HttpServletRequest;
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
-    
+
     @ExceptionHandler(RequestNotPermitted.class)
     public ResponseEntity<ErrorResponse> handleRateLimitExceeded(
             RequestNotPermitted ex, HttpServletRequest request) {
-        
+
         log.warn("Rate limit exceeded: {}", request.getRequestURI());
-        
+
         ErrorResponse error = new ErrorResponse(
             HttpStatus.TOO_MANY_REQUESTS.value(),
             "Too Many Requests",
             "Rate limit exceeded. Please try again later.",
             request.getRequestURI()
         );
-        
+
         return ResponseEntity
             .status(HttpStatus.TOO_MANY_REQUESTS)
             .header("Retry-After", "1")
@@ -244,7 +250,7 @@ public class GlobalExceptionHandler {
 <dependency>
     <groupId>io.github.resilience4j</groupId>
     <artifactId>resilience4j-spring-boot3</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 
 <!-- Spring Boot AOP (required for annotations) -->
@@ -280,22 +286,22 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class {Service}ApplicationServiceTest {
-    
+
     @Mock
     private {ExternalClient} client;
-    
+
     @InjectMocks
     private {Service}ApplicationService service;
-    
+
     @Test
     void {methodName}_withinRateLimit_succeeds() {
         // Arrange
         {ReturnType} expected = {expectedValue};
         when(client.{clientMethod}({testParam})).thenReturn(expected);
-        
+
         // Act
         {ReturnType} result = service.{methodName}({testParam});
-        
+
         // Assert
         assertEquals(expected, result);
         verify(client).{clientMethod}({testParam});

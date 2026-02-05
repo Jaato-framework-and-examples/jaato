@@ -12,20 +12,46 @@ tags:
   - resilience4j
   - circuit-breaker
   - fault-tolerance
-used_by:
-  - skill-code-001-add-circuit-breaker-java-resilience4j
-  - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  pattern: annotation
+  capability: resilience
+  feature: circuit-breaker
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v3.0 - Phase 3 Cross-Cutting Configuration
+# ═══════════════════════════════════════════════════════════════════
+phase_group: cross-cutting
+execution_order: 1  # Runs before retry (mod-002)
+
+transformation:
+  type: annotation
+  descriptor: transform/circuit-breaker-transform.yaml
+  targets:
+    - pattern: "**/adapter/out/**/*Adapter.java"
+      generated_by: mod-code-017-persistence-systemapi
+  adds:
+    - "@CircuitBreaker annotation to public methods"
+    - "Fallback methods for each annotated method"
+    - "SERVICE_NAME constant"
+  modifies:
+    - "application.yml (resilience4j.circuitbreaker config)"
+    - "pom.xml (resilience4j dependencies)"
 ---
 
 # MOD-001: Circuit Breaker - Java/Resilience4j
 
-**Module ID:** mod-code-001-circuit-breaker-java-resilience4j  
-**Version:** 2.1  
-**Date:** 2025-11-21  
-**Updated:** 2025-11-24  
-**Source ERI:** eri-code-008-circuit-breaker-java-resilience4j  
-**Framework:** Java 17+ / Spring Boot 3.x  
-**Library:** Resilience4j 2.1.0  
+**Module ID:** mod-code-001-circuit-breaker-java-resilience4j
+**Version:** 2.1
+**Date:** 2025-11-21
+**Updated:** 2025-11-24
+**Source ERI:** eri-code-008-circuit-breaker-java-resilience4j
+**Framework:** Java 17+ / Spring Boot 3.x
+**Library:** Resilience4j 2.2.0
 **Used by:** skill-code-001-add-circuit-breaker-java-resilience4j, skill-code-020-generate-microservice-java-spring
 
 ---
@@ -231,22 +257,22 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 
 @Service
 public class {{serviceName}} {
-    
+
     private static final Logger log = LoggerFactory.getLogger({{serviceName}}.class);
     private final CircuitBreaker circuitBreaker;
     private final {{clientType}} client;
-    
+
     public {{serviceName}}(CircuitBreakerRegistry registry, {{clientType}} client) {
         this.circuitBreaker = registry.circuitBreaker("{{circuitBreakerName}}");
         this.client = client;
     }
-    
+
     public {{returnType}} {{methodName}}({{methodParameters}}) {
         return circuitBreaker.executeSupplier(() -> {
             {{originalMethodBody}}
         });
     }
-    
+
     // With fallback
     public {{returnType}} {{methodName}}WithFallback({{methodParameters}}) {
         try {
@@ -271,14 +297,14 @@ public class {{serviceName}} {
 <dependency>
     <groupId>io.github.resilience4j</groupId>
     <artifactId>resilience4j-spring-boot3</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 ```
 
 ### Gradle (build.gradle)
 
 ```groovy
-implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.1.0'
+implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.2.0'
 ```
 
 ---
@@ -297,33 +323,33 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class {{serviceName}}Test {
-    
+
     @Mock
     private {{clientType}} client;
-    
+
     @InjectMocks
     private {{serviceName}} service;
-    
+
     @Test
     void {{methodName}}_WhenServiceAvailable_ReturnsResult() {
         // Given
         when(client.call(any())).thenReturn(expectedResult);
-        
+
         // When
         {{returnType}} result = service.{{methodName}}(params);
-        
+
         // Then
         assertThat(result).isEqualTo(expectedResult);
     }
-    
+
     @Test
     void {{methodName}}_WhenServiceUnavailable_ReturnsFallback() {
         // Given
         when(client.call(any())).thenThrow(new RuntimeException("Service down"));
-        
+
         // When
         {{returnType}} result = service.{{methodName}}(params);
-        
+
         // Then
         assertThat(result).isNotNull();
         // Verify fallback behavior based on strategy
@@ -372,15 +398,15 @@ class {{serviceName}}Test {
 ## Related
 
 - **Source ERI:** eri-code-008-circuit-breaker-java-resilience4j
-- **Used by Skills:** 
+- **Used by Skills:**
   - skill-code-001-add-circuit-breaker-java-resilience4j (TRANSFORMATION)
   - skill-code-020-generate-microservice-java-spring (CREATION)
-- **Complements:** 
+- **Complements:**
   - mod-code-002-retry-java-resilience4j (future)
   - mod-code-003-timeout-java-resilience4j (future)
 - **Feature:** resilience.circuit_breaker
 
 ---
 
-**Module Version:** 2.1  
+**Module Version:** 2.1
 **Last Updated:** 2025-11-24

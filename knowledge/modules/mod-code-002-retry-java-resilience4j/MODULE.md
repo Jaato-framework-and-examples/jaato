@@ -11,9 +11,37 @@ tags:
   - resilience4j
   - retry
   - fault-tolerance
-used_by:
-  - skill-code-002-add-retry-java-resilience4j
-  - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  pattern: annotation
+  capability: resilience
+  feature: retry
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v3.0 - Phase 3 Cross-Cutting Configuration
+# ═══════════════════════════════════════════════════════════════════
+phase_group: cross-cutting
+execution_order: 2  # Runs after circuit-breaker (mod-001)
+
+transformation:
+  type: annotation
+  descriptor: transform/retry-transform.yaml
+  depends_on:
+    - mod-code-001-circuit-breaker-java-resilience4j  # @Retry after @CircuitBreaker
+  targets:
+    - pattern: "**/adapter/out/**/*Adapter.java"
+      generated_by: mod-code-017-persistence-systemapi
+  adds:
+    - "@Retry annotation to public methods"
+  modifies:
+    - "application.yml (resilience4j.retry config)"
+  notes:
+    - "Annotation order: @CircuitBreaker → @Retry → method"
+    - "Retries happen INSIDE circuit breaker window"
 ---
 
 # MOD-002: Retry Pattern - Java/Resilience4j
@@ -44,9 +72,9 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
-    
+
     @Retry(name = "{retryName}")
     public {ReturnType} {methodName}({ParamType} {paramName}) {
         log.debug("Calling external service: {}", {paramName});
@@ -71,16 +99,16 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
     private final {CacheService} cacheService;
-    
+
     @Retry(name = "{retryName}", fallbackMethod = "{methodName}Fallback")
     public {ReturnType} {methodName}({ParamType} {paramName}) {
         log.debug("Calling external service: {}", {paramName});
         return client.{clientMethod}({paramName});
     }
-    
+
     private {ReturnType} {methodName}Fallback({ParamType} {paramName}, Exception ex) {
         log.warn("All retries exhausted for {}. Error: {}", {paramName}, ex.getMessage());
         return cacheService.getCached({paramName})
@@ -106,9 +134,9 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 @Slf4j
 public class {Service}ApplicationService {
-    
+
     private final {ExternalClient} client;
-    
+
     /**
      * Order: CircuitBreaker (outer) -> Retry (inner) -> Actual call
      */
@@ -118,7 +146,7 @@ public class {Service}ApplicationService {
         log.debug("Calling external service: {}", {paramName});
         return client.{clientMethod}({paramName});
     }
-    
+
     private {ReturnType} {methodName}Fallback({ParamType} {paramName}, Exception ex) {
         log.warn("Service unavailable for {}. Error: {}", {paramName}, ex.getMessage());
         return {defaultValue};
@@ -148,7 +176,7 @@ resilience4j:
           - java.io.IOException
         ignoreExceptions:
           - {basePackage}.domain.exception.{BusinessException}
-    
+
     instances:
       {retryName}:
         baseConfig: default
@@ -176,7 +204,7 @@ management:
 <dependency>
     <groupId>io.github.resilience4j</groupId>
     <artifactId>resilience4j-spring-boot3</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 
 <!-- Spring Boot AOP (required for annotations) -->
@@ -214,27 +242,27 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class {Service}ApplicationServiceTest {
-    
+
     @Mock
     private {ExternalClient} client;
-    
+
     @InjectMocks
     private {Service}ApplicationService service;
-    
+
     @Test
     void {methodName}_successOnFirstAttempt() {
         // Arrange
         {ReturnType} expected = {expectedValue};
         when(client.{clientMethod}({testParam})).thenReturn(expected);
-        
+
         // Act
         {ReturnType} result = service.{methodName}({testParam});
-        
+
         // Assert
         assertEquals(expected, result);
         verify(client, times(1)).{clientMethod}({testParam});
     }
-    
+
     @Test
     void {methodName}_successAfterRetry() {
         // Arrange
@@ -242,23 +270,23 @@ class {Service}ApplicationServiceTest {
         when(client.{clientMethod}({testParam}))
             .thenThrow(new ConnectException("Connection refused"))
             .thenReturn(expected);
-        
+
         // Act
         {ReturnType} result = service.{methodName}({testParam});
-        
+
         // Assert
         assertEquals(expected, result);
         verify(client, times(2)).{clientMethod}({testParam});
     }
-    
+
     @Test
     void {methodName}_failsAfterMaxRetries() {
         // Arrange
         when(client.{clientMethod}({testParam}))
             .thenThrow(new ConnectException("Connection refused"));
-        
+
         // Act & Assert
-        assertThrows(ConnectException.class, 
+        assertThrows(ConnectException.class,
             () -> service.{methodName}({testParam}));
         verify(client, times(3)).{clientMethod}({testParam});
     }

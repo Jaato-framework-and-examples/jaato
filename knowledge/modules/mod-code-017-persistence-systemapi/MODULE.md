@@ -1,8 +1,8 @@
 ---
 id: mod-code-017-persistence-systemapi
 title: "MOD-017: System API Persistence"
-version: 1.2
-date: 2025-12-01
+version: 1.3
+date: 2026-02-04
 status: Active
 derived_from: eri-code-012-persistence-patterns-java-spring
 depends_on:
@@ -16,6 +16,54 @@ tags:
   - resilience
 used_by:
   - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  capability: persistence
+  feature: systemapi
+
+# ═══════════════════════════════════════════════════════════════════
+# DEC-041: Module Variants
+# ═══════════════════════════════════════════════════════════════════
+# Variants allow user selection of implementation alternatives.
+# Discovery Agent detects keywords from prompt, or uses default.
+# CodeGen filters templates by // Variant: header.
+variants:
+  http_client:
+    description: "HTTP client implementation for System API calls"
+    default: restclient
+    options:
+      restclient:
+        description: "Spring 6.1+ RestClient (recommended for Spring Boot 3.2+)"
+        templates:
+          - client/restclient.java.tpl
+        keywords:
+          - restclient
+          - rest client
+          - webclient
+      feign:
+        description: "OpenFeign declarative client (requires spring-cloud-starter-openfeign)"
+        templates:
+          - client/feign.java.tpl
+          - config/feign-config.java.tpl
+        dependencies:
+          - groupId: org.springframework.cloud
+            artifactId: spring-cloud-starter-openfeign
+        keywords:
+          - feign
+          - openfeign
+          - declarative client
+      resttemplate:
+        description: "Legacy RestTemplate (deprecated, use only for compatibility)"
+        templates:
+          - client/resttemplate.java.tpl
+        keywords:
+          - resttemplate
+          - rest template
+          - legacy client
 ---
 
 # MOD-017: System API Persistence
@@ -30,8 +78,33 @@ Reusable templates for implementing persistence via System API delegation. The D
 
 **Use when:** Service delegates persistence to mainframe via System APIs
 
-> ⚠️ **IMPORTANT:** This module provides the adapter layer only (DTO, Mapper, Adapter).  
+> **IMPORTANT:** This module provides the adapter layer only (DTO, Mapper, Adapter).
 > REST client templates are in **mod-018**. Use both modules together.
+
+---
+
+## CRITICAL: NO @Transactional with System API
+
+**When persistence is via System API (HTTP), DO NOT use `@Transactional`.**
+
+```java
+// WRONG - System API uses HTTP, not database transactions
+@Service
+@Transactional  // <-- REMOVE THIS
+public class CustomerApplicationService {
+
+// CORRECT - No @Transactional with System API persistence
+@Service
+public class CustomerApplicationService {
+```
+
+**Why?**
+- `@Transactional` manages **database transactions** (JPA/JDBC)
+- System API persistence uses **HTTP calls**, not database
+- There is no local transaction to manage
+- Requires `spring-boot-starter-data-jpa` which is NOT in dependencies
+
+**This rule OVERRIDES mod-code-015 examples** which show `@Transactional` for JPA persistence.
 
 ---
 
@@ -58,7 +131,23 @@ mod-code-017-persistence-systemapi/
     └── systemapi-check.sh
 ```
 
-> **Note:** REST client templates have been moved to 
+---
+
+## Tests Generated
+
+This module generates the following unit tests:
+
+| Test File | Layer | Purpose | Spring Context |
+|-----------|-------|---------|----------------|
+| `{{Entity}}SystemApiAdapterTest.java` | Adapter OUT | Adapter logic with mocked client and mapper | None (Mockito only) |
+
+**Test Patterns:**
+- Adapter tests: Mock the client and mapper, verify mapping and delegation
+- Test findById, findAll, save, deleteById operations
+- No Spring context needed - pure unit testing with Mockito
+- Resilience behavior (circuit breaker, retry) should be tested separately with integration tests
+
+> **Note:** REST client templates have been moved to
 > [mod-code-018-api-integration-rest-java-spring](../mod-code-018-api-integration-rest-java-spring/MODULE.md).
 > This module focuses on the persistence adapter that wraps the client with resilience patterns.
 
@@ -86,159 +175,126 @@ import lombok.*;
 @AllArgsConstructor
 @Builder
 public class {Entity}Dto {
-    
+
     @JsonProperty("{idJsonField}")
     private String id;
-    
+
     // Add fields matching System API contract
 }
 ```
 
 ---
 
-## Template: Client (Feign)
+## Template: Client (RestClient - DEFAULT)
+
+> **Client selection:** This module uses REST clients from [mod-code-018](../mod-code-018-api-integration-rest-java-spring/MODULE.md).
+> **Default:** RestClient (no extra dependencies needed)
+> If user explicitly requests Feign or RestTemplate, see mod-code-018 for those templates.
 
 ```java
-// File: {basePackage}/adapter/systemapi/client/{Entity}SystemApiClient.java
+// File: {basePackage}/adapter/out/systemapi/client/{Entity}SystemApiClient.java
 
-package {basePackage}.adapter.systemapi.client;
+package {basePackage}.adapter.out.systemapi.client;
 
-import {basePackage}.adapter.systemapi.dto.{Entity}Dto;
-import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
-
-@FeignClient(
-    name = "{serviceName}-system-api",
-    url = "${system-api.{serviceName}.base-url}",
-    configuration = SystemApiFeignConfig.class
-)
-public interface {Entity}SystemApiClient {
-    
-    @GetMapping("/api/v1/{resourcePath}/{id}")
-    {Entity}Dto findById(@PathVariable("id") String id);
-    
-    @PostMapping("/api/v1/{resourcePath}")
-    {Entity}Dto save(@RequestBody {Entity}Dto dto);
-    
-    @DeleteMapping("/api/v1/{resourcePath}/{id}")
-    void deleteById(@PathVariable("id") String id);
-}
-```
-
----
-
-## Template: Client (RestTemplate)
-
-```java
-// File: {basePackage}/adapter/systemapi/client/{Entity}SystemApiClient.java
-
-package {basePackage}.adapter.systemapi.client;
-
-import {basePackage}.adapter.systemapi.dto.{Entity}Dto;
-import lombok.RequiredArgsConstructor;
+import {basePackage}.adapter.out.systemapi.dto.{Entity}Response;
+import {basePackage}.adapter.out.systemapi.dto.{Entity}Request;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
-import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
-
-@Component
-@RequiredArgsConstructor
-public class {Entity}SystemApiClient {
-    
-    private final RestTemplate restTemplate;
-    
-    @Value("${system-api.{serviceName}.base-url}")
-    private String baseUrl;
-    
-    public {Entity}Dto findById(String id) {
-        HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
-        ResponseEntity<{Entity}Dto> response = restTemplate.exchange(
-            baseUrl + "/api/v1/{resourcePath}/{id}",
-            HttpMethod.GET,
-            entity,
-            {Entity}Dto.class,
-            id
-        );
-        return response.getBody();
-    }
-    
-    public {Entity}Dto save({Entity}Dto dto) {
-        HttpEntity<{Entity}Dto> entity = new HttpEntity<>(dto, createHeaders());
-        ResponseEntity<{Entity}Dto> response = restTemplate.exchange(
-            baseUrl + "/api/v1/{resourcePath}",
-            HttpMethod.POST,
-            entity,
-            {Entity}Dto.class
-        );
-        return response.getBody();
-    }
-    
-    public void deleteById(String id) {
-        HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
-        restTemplate.exchange(
-            baseUrl + "/api/v1/{resourcePath}/{id}",
-            HttpMethod.DELETE,
-            entity,
-            Void.class,
-            id
-        );
-    }
-    
-    private HttpHeaders createHeaders() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("X-Source-System", "{serviceName}-domain-api");
-        headers.set("X-Correlation-Id", java.util.UUID.randomUUID().toString());
-        return headers;
-    }
-}
-```
-
----
-
-## Template: Client (RestClient)
-
-```java
-// File: {basePackage}/adapter/systemapi/client/{Entity}SystemApiClient.java
-
-package {basePackage}.adapter.systemapi.client;
-
-import {basePackage}.adapter.systemapi.dto.{Entity}Dto;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.slf4j.MDC;
 
+/**
+ * REST client for System API integration.
+ * Uses Spring RestClient (Spring 6.1+ / Boot 3.2+).
+ *
+ * @generated mod-code-017-persistence-systemapi
+ */
 @Component
-@RequiredArgsConstructor
 public class {Entity}SystemApiClient {
-    
+
     private final RestClient restClient;
-    
-    public {Entity}Dto findById(String id) {
+
+    public {Entity}SystemApiClient(
+            RestClient.Builder restClientBuilder,
+            @Value("${system-api.{service-name}.base-url}") String baseUrl) {
+        this.restClient = restClientBuilder
+            .baseUrl(baseUrl)
+            .build();
+    }
+
+    public {Entity}Response findById(String id) {
         return restClient.get()
-            .uri("/api/v1/{resourcePath}/{id}", id)
-            .header("X-Source-System", "{serviceName}-domain-api")
+            .uri("/{resource}/{id}", id)
+            .headers(this::addCorrelationHeaders)
             .retrieve()
-            .body({Entity}Dto.class);
+            .body({Entity}Response.class);
     }
-    
-    public {Entity}Dto save({Entity}Dto dto) {
+
+    public {Entity}Response create({Entity}Request request) {
         return restClient.post()
-            .uri("/api/v1/{resourcePath}")
-            .header("X-Source-System", "{serviceName}-domain-api")
-            .body(dto)
+            .uri("/{resource}")
+            .headers(this::addCorrelationHeaders)
+            .body(request)
             .retrieve()
-            .body({Entity}Dto.class);
+            .body({Entity}Response.class);
     }
-    
+
+    public {Entity}Response update(String id, {Entity}Request request) {
+        return restClient.put()
+            .uri("/{resource}/{id}", id)
+            .headers(this::addCorrelationHeaders)
+            .body(request)
+            .retrieve()
+            .body({Entity}Response.class);
+    }
+
     public void deleteById(String id) {
         restClient.delete()
-            .uri("/api/v1/{resourcePath}/{id}", id)
-            .header("X-Source-System", "{serviceName}-domain-api")
+            .uri("/{resource}/{id}", id)
+            .headers(this::addCorrelationHeaders)
             .retrieve()
             .toBodilessEntity();
+    }
+
+    private void addCorrelationHeaders(org.springframework.http.HttpHeaders headers) {
+        String correlationId = MDC.get("X-Correlation-ID");
+        if (correlationId != null) {
+            headers.set("X-Correlation-ID", correlationId);
+        }
+    }
+}
+```
+
+### Alternative: Feign (Only if explicitly requested)
+
+If user requests Feign, see [mod-code-018 Template 2](../mod-code-018-api-integration-rest-java-spring/MODULE.md#template-2-feign-only-if-explicitly-requested).
+
+**Remember:** Feign requires adding `spring-cloud-starter-openfeign` to pom.xml.
+
+---
+
+## Template: RestClient Configuration
+
+```java
+// File: {basePackage}/infrastructure/config/RestClientConfig.java
+
+package {basePackage}.infrastructure.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestClient;
+
+/**
+ * RestClient configuration.
+ *
+ * @generated mod-code-017-persistence-systemapi
+ */
+@Configuration
+public class RestClientConfig {
+
+    @Bean
+    public RestClient.Builder restClientBuilder() {
+        return RestClient.builder();
     }
 }
 ```
@@ -258,19 +314,19 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class {Entity}SystemApiMapper {
-    
+
     public {Entity} toDomain({Entity}Dto dto) {
         if (dto == null) return null;
-        
+
         return {Entity}.builder()
             .id(dto.getId())
             // Map other fields
             .build();
     }
-    
+
     public {Entity}Dto toDto({Entity} domain) {
         if (domain == null) return null;
-        
+
         return {Entity}Dto.builder()
             .id(domain.getId())
             // Map other fields
@@ -289,11 +345,11 @@ System APIs often use different data formats than domain models. The `mapping.js
 
 | Type | Domain Format | System API Format | Example |
 |------|---------------|-------------------|---------|
-| `uuid_format` | UUID with hyphens | 36 chars uppercase no hyphens | `550e8400-e29b-41d4-a716-446655440000` ↔ `550E8400E29B41D4A716446655440000` |
-| `case_conversion` | Mixed case | UPPERCASE | `John` ↔ `JOHN` |
-| `enum_to_code` | Enum value | Single char code | `ACTIVE` ↔ `A` |
-| `date_format` | LocalDate | ISO string | `2024-01-15` ↔ `"2024-01-15"` |
-| `timestamp_format` | Instant | DB2 timestamp | `2024-01-15T10:30:00Z` ↔ `2024-01-15-10.30.00.000000` |
+| `uuid_format` | UUID with hyphens | 36 chars uppercase no hyphens | `550e8400-e29b-41d4-a716-446655440000` to `550E8400E29B41D4A716446655440000` |
+| `case_conversion` | Mixed case | UPPERCASE | `John` to `JOHN` |
+| `enum_to_code` | Enum value | Single char code | `ACTIVE` to `A` |
+| `date_format` | LocalDate | ISO string | `2024-01-15` to `"2024-01-15"` |
+| `timestamp_format` | Instant | DB2 timestamp | `2024-01-15T10:30:00Z` to `2024-01-15-10.30.00.000000` |
 | `direct` | Any | Same | No transformation |
 
 ### mapping.json Structure
@@ -351,11 +407,11 @@ When `mapping.json` is provided, the generator produces a mapper with transforma
 ```java
 @Component
 public class CustomerSystemApiMapper {
-    
+
     // UUID transformation
     public CustomerId toCustomerId(String systemApiId) {
         if (systemApiId == null) return null;
-        // 550E8400E29B41D4A716446655440000 → 550e8400-e29b-41d4-a716-446655440000
+        // 550E8400E29B41D4A716446655440000 -> 550e8400-e29b-41d4-a716-446655440000
         String formatted = systemApiId.substring(0, 8) + "-" +
                           systemApiId.substring(8, 12) + "-" +
                           systemApiId.substring(12, 16) + "-" +
@@ -363,25 +419,25 @@ public class CustomerSystemApiMapper {
                           systemApiId.substring(20);
         return CustomerId.of(UUID.fromString(formatted.toLowerCase()));
     }
-    
+
     public String toSystemApiId(CustomerId id) {
         if (id == null) return null;
         return id.value().toString().replace("-", "").toUpperCase();
     }
-    
+
     // Case conversion
     public String toDomainName(String systemApiName) {
         if (systemApiName == null) return null;
-        // JOHN → John
-        return systemApiName.substring(0, 1).toUpperCase() + 
+        // JOHN -> John
+        return systemApiName.substring(0, 1).toUpperCase() +
                systemApiName.substring(1).toLowerCase();
     }
-    
+
     public String toSystemApiName(String domainName) {
         if (domainName == null) return null;
         return domainName.toUpperCase();
     }
-    
+
     // Enum mapping
     public CustomerStatus toDomainStatus(String code) {
         return switch (code) {
@@ -392,7 +448,7 @@ public class CustomerSystemApiMapper {
             default -> throw new IllegalArgumentException("Unknown status: " + code);
         };
     }
-    
+
     public String toSystemApiStatus(CustomerStatus status) {
         return switch (status) {
             case ACTIVE -> "A";
@@ -401,18 +457,18 @@ public class CustomerSystemApiMapper {
             case PENDING_VERIFICATION -> "P";
         };
     }
-    
+
     // Timestamp transformation
-    private static final DateTimeFormatter DB2_FORMAT = 
+    private static final DateTimeFormatter DB2_FORMAT =
         DateTimeFormatter.ofPattern("yyyy-MM-dd-HH.mm.ss.SSSSSS");
-    
+
     public Instant toDomainTimestamp(String db2Timestamp) {
         if (db2Timestamp == null) return null;
         return LocalDateTime.parse(db2Timestamp, DB2_FORMAT)
             .atZone(ZoneId.of("UTC"))
             .toInstant();
     }
-    
+
     public String toSystemApiTimestamp(Instant instant) {
         if (instant == null) return null;
         return DB2_FORMAT.format(instant.atZone(ZoneId.of("UTC")));
@@ -470,12 +526,12 @@ import java.util.Optional;
 @RequiredArgsConstructor
 @Slf4j
 public class {Entity}SystemApiAdapter implements {Entity}Repository {
-    
+
     private final {Entity}SystemApiClient client;
     private final {Entity}SystemApiMapper mapper;
-    
+
     private static final String SYSTEM_API = "{serviceName}SystemApi";
-    
+
     @Override
     @CircuitBreaker(name = SYSTEM_API, fallbackMethod = "findByIdFallback")
     @Retry(name = SYSTEM_API)
@@ -484,12 +540,12 @@ public class {Entity}SystemApiAdapter implements {Entity}Repository {
         {Entity}Dto dto = client.findById(id);
         return Optional.ofNullable(mapper.toDomain(dto));
     }
-    
+
     private Optional<{Entity}> findByIdFallback(String id, Exception ex) {
         log.warn("System API unavailable for {entity}: {}. Error: {}", id, ex.getMessage());
         return Optional.empty();
     }
-    
+
     @Override
     @CircuitBreaker(name = SYSTEM_API)
     @Retry(name = SYSTEM_API)
@@ -499,45 +555,13 @@ public class {Entity}SystemApiAdapter implements {Entity}Repository {
         {Entity}Dto saved = client.save(dto);
         return mapper.toDomain(saved);
     }
-    
+
     @Override
     @CircuitBreaker(name = SYSTEM_API)
     @Retry(name = SYSTEM_API)
     public void deleteById(String id) {
         log.debug("Deleting {entity} via System API: {}", id);
         client.deleteById(id);
-    }
-}
-```
-
----
-
-## Template: Feign Configuration
-
-```java
-// File: {basePackage}/adapter/systemapi/config/SystemApiFeignConfig.java
-
-package {basePackage}.adapter.systemapi.config;
-
-import feign.Logger;
-import feign.RequestInterceptor;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration
-public class SystemApiFeignConfig {
-    
-    @Bean
-    public Logger.Level feignLoggerLevel() {
-        return Logger.Level.BASIC;
-    }
-    
-    @Bean
-    public RequestInterceptor systemApiRequestInterceptor() {
-        return requestTemplate -> {
-            requestTemplate.header("X-Source-System", "{serviceName}-domain-api");
-            requestTemplate.header("X-Correlation-Id", java.util.UUID.randomUUID().toString());
-        };
     }
 }
 ```
@@ -555,15 +579,6 @@ system-api:
     connect-timeout: 5s
     read-timeout: 10s
 
-# Feign (if using Feign)
-feign:
-  client:
-    config:
-      {serviceName}-system-api:
-        connectTimeout: 5000
-        readTimeout: 10000
-        loggerLevel: basic
-
 # Resilience4j
 resilience4j:
   circuitbreaker:
@@ -573,7 +588,7 @@ resilience4j:
         failureRateThreshold: 50
         waitDurationInOpenState: 30s
         permittedNumberOfCallsInHalfOpenState: 3
-        
+
   retry:
     instances:
       {serviceName}SystemApi:
@@ -597,20 +612,20 @@ management:
 
 ## Template: Dependencies
 
-### pom.xml (Feign)
+### pom.xml (RestClient - DEFAULT)
 
 ```xml
-<!-- Feign Client -->
+<!-- Web (includes RestClient) -->
 <dependency>
-    <groupId>org.springframework.cloud</groupId>
-    <artifactId>spring-cloud-starter-openfeign</artifactId>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
 </dependency>
 
-<!-- Resilience4j -->
+<!-- Resilience4j - version 2.2.0 -->
 <dependency>
     <groupId>io.github.resilience4j</groupId>
     <artifactId>resilience4j-spring-boot3</artifactId>
-    <version>2.1.0</version>
+    <version>${resilience4j.version}</version>
 </dependency>
 
 <dependency>
@@ -619,25 +634,15 @@ management:
 </dependency>
 ```
 
-### pom.xml (RestTemplate/RestClient)
+### pom.xml (Feign - Only if explicitly requested)
+
+If user requests Feign, **add this dependency:**
 
 ```xml
-<!-- Web Client -->
+<!-- REQUIRED for Feign - only add if using Feign -->
 <dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-web</artifactId>
-</dependency>
-
-<!-- Resilience4j -->
-<dependency>
-    <groupId>io.github.resilience4j</groupId>
-    <artifactId>resilience4j-spring-boot3</artifactId>
-    <version>2.1.0</version>
-</dependency>
-
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-aop</artifactId>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-openfeign</artifactId>
 </dependency>
 ```
 
@@ -667,48 +672,48 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class {Entity}SystemApiAdapterTest {
-    
+
     @Mock
     private {Entity}SystemApiClient client;
-    
+
     @Mock
     private {Entity}SystemApiMapper mapper;
-    
+
     @InjectMocks
     private {Entity}SystemApiAdapter adapter;
-    
+
     @Test
     void findById_existingEntity_returnsEntity() {
         // Arrange
         String id = "test-id";
         {Entity}Dto dto = new {Entity}Dto();
         {Entity} expected = {Entity}.builder().id(id).build();
-        
+
         when(client.findById(id)).thenReturn(dto);
         when(mapper.toDomain(dto)).thenReturn(expected);
-        
+
         // Act
         Optional<{Entity}> result = adapter.findById(id);
-        
+
         // Assert
         assertThat(result).isPresent();
         assertThat(result.get().getId()).isEqualTo(id);
         verify(client).findById(id);
     }
-    
+
     @Test
     void save_validEntity_returnsPersistedEntity() {
         // Arrange
         {Entity} entity = {Entity}.builder().id("test-id").build();
         {Entity}Dto dto = new {Entity}Dto();
-        
+
         when(mapper.toDto(entity)).thenReturn(dto);
         when(client.save(dto)).thenReturn(dto);
         when(mapper.toDomain(dto)).thenReturn(entity);
-        
+
         // Act
         {Entity} result = adapter.save(entity);
-        
+
         // Assert
         assertThat(result).isNotNull();
         verify(client).save(dto);
@@ -734,11 +739,15 @@ class {Entity}SystemApiAdapterTest {
 
 ## Client Selection
 
-| Client | Use When | Dependencies |
-|--------|----------|--------------|
-| **Feign** | New projects, clean interfaces | spring-cloud-starter-openfeign |
-| **RestTemplate** | Legacy code, simple cases | spring-boot-starter-web |
-| **RestClient** | Spring Boot 3.2+, modern API | spring-boot-starter-web |
+| Client | Status | Dependencies | When to Use |
+|--------|--------|--------------|-------------|
+| **RestClient** | DEFAULT | None (in spring-boot-starter-web) | Always, unless user explicitly requests another |
+| **Feign** | Optional | Must add `spring-cloud-starter-openfeign` | Only if user explicitly requests |
+| **RestTemplate** | Deprecated | None (in spring-boot-starter-web) | Legacy compatibility only |
+
+**Default Rule:** Use RestClient unless user explicitly requests Feign or RestTemplate.
+
+See [mod-code-018](../mod-code-018-api-integration-rest-java-spring/MODULE.md) for complete client templates.
 
 ---
 
@@ -760,7 +769,7 @@ This section defines mandatory patterns for consistent code generation.
 **CRITICAL:** External code mapping (e.g., mainframe status codes) MUST be in the Mapper class:
 
 ```java
-// ✅ CORRECT - In Mapper
+// CORRECT - In Mapper
 private CustomerStatus toStatus(String code) {
     return switch (code) {
         case "A" -> CustomerStatus.ACTIVE;
@@ -769,7 +778,7 @@ private CustomerStatus toStatus(String code) {
     };
 }
 
-// ❌ WRONG - In Enum
+// WRONG - In Enum
 public enum CustomerStatus {
     ACTIVE("A"),  // NO! Don't put codes here
     ...
@@ -809,5 +818,5 @@ See [validation/README.md](validation/README.md) for validation script details.
 
 ---
 
-**Module Version:** 1.1  
+**Module Version:** 1.1
 **Last Updated:** 2025-12-22

@@ -1,0 +1,25 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-002-retry-java-resilience4j
+# Purpose: Retry pattern dependencies
+# Note: Same resilience4j stack as circuit-breaker (deduplication
+#       handled by Context Agent consolidation)
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  properties:
+    resilience4j.version: "2.2.0"
+
+  dependencies:
+    # ── Resilience4j ──
+    - groupId: io.github.resilience4j
+      artifactId: resilience4j-spring-boot3
+      version: ${resilience4j.version}
+
+    # ── AOP (required for @Retry annotation) ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-aop
+
+    # ── Actuator (resilience metrics) ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-actuator

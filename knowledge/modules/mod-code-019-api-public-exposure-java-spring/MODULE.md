@@ -1,8 +1,9 @@
 ---
 id: mod-code-019-api-public-exposure-java-spring
 title: "MOD-019: API Public Exposure - Java/Spring Boot"
-version: 1.0
-date: 2025-12-01
+version: 1.2
+date: 2026-01-19
+updated: 2026-02-03
 status: Active
 derived_from: eri-code-014-api-public-exposure-java-spring
 domain: code
@@ -14,14 +15,29 @@ tags:
   - pagination
 used_by:
   - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  capability: api-architecture
+  feature: domain-api
+
+# ═══════════════════════════════════════════════════════════════════
+# DEC-035: Config Flags Published by this Module
+# ═══════════════════════════════════════════════════════════════════
+publishes_flags:
+  hateoas: true      # Enables HATEOAS support (affects mod-015 Response.java.tpl)
+  pagination: true   # Enables pagination support
 ---
 
 # MOD-019: API Public Exposure - Java/Spring Boot
 
-**Module ID:** mod-code-019-api-public-exposure-java-spring  
-**Version:** 1.0  
-**Source ERI:** eri-code-014-api-public-exposure-java-spring  
-**Framework:** Java 17+ / Spring Boot 3.2.x  
+**Module ID:** mod-code-019-api-public-exposure-java-spring
+**Version:** 1.2
+**Source ERI:** eri-code-014-api-public-exposure-java-spring
+**Framework:** Java 17+ / Spring Boot 3.2.x
 **Used by:** skill-code-020-generate-microservice-java-spring
 
 ---
@@ -41,6 +57,51 @@ Provides reusable code templates for exposing REST APIs with pagination, HATEOAS
 
 ---
 
+## Config Flags Published (DEC-035)
+
+This module **publishes** config flags that affect code generation in other modules:
+
+| Flag | Value | Subscribers | Effect |
+|------|-------|-------------|--------|
+| `hateoas` | `true` | mod-015 (Response.java.tpl) | mod-015 skips Response; mod-019 generates HATEOAS version |
+| `pagination` | `true` | mod-015 (Controller.java.tpl) | Controller includes pagination parameters |
+
+These flags are collected by the Context Agent and propagate to `generation-context.json`:
+
+```json
+{
+  "config_flags": {
+    "hateoas": true,
+    "pagination": true
+  }
+}
+```
+
+See [DEC-035](../../DECISION-LOG.md#dec-035) for the Config Flags Pub/Sub pattern.
+
+---
+
+## CRITICAL: NO Spring Data Pageable
+
+**This module does NOT use Spring Data's `Pageable` interface.**
+
+When persistence is via System API (HTTP), Spring Data is NOT available. Use manual pagination with `@RequestParam` instead.
+
+```java
+// WRONG - Requires spring-data-commons (NOT AVAILABLE with System API)
+@GetMapping
+public ResponseEntity<PageResponse<CustomerResponse>> list(
+    @PageableDefault(size = 20) Pageable pageable) { }
+
+// CORRECT - Manual pagination parameters
+@GetMapping
+public ResponseEntity<PageResponse<CustomerResponse>> list(
+    @RequestParam(defaultValue = "0") int page,
+    @RequestParam(defaultValue = "20") int size) { }
+```
+
+---
+
 ## Template Structure
 
 ```
@@ -50,10 +111,26 @@ templates/
 │   └── FilterRequest.java.tpl        # Base filter criteria
 ├── assembler/
 │   └── EntityModelAssembler.java.tpl # HATEOAS link builder
-└── config/
-    ├── PageableConfig.java.tpl       # Pagination defaults
-    └── application-pagination.yml.tpl # Pagination config
+├── config/
+│   └── WebConfig.java.tpl            # Web configuration (NO Spring Data)
+└── test/
+    └── AssemblerTest.java.tpl        # HATEOAS assembler tests
 ```
+
+---
+
+## Tests Generated
+
+This module generates the following unit tests:
+
+| Test File | Layer | Purpose | Spring Context |
+|-----------|-------|---------|----------------|
+| `{{Entity}}ModelAssemblerTest.java` | Adapter IN | HATEOAS link generation | None (pure POJO) |
+
+**Test Patterns:**
+- Assembler tests: Verify HATEOAS links (self, collection)
+- No Spring context needed - test link building logic directly
+- Uses AssertJ for assertions
 
 ---
 
@@ -83,11 +160,10 @@ templates/
 
 | Template | Output Path | Description |
 |----------|-------------|-------------|
-| `dto/PageResponse.java.tpl` | `src/main/java/{{basePackagePath}}/adapter/in/rest/dto/PageResponse.java` | Standard paginated response |
-| `dto/FilterRequest.java.tpl` | `src/main/java/{{basePackagePath}}/adapter/in/rest/dto/{{entityName}}Filter.java` | Entity-specific filter |
-| `assembler/EntityModelAssembler.java.tpl` | `src/main/java/{{basePackagePath}}/adapter/in/rest/assembler/{{entityName}}ModelAssembler.java` | HATEOAS assembler |
-| `config/PageableConfig.java.tpl` | `src/main/java/{{basePackagePath}}/infrastructure/web/PageableConfig.java` | Pagination config |
-| `config/application-pagination.yml.tpl` | `src/main/resources/application-pagination.yml` | Pagination properties |
+| `dto/PageResponse.java.tpl` | `adapter/in/rest/dto/PageResponse.java` | Standard paginated response |
+| `dto/FilterRequest.java.tpl` | `adapter/in/rest/dto/{{entityName}}Filter.java` | Entity-specific filter |
+| `assembler/EntityModelAssembler.java.tpl` | `adapter/in/rest/assembler/{{entityName}}ModelAssembler.java` | HATEOAS assembler |
+| `config/WebConfig.java.tpl` | `infrastructure/config/WebConfig.java` | Web configuration |
 
 ---
 
@@ -98,10 +174,6 @@ templates/
 **File:** `templates/dto/PageResponse.java.tpl`
 
 ```java
-// Template: PageResponse.java.tpl
-// Output: {{basePackagePath}}/adapter/in/rest/dto/PageResponse.java
-// Purpose: Standard pagination response per ADR-001
-
 package {{basePackage}}.adapter.in.rest.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -111,35 +183,41 @@ import java.util.List;
 
 /**
  * Standard page response structure following ADR-001 pagination standards.
- * 
+ * Does NOT depend on Spring Data - uses manual pagination.
+ *
  * @param <T> Type of content items
+ * @generated mod-code-019-api-public-exposure-java-spring
  */
 public record PageResponse<T>(
     List<T> content,
     PageMetadata page,
     @JsonProperty("_links") Links links
 ) {
-    
+
     public record PageMetadata(
         int number,
         int size,
         long totalElements,
         int totalPages
-    ) {}
-    
+    ) {
+        public static PageMetadata of(int page, int size, long totalElements) {
+            int totalPages = size > 0 ? (int) Math.ceil((double) totalElements / size) : 0;
+            return new PageMetadata(page, size, totalElements, totalPages);
+        }
+    }
+
     /**
-     * Factory method to create PageResponse from Spring Page.
+     * Factory method to create PageResponse with manual pagination.
      */
     public static <T> PageResponse<T> of(
             List<T> content,
-            int number,
+            int page,
             int size,
             long totalElements,
-            int totalPages,
             Links links) {
         return new PageResponse<>(
             content,
-            new PageMetadata(number, size, totalElements, totalPages),
+            PageMetadata.of(page, size, totalElements),
             links
         );
     }
@@ -151,33 +229,28 @@ public record PageResponse<T>(
 **File:** `templates/dto/FilterRequest.java.tpl`
 
 ```java
-// Template: FilterRequest.java.tpl
-// Output: {{basePackagePath}}/adapter/in/rest/dto/{{entityName}}Filter.java
-// Purpose: Filter criteria for {{entityName}} queries
-
 package {{basePackage}}.adapter.in.rest.dto;
 
 /**
  * Filter criteria for {{entityName}} queries.
  * Add domain-specific filter fields as needed.
+ *
+ * @generated mod-code-019-api-public-exposure-java-spring
  */
 public record {{entityName}}Filter(
     String status,
-    String country
+    String searchTerm
 ) {
     public boolean hasStatus() {
         return status != null && !status.isBlank();
     }
-    
-    public boolean hasCountry() {
-        return country != null && !country.isBlank();
+
+    public boolean hasSearchTerm() {
+        return searchTerm != null && !searchTerm.isBlank();
     }
-    
-    /**
-     * Returns true if any filter is active.
-     */
+
     public boolean hasAnyFilter() {
-        return hasStatus() || hasCountry();
+        return hasStatus() || hasSearchTerm();
     }
 }
 ```
@@ -187,13 +260,9 @@ public record {{entityName}}Filter(
 **File:** `templates/assembler/EntityModelAssembler.java.tpl`
 
 ```java
-// Template: EntityModelAssembler.java.tpl
-// Output: {{basePackagePath}}/adapter/in/rest/assembler/{{entityName}}ModelAssembler.java
-// Purpose: Converts {{entityName}} to HATEOAS-enabled responses
-
 package {{basePackage}}.adapter.in.rest.assembler;
 
-import {{basePackage}}.adapter.in.rest.{{entityName}}Controller;
+import {{basePackage}}.adapter.in.rest.controller.{{entityName}}Controller;
 import {{basePackage}}.adapter.in.rest.dto.{{entityName}}Response;
 import {{basePackage}}.domain.model.{{entityName}};
 import org.springframework.hateoas.server.mvc.RepresentationModelAssemblerSupport;
@@ -204,140 +273,161 @@ import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.*;
 /**
  * Assembler that converts {{entityName}} domain entities to {{entityName}}Response DTOs
  * with HATEOAS links per ADR-001.
+ *
+ * @generated mod-code-019-api-public-exposure-java-spring
  */
 @Component
-public class {{entityName}}ModelAssembler 
+public class {{entityName}}ModelAssembler
         extends RepresentationModelAssemblerSupport<{{entityName}}, {{entityName}}Response> {
-    
+
     public {{entityName}}ModelAssembler() {
         super({{entityName}}Controller.class, {{entityName}}Response.class);
     }
-    
+
     @Override
     public {{entityName}}Response toModel({{entityName}} entity) {
         {{entityName}}Response response = mapToResponse(entity);
-        
+
         // Self link
         response.add(linkTo(methodOn({{entityName}}Controller.class)
-            .getById(entity.getId().toString(), null))
+            .getById(entity.getId().value().toString(), null))
             .withSelfRel());
-        
+
         // Collection link
         response.add(linkTo(methodOn({{entityName}}Controller.class)
-            .list(null, null, null, null))
+            .getAll(0, 20, null, null))
             .withRel("collection"));
-        
-        // Add state-specific action links
-        addActionLinks(response, entity);
-        
+
         return response;
     }
-    
+
     private {{entityName}}Response mapToResponse({{entityName}} entity) {
-        // TODO: Map entity fields to response
-        // This should be replaced with actual mapping logic
-        return new {{entityName}}Response(
-            entity.getId().toString()
-            // Add other fields
-        );
-    }
-    
-    private void addActionLinks({{entityName}}Response response, {{entityName}} entity) {
-        // Add conditional action links based on entity state
-        // Example: if entity is ACTIVE, add deactivate link
-        // if ("ACTIVE".equals(entity.getStatus().name())) {
-        //     response.add(linkTo(methodOn({{entityName}}Controller.class)
-        //         .deactivate(entity.getId().toString(), null))
-        //         .withRel("deactivate"));
-        // }
+        // Mapping logic - customize based on entity fields
+        return {{entityName}}Response.from(entity);
     }
 }
 ```
 
-### 4. Pageable Configuration
+### 4. Web Configuration (NO Spring Data)
 
-**File:** `templates/config/PageableConfig.java.tpl`
+**File:** `templates/config/WebConfig.java.tpl`
 
 ```java
-// Template: PageableConfig.java.tpl
-// Output: {{basePackagePath}}/infrastructure/web/PageableConfig.java
-// Purpose: Configure pagination defaults per ADR-001
-
-package {{basePackage}}.infrastructure.web;
+package {{basePackage}}.infrastructure.config;
 
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.web.config.EnableSpringDataWebSupport;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * Configuration for pagination support per ADR-001.
- * Uses Spring Data's Pageable resolver with DTO serialization.
+ * Web configuration for REST API.
+ * Does NOT use Spring Data - pagination is manual via @RequestParam.
+ *
+ * @generated mod-code-019-api-public-exposure-java-spring
  */
 @Configuration
-@EnableSpringDataWebSupport(pageSerializationMode = 
-    EnableSpringDataWebSupport.PageSerializationMode.VIA_DTO)
-public class PageableConfig {
-    // Configuration values from application.yml
+public class WebConfig implements WebMvcConfigurer {
+
+    // Default pagination values (used in @RequestParam defaults)
+    public static final int DEFAULT_PAGE_SIZE = 20;
+    public static final int MAX_PAGE_SIZE = 100;
+
+    // Add custom argument resolvers or converters if needed
 }
-```
-
-### 5. Pagination Properties
-
-**File:** `templates/config/application-pagination.yml.tpl`
-
-```yaml
-# Template: application-pagination.yml.tpl
-# Output: src/main/resources/application-pagination.yml
-# Purpose: Pagination configuration per ADR-001
-
-# Pagination defaults per ADR-001
-spring:
-  data:
-    web:
-      pageable:
-        default-page-size: {{defaultPageSize}}
-        max-page-size: {{maxPageSize}}
-        one-indexed-parameters: false  # Zero-based pagination
-        page-parameter: page
-        size-parameter: size
-      sort:
-        sort-parameter: sort
-
-# HATEOAS configuration
-  hateoas:
-    use-hal-as-default-json-media-type: true
 ```
 
 ---
 
-## Controller Integration
+## Controller Integration Pattern
 
-This module provides supporting classes. The actual controller implementation should follow this pattern (from ERI-014):
+**IMPORTANT:** Use `@RequestParam` for pagination, NOT `Pageable`.
 
 ```java
-@GetMapping
-public ResponseEntity<PageResponse<{{entityName}}Response>> list(
-        @RequestParam(required = false) String status,
-        @RequestParam(required = false) String country,
-        @PageableDefault(size = 20) Pageable pageable,
-        @RequestHeader(value = "X-Correlation-ID", required = false) String correlationId) {
-    
-    {{entityName}}Filter filter = new {{entityName}}Filter(status, country);
-    Page<{{entityName}}> page = service.findAll(filter, pageable);
-    
-    List<{{entityName}}Response> content = page.getContent().stream()
-        .map(assembler::toModel)
-        .toList();
-    
-    Links links = buildPaginationLinks(page, pageable, status, country);
-    
-    return ResponseEntity.ok(PageResponse.of(
-        content,
-        page.getNumber(),
-        page.getSize(),
-        page.getTotalElements(),
-        page.getTotalPages(),
-        links
-    ));
+package {{basePackage}}.adapter.in.rest.controller;
+
+import {{basePackage}}.adapter.in.rest.dto.*;
+import {{basePackage}}.adapter.in.rest.assembler.{{entityName}}ModelAssembler;
+import {{basePackage}}.application.service.{{entityName}}ApplicationService;
+import org.springframework.hateoas.Links;
+import org.springframework.hateoas.Link;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.*;
+
+@RestController
+@RequestMapping("/api/v1/{{entityNamePlural}}")
+public class {{entityName}}Controller {
+
+    private final {{entityName}}ApplicationService service;
+    private final {{entityName}}ModelAssembler assembler;
+
+    // Constructor injection...
+
+    /**
+     * List with manual pagination - NO Pageable.
+     */
+    @GetMapping
+    public ResponseEntity<PageResponse<{{entityName}}Response>> getAll(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String status,
+            @RequestHeader(value = "X-Correlation-ID", required = false) String correlationId) {
+
+        // Validate pagination params
+        if (size > 100) size = 100;
+        if (page < 0) page = 0;
+
+        {{entityName}}Filter filter = new {{entityName}}Filter(status, null);
+
+        // Get paginated results from service
+        List<{{entityName}}> results = service.findAll(filter, page, size);
+        long totalElements = service.count(filter);
+
+        // Convert to response DTOs
+        List<{{entityName}}Response> content = results.stream()
+            .map(assembler::toModel)
+            .toList();
+
+        // Build HATEOAS links
+        Links links = buildPaginationLinks(page, size, totalElements, status);
+
+        return ResponseEntity.ok(PageResponse.of(content, page, size, totalElements, links));
+    }
+
+    private Links buildPaginationLinks(int page, int size, long totalElements, String status) {
+        int totalPages = size > 0 ? (int) Math.ceil((double) totalElements / size) : 0;
+
+        Link selfLink = linkTo(methodOn({{entityName}}Controller.class)
+            .getAll(page, size, status, null)).withSelfRel();
+
+        Link firstLink = linkTo(methodOn({{entityName}}Controller.class)
+            .getAll(0, size, status, null)).withRel("first");
+
+        Link lastLink = linkTo(methodOn({{entityName}}Controller.class)
+            .getAll(Math.max(0, totalPages - 1), size, status, null)).withRel("last");
+
+        if (page > 0) {
+            Link prevLink = linkTo(methodOn({{entityName}}Controller.class)
+                .getAll(page - 1, size, status, null)).withRel("prev");
+
+            if (page < totalPages - 1) {
+                Link nextLink = linkTo(methodOn({{entityName}}Controller.class)
+                    .getAll(page + 1, size, status, null)).withRel("next");
+                return Links.of(selfLink, firstLink, prevLink, nextLink, lastLink);
+            }
+            return Links.of(selfLink, firstLink, prevLink, lastLink);
+        }
+
+        if (page < totalPages - 1) {
+            Link nextLink = linkTo(methodOn({{entityName}}Controller.class)
+                .getAll(page + 1, size, status, null)).withRel("next");
+            return Links.of(selfLink, firstLink, nextLink, lastLink);
+        }
+
+        return Links.of(selfLink, firstLink, lastLink);
+    }
 }
 ```
 
@@ -351,41 +441,23 @@ public ResponseEntity<PageResponse<{{entityName}}Response>> list(
 |--------|----------|-----------|
 | `pagination-check.sh` | ERROR | PageResponse structure exists |
 | `hateoas-check.sh` | ERROR | ModelAssembler exists for entities |
-| `config-check.sh` | WARNING | Pagination config values |
+| `no-spring-data-check.sh` | ERROR | No imports from org.springframework.data |
 
-### ERI Constraint Mapping
+### Validation Rules
 
-| ERI Constraint | Severity | Script | Check |
-|----------------|----------|--------|-------|
-| page-response-structure | ERROR | pagination-check.sh | PageResponse class exists with required fields |
-| page-metadata-fields | ERROR | pagination-check.sh | PageMetadata has number, size, totalElements, totalPages |
-| hateoas-self-link | ERROR | hateoas-check.sh | ModelAssembler adds self link |
-| default-page-size | ERROR | config-check.sh | application.yml has default-page-size: 20 |
-| max-page-size | ERROR | config-check.sh | application.yml has max-page-size: 100 |
-
----
-
-## Usage by Skills
-
-This module is used by:
-
-- `skill-code-020-generate-microservice-java-spring` - When generating Domain APIs
-
-### Layer Selection
-
-| API Layer | Include This Module? |
-|-----------|---------------------|
-| Experience (BFF) | ✅ Yes (pagination for aggregated responses) |
-| Composable | ⚠️ Optional (internal orchestration may not need HATEOAS) |
-| Domain | ✅ Yes (external contract) |
-| System | ❌ No (simpler contracts) |
+| Rule | Severity | Check |
+|------|----------|-------|
+| no-spring-data-pageable | ERROR | No `import org.springframework.data.domain.Pageable` |
+| no-pageable-default | ERROR | No `@PageableDefault` annotation |
+| manual-pagination | ERROR | Controllers use `@RequestParam` for page/size |
+| page-response-structure | ERROR | PageResponse has content, page, links |
 
 ---
 
 ## Dependencies Added
 
 ```xml
-<!-- Spring HATEOAS -->
+<!-- Spring HATEOAS (does NOT require Spring Data) -->
 <dependency>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-hateoas</artifactId>
@@ -397,6 +469,9 @@ This module is used by:
     <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
     <version>2.3.0</version>
 </dependency>
+
+<!-- DO NOT ADD spring-data-commons or spring-boot-starter-data-jpa -->
+<!-- Pagination is manual via @RequestParam, not Pageable -->
 ```
 
 ---
@@ -415,3 +490,4 @@ This module is used by:
 | Date | Version | Change | Author |
 |------|---------|--------|--------|
 | 2025-12-19 | 1.0 | Initial version | C4E Team |
+| 2026-01-19 | 1.1 | Removed Spring Data Pageable dependency - use manual @RequestParam pagination for System API compatibility | C4E Team |

@@ -1,0 +1,24 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-019-api-public-exposure-java-spring
+# Purpose: Public API exposure with HATEOAS and pagination
+# Note: No pom-*.tpl existed; dependencies deduced from template imports
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  dependencies:
+    # ── HATEOAS ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-hateoas
+
+    # ── Pagination (EnableSpringDataWebSupport) ──
+    - groupId: org.springframework.data
+      artifactId: spring-data-commons
+
+    # ── API Documentation ──
+    - groupId: org.springdoc
+      artifactId: springdoc-openapi-starter-webmvc-ui
+      version: ${springdoc.version}
+
+  properties:
+    springdoc.version: "2.3.0"
