@@ -43,6 +43,30 @@ TOOL_DISCOVERABILITY = [
 
 
 @dataclass
+class EditableContent:
+    """Declares which tool parameters are user-editable at permission time.
+
+    Tools that manage "content" (plans, code, configs) can opt-in to being
+    user-editable by setting this on their ToolSchema. When permission is
+    requested, the user gets an additional "Edit" option that opens the
+    content in their $EDITOR.
+
+    Attributes:
+        parameters: List of parameter names that are editable (e.g., ["title", "steps"]).
+        format: How to present content for editing. Options:
+            - "yaml": YAML format (default, most user-friendly for structured data)
+            - "json": JSON format
+            - "text": Plain text
+            - "markdown": Markdown format
+        template: Optional header/instructions to show in the editor.
+            This text is stripped when parsing the edited content back.
+    """
+    parameters: List[str]
+    format: str = "yaml"
+    template: Optional[str] = None
+
+
+@dataclass
 class ToolSchema:
     """Provider-agnostic tool/function declaration.
 
@@ -60,12 +84,16 @@ class ToolSchema:
             - "core": Always present in initial context (default for essential tools)
             - "discoverable": Loaded on-demand when model requests via introspection
             Default is "discoverable" to minimize initial context size.
+        editable: Optional EditableContent declaring which parameters are
+            user-editable at permission time. When set, the permission prompt
+            includes an "Edit" option that opens an external editor.
     """
     name: str
     description: str
     parameters: Dict[str, Any] = field(default_factory=dict)
     category: Optional[str] = None
     discoverability: str = "discoverable"
+    editable: Optional[EditableContent] = None
 
 
 @dataclass

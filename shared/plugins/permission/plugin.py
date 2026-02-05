@@ -23,6 +23,8 @@ from .channels import (
     ConsoleChannel,
     create_channel,
     get_default_permission_options,
+    get_permission_options_with_edit,
+    EDIT_PERMISSION_OPTION,
 )
 from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
 from ...ui_utils import format_permission_options, format_tool_args_summary
@@ -992,40 +994,79 @@ class PermissionPlugin:
                     self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
                     return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
-                # Get custom display info from source plugin if available
-                channel_type = channel.name if channel else "console"
-                display_info = self._get_display_info(tool_name, args, channel_type)
+                # Get tool schema to check for editable content
+                tool_schema = self._get_tool_schema(tool_name)
+                editable = tool_schema.editable if tool_schema else None
 
-                # Build context with display info
-                request_context = dict(context) if context else {}
-                if display_info:
-                    request_context["display_info"] = display_info
+                # Get permission options (with edit if tool is editable)
+                response_options = self._get_permission_options_for_tool(tool_name)
 
-                request = PermissionRequest.create(
-                    tool_name=tool_name,
-                    arguments=args,
-                    timeout=self._config.channel_timeout if self._config else 30,
-                    context=request_context,
-                )
+                # Track current arguments (may be modified by edit)
+                current_args = args.copy()
+                original_args = args.copy()
+                was_edited = False
 
-                # Emit permission requested hook with raw args (client formats display)
-                # SKIP in subagent mode
-                if self._on_permission_requested and not is_subagent_mode:
-                    self._on_permission_requested(
-                        tool_name, request.request_id, args, request.response_options, call_id
+                # Edit loop - user can edit multiple times before final decision
+                while True:
+                    # Get custom display info from source plugin if available
+                    channel_type = channel.name if channel else "console"
+                    display_info = self._get_display_info(tool_name, current_args, channel_type)
+
+                    # Build context with display info
+                    request_context = dict(context) if context else {}
+                    if display_info:
+                        request_context["display_info"] = display_info
+                    # Mark as edited in context for UI display
+                    if was_edited:
+                        request_context["was_edited"] = True
+
+                    request = PermissionRequest.create(
+                        tool_name=tool_name,
+                        arguments=current_args,
+                        timeout=self._config.channel_timeout if self._config else 30,
+                        context=request_context,
+                        response_options=response_options,
                     )
+                    # Attach editable metadata for the channel/client to use
+                    request.editable = editable
+                    request.was_edited = was_edited
+                    request.original_arguments = original_args if was_edited else None
 
-                response = channel.request_permission(request)
-                allowed, info = self._handle_channel_response(tool_name, args, response)
+                    # Emit permission requested hook with current args (client formats display)
+                    # SKIP in subagent mode
+                    if self._on_permission_requested and not is_subagent_mode:
+                        self._on_permission_requested(
+                            tool_name, request.request_id, current_args, request.response_options, call_id
+                        )
 
-                # Emit permission resolved hook
-                # SKIP in subagent mode
-                if self._on_permission_resolved and not is_subagent_mode:
-                    self._on_permission_resolved(
-                        tool_name, request.request_id, allowed, info.get('method', 'unknown')
-                    )
+                    response = channel.request_permission(request)
 
-                return allowed, info
+                    # Handle EDIT decision - loop back after editing
+                    if response.decision == ChannelDecision.EDIT:
+                        if response.edited_arguments:
+                            current_args = response.edited_arguments
+                            was_edited = True
+                            self._trace(f"check_permission: content edited for {tool_name}")
+                        # Continue loop to re-prompt with edited content
+                        continue
+
+                    # Final decision - exit loop
+                    allowed, info = self._handle_channel_response(tool_name, current_args, response)
+
+                    # Include edit metadata in info
+                    if was_edited:
+                        info['was_edited'] = True
+                        info['modified_args'] = current_args
+                        info['original_args'] = original_args
+
+                    # Emit permission resolved hook
+                    # SKIP in subagent mode
+                    if self._on_permission_resolved and not is_subagent_mode:
+                        self._on_permission_resolved(
+                            tool_name, request.request_id, allowed, info.get('method', 'unknown')
+                        )
+
+                    return allowed, info
 
         # Unknown decision type, deny by default
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}
@@ -1091,6 +1132,13 @@ class PermissionPlugin:
             self._log_decision(tool_name, args, "deny", "Channel timeout")
             return False, {'reason': response.reason, 'method': 'timeout'}
 
+        elif decision == ChannelDecision.EDIT:
+            # EDIT is handled in check_permission loop, but if we get here
+            # it means the channel returned EDIT without edited content
+            # Treat as a denial to force re-prompt
+            self._log_decision(tool_name, args, "deny", "Edit requested but no content provided")
+            return False, {'reason': 'Edit flow incomplete', 'method': 'edit_incomplete'}
+
         # Unknown decision, deny
         self._log_decision(tool_name, args, "deny", "Unknown channel decision")
         return False, {'reason': 'Unknown channel decision', 'method': 'unknown'}
@@ -1144,6 +1192,49 @@ class PermissionPlugin:
                 return None
 
         return None
+
+    def _get_tool_schema(self, tool_name: str) -> Optional[ToolSchema]:
+        """Get the ToolSchema for a given tool name.
+
+        Looks up the plugin that provides the tool and finds the matching schema.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            ToolSchema if found, None otherwise.
+        """
+        if not self._registry:
+            return None
+
+        plugin = self._registry.get_plugin_for_tool(tool_name)
+        if not plugin:
+            return None
+
+        try:
+            for schema in plugin.get_tool_schemas():
+                if schema.name == tool_name:
+                    return schema
+        except Exception:
+            pass
+
+        return None
+
+    def _get_permission_options_for_tool(self, tool_name: str) -> List[PermissionResponseOption]:
+        """Get permission response options for a tool.
+
+        If the tool has editable content, includes the 'edit' option.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            List of PermissionResponseOption objects.
+        """
+        schema = self._get_tool_schema(tool_name)
+        if schema and schema.editable is not None:
+            return get_permission_options_with_edit()
+        return get_default_permission_options()
 
     def _build_prompt_lines(
         self,
@@ -1264,10 +1355,21 @@ class PermissionPlugin:
             if not allowed:
                 return {"error": f"Permission denied: {perm_info.get('reason', '')}", "_permission": perm_info}
 
-            result = executor(args)
+            # Use modified args if content was edited by user
+            final_args = perm_info.get('modified_args', args)
+
+            result = executor(final_args)
+
             # Inject permission metadata if result is a dict
             if isinstance(result, dict):
                 result['_permission'] = perm_info
+                # Add feedback to model about edited content
+                if perm_info.get('was_edited'):
+                    result['_user_edited'] = True
+                    result['_edit_notice'] = (
+                        "Note: The user edited the content before execution. "
+                        "The executed content differs from what you originally provided."
+                    )
             return result
 
         self._wrapped_executors[name] = wrapped

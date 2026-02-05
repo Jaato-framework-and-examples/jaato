@@ -266,6 +266,75 @@ class RichClient:
                 self._display.append_output(source, text, mode)
         return callback
 
+    def _create_edit_callback(self) -> Callable[[Dict[str, Any], Any], Optional[Dict[str, Any]]]:
+        """Create callback for editing tool content in external editor.
+
+        This callback is invoked when user selects 'e' (edit) at a permission
+        prompt for a tool that has editable content.
+
+        Returns:
+            Callback function that takes (arguments, editable_metadata) and
+            returns edited arguments dict, or None if edit was cancelled.
+        """
+        from editor_utils import edit_tool_content
+
+        def edit_callback(arguments: Dict[str, Any], editable: Any) -> Optional[Dict[str, Any]]:
+            """Open external editor for tool content.
+
+            Args:
+                arguments: Current tool arguments.
+                editable: EditableContent metadata from the tool schema.
+
+            Returns:
+                Edited arguments dict, or None if cancelled/error.
+            """
+            self._trace(f"edit_callback: editing {len(arguments)} arguments")
+
+            # Get session directory for edit history (if available)
+            session_dir = None
+            if hasattr(self, '_session_dir') and self._session_dir:
+                session_dir = self._session_dir
+
+            # Temporarily suspend the TUI display for external editor
+            if self._display:
+                self._display.suspend()
+
+            try:
+                result = edit_tool_content(arguments, editable, session_dir)
+
+                if result.success:
+                    if result.was_modified:
+                        self._trace(f"edit_callback: content was modified")
+                        return result.arguments
+                    else:
+                        self._trace(f"edit_callback: content unchanged")
+                        return arguments  # Return original if unchanged
+                else:
+                    self._trace(f"edit_callback: edit failed: {result.error}")
+                    # Show error to user
+                    if self._display:
+                        self._display.add_system_message(
+                            f"Edit failed: {result.error}",
+                            style="system_error"
+                        )
+                    return None
+
+            except Exception as e:
+                self._trace(f"edit_callback: exception: {e}")
+                if self._display:
+                    self._display.add_system_message(
+                        f"Edit error: {e}",
+                        style="system_error"
+                    )
+                return None
+
+            finally:
+                # Resume TUI display
+                if self._display:
+                    self._display.resume()
+
+        return edit_callback
+
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
         """Try to execute user input as a plugin-provided command."""
         if not self._backend:
@@ -701,6 +770,7 @@ class RichClient:
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
                     cancel_token=cancel_token_proxy,
+                    edit_callback=self._create_edit_callback(),
                 )
                 self._trace("Permission channel callbacks set (queue)")
 

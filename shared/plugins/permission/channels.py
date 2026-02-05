@@ -55,6 +55,12 @@ class ChannelDecision(Enum):
         - Clears when the session finally transitions to IDLE state
         - Use case: Automated pipelines, batch processing, multi-turn scripts
 
+    EDIT:
+        - User wants to edit the tool's content before deciding
+        - Only available for tools with editable content declared
+        - Returns to permission prompt after editing with modified content
+        - User can edit multiple times before final decision
+
     Lifecycle:
         Interactive session:
             User message -> Turn starts -> Tools execute -> Turn ends -> IDLE
@@ -73,6 +79,7 @@ class ChannelDecision(Enum):
     ALLOW_ALL = "allow_all"          # Pre-approve all future requests in session
     ALLOW_TURN = "allow_turn"        # Allow all remaining tools this turn (clears on IDLE)
     ALLOW_UNTIL_IDLE = "allow_until_idle"  # Allow until session goes idle (clears on IDLE)
+    EDIT = "edit"                    # User wants to edit content before deciding
     TIMEOUT = "timeout"              # Channel didn't respond in time
 
 
@@ -135,6 +142,11 @@ DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
     PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
 ]
 
+# Edit option - added conditionally for tools with editable content
+EDIT_PERMISSION_OPTION = PermissionResponseOption(
+    "e", "edit", "Edit content in external editor before deciding", ChannelDecision.EDIT
+)
+
 
 def get_default_permission_options() -> List['PermissionResponseOption']:
     """Get the default list of permission response options.
@@ -142,6 +154,19 @@ def get_default_permission_options() -> List['PermissionResponseOption']:
     Returns a copy to prevent accidental modification of the defaults.
     """
     return list(DEFAULT_PERMISSION_OPTIONS)
+
+
+def get_permission_options_with_edit() -> List['PermissionResponseOption']:
+    """Get permission options including the edit option.
+
+    Use this for tools that have editable content declared.
+
+    Returns a copy with the edit option inserted after 'yes' and 'no'.
+    """
+    options = list(DEFAULT_PERMISSION_OPTIONS)
+    # Insert edit option after 'no' (index 2)
+    options.insert(2, EDIT_PERMISSION_OPTION)
+    return options
 
 
 @dataclass
@@ -163,6 +188,16 @@ class PermissionRequest:
     response_options: List[PermissionResponseOption] = field(
         default_factory=get_default_permission_options
     )
+
+    # Editable content metadata (from ToolSchema.editable)
+    # When set, the "edit" option is available
+    editable: Optional[Any] = None  # EditableContent from types.py
+
+    # Tracks whether content was edited (set after editing)
+    was_edited: bool = False
+
+    # Original arguments before any edits (for history/diff)
+    original_arguments: Optional[Dict[str, Any]] = None
 
     @classmethod
     def create(
@@ -186,7 +221,7 @@ class PermissionRequest:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "request_id": self.request_id,
             "timestamp": self.timestamp,
             "tool_name": self.tool_name,
@@ -195,7 +230,16 @@ class PermissionRequest:
             "default_on_timeout": self.default_on_timeout,
             "context": self.context,
             "response_options": [opt.to_dict() for opt in self.response_options],
+            "was_edited": self.was_edited,
         }
+        if self.original_arguments is not None:
+            result["original_arguments"] = self.original_arguments
+        # Editable metadata is serialized separately if needed
+        if self.editable is not None:
+            result["has_editable_content"] = True
+            result["editable_parameters"] = self.editable.parameters if hasattr(self.editable, 'parameters') else []
+            result["editable_format"] = self.editable.format if hasattr(self.editable, 'format') else "yaml"
+        return result
 
     def get_option_for_input(self, input_text: str) -> Optional[PermissionResponseOption]:
         """Find the response option matching user input.
@@ -223,6 +267,10 @@ class ChannelResponse:
     remember_pattern: Optional[str] = None  # Pattern to remember (e.g., "git *")
     expires_at: Optional[str] = None  # ISO8601 expiration time
 
+    # Edited content - set when decision is EDIT or when content was edited before approval
+    edited_arguments: Optional[Dict[str, Any]] = None
+    was_edited: bool = False
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ChannelResponse':
         """Create from dictionary."""
@@ -239,18 +287,24 @@ class ChannelResponse:
             remember=data.get("remember", False),
             remember_pattern=data.get("remember_pattern"),
             expires_at=data.get("expires_at"),
+            edited_arguments=data.get("edited_arguments"),
+            was_edited=data.get("was_edited", False),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "request_id": self.request_id,
             "decision": self.decision.value,
             "reason": self.reason,
             "remember": self.remember,
             "remember_pattern": self.remember_pattern,
             "expires_at": self.expires_at,
+            "was_edited": self.was_edited,
         }
+        if self.edited_arguments is not None:
+            result["edited_arguments"] = self.edited_arguments
+        return result
 
 
 class Channel(ABC):
@@ -856,6 +910,10 @@ class QueueChannel(ConsoleChannel):
         self._waiting_for_input: bool = False
         self._prompt_callback: Optional[Callable[[bool], None]] = None
         self._cancel_token: Optional[Any] = None  # CancelToken for interruption
+        # Callback for editing tool content in external editor
+        # Signature: (arguments: Dict, editable: EditableContent) -> Optional[Dict]
+        # Returns edited arguments or None if edit was cancelled
+        self._edit_callback: Optional[Callable[[Dict[str, Any], Any], Optional[Dict[str, Any]]]] = None
 
     def set_callbacks(
         self,
@@ -863,6 +921,7 @@ class QueueChannel(ConsoleChannel):
         input_queue: Optional['queue.Queue[str]'] = None,
         prompt_callback: Optional[Callable[[bool], None]] = None,
         cancel_token: Optional[Any] = None,
+        edit_callback: Optional[Callable[[Dict[str, Any], Any], Optional[Dict[str, Any]]]] = None,
         **kwargs,
     ) -> None:
         """Set the callbacks and queue for TUI integration.
@@ -872,11 +931,15 @@ class QueueChannel(ConsoleChannel):
             input_queue: Queue to receive user input from the main input handler.
             prompt_callback: Called with True when waiting for input, False when done.
             cancel_token: Optional CancelToken to check for cancellation requests.
+            edit_callback: Called with (arguments, editable_metadata) when user
+                chooses to edit content. Should open external editor and return
+                edited arguments dict, or None if cancelled.
         """
         self._output_callback = output_callback
         self._input_queue = input_queue
         self._prompt_callback = prompt_callback
         self._cancel_token = cancel_token
+        self._edit_callback = edit_callback
 
     @property
     def waiting_for_input(self) -> bool:
@@ -934,6 +997,10 @@ class QueueChannel(ConsoleChannel):
 
         Note: Permission content is displayed via unified event flow (AgentOutputEvent).
         This method only handles input waiting.
+
+        If the tool has editable content and user selects 'edit', the edit_callback
+        is invoked to open an external editor. The edited content is returned in
+        the ChannelResponse for the permission plugin to use.
         """
         # Signal that we're waiting for input
         self._waiting_for_input = True
@@ -969,6 +1036,9 @@ class QueueChannel(ConsoleChannel):
             # Parse response using request's response_options (uses parent's method)
             matched_option = request.get_option_for_input(response_text)
             if matched_option:
+                # Special handling for EDIT decision
+                if matched_option.decision == ChannelDecision.EDIT:
+                    return self._handle_edit_request(request)
                 return self._create_response_for_option(request, matched_option)
             else:
                 # Invalid input - treat as deny
@@ -983,6 +1053,61 @@ class QueueChannel(ConsoleChannel):
             self._waiting_for_input = False
             if self._prompt_callback:
                 self._prompt_callback(False)
+
+    def _handle_edit_request(self, request: PermissionRequest) -> ChannelResponse:
+        """Handle the edit request by invoking the edit callback.
+
+        Args:
+            request: The permission request with editable content.
+
+        Returns:
+            ChannelResponse with EDIT decision and edited arguments if successful,
+            or DENY if no edit callback or edit was cancelled.
+        """
+        # Check if tool has editable content and we have an edit callback
+        if not request.editable:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.DENY,
+                reason="Tool does not have editable content",
+            )
+
+        if not self._edit_callback:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.DENY,
+                reason="Edit not supported (no edit callback configured)",
+            )
+
+        # Invoke the edit callback to open external editor
+        try:
+            edited_args = self._edit_callback(request.arguments, request.editable)
+        except Exception as e:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.DENY,
+                reason=f"Edit failed: {e}",
+            )
+
+        if edited_args is None:
+            # Edit was cancelled, return EDIT with no changes
+            # The permission plugin will re-prompt
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.EDIT,
+                reason="Edit cancelled",
+                edited_arguments=request.arguments,  # Return original
+                was_edited=False,
+            )
+
+        # Edit successful
+        return ChannelResponse(
+            request_id=request.request_id,
+            decision=ChannelDecision.EDIT,
+            reason="Content edited by user",
+            edited_arguments=edited_args,
+            was_edited=True,
+        )
 
 
 class ParentBridgedChannel(Channel):

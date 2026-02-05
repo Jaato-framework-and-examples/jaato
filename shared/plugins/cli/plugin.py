@@ -12,7 +12,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from ..base import UserCommand
 from ..background import BackgroundCapableMixin
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.ai_tool_runner import get_current_tool_output_callback
 
@@ -293,6 +293,11 @@ class CLIToolPlugin(BackgroundCapableMixin):
             },
             category="system",
             discoverability="discoverable",
+            editable=EditableContent(
+                parameters=["command"],
+                format="text",
+                template="# Edit the command below. Save and exit to continue.\n",
+            ),
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
