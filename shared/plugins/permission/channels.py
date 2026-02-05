@@ -207,6 +207,7 @@ class PermissionRequest:
         timeout: int = 30,
         context: Optional[Dict[str, Any]] = None,
         response_options: Optional[List[PermissionResponseOption]] = None,
+        editable: Optional[Any] = None,
     ) -> 'PermissionRequest':
         """Create a new permission request with auto-generated ID and timestamp."""
         return cls(
@@ -217,6 +218,7 @@ class PermissionRequest:
             timeout_seconds=timeout,
             context=context or {},
             response_options=response_options or get_default_permission_options(),
+            editable=editable,
         )
 
     def to_dict(self) -> Dict[str, Any]:
