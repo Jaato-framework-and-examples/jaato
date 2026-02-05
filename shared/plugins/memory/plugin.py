@@ -1,11 +1,19 @@
 """Memory plugin for model self-curated persistent memory across sessions."""
 
+import json
 import os
+import subprocess
 import tempfile
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from ..base import PromptEnrichmentResult
+from ..base import (
+    CommandCompletion,
+    HelpLines,
+    PromptEnrichmentResult,
+    UserCommand,
+)
 from ..model_provider.types import ToolSchema
 from .indexer import MemoryIndexer
 from .models import Memory
@@ -178,6 +186,8 @@ class MemoryPlugin:
             "store_memory": self._execute_store,
             "retrieve_memories": self._execute_retrieve,
             "list_memory_tags": self._execute_list_tags,
+            # User command
+            "memory": self.execute_memory,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -208,21 +218,79 @@ class MemoryPlugin:
         """Return list of auto-approved tools.
 
         All memory tools are safe - read-only or self-directed writes.
+        The 'memory' user command is also auto-approved since it's
+        invoked directly by the user.
 
         Returns:
             List of tool names that don't require permission
         """
-        return ["store_memory", "retrieve_memories", "list_memory_tags"]
+        return ["store_memory", "retrieve_memories", "list_memory_tags", "memory"]
 
-    def get_user_commands(self) -> List:
-        """Return user-facing commands.
-
-        Memory plugin is model-driven, no direct user commands needed.
+    def get_user_commands(self) -> List[UserCommand]:
+        """Return user-facing commands for memory management.
 
         Returns:
-            Empty list
+            List of UserCommand objects for the memory command
         """
+        return [
+            UserCommand(
+                name="memory",
+                description="Manage persistent memories: list, remove <id>, edit <id>",
+                share_with_model=False,
+            )
+        ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for memory command arguments.
+
+        Provides autocompletion for:
+        - Subcommands: list, remove, edit, help
+        - Memory IDs for remove/edit subcommands
+        """
+        if command != "memory":
+            return []
+
+        # Subcommand completions
+        subcommands = [
+            CommandCompletion("list", "List all stored memories"),
+            CommandCompletion("remove", "Remove a memory by ID"),
+            CommandCompletion("edit", "Edit a memory in external editor"),
+            CommandCompletion("help", "Show detailed help"),
+        ]
+
+        if not args:
+            return subcommands
+
+        if len(args) == 1:
+            # Partial subcommand - filter matching ones
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        if len(args) == 2:
+            subcommand = args[0].lower()
+            partial = args[1].lower()
+
+            if subcommand in ("remove", "edit"):
+                # Provide memory ID completions
+                return self._get_memory_id_completions(partial)
+
         return []
+
+    def _get_memory_id_completions(self, partial: str) -> List[CommandCompletion]:
+        """Get memory ID completions matching partial input."""
+        if not self._storage:
+            return []
+
+        completions = []
+        for mem in self._storage.load_all():
+            if mem.id.lower().startswith(partial):
+                # Truncate description for display
+                desc = mem.description[:40] + "..." if len(mem.description) > 40 else mem.description
+                completions.append(CommandCompletion(mem.id, desc))
+
+        return completions
 
     # ===== Prompt Enrichment Protocol =====
 
@@ -433,6 +501,320 @@ class MemoryPlugin:
             "memory_count": memory_count,
             "message": f"Found {memory_count} memories with {len(tags)} unique tags"
         }
+
+    # ===== User Command Executor =====
+
+    def execute_memory(self, args: Dict[str, Any]) -> str:
+        """Execute the memory user command.
+
+        Subcommands:
+            list              - List all stored memories
+            remove <id>       - Remove a memory by ID
+            edit <id>         - Edit a memory in external editor
+            help              - Show detailed help
+
+        Args:
+            args: Dict with 'args' key containing list of command arguments
+
+        Returns:
+            Formatted string output for display to user
+        """
+        cmd_args = args.get("args", [])
+
+        if not cmd_args:
+            return self._memory_list()
+
+        subcommand = cmd_args[0].lower()
+
+        if subcommand == "list":
+            return self._memory_list()
+        elif subcommand == "remove":
+            if len(cmd_args) < 2:
+                return "Usage: memory remove <memory_id>"
+            memory_id = cmd_args[1]
+            return self._memory_remove(memory_id)
+        elif subcommand == "edit":
+            if len(cmd_args) < 2:
+                return "Usage: memory edit <memory_id>"
+            memory_id = cmd_args[1]
+            return self._memory_edit(memory_id)
+        elif subcommand == "help":
+            return self._memory_help()
+        else:
+            return (
+                f"Unknown subcommand: {subcommand}\n"
+                "Usage: memory <list|remove|edit|help>\n"
+                "  list              - List all stored memories\n"
+                "  remove <id>       - Remove a memory by ID\n"
+                "  edit <id>         - Edit a memory in external editor\n"
+                "  help              - Show detailed help"
+            )
+
+    def _memory_list(self) -> str:
+        """List all stored memories."""
+        if not self._storage:
+            return "Error: Memory plugin not initialized."
+
+        memories = self._storage.load_all()
+
+        if not memories:
+            return "No memories stored yet."
+
+        lines = []
+        lines.append("Stored Memories")
+        lines.append("═" * 15)
+        lines.append("")
+
+        for mem in memories:
+            # Format: ID | Description | Tags | Usage
+            tags_str = ", ".join(mem.tags[:3])
+            if len(mem.tags) > 3:
+                tags_str += f" +{len(mem.tags) - 3} more"
+
+            lines.append(f"ID: {mem.id}")
+            lines.append(f"  Description: {mem.description}")
+            lines.append(f"  Tags: {tags_str}")
+            lines.append(f"  Created: {mem.timestamp[:10]}")
+            lines.append(f"  Used: {mem.usage_count} times")
+            lines.append("")
+
+        lines.append(f"Total: {len(memories)} memories")
+        return "\n".join(lines)
+
+    def _memory_remove(self, memory_id: str) -> str:
+        """Remove a memory by ID."""
+        if not self._storage or not self._indexer:
+            return "Error: Memory plugin not initialized."
+
+        # Check if memory exists first
+        memory = self._storage.get_by_id(memory_id)
+        if not memory:
+            return f"Error: Memory not found: {memory_id}"
+
+        # Delete from storage
+        deleted = self._storage.delete(memory_id)
+
+        if deleted:
+            # Rebuild index after deletion
+            existing_memories = self._storage.load_all()
+            self._indexer.clear()
+            self._indexer.build_index(existing_memories)
+            return f"Removed memory: {memory_id}\n  Was: {memory.description}"
+        else:
+            return f"Error: Failed to remove memory: {memory_id}"
+
+    def _memory_edit(self, memory_id: str) -> str:
+        """Edit a memory in external editor."""
+        if not self._storage or not self._indexer:
+            return "Error: Memory plugin not initialized."
+
+        # Get the memory
+        memory = self._storage.get_by_id(memory_id)
+        if not memory:
+            return f"Error: Memory not found: {memory_id}"
+
+        # Get editor
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+
+        # Prepare memory as YAML for editing
+        memory_dict = {
+            "description": memory.description,
+            "content": memory.content,
+            "tags": memory.tags,
+        }
+
+        # Create temp file with memory content
+        try:
+            import yaml
+            HAS_YAML = True
+        except ImportError:
+            HAS_YAML = False
+
+        try:
+            # Format as YAML or JSON
+            if HAS_YAML:
+                content = (
+                    f"# Edit memory: {memory_id}\n"
+                    f"# Modify the fields below and save to update the memory.\n"
+                    f"# Close without saving to cancel.\n"
+                    f"#\n"
+                    f"# Fields:\n"
+                    f"#   description: Brief summary (1-2 sentences)\n"
+                    f"#   content: Full content/explanation\n"
+                    f"#   tags: List of keywords for retrieval\n"
+                    f"\n"
+                )
+                import yaml
+                content += yaml.safe_dump(
+                    memory_dict,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                suffix = ".yaml"
+            else:
+                content = (
+                    f"// Edit memory: {memory_id}\n"
+                    f"// Modify the fields below and save to update the memory.\n"
+                    f"// Close without saving to cancel.\n"
+                    f"\n"
+                )
+                content += json.dumps(memory_dict, indent=2, ensure_ascii=False)
+                suffix = ".json"
+
+            # Write to temp file
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix=suffix,
+                delete=False,
+                encoding='utf-8',
+            ) as f:
+                f.write(content)
+                temp_path = f.name
+
+            original_content = content
+
+            # Open in editor
+            result = subprocess.run([editor, temp_path], check=False)
+
+            if result.returncode != 0:
+                os.unlink(temp_path)
+                return f"Editor exited with code {result.returncode}. Edit cancelled."
+
+            # Read back edited content
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                edited_content = f.read()
+
+            os.unlink(temp_path)
+
+            # Check if content was modified
+            if edited_content.strip() == original_content.strip():
+                return "No changes made."
+
+            # Parse edited content
+            # Strip comment lines
+            lines = []
+            for line in edited_content.split('\n'):
+                stripped = line.strip()
+                if not stripped.startswith('#') and not stripped.startswith('//'):
+                    lines.append(line)
+            clean_content = '\n'.join(lines)
+
+            try:
+                if HAS_YAML:
+                    parsed = yaml.safe_load(clean_content)
+                else:
+                    parsed = json.loads(clean_content)
+            except Exception as e:
+                return f"Error parsing edited content: {e}\nEdit cancelled."
+
+            # Validate schema
+            validation_error = self._validate_memory_schema(parsed)
+            if validation_error:
+                return f"Validation error: {validation_error}\nEdit cancelled."
+
+            # Update memory
+            memory.description = parsed["description"]
+            memory.content = parsed["content"]
+            memory.tags = parsed["tags"]
+
+            # Save updated memory
+            self._storage.update(memory)
+
+            # Rebuild index
+            existing_memories = self._storage.load_all()
+            self._indexer.clear()
+            self._indexer.build_index(existing_memories)
+
+            return f"Updated memory: {memory_id}\n  Description: {memory.description}"
+
+        except Exception as e:
+            # Clean up temp file if it exists
+            if 'temp_path' in locals():
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+            return f"Error editing memory: {e}"
+
+    def _validate_memory_schema(self, data: Dict[str, Any]) -> Optional[str]:
+        """Validate that edited memory data conforms to schema.
+
+        Args:
+            data: Parsed memory data dict
+
+        Returns:
+            Error message if invalid, None if valid
+        """
+        # Required fields
+        required_fields = ["description", "content", "tags"]
+        for field in required_fields:
+            if field not in data:
+                return f"Missing required field: {field}"
+
+        # Type validation
+        if not isinstance(data["description"], str):
+            return "description must be a string"
+        if not isinstance(data["content"], str):
+            return "content must be a string"
+        if not isinstance(data["tags"], list):
+            return "tags must be a list"
+        if not all(isinstance(tag, str) for tag in data["tags"]):
+            return "all tags must be strings"
+
+        # Non-empty validation
+        if not data["description"].strip():
+            return "description cannot be empty"
+        if not data["content"].strip():
+            return "content cannot be empty"
+        if not data["tags"]:
+            return "tags cannot be empty"
+
+        return None
+
+    def _memory_help(self) -> HelpLines:
+        """Show detailed help for the memory command."""
+        return HelpLines(lines=[
+            ("Memory Command", "bold"),
+            ("", ""),
+            ("Manage persistent memories stored by the AI. Memories persist across", ""),
+            ("sessions and help the AI recall context, patterns, and lessons learned.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    memory [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list              List all stored memories with metadata", "dim"),
+            ("                      Shows ID, description, tags, creation date, usage count", "dim"),
+            ("", ""),
+            ("    remove <id>       Remove a memory by its ID", "dim"),
+            ("                      The memory will be permanently deleted", "dim"),
+            ("", ""),
+            ("    edit <id>         Edit a memory in your external editor ($EDITOR)", "dim"),
+            ("                      Opens the memory in YAML format for editing", "dim"),
+            ("                      Validates the schema on save", "dim"),
+            ("", ""),
+            ("    help              Show this help message", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    memory                         List all memories (default)", "dim"),
+            ("    memory list                    List all memories", "dim"),
+            ("    memory remove mem_20240101_... Remove a specific memory", "dim"),
+            ("    memory edit mem_20240101_...   Edit a specific memory", "dim"),
+            ("", ""),
+            ("EDIT FORMAT", "bold"),
+            ("    When editing, the memory is presented in YAML format with:", ""),
+            ("      description: Brief summary of the memory", "dim"),
+            ("      content: Full content/explanation", "dim"),
+            ("      tags: List of keywords for retrieval", "dim"),
+            ("", ""),
+            ("    Lines starting with # are comments and will be ignored.", ""),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    - Memories are stored in .jaato/memories.jsonl", "dim"),
+            ("    - Each memory has a unique ID starting with 'mem_'", "dim"),
+            ("    - Use Tab completion for memory IDs in remove/edit", "dim"),
+        ])
 
 
 def create_plugin() -> MemoryPlugin:
