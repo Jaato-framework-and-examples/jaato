@@ -3361,15 +3361,32 @@ NOTES
                 current_tokens = large_numbers[0] if len(large_numbers) >= 1 else 0
                 limit_tokens = large_numbers[1] if len(large_numbers) >= 2 else 0
 
-            overflow = current_tokens - limit_tokens if current_tokens > limit_tokens else 0
-
             self._trace(
                 f"CONTEXT_LIMIT_RECOVERY: {type(e).__name__}: "
-                f"current={current_tokens}, limit={limit_tokens}, overflow={overflow}"
+                f"current={current_tokens}, limit={limit_tokens}"
             )
 
-            # Truncate tool results, keeping first lines of content
-            truncated_results = self._truncate_results_to_fit(tool_results, overflow)
+            # Step 1: Try GC first to free up space (GC plugin decides if feasible)
+            gc_helped = self._try_gc_for_context_recovery(on_output)
+
+            if gc_helped:
+                # GC freed some space - retry the original request
+                self._trace("CONTEXT_LIMIT_RECOVERY: GC freed space, retrying original request")
+                try:
+                    return self._do_send_tool_results(
+                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+                except Exception as retry_e:
+                    if not is_context_limit_error(retry_e):
+                        raise
+                    # GC helped but still not enough - fall through to truncation
+                    self._trace("CONTEXT_LIMIT_RECOVERY: GC helped but still exceeded, proceeding to truncation")
+
+            # Step 2: Truncate tool results to fit within 80% of the model's limit
+            # This ensures we have headroom and don't hit the limit again immediately
+            truncated_results = self._truncate_results_to_fit(
+                tool_results, current_tokens, limit_tokens
+            )
 
             # Check if any result was actually modified
             any_modified = any(
@@ -3407,6 +3424,64 @@ NOTES
             return self._do_send_tool_results(
                 truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
             )
+
+    def _try_gc_for_context_recovery(
+        self,
+        on_output: Optional[OutputCallback],
+    ) -> bool:
+        """Attempt garbage collection to free context space during limit recovery.
+
+        This is called when the model rejects a request due to context limit exceeded.
+        The GC plugin decides whether it's feasible to collect anything at this point.
+
+        Args:
+            on_output: Optional callback for UI notifications.
+
+        Returns:
+            True if GC freed any space, False otherwise.
+        """
+        if not self._gc_plugin or not self._gc_config:
+            self._trace("CONTEXT_LIMIT_RECOVERY: No GC plugin configured, skipping GC attempt")
+            return False
+
+        self._trace("CONTEXT_LIMIT_RECOVERY: Attempting GC before truncation")
+
+        context_usage = self.get_context_usage()
+        history = self.get_history()
+
+        new_history, result = self._gc_plugin.collect(
+            history,
+            context_usage,
+            self._gc_config,
+            GCTriggerReason.CONTEXT_LIMIT,
+            budget=self._instruction_budget,
+        )
+
+        if result.success and result.tokens_freed > 0:
+            self._trace(
+                f"CONTEXT_LIMIT_RECOVERY: GC collected {result.items_collected} items, "
+                f"freed {result.tokens_freed} tokens"
+            )
+            self.reset_session(new_history)
+            self._gc_history.append(result)
+
+            # Sync budget with GC changes
+            self._apply_gc_removal_list(result)
+            self._emit_instruction_budget_update()
+
+            if on_output:
+                on_output(
+                    "system",
+                    f"[Context limit exceeded — GC freed {result.tokens_freed:,} tokens. Retrying.]",
+                    "write",
+                )
+            return True
+        else:
+            self._trace(
+                f"CONTEXT_LIMIT_RECOVERY: GC did not free any space "
+                f"(items_collected={result.items_collected}, tokens_freed={result.tokens_freed})"
+            )
+            return False
 
     def _remove_tool_results_from_history(self, count: int) -> None:
         """Remove the last N tool result messages from provider history.
@@ -3450,21 +3525,26 @@ NOTES
         "to read in smaller chunks.]"
     )
 
+    # Target 80% of context limit to leave headroom after truncation
+    _TRUNCATION_TARGET_PERCENT = 0.80
+
     def _truncate_results_to_fit(
-        self, tool_results: List[ToolResult], overflow_tokens: float
+        self, tool_results: List[ToolResult], current_tokens: int, limit_tokens: int
     ) -> List[ToolResult]:
         """Truncate tool results to reduce token count, preserving first lines.
 
         Strategy:
+        - Targets 80% of the model's context limit to leave headroom.
         - Targets the largest results first (they are the most likely culprits).
         - Preserves the first N lines of content so the model retains useful context.
         - Appends a notice informing the model about the truncation.
         - Never removes the tool result itself (models expect one response per call).
+        - Continues truncating multiple tool results until target is reached.
 
         Args:
             tool_results: The original tool results.
-            overflow_tokens: Estimated tokens to remove (0 means unknown — use
-                aggressive default).
+            current_tokens: Current total tokens as reported by the model error.
+            limit_tokens: Maximum allowed tokens as reported by the model error.
 
         Returns:
             A new list of tool results with large ones truncated.
@@ -3476,20 +3556,24 @@ NOTES
             estimated_tokens = len(result_str) / 4  # ~4 chars per token
             result_sizes.append((i, estimated_tokens, result_str))
 
-        total_tokens = sum(size for _, size, _ in result_sizes)
+        total_result_tokens = sum(size for _, size, _ in result_sizes)
+
+        # Calculate target: reduce to 80% of limit to leave headroom
+        # target_removal = how many tokens we need to remove from current
+        target_context = int(limit_tokens * self._TRUNCATION_TARGET_PERCENT)
+        target_removal = current_tokens - target_context
 
         self._trace(
-            f"CONTEXT_LIMIT_RECOVERY: truncate called with overflow={overflow_tokens}, "
-            f"total_tokens={total_tokens}, num_results={len(tool_results)}"
+            f"CONTEXT_LIMIT_RECOVERY: truncate called with current={current_tokens}, "
+            f"limit={limit_tokens}, target_context={target_context} (80%), "
+            f"target_removal={target_removal}, total_result_tokens={total_result_tokens}, "
+            f"num_results={len(tool_results)}"
         )
 
-        # If overflow is unknown or unreliable, be aggressive: cut 50% of total
-        if overflow_tokens <= 0:
-            overflow_tokens = total_tokens * 0.5
-            self._trace(f"CONTEXT_LIMIT_RECOVERY: using aggressive default overflow={overflow_tokens}")
-
-        # Add 15% safety margin
-        target_removal = overflow_tokens * 1.15
+        # If we couldn't extract valid token counts, be aggressive: cut 50% of results
+        if target_removal <= 0:
+            target_removal = int(total_result_tokens * 0.5)
+            self._trace(f"CONTEXT_LIMIT_RECOVERY: using aggressive default target_removal={target_removal}")
 
         # Sort indices by size descending to truncate largest first
         sized_indices = sorted(
