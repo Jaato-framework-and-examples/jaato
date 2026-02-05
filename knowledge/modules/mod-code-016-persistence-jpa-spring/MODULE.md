@@ -14,6 +14,14 @@ tags:
   - spring-data
 used_by:
   - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  capability: persistence
+  feature: jpa
 ---
 
 # MOD-016: JPA Persistence - Spring Data JPA
@@ -90,28 +98,28 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 @Builder
 public class {Entity}JpaEntity {
-    
+
     @Id
     @Column(name = "{idColumn}", length = 36)
     private String id;
-    
+
     // Add entity fields here
-    
+
     @Version
     private Long version;
-    
+
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
-    
+
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
-    
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
     }
-    
+
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
@@ -138,7 +146,7 @@ import java.util.Optional;
 
 @Repository
 public interface {Entity}JpaRepository extends JpaRepository<{Entity}JpaEntity, String> {
-    
+
     // Custom query methods
     // List<{Entity}JpaEntity> findBy{Field}(String value);
 }
@@ -159,19 +167,19 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class {Entity}PersistenceMapper {
-    
+
     public {Entity} toDomain({Entity}JpaEntity entity) {
         if (entity == null) return null;
-        
+
         return {Entity}.builder()
             .id(entity.getId())
             // Map other fields
             .build();
     }
-    
+
     public {Entity}JpaEntity toEntity({Entity} domain) {
         if (domain == null) return null;
-        
+
         return {Entity}JpaEntity.builder()
             .id(domain.getId())
             // Map other fields
@@ -203,23 +211,23 @@ import java.util.Optional;
 @Component
 @RequiredArgsConstructor
 public class {Entity}PersistenceAdapter implements {Entity}Repository {
-    
+
     private final {Entity}JpaRepository jpaRepository;
     private final {Entity}PersistenceMapper mapper;
-    
+
     @Override
     public Optional<{Entity}> findById(String id) {
         return jpaRepository.findById(id)
             .map(mapper::toDomain);
     }
-    
+
     @Override
     public {Entity} save({Entity} entity) {
         {Entity}JpaEntity jpaEntity = mapper.toEntity(entity);
         {Entity}JpaEntity saved = jpaRepository.save(jpaEntity);
         return mapper.toDomain(saved);
     }
-    
+
     @Override
     public void deleteById(String id) {
         jpaRepository.deleteById(id);
@@ -243,7 +251,7 @@ spring:
       maximum-pool-size: ${DB_POOL_SIZE:10}
       minimum-idle: 5
       connection-timeout: 30000
-      
+
   jpa:
     hibernate:
       ddl-auto: validate
@@ -318,42 +326,42 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class {Entity}PersistenceAdapterTest {
-    
+
     @Mock
     private {Entity}JpaRepository jpaRepository;
-    
+
     @Mock
     private {Entity}PersistenceMapper mapper;
-    
+
     @InjectMocks
     private {Entity}PersistenceAdapter adapter;
-    
+
     @Test
     void findById_existingEntity_returnsEntity() {
         // Arrange
         String id = "test-id";
         {Entity}JpaEntity jpaEntity = new {Entity}JpaEntity();
         {Entity} expected = {Entity}.builder().id(id).build();
-        
+
         when(jpaRepository.findById(id)).thenReturn(Optional.of(jpaEntity));
         when(mapper.toDomain(jpaEntity)).thenReturn(expected);
-        
+
         // Act
         Optional<{Entity}> result = adapter.findById(id);
-        
+
         // Assert
         assertThat(result).isPresent();
         assertThat(result.get().getId()).isEqualTo(id);
     }
-    
+
     @Test
     void findById_nonExistingEntity_returnsEmpty() {
         // Arrange
         when(jpaRepository.findById("unknown")).thenReturn(Optional.empty());
-        
+
         // Act
         Optional<{Entity}> result = adapter.findById("unknown");
-        
+
         // Assert
         assertThat(result).isEmpty();
     }

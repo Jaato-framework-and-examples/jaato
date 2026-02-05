@@ -1,0 +1,25 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-017-persistence-systemapi
+# Purpose: System API integration via RestClient/Feign
+# Note: No pom-*.tpl existed; dependencies deduced from template imports
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  properties:
+    spring-cloud.version: "2023.0.3"
+
+  dependencies:
+    # ── RestClient (Spring 6.1+, included in starter-web) ──
+    # No extra dep needed if starter-web already present from mod-015
+
+    # ── OpenFeign (alternative client) ──
+    - groupId: org.springframework.cloud
+      artifactId: spring-cloud-starter-openfeign
+
+  dependency_management:
+    - groupId: org.springframework.cloud
+      artifactId: spring-cloud-dependencies
+      version: ${spring-cloud.version}
+      type: pom
+      scope: import

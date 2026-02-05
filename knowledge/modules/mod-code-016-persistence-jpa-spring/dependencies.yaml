@@ -1,0 +1,28 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-016-persistence-jpa-spring
+# Purpose: JPA persistence dependencies
+# Source: Extracted from templates/config/pom-jpa.xml.tpl
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  dependencies:
+    # ── JPA ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-data-jpa
+
+    # ── Database driver ──
+    - groupId: org.postgresql
+      artifactId: postgresql
+      scope: runtime
+
+    # ── Test ──
+    - groupId: com.h2database
+      artifactId: h2
+      scope: test
+    - groupId: org.testcontainers
+      artifactId: junit-jupiter
+      scope: test
+    - groupId: org.testcontainers
+      artifactId: postgresql
+      scope: test

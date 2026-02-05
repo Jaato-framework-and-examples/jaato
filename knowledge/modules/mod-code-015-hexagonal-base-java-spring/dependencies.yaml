@@ -1,0 +1,39 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-015-hexagonal-base-java-spring
+# Purpose: Base dependencies for a Spring Boot hexagonal microservice
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  properties:
+    java.version: "17"
+    mapstruct.version: "1.5.5.Final"
+    lombok-mapstruct-binding.version: "0.2.0"
+    lombok.version: "1.18.30"
+
+  dependencies:
+    # ── Core ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-web
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-validation
+
+    # ── Observability ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-actuator
+
+    # ── Code generation ──
+    - groupId: org.projectlombok
+      artifactId: lombok
+      scope: provided
+    - groupId: org.mapstruct
+      artifactId: mapstruct
+      version: ${mapstruct.version}
+
+    # ── Test ──
+    - groupId: org.springframework.boot
+      artifactId: spring-boot-starter-test
+      scope: test
+
+  build_plugins:
+    - description: "maven-compiler-plugin with lombok + mapstruct annotation processors"

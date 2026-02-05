@@ -1,0 +1,20 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: mod-code-018-api-integration-rest-java-spring
+# Purpose: REST API integration (outbound calls to external APIs)
+# Note: No pom-*.tpl existed; dependencies deduced from template imports
+# ═══════════════════════════════════════════════════════════════════
+schema_version: "1.0"
+
+maven:
+  dependencies:
+    # ── RestClient (Spring 6.1+, included in starter-web) ──
+    # No extra dep needed if starter-web already present from mod-015
+
+    # ── Integration test ──
+    - groupId: org.wiremock
+      artifactId: wiremock-standalone
+      version: ${wiremock.version}
+      scope: test
+
+  properties:
+    wiremock.version: "3.3.1"

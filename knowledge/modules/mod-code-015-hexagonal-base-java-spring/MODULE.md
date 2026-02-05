@@ -1,9 +1,9 @@
 ---
 id: mod-code-015-hexagonal-base-java-spring
 title: "MOD-015: Hexagonal Base - Java/Spring Boot"
-version: 1.2
+version: 1.3
 date: 2025-12-01
-updated: 2025-12-22
+updated: 2026-02-03
 status: Active
 derived_from: eri-code-001-hexagonal-light-java-spring
 domain: code
@@ -15,14 +15,35 @@ tags:
   - ddd
 used_by:
   - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  capability: architecture
+  feature: hexagonal-light
+
+# ═══════════════════════════════════════════════════════════════════
+# DEC-035: Config Flag Subscriptions
+# ═══════════════════════════════════════════════════════════════════
+subscribes_to_flags:
+  - flag: hateoas
+    publisher: mod-code-019-api-public-exposure-java-spring
+    affects:
+      - templates/application/dto/Response.java.tpl
+    behavior: |
+      When hateoas=true:  DO NOT generate Response.java from this module.
+                          mod-019 will generate HATEOAS version instead.
+      When hateoas=false: Generate Response.java as immutable record.
 ---
 
 # MOD-015: Hexagonal Base - Java/Spring Boot
 
-**Module ID:** mod-code-015-hexagonal-base-java-spring  
-**Version:** 1.2  
-**Source ERI:** eri-code-001-hexagonal-light-java-spring  
-**Framework:** Java 17+ / Spring Boot 3.2.x  
+**Module ID:** mod-code-015-hexagonal-base-java-spring
+**Version:** 1.3
+**Source ERI:** eri-code-001-hexagonal-light-java-spring
+**Framework:** Java 17+ / Spring Boot 3.2.x
 **Used by:** skill-code-020-generate-microservice-java-spring
 
 ---
@@ -30,6 +51,61 @@ used_by:
 ## Purpose
 
 Provides reusable code templates for generating Hexagonal Light microservices in Java/Spring Boot. Templates use `{{placeholder}}` variables that are replaced dynamically during code generation.
+
+---
+
+## Code Style Guidelines
+
+The following conventions ensure consistent, reproducible code generation:
+
+### DTOs (Request/Response)
+
+| Rule | Rationale |
+|------|-----------|
+| Use `String` for ID fields, not `UUID` | JSON serialization is identical; String is simpler and avoids type conversion in tests |
+| Provide static factory method `from(Entity)` | Encapsulates mapping logic; cleaner service code |
+| Use constructor for required fields | Enables immutability and validation |
+
+**Example:**
+```java
+public class CustomerResponse {
+    private String id;  // ✅ String, not UUID
+
+    public static CustomerResponse from(Customer entity) {  // ✅ Factory method
+        CustomerResponse response = new CustomerResponse();
+        response.id = entity.getId().value().toString();
+        // ... other fields
+        return response;
+    }
+}
+```
+
+### Mappers
+
+| Rule | Rationale |
+|------|-----------|
+| Create private helper methods for transformations | Reduces duplication; consistent naming |
+| Use EXACT names: `toUpperCase()`, `toLowerCase()`, `toProperCase()` | Predictable code structure |
+| Place helper methods at end of class | Consistent organization |
+
+**Example:**
+```java
+private String toUpperCase(String value) {
+    return value != null ? value.toUpperCase() : null;
+}
+```
+
+---
+
+## Config Flag Subscriptions (DEC-035)
+
+This module **subscribes** to config flags published by feature modules:
+
+| Flag | Publisher | Affected Template | Behavior |
+|------|-----------|-------------------|----------|
+| `hateoas` | mod-019 | Response.java.tpl | When true: skip (mod-019 generates HATEOAS version). When false: generate record. |
+
+See [DEC-035](../../DECISION-LOG.md#dec-035) for the Config Flags Pub/Sub pattern.
 
 ---
 
@@ -50,7 +126,7 @@ templates/
 │   └── dto/
 │       ├── CreateRequest.java.tpl    # Create request DTO
 │       ├── UpdateRequest.java.tpl    # Update request DTO
-│       └── Response.java.tpl         # Response DTO
+│       └── Response.java.tpl         # Response DTO (basic, no HATEOAS)
 ├── adapter/
 │   └── RestController.java.tpl       # Inbound REST adapter
 ├── infrastructure/
@@ -61,8 +137,29 @@ templates/
 │   ├── pom.xml.tpl                   # Maven configuration
 │   └── application.yml.tpl           # Spring configuration
 └── test/
-    └── DomainServiceTest.java.tpl    # Domain layer tests
+    ├── DomainServiceTest.java.tpl    # Domain service tests
+    ├── EntityTest.java.tpl           # Domain entity tests
+    ├── EntityIdTest.java.tpl         # Value object ID tests
+    └── ControllerTest.java.tpl       # REST controller tests
 ```
+
+---
+
+## Tests Generated
+
+This module generates the following unit tests:
+
+| Test File | Layer | Purpose | Spring Context |
+|-----------|-------|---------|----------------|
+| `{{Entity}}Test.java` | Domain | Factory methods, domain behavior, equality | None (pure POJO) |
+| `{{Entity}}IdTest.java` | Domain | Value object creation, equality, validation | None (pure POJO) |
+| `{{Entity}}DomainServiceTest.java` | Domain | Domain service logic with mocked repository | None (Mockito only) |
+| `{{Entity}}ControllerTest.java` | Adapter IN | REST endpoint behavior, request validation | @WebMvcTest |
+
+**Test Patterns:**
+- Domain tests: Pure POJO testing, no Spring context
+- Controller tests: @WebMvcTest with @MockBean for application service
+- All tests use AssertJ for assertions and Mockito for mocks
 
 ---
 
@@ -103,29 +200,29 @@ templates/
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    
+
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>{{springBootVersion}}</version>
         <relativePath/>
     </parent>
-    
+
     <groupId>{{groupId}}</groupId>
     <artifactId>{{artifactId}}</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <name>{{serviceNamePascal}}</name>
     <description>{{serviceNamePascal}} - Hexagonal Light Architecture</description>
-    
+
     <properties>
         <java.version>{{javaVersion}}</java.version>
         <mapstruct.version>1.5.5.Final</mapstruct.version>
         <testcontainers.version>1.19.3</testcontainers.version>
     </properties>
-    
+
     <dependencies>
         <!-- Spring Boot Starters -->
         <dependency>
@@ -144,14 +241,14 @@ templates/
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
-        
+
         <!-- MapStruct -->
         <dependency>
             <groupId>org.mapstruct</groupId>
             <artifactId>mapstruct</artifactId>
             <version>${mapstruct.version}</version>
         </dependency>
-        
+
         <!-- Database -->
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -163,7 +260,7 @@ templates/
             <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
-        
+
         <!-- Testing -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -180,7 +277,7 @@ templates/
             <artifactId>postgresql</artifactId>
             <scope>test</scope>
         </dependency>
-        
+
         {{#features.resilience.circuit_breaker.enabled}}
         <!-- Resilience4j (Circuit Breaker) -->
         <dependency>
@@ -189,7 +286,7 @@ templates/
         </dependency>
         {{/features.resilience.circuit_breaker.enabled}}
     </dependencies>
-    
+
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -201,7 +298,7 @@ templates/
             </dependency>
         </dependencies>
     </dependencyManagement>
-    
+
     <build>
         <plugins>
             <plugin>
@@ -236,7 +333,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
 public class {{serviceNamePascal}}Application {
-    
+
     public static void main(String[] args) {
         SpringApplication.run({{serviceNamePascal}}Application.class, args);
     }
@@ -249,13 +346,13 @@ public class {{serviceNamePascal}}Application {
 spring:
   application:
     name: {{serviceName}}
-  
+
   datasource:
     url: jdbc:postgresql://localhost:5432/{{entityNamePlural}}
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
-  
+
   jpa:
     hibernate:
       ddl-auto: validate
@@ -317,14 +414,14 @@ import java.util.Objects;
  * Pure POJO - NO framework annotations.
  */
 public class {{entityName}} {
-    
+
     private final {{entityName}}Id id;
 {{#entityFields}}
     private {{fieldType}} {{fieldName}};
 {{/entityFields}}
     private final LocalDateTime createdAt;
     private LocalDateTime updatedAt;
-    
+
     // Factory method for creation
     public static {{entityName}} create({{entityName}}Registration registration) {
         return new {{entityName}}(
@@ -335,7 +432,7 @@ public class {{entityName}} {
             LocalDateTime.now()
         );
     }
-    
+
     // Constructor
     public {{entityName}}({{entityName}}Id id, {{constructorParams}}, LocalDateTime createdAt) {
         this.id = Objects.requireNonNull(id, "id must not be null");
@@ -350,7 +447,7 @@ public class {{entityName}} {
         this.createdAt = createdAt;
         this.updatedAt = createdAt;
     }
-    
+
     // Getters
     public {{entityName}}Id getId() { return id; }
 {{#entityFields}}
@@ -358,7 +455,7 @@ public class {{entityName}} {
 {{/entityFields}}
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }
-    
+
     // Update method
     public void update({{updateParams}}) {
 {{#entityFields}}
@@ -368,7 +465,7 @@ public class {{entityName}} {
 {{/entityFields}}
         this.updatedAt = LocalDateTime.now();
     }
-    
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -376,7 +473,7 @@ public class {{entityName}} {
         {{entityName}} that = ({{entityName}}) o;
         return Objects.equals(id, that.id);
     }
-    
+
     @Override
     public int hashCode() {
         return Objects.hash(id);
@@ -397,22 +494,22 @@ import java.util.UUID;
  * Immutable and self-validating.
  */
 public record {{entityName}}Id(String value) {
-    
+
     public {{entityName}}Id {
         Objects.requireNonNull(value, "{{entityName}}Id value must not be null");
         if (value.isBlank()) {
             throw new IllegalArgumentException("{{entityName}}Id value must not be blank");
         }
     }
-    
+
     public static {{entityName}}Id generate() {
         return new {{entityName}}Id(UUID.randomUUID().toString());
     }
-    
+
     public static {{entityName}}Id of(String value) {
         return new {{entityName}}Id(value);
     }
-    
+
     @Override
     public String toString() {
         return value;
@@ -460,23 +557,23 @@ import {{basePackage}}.domain.exception.*;
  * Pure POJO - NO Spring annotations.
  */
 public class {{entityName}}DomainService {
-    
+
     private final {{entityName}}Repository repository;
-    
+
     public {{entityName}}DomainService({{entityName}}Repository repository) {
         this.repository = repository;
     }
-    
+
     /**
      * Register a new {{entityNameLower}}.
      */
     public {{entityName}} register{{entityName}}({{entityName}}Registration registration) {
         // TODO: Add business validations
-        
+
         {{entityName}} entity = {{entityName}}.create(registration);
         return repository.save(entity);
     }
-    
+
     /**
      * Get {{entityNameLower}} by ID.
      */
@@ -484,7 +581,7 @@ public class {{entityName}}DomainService {
         return repository.findById(id)
             .orElseThrow(() -> new {{entityName}}NotFoundException(id));
     }
-    
+
     /**
      * Update {{entityNameLower}}.
      */
@@ -493,7 +590,7 @@ public class {{entityName}}DomainService {
         entity.update({{updateArgs}});
         return repository.save(entity);
     }
-    
+
     /**
      * Delete {{entityNameLower}}.
      */
@@ -519,13 +616,13 @@ import java.util.Optional;
  * Implementation provided by adapter layer.
  */
 public interface {{entityName}}Repository {
-    
+
     {{entityName}} save({{entityName}} entity);
-    
+
     Optional<{{entityName}}> findById({{entityName}}Id id);
-    
+
     void deleteById({{entityName}}Id id);
-    
+
     boolean existsById({{entityName}}Id id);
 }
 ```
@@ -538,14 +635,14 @@ package {{basePackage}}.domain.exception;
 import {{basePackage}}.domain.model.{{entityName}}Id;
 
 public class {{entityName}}NotFoundException extends RuntimeException {
-    
+
     private final {{entityName}}Id {{entityNameLower}}Id;
-    
+
     public {{entityName}}NotFoundException({{entityName}}Id id) {
         super("{{entityName}} not found: " + id.value());
         this.{{entityNameLower}}Id = id;
     }
-    
+
     public {{entityName}}Id get{{entityName}}Id() {
         return {{entityNameLower}}Id;
     }
@@ -576,29 +673,29 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @Transactional
 public class {{entityName}}ApplicationService {
-    
+
     private final {{entityName}}DomainService domainService;
     private final {{entityName}}DtoMapper mapper;
-    
+
     public {{entityName}}ApplicationService(
             {{entityName}}DomainService domainService,
             {{entityName}}DtoMapper mapper) {
         this.domainService = domainService;
         this.mapper = mapper;
     }
-    
+
     public {{entityName}}DTO create{{entityName}}(Create{{entityName}}Request request) {
         {{entityName}}Registration registration = mapper.toRegistration(request);
         {{entityName}} entity = domainService.register{{entityName}}(registration);
         return mapper.toDTO(entity);
     }
-    
+
     @Transactional(readOnly = true)
     public {{entityName}}DTO get{{entityName}}(String id) {
         {{entityName}} entity = domainService.get{{entityName}}({{entityName}}Id.of(id));
         return mapper.toDTO(entity);
     }
-    
+
     public {{entityName}}DTO update{{entityName}}(String id, Update{{entityName}}Request request) {
         {{entityName}} entity = domainService.update{{entityName}}(
             {{entityName}}Id.of(id),
@@ -606,7 +703,7 @@ public class {{entityName}}ApplicationService {
         );
         return mapper.toDTO(entity);
     }
-    
+
     public void delete{{entityName}}(String id) {
         domainService.delete{{entityName}}({{entityName}}Id.of(id));
     }
@@ -633,26 +730,26 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/v1/{{entityNamePlural}}")
 public class {{entityName}}Controller {
-    
+
     private final {{entityName}}ApplicationService applicationService;
-    
+
     public {{entityName}}Controller({{entityName}}ApplicationService applicationService) {
         this.applicationService = applicationService;
     }
-    
+
     @PostMapping
     public ResponseEntity<{{entityName}}DTO> create{{entityName}}(
             @Valid @RequestBody Create{{entityName}}Request request) {
         {{entityName}}DTO result = applicationService.create{{entityName}}(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
     }
-    
+
     @GetMapping("/{id}")
     public ResponseEntity<{{entityName}}DTO> get{{entityName}}(@PathVariable String id) {
         {{entityName}}DTO result = applicationService.get{{entityName}}(id);
         return ResponseEntity.ok(result);
     }
-    
+
     @PutMapping("/{id}")
     public ResponseEntity<{{entityName}}DTO> update{{entityName}}(
             @PathVariable String id,
@@ -660,7 +757,7 @@ public class {{entityName}}Controller {
         {{entityName}}DTO result = applicationService.update{{entityName}}(id, request);
         return ResponseEntity.ok(result);
     }
-    
+
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete{{entityName}}(@PathVariable String id) {
         applicationService.delete{{entityName}}(id);
@@ -723,7 +820,7 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 public class ApplicationConfig {
-    
+
     @Bean
     public {{entityName}}DomainService {{entityNameLower}}DomainService({{entityName}}Repository repository) {
         return new {{entityName}}DomainService(repository);
@@ -751,9 +848,9 @@ import java.util.List;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
-    
+
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
-    
+
     @ExceptionHandler({{entityName}}NotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound({{entityName}}NotFoundException ex) {
         log.warn("Entity not found: {}", ex.getMessage());
@@ -766,7 +863,7 @@ public class GlobalExceptionHandler {
                 null
             ));
     }
-    
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex) {
         List<ErrorResponse.FieldError> fieldErrors = ex.getBindingResult()
@@ -774,7 +871,7 @@ public class GlobalExceptionHandler {
             .stream()
             .map(fe -> new ErrorResponse.FieldError(fe.getField(), fe.getDefaultMessage()))
             .toList();
-        
+
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
             .body(new ErrorResponse(
                 LocalDateTime.now(),
@@ -784,7 +881,7 @@ public class GlobalExceptionHandler {
                 fieldErrors
             ));
     }
-    
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(Exception ex) {
         log.error("Unexpected error", ex);
@@ -831,38 +928,38 @@ import static org.mockito.Mockito.*;
  */
 @ExtendWith(MockitoExtension.class)
 class {{entityName}}DomainServiceTest {
-    
+
     @Mock
     private {{entityName}}Repository repository;
-    
+
     private {{entityName}}DomainService domainService;
-    
+
     @BeforeEach
     void setUp() {
         domainService = new {{entityName}}DomainService(repository);
     }
-    
+
     @Test
     void register{{entityName}}_WithValidData_Creates{{entityName}}() {
         // Given
         var registration = new {{entityName}}Registration({{testRegistrationArgs}});
         when(repository.save(any({{entityName}}.class))).thenAnswer(inv -> inv.getArgument(0));
-        
+
         // When
         {{entityName}} result = domainService.register{{entityName}}(registration);
-        
+
         // Then
         assertThat(result).isNotNull();
         assertThat(result.getId()).isNotNull();
         verify(repository).save(any({{entityName}}.class));
     }
-    
+
     @Test
     void get{{entityName}}_WhenNotFound_ThrowsException() {
         // Given
         var id = {{entityName}}Id.of("non-existent");
         when(repository.findById(id)).thenReturn(Optional.empty());
-        
+
         // When/Then
         assertThatThrownBy(() -> domainService.get{{entityName}}(id))
             .isInstanceOf({{entityName}}NotFoundException.class);
@@ -1002,5 +1099,5 @@ All generated files MUST include:
 
 ---
 
-**Module Version:** 1.2  
+**Module Version:** 1.2
 **Last Updated:** 2025-12-22

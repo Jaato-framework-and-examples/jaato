@@ -14,14 +14,22 @@ tags:
   - distributed-transactions
 used_by:
   - skill-code-020-generate-microservice-java-spring
+
+# ═══════════════════════════════════════════════════════════════════
+# MODEL v2.0 - Capability Implementation
+# ═══════════════════════════════════════════════════════════════════
+implements:
+  stack: java-spring
+  capability: distributed-transactions
+  feature: saga-compensation
 ---
 
 # MOD-020: Compensation - Java/Spring Boot
 
-**Module ID:** mod-code-020-compensation-java-spring  
-**Version:** 1.0  
-**Source ERI:** eri-code-015-distributed-transactions-java-spring  
-**Framework:** Java 17+ / Spring Boot 3.2.x  
+**Module ID:** mod-code-020-compensation-java-spring
+**Version:** 1.0
+**Source ERI:** eri-code-015-distributed-transactions-java-spring
+**Framework:** Java 17+ / Spring Boot 3.2.x
 **Used by:** skill-code-020-generate-microservice-java-spring
 
 ---
@@ -113,22 +121,22 @@ package {{basePackage}}.domain.transaction;
 
 /**
  * Interface for services that participate in distributed transactions.
- * 
+ *
  * Domain APIs that can be orchestrated in a SAGA MUST implement this interface
  * to provide compensation capabilities per ADR-013.
- * 
+ *
  * @param <T> Type of the compensation request specific to this domain
  */
 public interface Compensable<T extends CompensationRequest> {
-    
+
     /**
      * Execute compensation to reverse a previously completed operation.
-     * 
+     *
      * This method MUST be:
      * - Idempotent: calling multiple times produces the same result
      * - Recorded: compensation attempt is logged for audit
      * - Safe: never throws exceptions that would break the SAGA
-     * 
+     *
      * @param request the compensation request with operation details
      * @return the result of the compensation attempt
      */
@@ -154,20 +162,20 @@ import java.util.Map;
  * Base compensation request following ADR-013 structure.
  */
 public class CompensationRequest {
-    
+
     @NotBlank(message = "Transaction ID is required")
     private final String transactionId;
-    
+
     @NotBlank(message = "Correlation ID is required")
     private final String correlationId;
-    
+
     private final String originalOperationId;
-    
+
     private final String reason;
-    
+
     private final Map<String, Object> context;
-    
-    public CompensationRequest(String transactionId, 
+
+    public CompensationRequest(String transactionId,
                                 String correlationId,
                                 String originalOperationId,
                                 String reason,
@@ -178,13 +186,13 @@ public class CompensationRequest {
         this.reason = reason;
         this.context = context != null ? Map.copyOf(context) : Map.of();
     }
-    
+
     public String getTransactionId() { return transactionId; }
     public String getCorrelationId() { return correlationId; }
     public String getOriginalOperationId() { return originalOperationId; }
     public String getReason() { return reason; }
     public Map<String, Object> getContext() { return context; }
-    
+
     @SuppressWarnings("unchecked")
     public <V> V getContextValue(String key, Class<V> type) {
         Object value = context.get(key);
@@ -219,8 +227,8 @@ public record CompensationResult(
     Instant compensatedAt,
     String message
 ) {
-    
-    public static CompensationResult compensated(String transactionId, 
+
+    public static CompensationResult compensated(String transactionId,
                                                    String originalOperationId,
                                                    String message) {
         return new CompensationResult(
@@ -231,7 +239,7 @@ public record CompensationResult(
             message
         );
     }
-    
+
     public static CompensationResult alreadyCompensated(String transactionId,
                                                          String originalOperationId) {
         return new CompensationResult(
@@ -242,7 +250,7 @@ public record CompensationResult(
             "Operation was already compensated"
         );
     }
-    
+
     public static CompensationResult notFound(String transactionId,
                                                String originalOperationId) {
         return new CompensationResult(
@@ -253,7 +261,7 @@ public record CompensationResult(
             "Original operation not found"
         );
     }
-    
+
     public static CompensationResult failed(String transactionId,
                                              String originalOperationId,
                                              String errorMessage) {
@@ -283,19 +291,19 @@ package {{basePackage}}.domain.transaction;
  * Status values for compensation results per ADR-013.
  */
 public enum CompensationStatus {
-    
+
     /** Compensation executed successfully. */
     COMPENSATED,
-    
+
     /** Idempotency: operation was already compensated. */
     ALREADY_COMPENSATED,
-    
+
     /** Original operation not found (may already be rolled back). */
     NOT_FOUND,
-    
+
     /** Compensation failed (requires manual intervention). */
     FAILED,
-    
+
     /** Compensation queued for async processing. */
     PENDING
 }
@@ -319,7 +327,7 @@ import java.util.Map;
  * Log entry for tracking operations that may need compensation.
  */
 public class TransactionLog {
-    
+
     private final String id;
     private final String transactionId;
     private final String operationType;
@@ -329,8 +337,8 @@ public class TransactionLog {
     private TransactionLogStatus status;
     private Instant compensatedAt;
     private String compensationReason;
-    
-    public TransactionLog(String id, 
+
+    public TransactionLog(String id,
                           String transactionId,
                           String operationType,
                           String entityId,
@@ -343,17 +351,17 @@ public class TransactionLog {
         this.createdAt = Instant.now();
         this.status = TransactionLogStatus.COMPLETED;
     }
-    
+
     public void markCompensated(String reason) {
         this.status = TransactionLogStatus.COMPENSATED;
         this.compensatedAt = Instant.now();
         this.compensationReason = reason;
     }
-    
+
     public boolean isCompensated() {
         return status == TransactionLogStatus.COMPENSATED;
     }
-    
+
     // Getters
     public String getId() { return id; }
     public String getTransactionId() { return transactionId; }
@@ -364,7 +372,7 @@ public class TransactionLog {
     public TransactionLogStatus getStatus() { return status; }
     public Instant getCompensatedAt() { return compensatedAt; }
     public String getCompensationReason() { return compensationReason; }
-    
+
     public enum TransactionLogStatus {
         COMPLETED,
         COMPENSATED,
@@ -393,17 +401,17 @@ import java.util.Optional;
  * Used for compensation lookup and idempotency checks.
  */
 public interface TransactionLogRepository {
-    
+
     /**
      * Save a transaction log entry.
      */
     TransactionLog save(TransactionLog log);
-    
+
     /**
      * Find transaction log by transaction ID.
      */
     Optional<TransactionLog> findByTransactionId(String transactionId);
-    
+
     /**
      * Find transaction log by entity ID and operation type.
      */
@@ -427,12 +435,12 @@ This module provides the `/compensate` endpoint pattern. Add this to your contro
 public ResponseEntity<CompensationResult> compensate(
         @Valid @RequestBody CompensationRequest request,
         @RequestHeader("X-Correlation-ID") String correlationId) {
-    
+
     log.info("Compensation request - transaction: {}, correlation: {}",
              request.getTransactionId(), correlationId);
-    
+
     CompensationResult result = {{entityNameLower}}Service.compensate(request);
-    
+
     return switch (result.status()) {
         case COMPENSATED, ALREADY_COMPENSATED -> ResponseEntity.ok(result);
         case NOT_FOUND -> ResponseEntity.status(404).body(result);
@@ -451,14 +459,14 @@ Application services should implement Compensable and log operations:
 ```java
 @Service
 public class {{entityName}}ApplicationService implements Compensable<CompensationRequest> {
-    
+
     private final TransactionLogRepository transactionLogRepository;
-    
+
     @Transactional
     public {{entityName}} create(Create{{entityName}}Request request, String transactionId) {
         // 1. Execute business operation
         {{entityName}} entity = // ... create entity
-        
+
         // 2. Log for potential compensation
         TransactionLog txLog = new TransactionLog(
             UUID.randomUUID().toString(),
@@ -468,10 +476,10 @@ public class {{entityName}}ApplicationService implements Compensable<Compensatio
             Map.of("{{entityNameLower}}Id", entity.getId().toString())
         );
         transactionLogRepository.save(txLog);
-        
+
         return entity;
     }
-    
+
     @Override
     @Transactional
     public CompensationResult compensate(CompensationRequest request) {
@@ -514,10 +522,10 @@ This module is used by:
 
 | API Layer | Include This Module? |
 |-----------|---------------------|
-| Experience (BFF) | ❌ No (doesn't participate in SAGAs) |
-| Composable | ❌ No (orchestrates, doesn't compensate) |
-| Domain | ✅ Yes (participant in SAGAs) |
-| System | ❌ No (wrapped by Domain) |
+| Experience (BFF) | No (doesn't participate in SAGAs) |
+| Composable | No (orchestrates, doesn't compensate) |
+| Domain | Yes (participant in SAGAs) |
+| System | No (wrapped by Domain) |
 
 ---
 
