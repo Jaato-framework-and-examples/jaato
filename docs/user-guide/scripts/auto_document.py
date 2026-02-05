@@ -256,25 +256,13 @@ class AutoDocGenerator:
         print(f"  Prompt: {prompt[:100]}...")
 
         # Initialize Jaato client in headless mode
-        # Provider from JAATO_PROVIDER env var (default: google_genai)
-        # Model from MODEL_NAME env var (provider-specific default if not set)
+        # Framework reads JAATO_PROVIDER, MODEL_NAME, and provider-specific env vars
         import os
-        model = os.getenv("MODEL_NAME")
-        if not model:
-            raise ValueError(
-                "MODEL_NAME environment variable is required for documentation generation"
-            )
-
-        client = JaatoClient()  # Reads JAATO_PROVIDER from env
+        client = JaatoClient()
 
         try:
-            # Connect to provider
-            # Each provider plugin reads its own env vars:
-            # - Google: PROJECT_ID, LOCATION, GOOGLE_APPLICATION_CREDENTIALS
-            # - Anthropic: ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
-            # - GitHub: GITHUB_TOKEN
-            # - Ollama: OLLAMA_HOST
-            client.connect(model=model)
+            # Connect - framework handles all configuration from environment
+            client.connect(model=os.getenv("MODEL_NAME"))
 
             # Don't configure tools - we want pure text generation
             # client.configure_tools() is NOT called
@@ -550,17 +538,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    # Check required environment variables
-    import os
-    provider = os.getenv("JAATO_PROVIDER", "google_genai")
-    model = os.getenv("MODEL_NAME")
-
-    print(f"Using provider: {provider}")
-    if model:
-        print(f"Using model: {model}")
-    else:
-        print("⚠️  MODEL_NAME not set - will use provider default if available")
 
     generator = AutoDocGenerator(
         chapters_dir=args.chapters_dir,
