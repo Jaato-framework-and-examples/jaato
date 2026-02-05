@@ -260,22 +260,17 @@ class AutoDocGenerator:
         print(f"  Prompt: {prompt[:100]}...")
 
         # Initialize Jaato client in headless mode
-        client = JaatoClient()
+        client = JaatoClient(provider_name=self.provider)
 
         try:
-            # Connect with appropriate provider
-            if self.provider == "google_genai":
-                import os
-                client.connect(
-                    project=os.getenv("PROJECT_ID"),
-                    location=os.getenv("LOCATION", "us-central1"),
-                    model=self.model
-                )
-            elif self.provider == "anthropic":
-                client.connect(model=self.model)
-            else:
-                print(f"  ✗ Unsupported provider: {self.provider}")
-                return False
+            # Connect to provider
+            # Let the framework handle provider-specific requirements
+            import os
+            client.connect(
+                project=os.getenv("PROJECT_ID"),
+                location=os.getenv("LOCATION", "us-central1"),
+                model=self.model
+            )
 
             # Don't configure tools - we want pure text generation
             # client.configure_tools() is NOT called
@@ -522,7 +517,6 @@ def main():
     parser.add_argument(
         "--provider",
         default="google_genai",
-        choices=["google_genai", "anthropic", "ollama"],
         help="AI provider to use"
     )
     parser.add_argument(
