@@ -260,11 +260,16 @@ class AutoDocGenerator:
         print(f"  Prompt: {prompt[:100]}...")
 
         # Initialize Jaato client in headless mode
+        # Provider is identified here via provider_name parameter
         client = JaatoClient(provider_name=self.provider)
 
         try:
-            # Connect to provider
-            # Framework reads provider-specific env vars (PROJECT_ID, ANTHROPIC_API_KEY, etc.)
+            # Connect to provider - just pass model
+            # Each provider plugin reads its own env vars:
+            # - Google: PROJECT_ID, LOCATION, GOOGLE_APPLICATION_CREDENTIALS
+            # - Anthropic: ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
+            # - GitHub: GITHUB_TOKEN
+            # - Ollama: OLLAMA_HOST
             client.connect(model=self.model)
 
             # Don't configure tools - we want pure text generation
@@ -314,15 +319,36 @@ class AutoDocGenerator:
             print(f"  ✓ Generated: {output_file}")
             return True
 
-        except Exception as e:
-            print(f"  ✗ Error: {e}")
+        except KeyboardInterrupt:
+            print(f"\n  ✗ Interrupted by user")
             self.state.generation_log.append({
                 "timestamp": datetime.now().isoformat(),
                 "chapter": chapter.filename,
                 "mode": mode,
                 "success": False,
-                "error": str(e)
+                "error": "Interrupted by user"
             })
+            raise  # Re-raise to stop the whole process
+
+        except Exception as e:
+            # Log detailed error information
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"  ✗ {error_type}: {error_msg}")
+
+            # Save error to generation log
+            self.state.generation_log.append({
+                "timestamp": datetime.now().isoformat(),
+                "chapter": chapter.filename,
+                "mode": mode,
+                "success": False,
+                "error": error_msg,
+                "error_type": error_type
+            })
+
+            # Save state even on failure so we don't lose error log
+            self._save_state()
+
             return False
 
         finally:
