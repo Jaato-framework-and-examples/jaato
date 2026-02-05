@@ -300,12 +300,14 @@ class OutputBuffer:
     # Type alias for items that can be stored in the line buffer
     LineItem = Union[OutputLine, ToolBlock]
 
-    def __init__(self, max_lines: int = 1000, agent_type: str = "main"):
+    def __init__(self, max_lines: int = 1000, agent_type: str = "main", tools_expanded: bool = False):
         """Initialize the output buffer.
 
         Args:
             max_lines: Maximum number of lines to retain.
             agent_type: Type of agent ("main" or "subagent") for label display.
+            tools_expanded: Initial tool block expansion state. False (collapsed) for
+                interactive TUI, True (expanded) for headless mode.
         """
         self._lines: deque[Union[OutputLine, ToolBlock]] = deque(maxlen=max_lines)
         self._current_block: Optional[Tuple[str, List[str], bool]] = None
@@ -318,7 +320,7 @@ class OutputBuffer:
         self._spinner_active: bool = False
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
-        self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
+        self._tools_expanded: bool = tools_expanded  # Toggle between collapsed/expanded tool view
         self._tools_expanded_before_prompt: Optional[bool] = None  # Saved state before permission/clarification forced expansion
         self._rendering: bool = False  # Guard against flushes during render
         self._tool_placeholder_index: Optional[int] = None  # Position in _lines where tools render

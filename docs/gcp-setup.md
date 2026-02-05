@@ -215,6 +215,10 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/pip install -r requirements.txt
+
+# Or install via pyproject.toml
+.venv/bin/pip install .            # base dependencies
+.venv/bin/pip install ".[all]"     # all optional dependencies
 ```
 
 This installs `google-genai`, the recommended SDK for Google's generative models.

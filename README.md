@@ -110,6 +110,11 @@ For plugin development, see [shared/plugins/README.md](shared/plugins/README.md)
 git clone https://github.com/apanoia/jaato.git
 cd jaato
 pip install .
+
+# With optional extras
+pip install ".[vision]"       # PNG screenshots (requires libcairo2-dev on Linux)
+pip install ".[dev]"          # pytest and dev tools
+pip install ".[all]"          # all optional dependencies
 ```
 
 📖 **[Installation guides →](https://apanoia.github.io/jaato/api/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors

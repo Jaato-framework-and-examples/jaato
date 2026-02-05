@@ -795,5 +795,33 @@ class TestToolBlockExpansionPersistence:
         )
 
 
+class TestToolsExpandedDefault:
+    """Tests for configurable tools_expanded default (headless vs interactive)."""
+
+    def test_default_tools_collapsed(self):
+        """Interactive mode: tools default to collapsed."""
+        buffer = OutputBuffer()
+        assert buffer._tools_expanded is False
+
+    def test_headless_tools_expanded(self):
+        """Headless mode: tools can default to expanded via constructor parameter."""
+        buffer = OutputBuffer(tools_expanded=True)
+        assert buffer._tools_expanded is True
+
+    def test_headless_expanded_persists_in_toolblock(self):
+        """ToolBlocks created with expanded=True default should be expanded."""
+        buffer = OutputBuffer(tools_expanded=True)
+        buffer.set_width(80)
+
+        buffer.add_active_tool("testTool", {"arg": "value"}, call_id="call_1")
+        buffer.mark_tool_completed("testTool", success=True, call_id="call_1")
+        buffer.finalize_tool_tree()
+
+        # Find the ToolBlock in the lines
+        tool_blocks = [item for item in buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 1, "Should have one ToolBlock"
+        assert tool_blocks[0].expanded is True, "ToolBlock should be expanded in headless mode"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

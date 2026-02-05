@@ -10,6 +10,7 @@ from shared.retry_utils import (
     classify_error,
     calculate_backoff,
     with_retry,
+    is_context_limit_error,
 )
 
 
@@ -189,6 +190,72 @@ class TestWithRetry(unittest.TestCase):
         self.assertEqual(stats.rate_limit_errors, 1)
         self.assertEqual(stats.transient_errors, 1)
         self.assertEqual(len(stats.errors), 2)
+
+
+class TestIsContextLimitError(unittest.TestCase):
+    """Tests for is_context_limit_error detection."""
+
+    def test_anthropic_context_limit_class(self):
+        """Detects Anthropic ContextLimitError class directly."""
+        try:
+            from shared.plugins.model_provider.anthropic.errors import ContextLimitError
+            exc = ContextLimitError(model="claude-3", original_error="context too long")
+            self.assertTrue(is_context_limit_error(exc))
+        except ImportError:
+            self.skipTest("Anthropic provider not available")
+
+    def test_github_context_limit_class(self):
+        """Detects GitHub ContextLimitError class directly."""
+        try:
+            from shared.plugins.model_provider.github_models.errors import ContextLimitError
+            exc = ContextLimitError(model="gpt-4", original_error="tokens exceeded")
+            self.assertTrue(is_context_limit_error(exc))
+        except ImportError:
+            self.skipTest("GitHub Models provider not available")
+
+    def test_github_payload_too_large_class(self):
+        """Detects GitHub PayloadTooLargeError class."""
+        try:
+            from shared.plugins.model_provider.github_models.errors import PayloadTooLargeError
+            exc = PayloadTooLargeError(original_error="HTTP 413")
+            self.assertTrue(is_context_limit_error(exc))
+        except ImportError:
+            self.skipTest("GitHub Models provider not available")
+
+    def test_string_token_limit_exceeded(self):
+        """Detects token limit exceeded from error message."""
+        exc = Exception("181145 tokens exceeds the limit of 128000")
+        self.assertTrue(is_context_limit_error(exc))
+
+    def test_string_context_too_long(self):
+        """Detects context too long from error message."""
+        exc = Exception("Request context is too long for this model")
+        self.assertTrue(is_context_limit_error(exc))
+
+    def test_string_prompt_too_large(self):
+        """Detects prompt too large from error message."""
+        exc = Exception("Prompt is too large, maximum is 100000 tokens")
+        self.assertTrue(is_context_limit_error(exc))
+
+    def test_string_http_413_payload(self):
+        """Detects HTTP 413 payload too large."""
+        exc = Exception("HTTP 413: payload too large")
+        self.assertTrue(is_context_limit_error(exc))
+
+    def test_rate_limit_not_context_limit(self):
+        """Rate limit errors are NOT context limit errors."""
+        exc = Exception("429 Too Many Requests - rate limit exceeded")
+        self.assertFalse(is_context_limit_error(exc))
+
+    def test_auth_error_not_context_limit(self):
+        """Auth errors are NOT context limit errors."""
+        exc = Exception("Invalid API key")
+        self.assertFalse(is_context_limit_error(exc))
+
+    def test_generic_error_not_context_limit(self):
+        """Generic errors are NOT context limit errors."""
+        exc = Exception("Something went wrong")
+        self.assertFalse(is_context_limit_error(exc))
 
 
 if __name__ == "__main__":

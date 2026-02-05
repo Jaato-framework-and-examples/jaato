@@ -537,3 +537,155 @@ class TestJaatoSessionFrameworkEnrichment:
 
         assert session._get_framework_enrichments("") == []
         assert session._get_framework_enrichments(None) == []
+
+
+class TestContextLimitRecovery:
+    """Tests for context limit error recovery and truncation."""
+
+    def test_truncate_preserves_first_lines(self):
+        """Test that truncation keeps the first N lines of large results."""
+        from ..plugins.model_provider.types import ToolResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Create a result with many lines (100 lines, each ~40 chars = ~1000 tokens)
+        large_content = "\n".join([f"Line {i}: Some content here" for i in range(100)])
+        tool_results = [
+            ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
+        ]
+
+        # Request truncation with overflow
+        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=500)
+
+        # Should have truncated
+        assert truncated[0].result != large_content
+        # Should preserve first 20 lines (the default)
+        for i in range(20):
+            assert f"Line {i}:" in truncated[0].result
+        # Should have truncation notice
+        assert "[NOTICE:" in truncated[0].result
+        assert "automatically truncated" in truncated[0].result
+
+    def test_truncate_skips_small_results(self):
+        """Test that small results are not truncated."""
+        from ..plugins.model_provider.types import ToolResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Small result (< 200 estimated tokens)
+        small_content = "Short result"
+        tool_results = [
+            ToolResult(call_id="1", name="echo", result=small_content, is_error=False)
+        ]
+
+        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=100)
+
+        # Should NOT be truncated
+        assert truncated[0].result == small_content
+
+    def test_truncate_targets_largest_first(self):
+        """Test that truncation targets the largest results first."""
+        from ..plugins.model_provider.types import ToolResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        small_content = "Small result"
+        # Make content large enough (~1000 tokens = ~4000 chars)
+        large_content = "\n".join([f"Line {i}: {'x' * 30}" for i in range(100)])
+
+        tool_results = [
+            ToolResult(call_id="1", name="small_tool", result=small_content, is_error=False),
+            ToolResult(call_id="2", name="large_tool", result=large_content, is_error=False),
+        ]
+
+        # Request truncation
+        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=500)
+
+        # Small should be unchanged
+        assert truncated[0].result == small_content
+        # Large should be truncated
+        assert truncated[1].result != large_content
+        assert "[NOTICE:" in truncated[1].result
+
+    def test_truncate_with_zero_overflow_uses_aggressive_default(self):
+        """Test that unknown overflow (0) triggers aggressive truncation."""
+        from ..plugins.model_provider.types import ToolResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        large_content = "\n".join([f"Line {i}: content" for i in range(100)])
+        tool_results = [
+            ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
+        ]
+
+        # overflow_tokens=0 should still trigger truncation (aggressive default)
+        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=0)
+
+        assert truncated[0].result != large_content
+        assert "[NOTICE:" in truncated[0].result
+
+    def test_truncate_uses_char_based_for_few_lines(self):
+        """Test that char-based truncation is used when content has few lines."""
+        from ..plugins.model_provider.types import ToolResult
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Large content with only 3 lines (simulates JSON or base64)
+        large_single_line = "x" * 100000  # ~25000 tokens in ~3 lines
+        large_content = f"line1\n{large_single_line}\nline3"
+        tool_results = [
+            ToolResult(call_id="1", name="read_file", result=large_content, is_error=False)
+        ]
+
+        # Request truncation
+        truncated = session._truncate_results_to_fit(tool_results, overflow_tokens=20000)
+
+        # Should have truncated using char-based method
+        assert truncated[0].result != large_content
+        assert "[NOTICE:" in truncated[0].result
+        assert "characters" in truncated[0].result  # Should mention characters, not lines
+        # Should be much shorter than original
+        assert len(truncated[0].result) < len(large_content) / 2
+
+    def test_sync_budget_after_truncation(self):
+        """Test that budget is adjusted after truncation."""
+        from ..plugins.model_provider.types import ToolResult
+        from ..instruction_budget import InstructionBudget, InstructionSource
+
+        mock_runtime = MagicMock()
+        mock_runtime.ledger = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Create an instruction budget
+        session._instruction_budget = InstructionBudget.create_default(
+            session_id="test",
+            agent_id="main",
+            agent_type="main",
+            context_limit=100000,
+        )
+        # Set some conversation tokens
+        session._instruction_budget.update_tokens(InstructionSource.CONVERSATION, 5000)
+
+        # Create original and truncated results
+        large_content = "x" * 4000  # ~1000 tokens
+        small_content = "x" * 400   # ~100 tokens
+
+        original = [ToolResult(call_id="1", name="tool", result=large_content, is_error=False)]
+        truncated = [ToolResult(call_id="1", name="tool", result=small_content, is_error=False)]
+
+        # Sync budget
+        session._sync_budget_after_truncation(original, truncated)
+
+        # Budget should be reduced
+        conv_entry = session._instruction_budget.get_entry(InstructionSource.CONVERSATION)
+        assert conv_entry.tokens < 5000
+
+        # Ledger should record the event
+        mock_runtime.ledger._record.assert_called_once()
+        call_args = mock_runtime.ledger._record.call_args
+        assert call_args[0][0] == 'context-limit-truncation'
