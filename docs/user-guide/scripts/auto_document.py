@@ -257,12 +257,11 @@ class AutoDocGenerator:
 
         # Initialize Jaato client in headless mode
         # Framework reads JAATO_PROVIDER, MODEL_NAME, and provider-specific env vars
-        import os
         client = JaatoClient()
 
         try:
             # Connect - framework handles all configuration from environment
-            client.connect(model=os.getenv("MODEL_NAME"))
+            client.connect()
 
             # Don't configure tools - we want pure text generation
             # client.configure_tools() is NOT called

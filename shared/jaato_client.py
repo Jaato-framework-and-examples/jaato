@@ -317,6 +317,7 @@ class JaatoClient:
             project: Cloud project ID (required for Vertex AI).
             location: Provider region (required for Vertex AI).
             model: Model name (e.g., 'gemini-2.5-flash').
+                If not provided, reads from MODEL_NAME env var.
         """
         model = model or get_default_model()
         if not model:
