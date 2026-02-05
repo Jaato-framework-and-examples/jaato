@@ -134,3 +134,28 @@ class MemoryStorage:
             Number of memories in storage
         """
         return len(self.load_all())
+
+    def delete(self, memory_id: str) -> bool:
+        """Delete a memory by ID.
+
+        Args:
+            memory_id: Unique identifier of the memory to delete
+
+        Returns:
+            True if memory was deleted, False if not found
+        """
+        all_memories = self.load_all()
+
+        # Find and remove the memory
+        original_count = len(all_memories)
+        all_memories = [mem for mem in all_memories if mem.id != memory_id]
+
+        if len(all_memories) == original_count:
+            return False  # Memory not found
+
+        # Rewrite entire file
+        with open(self.path, 'w', encoding='utf-8') as f:
+            for mem in all_memories:
+                f.write(json.dumps(asdict(mem)) + '\n')
+
+        return True
