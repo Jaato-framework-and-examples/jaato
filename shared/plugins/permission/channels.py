@@ -161,11 +161,11 @@ def get_permission_options_with_edit() -> List['PermissionResponseOption']:
 
     Use this for tools that have editable content declared.
 
-    Returns a copy with the edit option inserted after 'yes' and 'no'.
+    Returns a copy with the edit option appended at the end.
     """
     options = list(DEFAULT_PERMISSION_OPTIONS)
-    # Insert edit option after 'no' (index 2)
-    options.insert(2, EDIT_PERMISSION_OPTION)
+    # Append edit option at the end
+    options.append(EDIT_PERMISSION_OPTION)
     return options
 
 
@@ -207,6 +207,7 @@ class PermissionRequest:
         timeout: int = 30,
         context: Optional[Dict[str, Any]] = None,
         response_options: Optional[List[PermissionResponseOption]] = None,
+        editable: Optional[Any] = None,
     ) -> 'PermissionRequest':
         """Create a new permission request with auto-generated ID and timestamp."""
         return cls(
@@ -217,6 +218,7 @@ class PermissionRequest:
             timeout_seconds=timeout,
             context=context or {},
             response_options=response_options or get_default_permission_options(),
+            editable=editable,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1064,6 +1066,7 @@ class QueueChannel(ConsoleChannel):
             ChannelResponse with EDIT decision and edited arguments if successful,
             or DENY if no edit callback or edit was cancelled.
         """
+        logger.debug(f"_handle_edit_request: editable={request.editable}, edit_callback={self._edit_callback is not None}")
         # Check if tool has editable content and we have an edit callback
         if not request.editable:
             return ChannelResponse(
