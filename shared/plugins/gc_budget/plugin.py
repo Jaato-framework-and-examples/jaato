@@ -257,16 +257,16 @@ class BudgetGCPlugin:
             # Sort by created_at (oldest first)
             sorted_candidates = sorted(
                 ephemeral_candidates,
-                key=lambda e: e.created_at or 0
+                key=lambda e: e[1].created_at or 0
             )
 
-            for entry in sorted_candidates:
+            for child_key, entry in sorted_candidates:
                 if tokens_freed >= tokens_to_free:
                     break
                 entry_tokens = entry.total_tokens()
                 removal_list.append(GCRemovalItem(
                     source=entry.source,
-                    child_key=entry.label,
+                    child_key=child_key,
                     tokens_freed=entry_tokens,
                     reason="ephemeral",
                     message_ids=entry.message_ids,
@@ -307,13 +307,13 @@ class BudgetGCPlugin:
                 f"({percent_used:.1f}% >= {config.pressure_percent}%)"
             )
             preservable_candidates = self._get_preservable_candidates(budget)
-            for entry in preservable_candidates:
+            for child_key, entry in preservable_candidates:
                 if tokens_freed >= tokens_to_free:
                     break
                 entry_tokens = entry.total_tokens()
                 removal_list.append(GCRemovalItem(
                     source=entry.source,
-                    child_key=entry.label,
+                    child_key=child_key,
                     tokens_freed=entry_tokens,
                     reason="preservable_under_pressure",
                     message_ids=entry.message_ids,
@@ -379,16 +379,16 @@ class BudgetGCPlugin:
     def _get_ephemeral_candidates(
         self,
         budget: InstructionBudget,
-    ) -> List[SourceEntry]:
+    ) -> List[Tuple[str, SourceEntry]]:
         """Get EPHEMERAL entries eligible for removal (excluding ENRICHMENT).
 
         Args:
             budget: The instruction budget to search.
 
         Returns:
-            List of EPHEMERAL entries sorted by creation time (oldest first).
+            List of (child_key, entry) tuples for EPHEMERAL entries.
         """
-        candidates: List[SourceEntry] = []
+        candidates: List[Tuple[str, SourceEntry]] = []
 
         for source, entry in budget.entries.items():
             # Skip ENRICHMENT (handled separately as bulk clear)
@@ -398,7 +398,7 @@ class BudgetGCPlugin:
             # Check children for EPHEMERAL entries
             for child_key, child in entry.children.items():
                 if child.gc_policy == GCPolicy.EPHEMERAL:
-                    candidates.append(child)
+                    candidates.append((child_key, child))
 
         return candidates
 
@@ -460,25 +460,26 @@ class BudgetGCPlugin:
     def _get_preservable_candidates(
         self,
         budget: InstructionBudget,
-    ) -> List[SourceEntry]:
+    ) -> List[Tuple[str, SourceEntry]]:
         """Get PRESERVABLE entries (only for extreme pressure mode).
 
         Args:
             budget: The instruction budget to search.
 
         Returns:
-            List of PRESERVABLE entries sorted by creation time (oldest first).
+            List of (child_key, entry) tuples for PRESERVABLE entries,
+            sorted by creation time (oldest first).
         """
-        candidates: List[SourceEntry] = []
+        candidates: List[Tuple[str, SourceEntry]] = []
 
         for source, entry in budget.entries.items():
             # Check children for PRESERVABLE entries
             for child_key, child in entry.children.items():
                 if child.gc_policy == GCPolicy.PRESERVABLE:
-                    candidates.append(child)
+                    candidates.append((child_key, child))
 
         # Sort by creation time (oldest first)
-        candidates.sort(key=lambda e: e.created_at or 0)
+        candidates.sort(key=lambda e: e[1].created_at or 0)
         return candidates
 
     def _apply_removals_to_history(
