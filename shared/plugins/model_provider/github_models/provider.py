@@ -65,6 +65,8 @@ from ..types import (
 )
 from .converters import (
     clear_tool_name_mapping,
+    extract_reasoning_from_response,
+    extract_reasoning_from_stream_delta,
     get_original_tool_name,
     history_from_sdk,
     history_to_sdk,
@@ -99,6 +101,14 @@ from .errors import (
 
 # GitHub Models catalog API endpoint (models.github.ai as of May 2025)
 CATALOG_API_ENDPOINT = "https://models.github.ai/catalog/models"
+
+# Models that expose reasoning/thinking content via `reasoning_content`.
+# OpenAI o-series models do NOT expose reasoning text (hidden internally).
+# DeepSeek-R1 and similar open reasoning models DO expose it.
+REASONING_CAPABLE_MODELS = [
+    "deepseek/deepseek-r1",
+    "deepseek-r1",
+]
 
 
 @dataclass
@@ -233,6 +243,9 @@ class GitHubModelsProvider:
         self._tools: Optional[List[ToolSchema]] = None
         self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
+
+        # Thinking/reasoning configuration
+        self._enable_thinking: bool = True  # Extract reasoning by default when available
 
         # Models cache: (timestamp, {model_id: ModelInfo})
         self._models_cache: Optional[Tuple[float, Dict[str, ModelInfo]]] = None
@@ -1083,6 +1096,7 @@ class GitHubModelsProvider:
 
         parts = []
         finish_reason = FinishReason.STOP
+        thinking = None
 
         for item in response.output:
             if item.type == "message":
@@ -1093,6 +1107,19 @@ class GitHubModelsProvider:
                             text = content_item.get("text", "")
                             if text:
                                 parts.append(Part.from_text(text))
+
+            elif item.type == "reasoning":
+                # Reasoning/thinking block (Responses API format)
+                if self._enable_thinking and hasattr(item, "summary"):
+                    summaries = item.summary or []
+                    reasoning_texts = []
+                    for s in summaries:
+                        if isinstance(s, dict):
+                            reasoning_texts.append(s.get("text", ""))
+                        elif hasattr(s, "text"):
+                            reasoning_texts.append(s.text)
+                    if reasoning_texts:
+                        thinking = "\n".join(t for t in reasoning_texts if t)
 
             elif item.type == "function_call":
                 # Convert function call
@@ -1122,6 +1149,7 @@ class GitHubModelsProvider:
             usage=usage,
             finish_reason=finish_reason,
             raw=None,
+            thinking=thinking,
         )
 
     def _build_copilot_messages(self) -> List[Dict[str, Any]]:
@@ -1228,9 +1256,16 @@ class GitHubModelsProvider:
 
         parts = []
         finish_reason = FinishReason.STOP
+        thinking = None
 
         if response.choices:
             choice = response.choices[0]
+            # Extract reasoning/thinking content (e.g. DeepSeek-R1)
+            if self._enable_thinking:
+                reasoning = getattr(choice.message, "reasoning_content", None)
+                if reasoning:
+                    thinking = reasoning
+
             # Extract text
             if choice.message.content:
                 parts.append(Part.from_text(choice.message.content))
@@ -1267,6 +1302,7 @@ class GitHubModelsProvider:
             usage=usage,
             finish_reason=finish_reason,
             raw=None,
+            thinking=thinking,
         )
 
     def _handle_api_error(self, error: Exception) -> None:
@@ -1461,23 +1497,39 @@ class GitHubModelsProvider:
         return True
 
     def supports_thinking(self) -> bool:
-        """Check if extended thinking is supported.
+        """Check if reasoning/thinking content is supported.
+
+        Returns True for models known to expose ``reasoning_content``
+        (e.g. DeepSeek-R1).  OpenAI o-series models use reasoning
+        internally but never surface it through the Chat Completions API,
+        so they return False here.
 
         Returns:
-            False - GitHub Models does not support extended thinking.
+            True if the current model exposes reasoning content.
         """
-        return False
+        return self._is_reasoning_capable()
 
     def set_thinking_config(self, config: 'ThinkingConfig') -> None:
-        """Set thinking configuration (no-op for GitHub Models).
+        """Set thinking configuration.
 
-        GitHub Models does not support extended thinking, so this
-        method does nothing.
+        For reasoning-capable models this enables/disables extraction of
+        ``reasoning_content`` from responses.  Models that don't expose
+        reasoning ignore this setting.
 
         Args:
-            config: ThinkingConfig (ignored).
+            config: ThinkingConfig with enabled flag and budget.
         """
-        pass  # GitHub Models doesn't support thinking
+        self._enable_thinking = config.enabled
+
+    def _is_reasoning_capable(self) -> bool:
+        """Check if the current model exposes reasoning content."""
+        if not self._model_name:
+            return False
+        name_lower = self._model_name.lower()
+        for prefix in REASONING_CAPABLE_MODELS:
+            if name_lower.startswith(prefix) or name_lower.endswith(prefix):
+                return True
+        return False
 
     # ==================== Streaming ====================
 
@@ -1488,6 +1540,7 @@ class GitHubModelsProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
         trace_prefix: str = "STREAM",
     ) -> ProviderResponse:
         """Handle streaming response from Copilot API.
@@ -1498,6 +1551,7 @@ class GitHubModelsProvider:
             on_chunk: Callback for each text chunk.
             cancel_token: Optional cancellation token.
             on_usage_update: Optional usage callback.
+            on_thinking: Optional callback for reasoning/thinking chunks.
             trace_prefix: Prefix for trace logging.
 
         Returns:
@@ -1506,6 +1560,7 @@ class GitHubModelsProvider:
         from ..types import FunctionCall
 
         accumulated_text = []
+        accumulated_thinking: List[str] = []
         parts = []
         finish_reason = FinishReason.UNKNOWN
         function_calls = []
@@ -1566,6 +1621,15 @@ class GitHubModelsProvider:
 
                 delta = choice.delta
 
+                # Extract reasoning/thinking (e.g. DeepSeek-R1)
+                if self._enable_thinking:
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        self._trace(f"{trace_prefix}_THINKING len={len(reasoning)}")
+                        accumulated_thinking.append(reasoning)
+                        if on_thinking:
+                            on_thinking(reasoning)
+
                 # Accumulate text
                 if delta.content:
                     chunk_count += 1
@@ -1617,11 +1681,14 @@ class GitHubModelsProvider:
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
         return ProviderResponse(
             parts=parts,
             usage=usage,
             finish_reason=finish_reason,
             raw=None,
+            thinking=thinking,
         )
 
     def _copilot_responses_streaming(
@@ -1631,6 +1698,7 @@ class GitHubModelsProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
         trace_prefix: str = "RESPONSES_STREAM",
     ) -> ProviderResponse:
         """Handle streaming response from Copilot Responses API.
@@ -1641,6 +1709,7 @@ class GitHubModelsProvider:
             on_chunk: Callback for each text chunk.
             cancel_token: Optional cancellation token.
             on_usage_update: Optional usage callback.
+            on_thinking: Optional callback for reasoning/thinking chunks.
             trace_prefix: Prefix for trace logging.
 
         Returns:
@@ -1649,6 +1718,7 @@ class GitHubModelsProvider:
         from ..types import FunctionCall
 
         accumulated_text = []
+        accumulated_thinking: List[str] = []
         parts = []
         finish_reason = FinishReason.UNKNOWN
         function_calls = []
@@ -1688,6 +1758,16 @@ class GitHubModelsProvider:
                         self._trace(f"{trace_prefix}_CHUNK[{chunk_count}] len={len(text)}")
                         accumulated_text.append(text)
                         on_chunk(text)
+
+                elif event_type == "reasoning":
+                    # Reasoning/thinking content (Responses API)
+                    if self._enable_thinking:
+                        reasoning_text = event.get("text", "")
+                        if reasoning_text:
+                            self._trace(f"{trace_prefix}_THINKING len={len(reasoning_text)}")
+                            accumulated_thinking.append(reasoning_text)
+                            if on_thinking:
+                                on_thinking(reasoning_text)
 
                 elif event_type == "function_call":
                     # Function call complete
@@ -1739,11 +1819,14 @@ class GitHubModelsProvider:
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
         return ProviderResponse(
             parts=parts,
             usage=usage,
             finish_reason=finish_reason,
             raw=None,
+            thinking=thinking,
         )
 
     def send_message_streaming(
@@ -1787,6 +1870,7 @@ class GitHubModelsProvider:
                     on_chunk=on_chunk,
                     cancel_token=cancel_token,
                     on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
                     trace_prefix="RESPONSES_STREAM",
                 )
             else:
@@ -1796,6 +1880,7 @@ class GitHubModelsProvider:
                     on_chunk=on_chunk,
                     cancel_token=cancel_token,
                     on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
                     trace_prefix="STREAM",
                 )
 
@@ -1825,6 +1910,7 @@ class GitHubModelsProvider:
 
         # Accumulate response with parts preserving order
         accumulated_text = []  # Text chunks for current text block
+        accumulated_thinking: List[str] = []  # Reasoning/thinking chunks
         parts = []  # Ordered parts preserving text/function_call interleaving
         finish_reason = FinishReason.UNKNOWN
         function_calls = []  # Also keep flat list for backwards compatibility
@@ -1863,6 +1949,16 @@ class GitHubModelsProvider:
                         # Extract text delta
                         if hasattr(choice, 'delta') and choice.delta:
                             delta = choice.delta
+
+                            # Extract reasoning/thinking (e.g. DeepSeek-R1)
+                            if self._enable_thinking:
+                                reasoning_chunk = extract_reasoning_from_stream_delta(delta)
+                                if reasoning_chunk:
+                                    self._trace(f"STREAM_THINKING len={len(reasoning_chunk)}")
+                                    accumulated_thinking.append(reasoning_chunk)
+                                    if on_thinking:
+                                        on_thinking(reasoning_chunk)
+
                             if hasattr(delta, 'content') and delta.content:
                                 chunk_count += 1
                                 self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
@@ -1919,11 +2015,14 @@ class GitHubModelsProvider:
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
         provider_response = ProviderResponse(
             parts=parts,
             usage=usage,
             finish_reason=finish_reason,
-            raw=None
+            raw=None,
+            thinking=thinking,
         )
 
         self._last_usage = usage
@@ -1986,6 +2085,7 @@ class GitHubModelsProvider:
                     on_chunk=on_chunk,
                     cancel_token=cancel_token,
                     on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
                     trace_prefix="RESPONSES_STREAM_TOOL_RESULTS",
                 )
             else:
@@ -1995,6 +2095,7 @@ class GitHubModelsProvider:
                     on_chunk=on_chunk,
                     cancel_token=cancel_token,
                     on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
                     trace_prefix="STREAM_TOOL_RESULTS",
                 )
 
@@ -2024,6 +2125,7 @@ class GitHubModelsProvider:
 
         # Accumulate response with parts preserving order
         accumulated_text = []  # Text chunks for current text block
+        accumulated_thinking: List[str] = []  # Reasoning/thinking chunks
         parts = []  # Ordered parts preserving text/function_call interleaving
         finish_reason = FinishReason.UNKNOWN
         function_calls = []  # Also keep flat list for backwards compatibility
@@ -2068,6 +2170,16 @@ class GitHubModelsProvider:
                         # Extract text delta
                         if hasattr(choice, 'delta') and choice.delta:
                             delta = choice.delta
+
+                            # Extract reasoning/thinking (e.g. DeepSeek-R1)
+                            if self._enable_thinking:
+                                reasoning_chunk = extract_reasoning_from_stream_delta(delta)
+                                if reasoning_chunk:
+                                    self._trace(f"STREAM_TOOL_THINKING len={len(reasoning_chunk)}")
+                                    accumulated_thinking.append(reasoning_chunk)
+                                    if on_thinking:
+                                        on_thinking(reasoning_chunk)
+
                             if hasattr(delta, 'content') and delta.content:
                                 chunk_count += 1
                                 self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
@@ -2124,11 +2236,14 @@ class GitHubModelsProvider:
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
         provider_response = ProviderResponse(
             parts=parts,
             usage=usage,
             finish_reason=finish_reason,
-            raw=None
+            raw=None,
+            thinking=thinking,
         )
 
         self._last_usage = usage
