@@ -369,6 +369,19 @@ ERROR HANDLING:
 - "No such file or directory" - verify the path exists before operating on it
 - When a step fails, decide whether to: retry with a workaround, skip if goal is met, or report the blocker
 
+NO INTERACTIVITY — this tool runs commands via subprocess, NOT a PTY/TTY.
+It captures stdout/stderr and returns them when the process exits.
+It CANNOT handle any form of interactive input during execution:
+- Password prompts (ssh, sudo, mysql -p) — the process will hang waiting for input
+- REPLs (python, node, psql) — no way to send commands after launch
+- Wizards or installers that ask questions (npm init, apt install without -y)
+- Debuggers (gdb, pdb) — no interactive stepping possible
+- Programs that read from /dev/tty directly
+
+If a command requires ANY back-and-forth interaction, use the shell_spawn /
+shell_input tools instead — they provide a real PTY session where you can
+read output and send input repeatedly.
+
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
 - Use head/tail to limit output lines
