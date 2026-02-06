@@ -335,6 +335,11 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                editable=EditableContent(
+                    parameters=["new_content"],
+                    format="text",
+                    template="# Edit the file content below. Save and exit to continue.\n",
+                ),
             ),
             ToolSchema(
                 name="writeNewFile",
