@@ -29,6 +29,7 @@ from .enrichment_formatter import (
     EnrichmentNotification,
     format_enrichment_notifications,
 )
+from shared.trace import trace as _trace_write
 
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
@@ -44,22 +45,7 @@ def _trace(msg: str, include_traceback: bool = False) -> None:
         msg: The message to log.
         include_traceback: If True, append the current exception traceback.
     """
-    trace_path = os.environ.get(
-        'JAATO_TRACE_LOG',
-        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-    )
-    if trace_path:
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [PluginRegistry] {msg}\n")
-                if include_traceback:
-                    tb = traceback.format_exc()
-                    if tb and tb.strip() != "NoneType: None":
-                        f.write(f"[{ts}] [PluginRegistry] Traceback:\n{tb}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
+    _trace_write("PluginRegistry", msg, include_traceback=include_traceback)
     # Also log to standard logger for visibility
     if include_traceback:
         logger.error(msg, exc_info=True)

@@ -15,6 +15,7 @@ from ..background import BackgroundCapableMixin
 from ..model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.trace import trace as _trace_write
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
@@ -108,19 +109,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [CLI{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("CLI", msg)
 
     def _detect_workspace_root(self) -> Optional[str]:
         """Auto-detect workspace root from environment variables.

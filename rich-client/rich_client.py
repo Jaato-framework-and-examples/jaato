@@ -692,14 +692,8 @@ class RichClient:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
-        import datetime
-        trace_path = os.environ.get("JAATO_TRACE_LOG")
-        if not trace_path:
-            return  # Tracing disabled
-        with open(trace_path, "a") as f:
-            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{ts}] {msg}\n")
-            f.flush()
+        from shared.trace import trace
+        trace("rich_client", msg)
 
     def _setup_queue_channels(self) -> None:
         """Set up queue-based channels for permission, clarification, and references.
@@ -1438,18 +1432,8 @@ class RichClient:
                 return
 
             # Write to provider trace for debugging (same file as provider uses)
-            import datetime
-            trace_path = os.environ.get(
-                "JAATO_PROVIDER_TRACE",
-                os.path.join(tempfile.gettempdir(), "provider_trace.log")
-            )
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [rich_client_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}\n")
-                    f.flush()
-            except Exception as e:
-                pass  # Ignore trace errors
+            from shared.trace import provider_trace as _provider_trace
+            _provider_trace("rich_client_callback", f"received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
             self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
 
             # Only update if we see HIGHER values (prevents backwards jumping)
@@ -1465,13 +1449,7 @@ class RichClient:
                 return
 
             # Trace the condition check
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} backend={self._backend is not None}\n")
-                    f.flush()
-            except Exception:
-                pass
+            _provider_trace("rich_client_callback", f"display={self._display is not None} backend={self._backend is not None}")
             if self._display and self._backend:
                 # Get context limit for percentage calculation
                 context_limit = self._run_async(self._backend.get_context_limit())
@@ -1507,13 +1485,7 @@ class RichClient:
                 self._display.update_context_usage(usage_dict)
 
                 # Trace after update
-                try:
-                    with open(trace_path, "a") as f:
-                        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                        f.write(f"[{ts}] [rich_client_callback] update_context_usage called, percent={percent_used:.1f}%\n")
-                        f.flush()
-                except Exception:
-                    pass
+                _provider_trace("rich_client_callback", f"update_context_usage called, percent={percent_used:.1f}%")
 
         def gc_threshold_callback(percent_used: float, threshold: float) -> None:
             """Handle GC threshold crossing notification."""
@@ -3443,6 +3415,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     import logging
     trace_log_path = os.environ.get("JAATO_TRACE_LOG")
     if trace_log_path:
+        # Ensure parent directories exist
+        os.makedirs(os.path.dirname(os.path.abspath(trace_log_path)), exist_ok=True)
         # Redirect logs to trace file
         file_handler = logging.FileHandler(trace_log_path)
         file_handler.setFormatter(logging.Formatter(

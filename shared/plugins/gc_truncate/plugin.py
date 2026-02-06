@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 from ...instruction_budget import InstructionSource
 
+from shared.trace import trace as _trace_write
+
 
 class TruncateGCPlugin:
     """GC plugin that removes oldest turns to free context space.
@@ -65,19 +67,7 @@ class TruncateGCPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [GC_TRUNCATE{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("GC_TRUNCATE", msg)
 
     @property
     def name(self) -> str:

@@ -94,9 +94,9 @@ class KaggleBackend(NotebookBackend):
         self._trace_fn = trace_fn
 
     def _trace(self, msg: str) -> None:
-        """Log a trace message."""
-        if self._trace_fn:
-            self._trace_fn(f"[kaggle] {msg}")
+        """Write trace message to log file for debugging."""
+        from shared.trace import provider_trace
+        provider_trace("Kaggle", msg)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for REST API calls.

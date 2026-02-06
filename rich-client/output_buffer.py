@@ -22,56 +22,21 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
-    trace_path = os.environ.get('JAATO_TRACE_LOG')
-    if not trace_path:
-        return  # Tracing disabled
-    try:
-        with open(trace_path, "a", encoding="utf-8") as f:
-            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{ts}] [OutputBuffer] {msg}\n")
-            f.flush()
-    except (IOError, OSError, UnicodeEncodeError):
-        pass
+    from shared.trace import trace
+    trace("OutputBuffer", msg)
 
 
 def _get_buffer_trace_path() -> Optional[str]:
-    """Get the buffer trace file path from environment variable.
-
-    Returns:
-        Path to trace file, or None if tracing is disabled.
-        - RICH_BUFFER_TRACE not set: default to {tempdir}/rich_render_trace.log
-        - RICH_BUFFER_TRACE="": disabled (returns None)
-        - RICH_BUFFER_TRACE="/path/to/file": use that path
-    """
-    env_val = os.environ.get("RICH_BUFFER_TRACE")
-    if env_val is None:
-        # Not set - use default location
-        return os.path.join(tempfile.gettempdir(), "rich_render_trace.log")
-    elif env_val == "":
-        # Explicitly disabled
-        return None
-    else:
-        # Custom path
-        return env_val
+    """Get the buffer trace file path from environment variable."""
+    from shared.trace import resolve_trace_path
+    return resolve_trace_path("RICH_BUFFER_TRACE",
+                              default_filename="rich_render_trace.log")
 
 
 def _buffer_trace(msg: str) -> None:
-    """Write trace message to buffer trace log.
-
-    Args:
-        msg: Message to trace.
-    """
-    trace_path = _get_buffer_trace_path()
-    if trace_path is None:
-        return
-
-    try:
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {msg}\n")
-            f.flush()
-    except (IOError, OSError, UnicodeEncodeError):
-        pass  # Silently ignore trace errors
+    """Write trace message to buffer trace log."""
+    from shared.trace import trace_write
+    trace_write("OutputBuffer", msg, _get_buffer_trace_path())
 
 
 from io import StringIO
@@ -169,43 +134,8 @@ def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bo
 
 
 def _get_trace_path() -> Optional[str]:
-    """Get the trace file path from environment variable.
-
-    Returns:
-        Path to trace file, or None if tracing is disabled.
-        - RICH_BUFFER_TRACE not set: default to {tempdir}/rich_render_trace.log
-        - RICH_BUFFER_TRACE="": disabled (returns None)
-        - RICH_BUFFER_TRACE="/path/to/file": use that path
-    """
-    env_val = os.environ.get("RICH_BUFFER_TRACE")
-    if env_val is None:
-        # Not set - use default location
-        return os.path.join(tempfile.gettempdir(), "rich_render_trace.log")
-    elif env_val == "":
-        # Explicitly disabled
-        return None
-    else:
-        # Custom path
-        return env_val
-
-
-def _buffer_trace(msg: str) -> None:
-    """Write trace message to buffer trace log.
-
-    Args:
-        msg: Message to trace.
-    """
-    trace_path = _get_trace_path()
-    if trace_path is None:
-        return
-
-    try:
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {msg}\n")
-            f.flush()
-    except (IOError, OSError, UnicodeEncodeError):
-        pass  # Silently ignore trace errors
+    """Get the trace file path from environment variable."""
+    return _get_buffer_trace_path()
 
 
 @dataclass
