@@ -86,7 +86,7 @@ def configure_logging(
             Session logs go to {workspace}/JAATO_SESSION_LOG_DIR/ based on
             the JAATO_SESSION_LOG_DIR env var in each workspace's .env file.
     """
-    level = logging.DEBUG if verbose else logging.INFO
+    central_level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
     # Remove any existing handlers
@@ -94,7 +94,10 @@ def configure_logging(
     for handler in root.handlers[:]:
         root.removeHandler(handler)
 
-    root.setLevel(level)
+    # Root logger passes everything; each handler filters its own level.
+    # This allows session logs to capture DEBUG while the central log
+    # stays at INFO (unless --verbose).
+    root.setLevel(logging.DEBUG)
 
     if log_file:
         # Use rotating file handler to prevent unbounded log growth
@@ -104,18 +107,21 @@ def configure_logging(
             backupCount=LOG_BACKUP_COUNT,
             encoding='utf-8',
         )
+        handler.setLevel(central_level)
         handler.setFormatter(logging.Formatter(fmt))
         root.addHandler(handler)
     else:
         # Console logging
         handler = logging.StreamHandler()
+        handler.setLevel(central_level)
         handler.setFormatter(logging.Formatter(fmt))
         root.addHandler(handler)
 
     # Add session routing handler for per-session/client log files
+    # Always at DEBUG level for full session visibility.
     if enable_session_logging:
         configure_session_logging(
-            level=level,
+            level=logging.DEBUG,
             formatter=logging.Formatter(fmt),
         )
 
