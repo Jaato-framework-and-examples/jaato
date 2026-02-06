@@ -3359,7 +3359,11 @@ NOTES
             gc_helped = self._try_gc_for_context_recovery(on_output)
 
             if gc_helped:
-                # GC freed some space - retry the original request
+                # GC freed some space - retry the original request.
+                # The provider already appended these tool results to its history
+                # before the failed API call, and they survived GC (preserve_recent_turns).
+                # Remove them so _do_send_tool_results can re-append them cleanly.
+                self._remove_tool_results_from_history(len(tool_results))
                 self._trace("CONTEXT_LIMIT_RECOVERY: GC freed space, retrying original request")
                 try:
                     return self._do_send_tool_results(
