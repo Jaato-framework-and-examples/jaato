@@ -48,7 +48,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server.session_manager import SessionManager
-from server.session_logging import configure_session_logging
+from server.session_logging import (
+    configure_session_logging,
+    set_logging_context,
+    clear_logging_context,
+)
 from server.events import Event
 
 
@@ -303,6 +307,40 @@ class JaatoDaemon:
         if not self._session_manager:
             return
 
+        # Set logging context from existing session (if any) so all logger
+        # calls in this thread are routed to per-session log files.
+        existing_session = self._session_manager.get_client_session(client_id)
+        workspace_from_ipc = (
+            self._ipc_server.get_client_workspace(client_id)
+            if self._ipc_server else None
+        )
+        if existing_session and existing_session.server:
+            set_logging_context(
+                session_id=existing_session.session_id,
+                client_id=client_id,
+                workspace_path=existing_session.workspace_path or workspace_from_ipc,
+                session_env=existing_session.server.get_all_session_env(),
+            )
+        elif session_id and workspace_from_ipc:
+            # No loaded session yet but we have identifiers (e.g. attach path)
+            set_logging_context(
+                session_id=session_id,
+                client_id=client_id,
+                workspace_path=workspace_from_ipc,
+            )
+
+        try:
+            self._handle_session_request_inner(client_id, session_id, event)
+        finally:
+            clear_logging_context()
+
+    def _handle_session_request_inner(
+        self,
+        client_id: str,
+        session_id: str,
+        event: Event,
+    ) -> None:
+        """Inner handler with logging context already set."""
         # Handle tool disable request (direct registry call, no response events)
         from server.events import ToolDisableRequest
         if isinstance(event, ToolDisableRequest):
@@ -335,8 +373,23 @@ class JaatoDaemon:
                 new_session_id = self._session_manager.create_session(
                     client_id, name, workspace_path=workspace_path
                 )
-                if self._ipc_server and new_session_id:
-                    self._ipc_server.set_client_session(client_id, new_session_id)
+                if new_session_id:
+                    # Update logging context now that session_id is known.
+                    # create_session() loaded the .env, so fetch session_env.
+                    new_session = self._session_manager.get_client_session(client_id)
+                    session_env = (
+                        new_session.server.get_all_session_env()
+                        if new_session and new_session.server else {}
+                    )
+                    set_logging_context(
+                        session_id=new_session_id,
+                        client_id=client_id,
+                        workspace_path=workspace_path,
+                        session_env=session_env,
+                    )
+                    logger.info(f"Session {new_session_id} created and context set")
+                    if self._ipc_server:
+                        self._ipc_server.set_client_session(client_id, new_session_id)
                 return
 
             elif cmd == "session.attach":
@@ -381,9 +434,21 @@ class JaatoDaemon:
                         ))
                         return
                     # No mismatch, proceed with attach
+                    # Set context before attach so initialization logs are routed
+                    set_logging_context(
+                        session_id=target_session_id,
+                        client_id=client_id,
+                        workspace_path=workspace_path,
+                    )
                     if self._session_manager.attach_session(
                         client_id, target_session_id, workspace_path=workspace_path
                     ):
+                        # Update context with session_env now that server is loaded
+                        attached = self._session_manager.get_client_session(client_id)
+                        if attached and attached.server:
+                            set_logging_context(
+                                session_env=attached.server.get_all_session_env(),
+                            )
                         if self._ipc_server:
                             self._ipc_server.set_client_session(client_id, target_session_id)
                 return
@@ -416,8 +481,18 @@ class JaatoDaemon:
                 default_session_id = self._session_manager.get_or_create_default(
                     client_id, workspace_path=workspace_path
                 )
-                if self._ipc_server and default_session_id:
-                    self._ipc_server.set_client_session(client_id, default_session_id)
+                if default_session_id:
+                    # Update context now that session exists
+                    default_session = self._session_manager.get_client_session(client_id)
+                    if default_session and default_session.server:
+                        set_logging_context(
+                            session_id=default_session_id,
+                            client_id=client_id,
+                            workspace_path=workspace_path,
+                            session_env=default_session.server.get_all_session_env(),
+                        )
+                    if self._ipc_server:
+                        self._ipc_server.set_client_session(client_id, default_session_id)
                 return
 
             elif cmd == "session.end":
