@@ -342,12 +342,28 @@ Use these tools when a command requires interactive input that CANNOT be
 handled with flags or pipes. Examples: REPLs, password prompts, wizards,
 debuggers, SSH sessions, interactive installers.
 
+TOOL ROLES — read this carefully:
+- shell_spawn: Start a NEW process. Call this ONCE per command. It returns
+  a session_id and the initial output. Do NOT call shell_spawn again to
+  send input to an already-running session.
+- shell_input: Send input to an EXISTING session (by session_id). This is
+  what you use for ALL subsequent interactions after shell_spawn. Whenever
+  a session is already running and waiting for input, use shell_input.
+- shell_read: Check for new output without sending input.
+- shell_control: Send Ctrl+C, Ctrl+D, etc.
+- shell_close: Terminate a session when done.
+- shell_list: See what sessions are currently running.
+
 WORKFLOW:
-1. shell_spawn(command="ssh user@host") → see initial output
+1. shell_spawn(command="ssh user@host") → creates session, returns session_id + initial output
 2. Read the output. Understand what the program is asking.
 3. shell_input(session_id=..., input="your response\\n") → see next output
-4. Repeat step 2-3 until done.
+4. Repeat steps 2-3 (using shell_input, NEVER shell_spawn) until done.
 5. shell_close(session_id=...) → clean up
+
+CRITICAL: Once a session exists, ALWAYS use shell_input to send data to it.
+Calling shell_spawn again would start a SECOND unrelated process — it does
+NOT send input to an existing one.
 
 You do NOT need to know the program's prompt format in advance. Just read
 what it outputs and respond appropriately. The output includes everything
