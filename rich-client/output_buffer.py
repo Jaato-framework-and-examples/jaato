@@ -4061,9 +4061,11 @@ class OutputBuffer:
             available_for_lines = height
 
             # Reserve space for the spinner when it will be rendered after items.
-            # The spinner (lines 4349+) appends 1-3 extra lines that are NOT part of
-            # any item's display_lines, so they must be subtracted from the budget.
-            if self._spinner_active and not self._active_tools:
+            # The spinner appends 1-3 extra lines that are NOT part of any item's
+            # display_lines, so they must be subtracted from the budget.
+            # Only reserve when at the bottom (scroll_offset==0) - when scrolled up,
+            # the spinner at the bottom being clipped by the Panel is acceptable.
+            if self._spinner_active and not self._active_tools and self._scroll_offset == 0:
                 spinner_reserved = 1  # "thinking..." line
                 if all_items:
                     spinner_reserved += 1  # blank line separator
@@ -4380,7 +4382,13 @@ class OutputBuffer:
         # Rich Panel clips from the BOTTOM when content exceeds height, which hides
         # the most recent output. By cropping from the TOP here, we guarantee the
         # most recent (bottom) content is always visible.
-        if height and isinstance(output, Text):
+        #
+        # Only crop when at the bottom (scroll_offset==0). When scrolled up, the
+        # user wants to see the OLDER content at the top of the viewport; cropping
+        # from the top would remove exactly what they scrolled up to see. In that
+        # case, Panel's default bottom-clipping is correct (clips the newer edge
+        # of the visible range, preserving the older content the user navigated to).
+        if height and self._scroll_offset == 0 and isinstance(output, Text):
             plain = output.plain
             line_count = plain.count('\n') + 1 if plain else 0
             if line_count > height:
