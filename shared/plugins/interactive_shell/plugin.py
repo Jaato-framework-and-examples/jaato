@@ -60,6 +60,7 @@ class InteractiveShellPlugin:
         self._workspace_root: Optional[str] = None
         self._agent_name: Optional[str] = None
         self._initialized = False
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
@@ -628,9 +629,17 @@ IMPORTANT NOTES:
 
     # --- Helpers ---
 
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during tool execution.
+
+        Called by ToolExecutor before/after each tool call. Also supports
+        thread-local fallback for parallel execution.
+        """
+        self._tool_output_callback = callback
+
     def _stream_output(self, text: str) -> None:
         """Forward output text to the tool output callback if available."""
-        callback = get_current_tool_output_callback()
+        callback = get_current_tool_output_callback() or self._tool_output_callback
         if callback and text:
             for line in text.splitlines():
                 callback(line)
