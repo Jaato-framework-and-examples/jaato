@@ -147,7 +147,7 @@ class TestCollectWithBudget:
 
         budget = make_budget(10000)
         # Add some entries but stay below target
-        budget.update_entry(InstructionSource.SYSTEM, 1000, GCPolicy.LOCKED)
+        budget.set_entry(InstructionSource.SYSTEM, 1000, GCPolicy.LOCKED)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)
@@ -168,9 +168,9 @@ class TestCollectWithBudget:
 
         budget = make_budget(10000)
         # Add ENRICHMENT with substantial tokens
-        budget.update_entry(InstructionSource.ENRICHMENT, 2000, GCPolicy.EPHEMERAL)
+        budget.set_entry(InstructionSource.ENRICHMENT, 2000, GCPolicy.EPHEMERAL)
         # Add some conversation
-        budget.update_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)  # Target: 6000 tokens
@@ -191,31 +191,25 @@ class TestCollectWithBudget:
 
         budget = make_budget(10000)
         # Add older ephemeral entry
-        budget.update_entry(InstructionSource.PLUGIN, 100, GCPolicy.LOCKED)
+        budget.set_entry(InstructionSource.PLUGIN, 100, GCPolicy.LOCKED)
         budget.add_child(
             InstructionSource.PLUGIN,
             "old_ephemeral",
-            SourceEntry(
-                source=InstructionSource.PLUGIN,
-                tokens=1000,
-                gc_policy=GCPolicy.EPHEMERAL,
-                label="old_ephemeral",
-                created_at=time.time() - 100,  # Older
-            )
+            1000,
+            GCPolicy.EPHEMERAL,
+            label="old_ephemeral",
+            created_at=time.time() - 100,  # Older
         )
         budget.add_child(
             InstructionSource.PLUGIN,
             "new_ephemeral",
-            SourceEntry(
-                source=InstructionSource.PLUGIN,
-                tokens=1000,
-                gc_policy=GCPolicy.EPHEMERAL,
-                label="new_ephemeral",
-                created_at=time.time(),  # Newer
-            )
+            1000,
+            GCPolicy.EPHEMERAL,
+            label="new_ephemeral",
+            created_at=time.time(),  # Newer
         )
         # Add conversation to trigger GC
-        budget.update_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)  # Target: 6000 tokens
@@ -236,18 +230,16 @@ class TestCollectWithBudget:
 
         budget = make_budget(10000)
         # Add PRESERVABLE entry
+        budget.set_entry(InstructionSource.PLUGIN, 0, GCPolicy.PARTIAL)
         budget.add_child(
             InstructionSource.PLUGIN,
             "preservable_1",
-            SourceEntry(
-                source=InstructionSource.PLUGIN,
-                tokens=2000,
-                gc_policy=GCPolicy.PRESERVABLE,
-                label="preservable_1",
-            )
+            2000,
+            GCPolicy.PRESERVABLE,
+            label="preservable_1",
         )
         # Add conversation
-        budget.update_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(
@@ -271,19 +263,17 @@ class TestCollectWithBudget:
 
         budget = make_budget(10000)
         # Add PRESERVABLE entry
+        budget.set_entry(InstructionSource.PLUGIN, 0, GCPolicy.PARTIAL)
         budget.add_child(
             InstructionSource.PLUGIN,
             "preservable_1",
-            SourceEntry(
-                source=InstructionSource.PLUGIN,
-                tokens=2000,
-                gc_policy=GCPolicy.PRESERVABLE,
-                label="preservable_1",
-                created_at=time.time() - 100,
-            )
+            2000,
+            GCPolicy.PRESERVABLE,
+            label="preservable_1",
+            created_at=time.time() - 100,
         )
         # Add locked conversation to consume budget
-        budget.update_entry(InstructionSource.CONVERSATION, 7500, GCPolicy.LOCKED)
+        budget.set_entry(InstructionSource.CONVERSATION, 7500, GCPolicy.LOCKED)
 
         history = make_history(5)
         config = GCConfig(
@@ -329,8 +319,8 @@ class TestRemovalList:
         plugin.initialize({"preserve_recent_turns": 2})
 
         budget = make_budget(10000)
-        budget.update_entry(InstructionSource.ENRICHMENT, 2000, GCPolicy.EPHEMERAL)
-        budget.update_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.ENRICHMENT, 2000, GCPolicy.EPHEMERAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 7000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)
@@ -359,8 +349,8 @@ class TestNotification:
         })
 
         budget = make_budget(10000)
-        budget.update_entry(InstructionSource.ENRICHMENT, 3000, GCPolicy.EPHEMERAL)
-        budget.update_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.ENRICHMENT, 3000, GCPolicy.EPHEMERAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)
@@ -382,8 +372,8 @@ class TestNotification:
         })
 
         budget = make_budget(10000)
-        budget.update_entry(InstructionSource.ENRICHMENT, 3000, GCPolicy.EPHEMERAL)
-        budget.update_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
+        budget.set_entry(InstructionSource.ENRICHMENT, 3000, GCPolicy.EPHEMERAL)
+        budget.set_entry(InstructionSource.CONVERSATION, 6000, GCPolicy.PARTIAL)
 
         history = make_history(5)
         config = GCConfig(target_percent=60.0)
@@ -462,3 +452,144 @@ class TestGCRemovalItem:
         assert item.tokens_freed == 500
         assert item.reason == "ephemeral"
         assert item.message_ids == ["msg-1", "msg-2"]
+
+
+class TestRegressionContextLimitRecovery:
+    """Regression tests for GC context-limit recovery bugs."""
+
+    def test_ephemeral_candidates_return_dict_keys(self):
+        """Bug B: _get_ephemeral_candidates must return dict keys that match budget children."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        budget = make_budget(10000)
+        budget.set_entry(InstructionSource.PLUGIN, 0, GCPolicy.PARTIAL)
+        budget.add_child(
+            InstructionSource.PLUGIN,
+            "tool_result_42",
+            500,
+            GCPolicy.EPHEMERAL,
+            label="some display label",
+        )
+
+        candidates = plugin._get_ephemeral_candidates(budget)
+        assert len(candidates) == 1
+        child_key, entry = candidates[0]
+        # The key must be the actual dict key, not the display label
+        assert child_key == "tool_result_42"
+        assert child_key in budget.get_entry(InstructionSource.PLUGIN).children
+
+    def test_preservable_candidates_return_dict_keys(self):
+        """Bug B: _get_preservable_candidates must return dict keys that match budget children."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        budget = make_budget(10000)
+        budget.set_entry(InstructionSource.PLUGIN, 0, GCPolicy.PARTIAL)
+        budget.add_child(
+            InstructionSource.PLUGIN,
+            "memo_99",
+            300,
+            GCPolicy.PRESERVABLE,
+            label="memory note 99",
+        )
+
+        candidates = plugin._get_preservable_candidates(budget)
+        assert len(candidates) == 1
+        child_key, entry = candidates[0]
+        assert child_key == "memo_99"
+        assert child_key in budget.get_entry(InstructionSource.PLUGIN).children
+
+    def test_apply_removals_removes_messages_with_ids(self):
+        """Bug A: _apply_removals_to_history must actually remove messages when message_ids are set."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        msg1 = make_message("user", "hello", message_id="id-1")
+        msg2 = make_message("model", "hi there", message_id="id-2")
+        msg3 = make_message("user", "bye", message_id="id-3")
+        history = [msg1, msg2, msg3]
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_0",
+                tokens_freed=10,
+                reason="ephemeral",
+                message_ids=["id-1"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_1",
+                tokens_freed=10,
+                reason="ephemeral",
+                message_ids=["id-2"],
+            ),
+        ]
+
+        new_history = plugin._apply_removals_to_history(history, removal_list)
+        assert len(new_history) == 1
+        assert new_history[0].message_id == "id-3"
+
+    def test_apply_removals_no_op_without_message_ids(self):
+        """Without message_ids, _apply_removals_to_history returns original history."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        history = [make_message("user", "hello", message_id="id-1")]
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_0",
+                tokens_freed=10,
+                reason="ephemeral",
+                message_ids=[],  # Empty — this was the bug
+            ),
+        ]
+
+        new_history = plugin._apply_removals_to_history(history, removal_list)
+        assert len(new_history) == 1  # Nothing removed
+
+    def test_end_to_end_gc_collect_frees_tokens(self):
+        """End-to-end: GC collect() with populated message_ids actually removes messages."""
+        plugin = create_plugin()
+        plugin.initialize({"preserve_recent_turns": 1})
+
+        budget = make_budget(10000)
+        # Set up conversation with children that have message_ids
+        budget.set_entry(InstructionSource.CONVERSATION, 0, GCPolicy.PARTIAL)
+
+        # Build history with known message IDs
+        history = []
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "model"
+            msg = make_message(role, f"Message {i}", message_id=f"msg-id-{i}")
+            history.append(msg)
+
+        # Add budget children matching the history, with message_ids
+        for i, msg in enumerate(history):
+            budget.add_child(
+                InstructionSource.CONVERSATION,
+                f"msg_{i}",
+                1500,
+                GCPolicy.EPHEMERAL,
+                label=f"turn message {i}",
+                message_ids=[msg.message_id],
+            )
+
+        config = GCConfig(target_percent=50.0, preserve_recent_turns=1)
+        context = {"percent_used": 90.0}
+
+        new_history, result = plugin.collect(
+            history, context, config, GCTriggerReason.THRESHOLD, budget
+        )
+
+        assert result.success
+        assert result.items_collected > 0
+        assert result.tokens_freed > 0
+        # History should be shorter than original
+        assert len(new_history) < len(history)
+        # Removal list items should have the correct dict keys
+        for item in result.removal_list:
+            if item.child_key and item.source == InstructionSource.CONVERSATION:
+                assert item.child_key.startswith("msg_")
