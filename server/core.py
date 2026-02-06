@@ -1949,7 +1949,22 @@ class JaatoServer:
                 style="warning",
             ))
 
+        # Capture logging context for propagation into model thread
+        from server.session_logging import (
+            get_logging_context, set_logging_context, clear_logging_context,
+        )
+        _log_ctx = get_logging_context()
+
         def model_thread():
+            # Propagate session logging context so plugin logger calls
+            # are routed to per-session log files.
+            if _log_ctx.get('session_id') and _log_ctx.get('workspace_path'):
+                set_logging_context(
+                    session_id=_log_ctx['session_id'],
+                    client_id=_log_ctx.get('client_id'),
+                    workspace_path=_log_ctx['workspace_path'],
+                    session_env=_log_ctx.get('session_env'),
+                )
             server._model_running = True
             try:
                 # Run in workspace context so file operations use client's CWD
@@ -2010,6 +2025,7 @@ class JaatoServer:
                     agent_id="main",
                     status=status,
                 ))
+                clear_logging_context()
 
         self._model_thread = threading.Thread(target=model_thread, daemon=True)
         self._model_thread.start()

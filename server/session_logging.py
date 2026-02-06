@@ -67,16 +67,17 @@ def clear_logging_context() -> None:
     session_env_context.set(None)
 
 
-def get_logging_context() -> Dict[str, Optional[str]]:
+def get_logging_context() -> Dict[str, Any]:
     """Get the current logging context.
 
     Returns:
-        Dict with session_id, client_id, workspace_path keys.
+        Dict with session_id, client_id, workspace_path, session_env keys.
     """
     return {
         'session_id': session_context.get(),
         'client_id': client_context.get(),
         'workspace_path': workspace_context.get(),
+        'session_env': session_env_context.get(),
     }
 
 
