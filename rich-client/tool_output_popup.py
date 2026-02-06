@@ -28,7 +28,7 @@ class ToolOutputPopup:
     """Renders a floating popup for live tool output visualization.
 
     Features:
-    - Auto-popup when an expanded running tool has output
+    - Auto-popup when tools are expanded and a running tool has output
     - Auto-follow (tail -f style, always showing latest output)
     - Tab-switching between concurrent running tools
     - Auto-dismiss when the tracked tool completes
@@ -85,7 +85,7 @@ class ToolOutputPopup:
         """Update popup state based on current tool state.
 
         Called on each refresh cycle. Handles:
-        - Auto-popup when an expanded running tool produces output
+        - Auto-popup when tools are expanded and a running tool produces output
         - Auto-dismiss when tracked tool completes
         - Tracking the first available tool if none tracked
         """
@@ -106,10 +106,11 @@ class ToolOutputPopup:
                 return
 
         if not self._visible:
-            # Auto-popup: check for expanded running tools with output
+            # Auto-popup: show when tools are expanded and a running tool has output
+            if not buffer.tools_expanded:
+                return
             for tool in buffer.active_tools:
                 if (not tool.completed
-                        and tool.expanded
                         and tool.output_lines
                         and tool.call_id):
                     self._visible = True
