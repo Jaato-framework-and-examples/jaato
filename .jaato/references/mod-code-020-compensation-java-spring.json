@@ -1,10 +1,11 @@
 {
   "id": "mod-code-020-compensation-java-spring",
-  "name": "MOD-020: Compensation (Java/Spring)",
-  "description": "Templates for SAGA compensation patterns in Domain APIs. Runtime dependency of skill-021.",
+  "name": "MOD-020: Compensation - Java/Spring Boot",
+  "description": "Templates for adding compensation endpoints/interfaces for Domain APIs participating in SAGA orchestration (distributed transactions) aligned to ADR-013.",
   "type": "local",
-  "path": "../../knowledge/modules/mod-code-020-compensation-java-spring/",
+  "path": "./knowledge/modules/mod-code-020-compensation-java-spring/",
   "mode": "selectable",
-  "tags": ["module", "saga", "compensation", "distributed-transactions", "java", "spring", "templates"],
-  "fetchHint": "Read MODULE.md for Compensable interface and TransactionLog templates"
+  "tags": ["module", "java", "spring-boot", "saga", "compensation", "distributed-transactions", "templates"],
+  "fetchHint": "Read MODULE.md Purpose and template structure; see ERI-CODE-015 for the reference contract.",
+  "notes": "This module references ADR-013 but ADR-013 is stored under knowledge/ADRs/ rather than modules."
 }

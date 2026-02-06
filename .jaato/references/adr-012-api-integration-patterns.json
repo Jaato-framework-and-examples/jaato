@@ -1,10 +1,10 @@
 {
   "id": "adr-012-api-integration-patterns",
   "name": "ADR-012: API Integration Patterns",
-  "description": "Architecture decision record defining REST client patterns for external API integration.",
+  "description": "Defines API integration as a first-class capability with standard integration types (REST, gRPC, async request/reply, event-driven) and current scope.",
   "type": "local",
-  "path": "../../knowledge/ADRs/adr-012-api-integration-patterns/",
+  "path": "./knowledge/ADRs/adr-012-api-integration-patterns/",
   "mode": "selectable",
-  "tags": ["adr", "integration", "rest", "client", "feign", "restclient"],
-  "fetchHint": "Read ADR.md for integration client decisions and error handling patterns"
+  "tags": ["adr", "integration", "rest", "grpc", "async-api", "orchestration", "choreography"],
+  "fetchHint": "Read ADR.md for integration scenarios and supported types; see ERI-CODE-013 and mod-018 for REST client patterns."
 }

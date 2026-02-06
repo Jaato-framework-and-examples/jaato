@@ -1,10 +1,10 @@
 {
   "id": "mod-code-015-hexagonal-base-java-spring",
-  "name": "MOD-015: Hexagonal Base (Java/Spring)",
-  "description": "Core templates for Hexagonal Light microservice architecture. Runtime dependency of skill-020.",
+  "name": "MOD-015: Hexagonal Base - Java/Spring Boot",
+  "description": "Base templates for generating Hexagonal Light Java/Spring Boot microservices, including conventions and cross-cutting flag subscriptions.",
   "type": "local",
-  "path": "../../knowledge/modules/mod-code-015-hexagonal-base-java-spring/",
+  "path": "./knowledge/modules/mod-code-015-hexagonal-base-java-spring/",
   "mode": "selectable",
-  "tags": ["module", "hexagonal", "architecture", "java", "spring", "templates"],
-  "fetchHint": "Read MODULE.md for directory structure and layer templates"
+  "tags": ["module", "java", "spring-boot", "hexagonal", "architecture", "ddd", "templates"],
+  "fetchHint": "Read MODULE.md Purpose + template conventions; note DEC-035 flag subscriptions that affect generated DTOs."
 }

@@ -1,10 +1,10 @@
 {
   "id": "eri-code-010-timeout-java-resilience4j",
-  "name": "ERI-010: Timeout (Java/Resilience4j)",
-  "description": "Enterprise Reference Implementation for timeout pattern using Resilience4j. Defines configuration and fallback strategies.",
+  "name": "ERI-010: Timeout (TimeLimiter) - Java/Spring Boot with Resilience4j",
+  "description": "Reference implementation of timeout/time limiter patterns in Java/Spring Boot using Resilience4j, including implementation options and constraints.",
   "type": "local",
-  "path": "../../knowledge/ERIs/eri-code-010-timeout-java-resilience4j/",
+  "path": "./knowledge/ERIs/eri-code-010-timeout-java-resilience4j/",
   "mode": "selectable",
-  "tags": ["eri", "timeout", "resilience4j", "java", "reference"],
-  "fetchHint": "Read ERI.md for timeout configuration and cancellation patterns"
+  "tags": ["eri", "java", "spring-boot", "resilience4j", "timeout", "time-limiter", "fault-tolerance"],
+  "fetchHint": "Read ERI.md Overview and Implementation Options; module mod-003 supports multiple variants derived from this ERI."
 }

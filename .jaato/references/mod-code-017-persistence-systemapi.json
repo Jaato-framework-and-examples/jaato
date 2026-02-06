@@ -1,10 +1,10 @@
 {
   "id": "mod-code-017-persistence-systemapi",
   "name": "MOD-017: System API Persistence",
-  "description": "Templates for System API delegation persistence. Runtime dependency of skill-020.",
+  "description": "Templates for persistence via delegation to System APIs (mainframe SoR) including selectable HTTP client variants and resilience composition.",
   "type": "local",
-  "path": "../../knowledge/modules/mod-code-017-persistence-systemapi/",
+  "path": "./knowledge/modules/mod-code-017-persistence-systemapi/",
   "mode": "selectable",
-  "tags": ["module", "persistence", "system-api", "mainframe", "java", "templates"],
-  "fetchHint": "Read MODULE.md for adapter and mapping templates"
+  "tags": ["module", "java", "spring-boot", "persistence", "system-api", "integration", "rest-client", "resilience", "variants"],
+  "fetchHint": "Read MODULE.md Variants to choose RestClient/Feign/RestTemplate; module depends on mod-018 for HTTP client templates."
 }

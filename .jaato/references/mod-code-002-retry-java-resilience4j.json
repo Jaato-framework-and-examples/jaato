@@ -1,10 +1,10 @@
 {
   "id": "mod-code-002-retry-java-resilience4j",
-  "name": "MOD-002: Retry Templates (Java/Resilience4j)",
-  "description": "Reusable code templates for retry pattern. Runtime dependency of skill-020.",
+  "name": "MOD-002: Retry Pattern - Java/Resilience4j",
+  "description": "Reusable templates for adding Resilience4j Retry to Java/Spring adapters, intended to compose after circuit breaker.",
   "type": "local",
-  "path": "../../knowledge/modules/mod-code-002-retry-java-resilience4j/",
+  "path": "./knowledge/modules/mod-code-002-retry-java-resilience4j/",
   "mode": "selectable",
-  "tags": ["module", "retry", "resilience4j", "java", "templates"],
-  "fetchHint": "Read MODULE.md for templates with {{placeholder}} variables"
+  "tags": ["module", "java", "spring", "resilience4j", "retry", "fault-tolerance", "templates"],
+  "fetchHint": "Read MODULE.md for annotation ordering and YAML config; check templates/annotation and templates/config."
 }

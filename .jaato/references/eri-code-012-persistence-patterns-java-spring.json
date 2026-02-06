@@ -1,10 +1,10 @@
 {
   "id": "eri-code-012-persistence-patterns-java-spring",
-  "name": "ERI-012: Persistence Patterns (Java/Spring)",
-  "description": "Enterprise Reference Implementation for persistence patterns including JPA and System API delegation.",
+  "name": "ERI-012: Persistence Patterns - Java/Spring Boot",
+  "description": "Reference patterns for persistence in hexagonal Java/Spring services: repository ports in domain layer with JPA or System API adapters.",
   "type": "local",
-  "path": "../../knowledge/ERIs/eri-code-012-persistence-patterns-java-spring/",
+  "path": "./knowledge/ERIs/eri-code-012-persistence-patterns-java-spring/",
   "mode": "selectable",
-  "tags": ["eri", "persistence", "jpa", "system-api", "java", "spring", "reference"],
-  "fetchHint": "Read ERI.md for persistence adapter patterns and repository implementations"
+  "tags": ["eri", "java", "spring-boot", "persistence", "jpa", "system-api", "hexagonal", "repository"],
+  "fetchHint": "Read ERI.md Overview diagrams, then choose JPA vs System API approach; modules mod-016 and mod-017 implement each option."
 }

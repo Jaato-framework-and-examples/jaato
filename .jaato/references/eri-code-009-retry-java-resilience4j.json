@@ -1,10 +1,10 @@
 {
   "id": "eri-code-009-retry-java-resilience4j",
-  "name": "ERI-009: Retry (Java/Resilience4j)",
-  "description": "Enterprise Reference Implementation for retry pattern using Resilience4j. Defines configuration and backoff strategies.",
+  "name": "ERI-009: Retry - Java/Spring Boot with Resilience4j",
+  "description": "Reference implementation of Retry pattern in Java/Spring Boot using Resilience4j, including backoff strategies and when to use/avoid retries.",
   "type": "local",
-  "path": "../../knowledge/ERIs/eri-code-009-retry-java-resilience4j/",
+  "path": "./knowledge/ERIs/eri-code-009-retry-java-resilience4j/",
   "mode": "selectable",
-  "tags": ["eri", "retry", "resilience4j", "java", "reference"],
-  "fetchHint": "Read ERI.md for retry configuration and exponential backoff patterns"
+  "tags": ["eri", "java", "spring-boot", "resilience4j", "retry", "fault-tolerance", "microservices"],
+  "fetchHint": "Read ERI.md Overview and guidance (When to use/NOT use) before applying templates via mod-002."
 }
