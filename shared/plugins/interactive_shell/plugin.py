@@ -20,6 +20,7 @@ from typing import Dict, List, Any, Callable, Optional
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from .session import ShellSession
+from shared.ai_tool_runner import get_current_tool_output_callback
 
 
 # Maximum concurrent interactive sessions
@@ -470,6 +471,7 @@ IMPORTANT NOTES:
                 f"spawn: id={session_id} output_len={len(initial_output)} "
                 f"alive={session.is_alive}"
             )
+            self._stream_output(initial_output)
             return result
 
         except Exception as exc:
@@ -501,6 +503,7 @@ IMPORTANT NOTES:
 
         try:
             output = session.send_input(text)
+            self._stream_output(output)
             return {
                 'output': output,
                 'is_alive': session.is_alive,
@@ -525,6 +528,7 @@ IMPORTANT NOTES:
 
         try:
             output = session.read_output(timeout=timeout)
+            self._stream_output(output)
             return {
                 'output': output,
                 'is_alive': session.is_alive,
@@ -556,6 +560,7 @@ IMPORTANT NOTES:
 
         try:
             output = session.send_control(key)
+            self._stream_output(output)
             return {
                 'output': output,
                 'is_alive': session.is_alive,
@@ -611,6 +616,13 @@ IMPORTANT NOTES:
         return {'sessions': sessions, 'count': len(sessions)}
 
     # --- Helpers ---
+
+    def _stream_output(self, text: str) -> None:
+        """Forward output text to the tool output callback if available."""
+        callback = get_current_tool_output_callback()
+        if callback and text:
+            for line in text.splitlines():
+                callback(line)
 
     def _get_session(self, session_id: str) -> Optional[ShellSession]:
         """Look up a session by ID."""
