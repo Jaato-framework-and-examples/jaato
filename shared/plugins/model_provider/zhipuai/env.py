@@ -67,3 +67,34 @@ def resolve_context_length() -> Optional[int]:
         except ValueError:
             pass
     return None
+
+
+def resolve_enable_thinking() -> bool:
+    """Resolve whether extended thinking is enabled.
+
+    Checks:
+    1. ZHIPUAI_ENABLE_THINKING environment variable
+
+    Returns:
+        True if thinking is enabled, False by default.
+    """
+    val = os.environ.get("ZHIPUAI_ENABLE_THINKING", "").lower()
+    return val in ("1", "true", "yes")
+
+
+def resolve_thinking_budget() -> int:
+    """Resolve thinking budget (max thinking tokens).
+
+    Checks:
+    1. ZHIPUAI_THINKING_BUDGET environment variable
+
+    Returns:
+        Thinking budget in tokens (default: 10000).
+    """
+    val = os.environ.get("ZHIPUAI_THINKING_BUDGET")
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return 10000

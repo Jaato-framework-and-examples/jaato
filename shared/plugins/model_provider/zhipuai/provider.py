@@ -33,7 +33,9 @@ from .env import (
     resolve_api_key,
     resolve_base_url,
     resolve_context_length,
+    resolve_enable_thinking,
     resolve_model,
+    resolve_thinking_budget,
 )
 from .auth import (
     get_stored_api_key,
@@ -59,6 +61,13 @@ KNOWN_MODELS = [
     "glm-4",
     "glm-4v",
     "glm-4-assistant",
+]
+
+
+# GLM models that support extended thinking (chain-of-thought reasoning)
+# GLM-4.7 has native chain-of-thought reasoning capability
+THINKING_CAPABLE_MODELS = [
+    "glm-4.7",
 ]
 
 
@@ -92,7 +101,8 @@ class ZhipuAIProvider(AnthropicProvider):
     - Custom base_url pointing to Z.AI's Anthropic-compatible endpoint
     - API key authentication via ZHIPUAI_API_KEY
     - Model listing for GLM models
-    - Caching and thinking disabled (may not be supported)
+    - Caching disabled (may not be supported)
+    - Extended thinking for GLM-4.7 (native chain-of-thought reasoning)
 
     All message handling, streaming, and converters are inherited from
     AnthropicProvider since Zhipu AI uses the same API format.
@@ -104,9 +114,8 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url: str = DEFAULT_ZHIPUAI_BASE_URL
         self._context_length_override: Optional[int] = None
 
-        # Disable features that may not be supported by Zhipu AI's API
+        # Caching may not be supported by Zhipu AI's Anthropic-compatible API
         self._enable_caching = False
-        self._enable_thinking = False
 
     @property
     def name(self) -> str:
@@ -121,6 +130,8 @@ class ZhipuAIProvider(AnthropicProvider):
                 - api_key: Zhipu AI API key (overrides ZHIPUAI_API_KEY)
                 - extra['base_url']: Override ZHIPUAI_BASE_URL
                 - extra['context_length']: Override context length
+                - extra['enable_thinking']: Enable extended thinking (default: False)
+                - extra['thinking_budget']: Max thinking tokens (default: 10000)
 
         Raises:
             ZhipuAIAPIKeyNotFoundError: If no API key is found.
@@ -164,9 +175,16 @@ class ZhipuAIProvider(AnthropicProvider):
             config.extra.get("context_length") or resolve_context_length()
         )
 
-        # Zhipu AI's Anthropic API may not support caching/thinking - force disable
+        # Caching may not be supported by Zhipu AI's Anthropic-compatible API
         self._enable_caching = False
-        self._enable_thinking = False
+
+        # Extended thinking: configurable for GLM-4.7 which has native CoT reasoning
+        self._enable_thinking = config.extra.get(
+            "enable_thinking", resolve_enable_thinking()
+        )
+        self._thinking_budget = config.extra.get(
+            "thinking_budget", resolve_thinking_budget()
+        )
 
         # Zhipu AI doesn't use OAuth/PKCE - set to disabled
         self._use_pkce = False
@@ -255,6 +273,18 @@ class ZhipuAIProvider(AnthropicProvider):
         if self._context_length_override:
             return self._context_length_override
         return DEFAULT_CONTEXT_LIMIT
+
+    def _is_thinking_capable(self) -> bool:
+        """Check if the current model supports extended thinking.
+
+        GLM-4.7 has native chain-of-thought reasoning capability.
+        Flash and other GLM variants do not support it.
+        """
+        if not self._model_name:
+            return False
+        name_lower = self._model_name.lower()
+        # GLM-4.7 supports thinking, but flash variants do not
+        return name_lower.startswith("glm-4.7") and "flash" not in name_lower
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors with Zhipu AI-specific interpretation.

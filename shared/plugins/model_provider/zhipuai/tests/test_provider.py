@@ -9,9 +9,11 @@ from ..provider import (
     ZhipuAIConnectionError,
     DEFAULT_CONTEXT_LIMIT,
     KNOWN_MODELS,
+    THINKING_CAPABLE_MODELS,
 )
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 from ...base import ProviderConfig
+from ...types import ThinkingConfig
 
 
 class TestInitialization:
@@ -86,16 +88,23 @@ class TestInitialization:
         assert provider._enable_caching is False
 
     @patch('anthropic.Anthropic')
-    def test_thinking_disabled(self, mock_anthropic):
-        """Should have thinking disabled (may not be supported)."""
+    def test_thinking_default_disabled(self, mock_anthropic):
+        """Should have thinking disabled by default."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        assert provider._enable_thinking is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_enabled_via_config(self, mock_anthropic):
+        """Should allow enabling thinking via config."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(
             api_key="test-key",
             extra={"enable_thinking": True}
         ))
 
-        # Should still be disabled
-        assert provider._enable_thinking is False
+        assert provider._enable_thinking is True
 
     @patch('anthropic.Anthropic')
     def test_strips_trailing_slash_from_base_url(self, mock_anthropic):
@@ -277,6 +286,108 @@ class TestLogin:
 
         assert any("ZHIPUAI_API_KEY" in m for m in messages)
         assert any("open.bigmodel.cn" in m for m in messages)
+
+
+class TestThinkingSupport:
+    """Tests for extended thinking / chain-of-thought support."""
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_capable_glm47(self, mock_anthropic):
+        """GLM-4.7 should be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7")
+
+        assert provider._is_thinking_capable() is True
+        assert provider.supports_thinking() is True
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_flash(self, mock_anthropic):
+        """GLM-4.7-flash should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-flash")
+
+        assert provider._is_thinking_capable() is False
+        assert provider.supports_thinking() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_glm4(self, mock_anthropic):
+        """GLM-4 should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4")
+
+        assert provider._is_thinking_capable() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_glm4v(self, mock_anthropic):
+        """GLM-4V should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4v")
+
+        assert provider._is_thinking_capable() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_capable_dated_variant(self, mock_anthropic):
+        """Dated GLM-4.7 variants should be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-20250601")
+
+        assert provider._is_thinking_capable() is True
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_no_model(self, mock_anthropic):
+        """Should return False when no model is connected."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        assert provider._is_thinking_capable() is False
+        assert provider.supports_thinking() is False
+
+    @patch('anthropic.Anthropic')
+    def test_set_thinking_config(self, mock_anthropic):
+        """Should accept ThinkingConfig to enable/disable thinking."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7")
+
+        # Enable thinking
+        provider.set_thinking_config(ThinkingConfig(enabled=True, budget=5000))
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 5000
+
+        # Disable thinking
+        provider.set_thinking_config(ThinkingConfig(enabled=False, budget=0))
+        assert provider._enable_thinking is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_budget_from_config(self, mock_anthropic):
+        """Should use thinking budget from config."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            extra={"enable_thinking": True, "thinking_budget": 20000}
+        ))
+
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 20000
+
+    @patch('anthropic.Anthropic')
+    @patch.dict('os.environ', {
+        'ZHIPUAI_API_KEY': 'key',
+        'ZHIPUAI_ENABLE_THINKING': 'true',
+        'ZHIPUAI_THINKING_BUDGET': '15000',
+    })
+    def test_thinking_from_env(self, mock_anthropic):
+        """Should use thinking config from environment variables."""
+        provider = ZhipuAIProvider()
+        provider.initialize()
+
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 15000
 
 
 class TestCreateProvider:
