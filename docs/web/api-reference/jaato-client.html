@@ -118,7 +118,9 @@
           <div class="code-label">Quick example</div>
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+import os
 
+# Framework reads JAATO_PROVIDER and MODEL_NAME from environment
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
@@ -278,6 +280,11 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
             </li>
           </ul>
 
+          <div class="callout callout-info">
+            <div class="callout-title">Recommended Usage</div>
+            Call <code>connect()</code> with no arguments and let the framework read all configuration from environment variables (<code>JAATO_PROVIDER</code>, <code>MODEL_NAME</code>, and provider-specific vars). Only pass explicit parameters when you need to override environment configuration.
+          </div>
+
           <h3 id="is-connected">is_connected <span class="badge badge-property">property</span></h3>
           <p>Returns <code>True</code> if the client is connected to a provider.</p>
 
@@ -375,7 +382,9 @@ client.connect(
 
           <div class="code-label" style="margin-top: 24px;">Runtime &amp; Session access</div>
           <div class="code-block">
-            <pre><code class="language-python"># Access runtime for subagent creation
+            <pre><code class="language-python">import os
+
+# Access runtime for subagent creation
 runtime = client.get_runtime()
 sub_session = runtime.create_session(
     model="claude-sonnet-4-20250514",
@@ -393,7 +402,11 @@ history = main_session.get_history()</code></pre>
           <div class="code-block">
             <pre><code class="language-python"># For providers with OAuth (Anthropic, Antigravity)
 client = JaatoClient(provider_name="anthropic")
+<<<<<<< HEAD:docs/web/api-reference/jaato-client.html
 client.connect()  # Reads MODEL_NAME from env
+=======
+client.connect()  # Reads MODEL_NAME from environment
+>>>>>>> 57d6a4b (docs: Update HTML documentation to reflect env var based configuration):docs/api/api-reference/jaato-client.html
 
 # Verify auth - triggers browser OAuth if needed
 if not client.verify_auth(
@@ -488,12 +501,21 @@ client.configure_tools(registry, permission_plugin, ledger)</code></pre>
     PermissionPlugin,
     TokenLedger
 )
+import os
 
+# Framework reads configuration from environment
 client = JaatoClient()
+<<<<<<< HEAD:docs/web/api-reference/jaato-client.html
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Setup registry
 registry = PluginRegistry(model_name=client.model_name)
+=======
+client.connect()
+
+# Setup registry
+registry = PluginRegistry(model_name=os.getenv("MODEL_NAME"))
+>>>>>>> 57d6a4b (docs: Update HTML documentation to reflect env var based configuration):docs/api/api-reference/jaato-client.html
 registry.discover()
 registry.expose_tool("cli")
 registry.expose_tool("file_edit")
@@ -1181,7 +1203,11 @@ if share:
 from shared import JaatoClient, CancelledException
 
 client = JaatoClient()
+<<<<<<< HEAD:docs/web/api-reference/jaato-client.html
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
+=======
+client.connect()
+>>>>>>> 57d6a4b (docs: Update HTML documentation to reflect env var based configuration):docs/api/api-reference/jaato-client.html
 # ... configure tools ...
 
 # Enable streaming for mid-generation cancellation
