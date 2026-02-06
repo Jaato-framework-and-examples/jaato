@@ -1335,6 +1335,7 @@ class JaatoSession:
                     msg_tokens,
                     gc_policy,
                     label=f"turn_{current_turn} {role_label}",  # Display turn number and type
+                    message_ids=[msg.message_id],
                 )
 
         self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, conversation_tokens)
@@ -3674,19 +3675,14 @@ NOTES
         if saved_tokens <= 0:
             return
 
-        # Adjust the conversation entry — the provider's history will be updated
-        # by the provider itself when it receives the truncated results, so we
-        # just need to adjust our budget tracking to match.
-        conv_entry = self._instruction_budget.get_entry(
-            InstructionSource.CONVERSATION
+        # Note: We don't adjust the budget here — total_tokens() returns
+        # sum(children) when children exist, so adjusting conv_entry.tokens
+        # has no effect. The budget rebuilds from actual history at turn-end
+        # via _update_conversation_budget().
+        self._trace(
+            f"CONTEXT_LIMIT_RECOVERY: Truncation saved ~{saved_tokens} tokens "
+            f"(budget will sync at turn-end)"
         )
-        if conv_entry:
-            current = conv_entry.total_tokens()
-            conv_entry.tokens = max(0, conv_entry.tokens - saved_tokens)
-            self._trace(
-                f"CONTEXT_LIMIT_RECOVERY: Budget adjusted by -{saved_tokens} tokens "
-                f"(conversation: {current} -> {conv_entry.total_tokens()})"
-            )
 
         # Record truncation event in ledger
         if self._runtime.ledger:

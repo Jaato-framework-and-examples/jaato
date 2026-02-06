@@ -693,9 +693,9 @@ class TestContextLimitRecovery:
         # Sync budget
         session._sync_budget_after_truncation(original, truncated)
 
-        # Budget should be reduced
-        conv_entry = session._instruction_budget.get_entry(InstructionSource.CONVERSATION)
-        assert conv_entry.tokens < 5000
+        # Budget tokens are NOT adjusted inline (Bug C fix) — the budget
+        # rebuilds from actual history at turn-end via _update_conversation_budget().
+        # The method only records the event in the ledger.
 
         # Ledger should record the event
         mock_runtime.ledger._record.assert_called_once()
@@ -715,8 +715,10 @@ class TestContextLimitRecovery:
         mock_gc_result = GCResult(
             success=True,
             items_collected=2,
-            tokens_freed=5000,
-            details="Freed 2 old turns"
+            tokens_before=10000,
+            tokens_after=5000,
+            plugin_name="gc_budget",
+            trigger_reason=GCTriggerReason.CONTEXT_LIMIT,
         )
         mock_gc_plugin.collect.return_value = ([], mock_gc_result)
 
@@ -749,7 +751,7 @@ class TestContextLimitRecovery:
 
     def test_try_gc_for_context_recovery_gc_frees_nothing(self):
         """Test that GC recovery returns False when GC frees nothing."""
-        from ..plugins.gc import GCConfig, GCResult
+        from ..plugins.gc import GCConfig, GCResult, GCTriggerReason
 
         mock_runtime = MagicMock()
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
@@ -759,8 +761,10 @@ class TestContextLimitRecovery:
         mock_gc_result = GCResult(
             success=True,
             items_collected=0,
-            tokens_freed=0,
-            details="Nothing to collect"
+            tokens_before=5000,
+            tokens_after=5000,
+            plugin_name="gc_budget",
+            trigger_reason=GCTriggerReason.CONTEXT_LIMIT,
         )
         mock_gc_plugin.collect.return_value = ([], mock_gc_result)
 
