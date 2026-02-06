@@ -40,6 +40,9 @@ class BudgetPanel:
         self._toggle_key = toggle_key or "c-b"
         self._theme: Optional["ThemeConfig"] = None
 
+        # Agent name mapping: agent_id -> display name
+        self._agent_names: Dict[str, str] = {}
+
         # View state
         self._selected_agent_index: int = 0  # 0 = Total, 1 = Main, 2+ = subagents
         self._agent_order: List[str] = []  # ["_total", "main", "subagent_1", ...]
@@ -91,6 +94,34 @@ class BudgetPanel:
     def hide(self) -> None:
         """Hide the panel."""
         self._visible = False
+
+    def set_agent_name(self, agent_id: str, name: str) -> None:
+        """Register a display name for an agent.
+
+        Args:
+            agent_id: Agent identifier ("main", "subagent_1", etc.)
+            name: Human-readable display name.
+        """
+        self._agent_names[agent_id] = name
+
+    def _get_agent_display_name(self, agent_id: str, max_len: int = 15) -> str:
+        """Get a display name for an agent, truncated with ellipsis if needed.
+
+        Args:
+            agent_id: Agent identifier.
+            max_len: Maximum length before truncation.
+
+        Returns:
+            Human-readable display name.
+        """
+        if agent_id == "_total":
+            return "Total"
+        if agent_id == "main":
+            return "Main"
+        name = self._agent_names.get(agent_id, agent_id)
+        if len(name) > max_len:
+            return name[:max_len - 1] + "…"
+        return name
 
     def update_budget(self, agent_id: str, budget_snapshot: Dict[str, Any]) -> None:
         """Update budget data for an agent.
@@ -508,13 +539,7 @@ class BudgetPanel:
 
         for i, agent_id in enumerate(self._agent_order):
             is_selected = i == self._selected_agent_index
-
-            if agent_id == "_total":
-                label = "Total"
-            elif agent_id == "main":
-                label = "Main"
-            else:
-                label = agent_id
+            label = self._get_agent_display_name(agent_id)
 
             if is_selected:
                 tabs.append(f"[{label}]", style="bold reverse")
