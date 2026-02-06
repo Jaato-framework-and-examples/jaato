@@ -104,6 +104,7 @@ Three plugin types:
 **Tool Plugins** - Provide tools the model can invoke:
 - `PluginRegistry`: Discovers and manages tool plugins
 - `cli/`: Shell commands | `mcp/`: MCP servers | `permission/`: Permission control
+- `interactive_shell/`: Interactive PTY sessions (REPLs, password prompts, wizards, debuggers)
 - `file_edit/`, `todo/`, `web_search/`, `filesystem_query/`, etc.
 
 **GC Plugins** - Context garbage collection strategies:
@@ -192,6 +193,34 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 
 - Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
 - Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
+
+### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
+
+The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
+
+**Design:** No expect patterns. The plugin uses idle-based output detection — it reads until the process stops producing output (~500ms of silence), then returns whatever appeared. The model reads the raw output, understands what the program is asking (password prompt, menu, REPL prompt, etc.), and decides what to type next.
+
+**Tools** (all `discoverability="discoverable"`):
+
+| Tool | Purpose |
+|------|---------|
+| `shell_spawn` | Start a new interactive process. Called **once** per command. Returns `session_id` + initial output. |
+| `shell_input` | Send text to an **existing** session (by `session_id`). Used for **all** subsequent interactions after spawn. |
+| `shell_read` | Read pending output without sending input. For checking on long-running operations. |
+| `shell_control` | Send control keys: `c-c` (interrupt), `c-d` (EOF), `c-z` (suspend), `c-l` (clear). |
+| `shell_close` | Terminate a session (EOF → SIGTERM → SIGKILL). Returns exit status. |
+| `shell_list` | List all active sessions with status, command, and age. Auto-approved. |
+
+**Key distinction:** `shell_spawn` starts a new process; `shell_input` sends input to an already-running one. The model must never call `shell_spawn` to send input to an existing session.
+
+**Architecture:**
+- `session.py`: `ShellSession` wraps `pexpect.spawn` with `read_until_idle()` — the idle detection algorithm
+- `ansi.py`: ANSI escape sequence stripping (CSI, OSC, CR, backspace overprint) for clean model-readable output
+- `plugin.py`: `InteractiveShellPlugin` with session dict, reaper thread (cleans up expired/idle/dead sessions), and tool executors
+
+**Session lifecycle:** Sessions have configurable max lifetime (default 600s) and max idle time (default 300s). A background reaper thread periodically closes expired sessions. Max concurrent sessions defaults to 8.
+
+**Use cases:** Database REPLs (`psql`, `mysql`), SSH sessions, debuggers (`gdb`, `pdb`), package manager wizards (`npm init`), interactive installers, language REPLs (`python`, `node`), container shells (`docker exec -it`).
 
 ### UI Rendering Architecture (Separation of Concerns)
 
