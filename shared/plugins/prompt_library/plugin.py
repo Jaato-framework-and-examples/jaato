@@ -44,6 +44,7 @@ from ..model_provider.types import ToolSchema
 from ..base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
 from shared.http import get_url_opener
+from shared.trace import trace as _trace_write
 
 # Type alias for output callback: (source, text, mode) -> None
 OutputCallback = Callable[[str, str, str], None]
@@ -136,19 +137,7 @@ class PromptLibraryPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [PROMPT_LIBRARY{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("PROMPT_LIBRARY", msg)
 
     @property
     def name(self) -> str:

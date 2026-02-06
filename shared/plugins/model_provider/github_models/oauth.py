@@ -555,19 +555,8 @@ def clear_copilot_token() -> None:
 
 def _oauth_trace(msg: str) -> None:
     """Write trace message for debugging OAuth operations."""
-    import datetime
-    import tempfile
-    trace_path = os.environ.get(
-        "JAATO_PROVIDER_TRACE",
-        os.path.join(tempfile.gettempdir(), "provider_trace.log")
-    )
-    try:
-        with open(trace_path, "a") as f:
-            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{ts}] [oauth] {msg}\n")
-            f.flush()
-    except Exception:
-        pass
+    from shared.trace import provider_trace
+    provider_trace("oauth", msg)
 
 
 def get_stored_access_token() -> Optional[str]:

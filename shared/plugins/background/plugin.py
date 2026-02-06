@@ -17,6 +17,7 @@ from ..model_provider.types import ToolSchema
 
 from ..base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
+from shared.trace import trace as _trace_write
 
 if TYPE_CHECKING:
     from ..registry import PluginRegistry
@@ -47,19 +48,7 @@ class BackgroundPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [BACKGROUND{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError) as exc:
-                logger.debug(f"Failed to write trace: {exc}")
+        _trace_write("BACKGROUND", msg)
 
     @property
     def name(self) -> str:

@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
+from shared.trace import trace as _trace_write
 
 
 DEFAULT_TIMEOUT = 30  # seconds
@@ -49,19 +50,7 @@ class WebFetchPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [WEB_FETCH{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("WEB_FETCH", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the web fetch plugin.

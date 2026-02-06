@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
 
+from shared.trace import trace as _trace_write
+
 
 # Config file names
 GLOBAL_CONFIG_FILE = "sandbox_paths.json"
@@ -71,18 +73,7 @@ class SandboxManagerPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [SandboxManager] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("SandboxManager", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the sandbox manager plugin.
