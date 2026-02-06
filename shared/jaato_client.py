@@ -113,22 +113,10 @@ class JaatoClient:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get("JAATO_TRACE_LOG")
-        if not trace_path:
-            trace_path = os.environ.get(
-                "JAATO_PROVIDER_TRACE",
-                os.path.join(tempfile.gettempdir(), "provider_trace.log")
-            )
-        # Empty string means disabled
-        if trace_path == "":
-            return
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [jaato_client] {msg}\n")
-                f.flush()
-        except Exception:
-            pass  # Don't let tracing errors break the client
+        from shared.trace import resolve_trace_path, trace_write
+        path = resolve_trace_path("JAATO_TRACE_LOG", "JAATO_PROVIDER_TRACE",
+                                  default_filename="provider_trace.log")
+        trace_write("jaato_client", msg, path)
 
     @property
     def is_connected(self) -> bool:

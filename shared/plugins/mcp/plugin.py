@@ -20,6 +20,7 @@ from ..base import UserCommand, CommandParameter, CommandCompletion, HelpLines
 from ..model_provider.types import ToolSchema
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
+from shared.trace import trace as _trace_write
 
 
 # Message types for background thread communication
@@ -274,30 +275,13 @@ class MCPToolPlugin:
             msg: The message to log.
             include_traceback: If True, append the current exception traceback.
         """
-        import tempfile
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    # Build prefix: [MCP:session@agent] or [MCP:session] or [MCP@agent] or [MCP]
-                    parts = ["MCP"]
-                    if self._session_id:
-                        parts[0] = f"MCP:{self._session_id}"
-                    if self._agent_name:
-                        parts.append(f"@{self._agent_name}")
-                    prefix = "".join(parts)
-                    f.write(f"[{ts}] [{prefix}] {msg}\n")
-                    if include_traceback:
-                        tb = traceback.format_exc()
-                        if tb and tb.strip() != "NoneType: None":
-                            f.write(f"[{ts}] [{prefix}] Traceback:\n{tb}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        parts = ["MCP"]
+        if self._session_id:
+            parts[0] = f"MCP:{self._session_id}"
+        if self._agent_name:
+            parts.append(f"@{self._agent_name}")
+        prefix = "".join(parts)
+        _trace_write(prefix, msg, include_traceback=include_traceback)
         # Also log to standard logger for visibility
         if include_traceback:
             logger.error(msg, exc_info=True)

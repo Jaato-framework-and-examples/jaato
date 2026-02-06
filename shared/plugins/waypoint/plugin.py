@@ -36,6 +36,8 @@ from ..base import (
 )
 from ..model_provider.types import ToolSchema
 
+from shared.trace import trace as _trace_write
+
 if TYPE_CHECKING:
     from ..file_edit.backup import BackupManager
     from ..model_provider.types import Message
@@ -91,19 +93,7 @@ class WaypointPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        import os
-        import tempfile
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [WAYPOINT] {msg}\n")
-            except Exception:
-                pass
+        _trace_write("WAYPOINT", msg)
 
     @property
     def name(self) -> str:

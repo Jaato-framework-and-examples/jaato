@@ -28,6 +28,7 @@ import os
 import re
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional
+from shared.trace import trace as _trace_write
 
 
 # Map of language identifiers to file extensions for temp file creation
@@ -72,17 +73,8 @@ SEVERITY_ICONS = {
 
 
 def _trace(msg: str) -> None:
-    """Write trace message to log file (only if JAATO_TRACE_LOG is set)."""
-    trace_path = os.environ.get('JAATO_TRACE_LOG')
-    if not trace_path:
-        return
-    try:
-        with open(trace_path, "a") as f:
-            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            f.write(f"[{ts}] [CodeValidator] {msg}\n")
-            f.flush()
-    except (IOError, OSError):
-        pass
+    """Write trace message to log file for debugging."""
+    _trace_write("CODE_VALIDATION_FORMATTER", msg)
 
 
 class CodeValidationFormatterPlugin:

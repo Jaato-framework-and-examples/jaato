@@ -30,20 +30,12 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from shared.plugins.table_formatter.plugin import _display_width
+from shared.trace import trace as _trace_write
 
 
 def _trace(msg: str) -> None:
-    """Write debug trace to file (only if JAATO_TRACE_LOG is set)."""
-    trace_path = os.environ.get('JAATO_TRACE_LOG')
-    if not trace_path:
-        return
-    try:
-        with open(trace_path, 'a') as f:
-            ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            f.write(f"[{ts}] [CodeBlockFormatter] {msg}\n")
-            f.flush()
-    except Exception:
-        pass
+    """Write trace message to log file for debugging."""
+    _trace_write("CODE_BLOCK_FORMATTER", msg)
 
 
 # Common language aliases mapping

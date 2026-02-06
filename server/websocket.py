@@ -28,6 +28,7 @@ except ImportError:
     WebSocketServerProtocol = Any
 
 from .core import JaatoServer
+from .session_logging import set_logging_context, clear_logging_context
 from .events import (
     Event,
     EventType,
@@ -338,16 +339,56 @@ class JaatoWSServer:
             await self._send_error(client_id, "No workspace selected")
             return
 
+        # Set logging context for session-specific log routing
+        # WebSocket server uses a single workspace at a time
+        if self._jaato_server and self._workspace_manager:
+            selected = self._workspace_manager.get_selected_workspace()
+            workspace_path = selected.path if selected else None
+            session_env = self._jaato_server.get_all_session_env()
+            # Use workspace name as session_id for WebSocket mode
+            session_id = selected.name if selected else "websocket"
+            set_logging_context(
+                session_id=session_id,
+                client_id=client_id,
+                workspace_path=workspace_path,
+                session_env=session_env,
+            )
+
         # Route by event type
         if isinstance(event, SendMessageRequest):
-            # Run in thread pool to not block event loop
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._jaato_server.send_message(
-                    event.text,
-                    event.attachments if event.attachments else None
+            # Capture context for thread (ContextVars don't propagate to threads)
+            if self._jaato_server and self._workspace_manager:
+                selected = self._workspace_manager.get_selected_workspace()
+                ctx_workspace = selected.path if selected else None
+                ctx_session_env = self._jaato_server.get_all_session_env()
+                ctx_session_id = selected.name if selected else "websocket"
+                ctx_client_id = client_id
+
+                def run_with_context():
+                    set_logging_context(
+                        session_id=ctx_session_id,
+                        client_id=ctx_client_id,
+                        workspace_path=ctx_workspace,
+                        session_env=ctx_session_env,
+                    )
+                    try:
+                        self._jaato_server.send_message(
+                            event.text,
+                            event.attachments if event.attachments else None
+                        )
+                    finally:
+                        clear_logging_context()
+
+                await asyncio.get_event_loop().run_in_executor(None, run_with_context)
+            else:
+                # Fallback without context
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self._jaato_server.send_message(
+                        event.text,
+                        event.attachments if event.attachments else None
+                    )
                 )
-            )
 
         elif isinstance(event, PermissionResponseRequest):
             self._jaato_server.respond_to_permission(

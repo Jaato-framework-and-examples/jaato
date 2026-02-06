@@ -40,6 +40,7 @@ from shared.plugins.session import (
 )
 
 from .core import JaatoServer
+from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .events import (
     Event,
     EventType,
@@ -1193,6 +1194,11 @@ class SessionManager:
         if session.is_dirty:
             self._save_session(session)
 
+        # Close session-specific log handlers
+        handler = get_session_handler()
+        if handler:
+            handler.close_session(session_id)
+
         # Shutdown server and remove from memory
         session.server.shutdown()
         del self._sessions[session_id]
@@ -1592,6 +1598,16 @@ class SessionManager:
         # Route to session's server
         server = session.server
 
+        # Set logging context for session-specific log routing
+        workspace_path = session.workspace_path
+        session_env = server.get_all_session_env() if server else {}
+        set_logging_context(
+            session_id=session_id,
+            client_id=client_id,
+            workspace_path=workspace_path,
+            session_env=session_env,
+        )
+
         from .events import (
             SendMessageRequest,
             PermissionResponseRequest,
@@ -1609,14 +1625,30 @@ class SessionManager:
                 session.user_inputs.append(event.text)
                 session.is_dirty = True
 
+            # Capture context for thread (ContextVars don't propagate to threads)
+            ctx_session_id = session_id
+            ctx_client_id = client_id
+            ctx_workspace = workspace_path
+            ctx_session_env = session_env
+
             # Run in thread to not block
             def run_message():
-                server.send_message(
-                    event.text,
-                    event.attachments if event.attachments else None
+                # Set logging context in thread
+                set_logging_context(
+                    session_id=ctx_session_id,
+                    client_id=ctx_client_id,
+                    workspace_path=ctx_workspace,
+                    session_env=ctx_session_env,
                 )
-                # Auto-save after turn
-                self._save_session(session)
+                try:
+                    server.send_message(
+                        event.text,
+                        event.attachments if event.attachments else None
+                    )
+                    # Auto-save after turn
+                    self._save_session(session)
+                finally:
+                    clear_logging_context()
 
             threading.Thread(target=run_message, daemon=True).start()
 
@@ -1760,6 +1792,11 @@ class SessionManager:
 
             self._sessions.clear()
             self._client_to_session.clear()
+
+        # Close all session log handlers
+        handler = get_session_handler()
+        if handler:
+            handler.close()
 
         self._session_plugin.shutdown()
         logger.info("SessionManager shutdown complete")

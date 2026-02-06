@@ -21,6 +21,8 @@ from .lsp_client import (
     TextEdit, WorkspaceEdit, CodeAction, Range, Position
 )
 
+from shared.trace import trace as _trace_write
+
 
 # Tools that write/modify files and should trigger LSP diagnostics
 FILE_WRITING_TOOLS = {
@@ -390,31 +392,8 @@ class LSPToolPlugin:
         return "lsp"
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging.
-
-        Uses JAATO_TRACE_LOG env var, or defaults to /tmp/rich_client_trace.log.
-        Silently skips if trace file cannot be written.
-        """
-        import tempfile
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    # Build prefix: [LSP:session@agent] or [LSP:session] or [LSP@agent] or [LSP]
-                    parts = ["LSP"]
-                    if self._session_id:
-                        parts[0] = f"LSP:{self._session_id}"
-                    if self._agent_name:
-                        parts.append(f"@{self._agent_name}")
-                    prefix = "".join(parts)
-                    f.write(f"[{ts}] [{prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass  # Silently skip if trace file cannot be written
+        """Write trace message to log file for debugging."""
+        _trace_write("LSP", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the LSP plugin by starting the background thread.

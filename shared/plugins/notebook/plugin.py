@@ -25,6 +25,7 @@ from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
 from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.trace import trace as _trace_write
 
 
 class SandboxMode(Enum):
@@ -85,19 +86,7 @@ class NotebookPlugin(StreamingCapable):
 
     def _trace(self, msg: str) -> None:
         """Write trace message for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [NOTEBOOK{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        _trace_write("NOTEBOOK", msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the notebook plugin.

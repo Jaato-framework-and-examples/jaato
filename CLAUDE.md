@@ -338,6 +338,7 @@ Available Models:
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
+| `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 
 ### Rate Limiting
 | Variable | Purpose |

@@ -269,23 +269,10 @@ class GitHubModelsProvider:
             return f"github_models:subagent:{self._agent_id}"
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to file for debugging streaming interactions."""
-        import tempfile
-        trace_path = os.environ.get(
-            "JAATO_PROVIDER_TRACE",
-            os.path.join(tempfile.gettempdir(), "provider_trace.log")
-        )
-        if not trace_path:
-            return
-        import datetime
-        try:
-            prefix = self._get_trace_prefix()
-            with open(trace_path, "a") as f:
-                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [{prefix}] {msg}\n")
-                f.flush()
-        except Exception:
-            pass  # Don't let tracing errors break the provider
+        """Write trace message to log file for debugging."""
+        from shared.trace import provider_trace
+        prefix = self._get_trace_prefix()
+        provider_trace(prefix, msg)
 
     @property
     def name(self) -> str:

@@ -23,6 +23,7 @@ from .models import (
 from ..model_provider.types import ToolSchema, EditableContent
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
+from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus, get_event_bus
 from ..base import UserCommand
@@ -103,20 +104,9 @@ class TodoPlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_name = self._get_agent_name()
-                    agent_prefix = f"@{agent_name}" if agent_name != "main" else ""
-                    f.write(f"[{ts}] [TODO{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        agent_name = self._get_agent_name()
+        prefix = f"TODO@{agent_name}" if agent_name != "main" else "TODO"
+        _trace_write(prefix, msg)
 
     def _get_agent_name(self) -> str:
         """Get current agent name from thread-local session or fallback to config.

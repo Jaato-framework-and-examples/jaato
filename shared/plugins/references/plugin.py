@@ -33,6 +33,8 @@ from ..base import (
     ToolResultEnrichmentResult,
 )
 
+from shared.trace import trace as _trace_write
+
 
 # Maximum depth for transitive reference resolution to prevent runaway recursion
 MAX_TRANSITIVE_DEPTH = 10
@@ -72,24 +74,8 @@ class ReferencesPlugin:
         return self._name
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging.
-
-        Uses JAATO_TRACE_LOG env var, or defaults to /tmp/rich_client_trace.log.
-        Silently skips if trace file cannot be written.
-        """
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [REFERENCES{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass  # Silently skip if trace file cannot be written
+        """Write trace message to log file for debugging."""
+        _trace_write("REFERENCES", msg)
 
     def set_plugin_registry(self, registry) -> None:
         """Set the plugin registry for cross-plugin communication.

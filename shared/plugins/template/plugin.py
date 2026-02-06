@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
+from shared.trace import trace as _trace_write
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -113,19 +114,8 @@ class TemplatePlugin:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [TEMPLATE{agent_prefix}] {msg}\n")
-                    f.flush()
-            except (IOError, OSError):
-                pass
+        prefix = f"TEMPLATE@{self._agent_name}" if self._agent_name else "TEMPLATE"
+        _trace_write(prefix, msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the template plugin."""
