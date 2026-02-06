@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from ..base import UserCommand, PermissionDisplayInfo
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import EditableContent, ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
@@ -335,6 +335,11 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                editable=EditableContent(
+                    parameters=["new_content"],
+                    format="text",
+                    template="# Edit the file content below. Save and exit to continue.\n",
+                ),
             ),
             ToolSchema(
                 name="writeNewFile",
@@ -363,6 +368,11 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                editable=EditableContent(
+                    parameters=["content"],
+                    format="text",
+                    template="# Edit the file content below. Save and exit to continue.\n",
+                ),
             ),
             ToolSchema(
                 name="removeFile",
