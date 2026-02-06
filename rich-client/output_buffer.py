@@ -4192,6 +4192,17 @@ class OutputBuffer:
             # The marker's height is calculated in _get_item_display_lines()
             available_for_lines = height
 
+            # Reserve space for the spinner when it will be rendered after items.
+            # The spinner (lines 4349+) appends 1-3 extra lines that are NOT part of
+            # any item's display_lines, so they must be subtracted from the budget.
+            if self._spinner_active and not self._active_tools:
+                spinner_reserved = 1  # "thinking..." line
+                if all_items:
+                    spinner_reserved += 1  # blank line separator
+                    if self._last_turn_source != "model":
+                        spinner_reserved += 1  # model header line
+                available_for_lines = max(1, available_for_lines - spinner_reserved)
+
             # Calculate total display lines (accounting for ToolBlocks)
             total_display_lines = sum(self._get_item_display_lines(item) for item in all_items)
 
@@ -4493,6 +4504,27 @@ class OutputBuffer:
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
             output.append("thinking...", style=self._style("hint", "dim italic"))
+
+        # Crop rendered content to exactly fit the viewport height.
+        # This is the definitive safety net against ALL measurement inaccuracies
+        # (word-wrap differences between textwrap and Rich, inter-item spacing edge
+        # cases, spinner lines, tool tree height miscalculations, etc.).
+        # Rich Panel clips from the BOTTOM when content exceeds height, which hides
+        # the most recent output. By cropping from the TOP here, we guarantee the
+        # most recent (bottom) content is always visible.
+        if height and isinstance(output, Text):
+            plain = output.plain
+            line_count = plain.count('\n') + 1 if plain else 0
+            if line_count > height:
+                trim_count = line_count - height
+                pos = 0
+                for _ in range(trim_count):
+                    idx = plain.find('\n', pos)
+                    if idx == -1:
+                        break
+                    pos = idx + 1
+                if pos > 0:
+                    output = output[pos:]
 
         # Add debug line numbers if enabled (checked at runtime for .env support)
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
