@@ -896,6 +896,9 @@ class RichClient:
                     icon_lines=icon_lines,
                     created_at=created_at
                 )
+                # Register agent name in budget panel for display
+                if display and hasattr(display, 'register_agent_name'):
+                    display.register_agent_name(agent_id, agent_name)
 
             def on_agent_output(self, agent_id, source, text, mode):
                 buffer = registry.get_buffer(agent_id)
@@ -3820,6 +3823,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     parent_agent_id=event.parent_agent_id,
                     icon_lines=event.icon_lines,
                 )
+                # Register agent name in budget panel for display
+                if hasattr(display, 'register_agent_name'):
+                    display.register_agent_name(event.agent_id, event.agent_name)
                 # Show welcome messages when main agent is created (now in correct buffer)
                 # Skip during reconnection - these are init-only messages
                 if event.agent_id == "main" and not is_reconnecting:
