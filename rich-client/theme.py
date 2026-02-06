@@ -442,6 +442,7 @@ DEFAULT_SEMANTIC_STYLES = {
     # Tool output popup
     "tool_output_popup_border": StyleSpec(fg="#5fafaf"),  # Teal/cyan
     "tool_output_popup_background": StyleSpec(bg="background"),
+    "tool_output_popup_header": StyleSpec(bold=True),
     "tool_output_popup_scroll": StyleSpec(dim=True),
     "tool_output_popup_hint": StyleSpec(dim=True, italic=True),
 }

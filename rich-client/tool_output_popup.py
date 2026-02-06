@@ -219,9 +219,9 @@ class ToolOutputPopup:
         # Get output lines
         lines = tracked.output_lines
 
-        # Calculate visible window
+        # Calculate visible window — reserve for borders, sticky header, separator, hints
         total_lines = len(lines)
-        visible_lines = min(total_lines, max_height - 3)  # Reserve for borders + hints
+        visible_lines = min(total_lines, max_height - 5)  # borders + header + separator + hint
 
         if self._scroll_offset == 0:
             # Auto-follow: show last N lines
@@ -242,6 +242,17 @@ class ToolOutputPopup:
         # Build content
         elements = []
 
+        # Sticky header: command/args summary
+        content_width = width - 4  # Panel borders
+        args_text = tracked.display_args_summary if tracked.display_args_summary is not None else tracked.args_summary
+        if args_text:
+            header = Text()
+            header.append("❯ ", style=self._style("tool_output_popup_border", "cyan"))
+            header.append(args_text, style=self._style("tool_output_popup_header", "bold"))
+            header.truncate(content_width)
+            elements.append(header)
+            elements.append(Text("─" * content_width, style=self._style("tool_output_popup_scroll", "dim")))
+
         # "More above" indicator
         if start > 0:
             above = Text()
@@ -249,7 +260,6 @@ class ToolOutputPopup:
             elements.append(above)
 
         # Content lines (strip to fit width, preserve ANSI)
-        content_width = width - 4  # Panel borders
         for line in display_lines:
             line_text = Text.from_ansi(line) if '\x1b[' in line else Text(line)
             line_text.truncate(content_width)
