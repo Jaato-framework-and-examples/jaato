@@ -70,16 +70,14 @@ class LivePlanReporter(TodoReporter):
                 "result": step.result,
                 "error": step.error,
             }
-            # Include cross-agent dependency info for UI
+            # Include cross-agent dependency info for UI (with display metadata)
             if step.blocked_by:
                 step_data["blocked_by"] = [
-                    {"agent_id": ref.agent_id, "step_id": ref.step_id}
-                    for ref in step.blocked_by
+                    ref.to_dict() for ref in step.blocked_by
                 ]
             if step.depends_on:
                 step_data["depends_on"] = [
-                    {"agent_id": ref.agent_id, "step_id": ref.step_id}
-                    for ref in step.depends_on
+                    ref.to_dict() for ref in step.depends_on
                 ]
             if step.received_outputs:
                 step_data["received_outputs"] = step.received_outputs

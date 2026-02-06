@@ -2447,6 +2447,15 @@ class PTDisplay:
 
     # Budget panel methods
 
+    def register_agent_name(self, agent_id: str, name: str) -> None:
+        """Register a display name for an agent (used by budget panel tabs).
+
+        Args:
+            agent_id: Agent identifier ("main", "subagent_1", etc.)
+            name: Human-readable display name.
+        """
+        self._budget_panel.set_agent_name(agent_id, name)
+
     def update_instruction_budget(self, agent_id: str, budget_snapshot: Dict[str, Any]) -> None:
         """Update the instruction budget for an agent.
 
