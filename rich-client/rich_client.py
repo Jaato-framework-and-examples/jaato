@@ -979,11 +979,12 @@ class RichClient:
                         display.refresh()
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
-                                  error_message=None, call_id=None):
+                                  error_message=None, call_id=None, backgrounded=False):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
                     buffer.mark_tool_completed(
-                        tool_name, success, duration_seconds, error_message, call_id=call_id
+                        tool_name, success, duration_seconds, error_message,
+                        call_id=call_id, backgrounded=backgrounded,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     if display:
@@ -4065,7 +4066,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         event.success,
                         event.duration_seconds,
                         event.error_message,
-                        call_id=event.call_id
+                        call_id=event.call_id,
+                        backgrounded=event.backgrounded,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     display.refresh()

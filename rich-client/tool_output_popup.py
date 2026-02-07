@@ -66,16 +66,34 @@ class ToolOutputPopup:
         return self._tracked_call_id
 
     def _get_running_tools(self, buffer: "OutputBuffer") -> List["ActiveToolCall"]:
-        """Get list of currently running (non-completed) tools with output."""
-        return [
+        """Get list of running or backgrounded tools with output.
+
+        Checks both active_tools (pre-finalization) and popup_tools
+        (post-finalization backgrounded tools).
+        """
+        result = [
             t for t in buffer.active_tools
-            if not t.completed and t.output_lines and t.call_id
+            if (not t.completed or t.backgrounded) and t.output_lines and t.call_id
         ]
+        seen = {t.call_id for t in result}
+        for call_id, tool in buffer.popup_tools.items():
+            if call_id not in seen and tool.backgrounded and tool.output_lines:
+                result.append(tool)
+        return result
 
     def _get_tracked_tool(self, buffer: "OutputBuffer") -> Optional["ActiveToolCall"]:
-        """Get the tool currently being tracked, if still running."""
+        """Get the tool currently being tracked, if still running.
+
+        Checks popup_tools first (post-finalization backgrounded tools),
+        then falls back to active_tools (pre-finalization).
+        """
         if not self._tracked_call_id:
             return None
+        # Post-finalization: backgrounded tool lives in popup_tools
+        popup_tool = buffer.popup_tools.get(self._tracked_call_id)
+        if popup_tool:
+            return popup_tool
+        # Pre-finalization: tool still in active_tools
         for tool in buffer.active_tools:
             if tool.call_id == self._tracked_call_id:
                 return tool
@@ -92,9 +110,10 @@ class ToolOutputPopup:
         tracked = self._get_tracked_tool(buffer)
 
         if self._visible:
-            # Auto-dismiss: tracked tool completed or disappeared
-            if tracked is None or tracked.completed:
-                # Try to switch to another running tool
+            # Auto-dismiss: tracked tool completed (and not backgrounded) or disappeared
+            tool_done = tracked is None or (tracked.completed and not tracked.backgrounded)
+            if tool_done:
+                # Try to switch to another running/backgrounded tool
                 running = self._get_running_tools(buffer)
                 if running:
                     self._tracked_call_id = running[0].call_id
@@ -106,17 +125,15 @@ class ToolOutputPopup:
                 return
 
         if not self._visible:
-            # Auto-popup: show when tools are expanded and a running tool has output
+            # Auto-popup: show when tools are expanded and a running/backgrounded tool has output
             if not buffer.tools_expanded:
                 return
-            for tool in buffer.active_tools:
-                if (not tool.completed
-                        and tool.output_lines
-                        and tool.call_id):
-                    self._visible = True
-                    self._tracked_call_id = tool.call_id
-                    self._scroll_offset = 0
-                    return
+            running = self._get_running_tools(buffer)
+            if running:
+                self._visible = True
+                self._tracked_call_id = running[0].call_id
+                self._scroll_offset = 0
+                return
 
     def cycle_tool(self, buffer: "OutputBuffer", forward: bool = True) -> bool:
         """Cycle to the next/previous running tool.

@@ -87,6 +87,10 @@ class ToolExecutor:
         self._auto_background_pool: Optional[ThreadPoolExecutor] = None
         self._auto_background_pool_size = auto_background_pool_size
 
+        # Callback fired when an auto-backgrounded task completes.
+        # Set by the session before execute(), captured per-task after threshold.
+        self._task_done_callback: Optional[Callable] = None
+
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
 
@@ -176,6 +180,18 @@ class ToolExecutor:
                 plugin = self._registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_tool_output_callback'):
                     plugin.set_tool_output_callback(callback)
+
+    def set_task_done_callback(self, callback: Optional[Callable]) -> None:
+        """Set the callback for when an auto-backgrounded task completes.
+
+        The session sets this before each tool execution with a closure that
+        captures the call_id. The executor stores it and registers it per-task
+        on the mixin only when auto-backgrounding actually occurs.
+
+        Args:
+            callback: Callable(task_id, success, error, duration), or None to clear.
+        """
+        self._task_done_callback = callback
 
     def get_tool_output_callback(self) -> Optional[ToolOutputCallback]:
         """Get the current tool output callback.
@@ -300,8 +316,14 @@ class ToolExecutor:
 
         try:
             # Start as background task immediately - this uses the streaming
-            # executor which captures output incrementally
-            handle = plugin.start_background(name, args, executor_fn=executor_fn)
+            # executor which captures output incrementally.
+            # Pass the current output callback explicitly for thread-safety
+            # (in parallel execution, the callback is in thread-local, not instance).
+            current_output_cb = self.get_tool_output_callback()
+            handle = plugin.start_background(
+                name, args, executor_fn=executor_fn,
+                output_callback=current_output_cb,
+            )
             task_id = handle.task_id
 
             # Wait up to threshold seconds for completion
@@ -321,7 +343,11 @@ class ToolExecutor:
                     return True, result
                 time.sleep(0.1)  # Small poll interval
 
-            # Task exceeded threshold - return as auto-backgrounded
+            # Task exceeded threshold - register done callback for UI completion
+            if self._task_done_callback and hasattr(plugin, 'set_task_done_callback'):
+                plugin.set_task_done_callback(task_id, self._task_done_callback)
+
+            # Return as auto-backgrounded
             result = {
                 "auto_backgrounded": True,
                 "task_id": task_id,

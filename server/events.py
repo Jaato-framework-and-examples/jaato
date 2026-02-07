@@ -230,6 +230,7 @@ class ToolCallEndEvent(Event):
     success: bool = True
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
+    backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
 
 
 @dataclass

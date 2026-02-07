@@ -181,6 +181,7 @@ class ActiveToolCall:
     args_summary: str  # Truncated string representation of args
     call_id: Optional[str] = None  # Unique ID for correlating start/end of same tool call
     completed: bool = False  # True when tool execution finished
+    backgrounded: bool = False  # True when auto-backgrounded (completed but still producing output)
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
     error_message: Optional[str] = None  # Error message if tool failed
@@ -250,6 +251,7 @@ class OutputBuffer:
         self._spinner_active: bool = False
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
+        self._popup_tools: Dict[str, ActiveToolCall] = {}  # Backgrounded tools for popup (keyed by call_id)
         self._tools_expanded: bool = tools_expanded  # Toggle between collapsed/expanded tool view
         self._tools_expanded_before_prompt: Optional[bool] = None  # Saved state before permission/clarification forced expansion
         self._rendering: bool = False  # Guard against flushes during render
@@ -872,8 +874,8 @@ class OutputBuffer:
         """
         _buffer_trace(f"add_active_tool: name={tool_name} call_id={call_id}")
 
-        # If all existing tools are completed, finalize them as a ToolBlock
-        # This ensures proper ordering of text and tool output
+        # If all active tools are completed, finalize them as a ToolBlock
+        # This ensures proper ordering of text and tool output.
         if self._active_tools and all(t.completed for t in self._active_tools):
             self._finalize_completed_tools()
 
@@ -916,8 +918,13 @@ class OutputBuffer:
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
                             error_message: Optional[str] = None,
-                            call_id: Optional[str] = None) -> None:
+                            call_id: Optional[str] = None,
+                            backgrounded: bool = False) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
+
+        When backgrounded=True, the tool is marked completed for tree purposes
+        but keeps accepting output and stays visible in the popup until the
+        background task finishes (a second call with backgrounded=False).
 
         Args:
             tool_name: Name of the tool that finished.
@@ -925,54 +932,100 @@ class OutputBuffer:
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
             call_id: Unique identifier for this tool call (for correlation).
+            backgrounded: True if tool was auto-backgrounded (still producing output).
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
-            f"duration={duration_seconds} call_id={call_id}"
+            f"duration={duration_seconds} call_id={call_id} backgrounded={backgrounded}"
         )
 
         for tool in self._active_tools:
             # Match by call_id if provided, otherwise by name (for backwards compatibility)
             if call_id:
-                if tool.call_id == call_id and not tool.completed:
-                    tool.completed = True
-                    tool.success = success
-                    tool.duration_seconds = duration_seconds
-                    tool.error_message = error_message
-                    return
+                if tool.call_id == call_id:
+                    # Transition: backgrounded → truly completed (done callback fired)
+                    if tool.completed and tool.backgrounded and not backgrounded:
+                        tool.backgrounded = False
+                        tool.success = success
+                        if duration_seconds is not None:
+                            tool.duration_seconds = duration_seconds
+                        tool.error_message = error_message
+                        self._popup_tools.pop(call_id, None)
+                        return
+                    # Normal completion
+                    if not tool.completed:
+                        tool.completed = True
+                        tool.backgrounded = backgrounded
+                        tool.success = success
+                        tool.duration_seconds = duration_seconds
+                        tool.error_message = error_message
+                        if backgrounded and call_id:
+                            self._popup_tools[call_id] = tool
+                        return
             elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
+                tool.backgrounded = backgrounded
                 tool.success = success
                 tool.duration_seconds = duration_seconds
                 tool.error_message = error_message
+                return
+
+        # Tool not found in _active_tools — check _popup_tools (post-finalization)
+        if call_id and call_id in self._popup_tools:
+            tool = self._popup_tools[call_id]
+            if tool.completed and tool.backgrounded and not backgrounded:
+                tool.backgrounded = False
+                tool.success = success
+                if duration_seconds is not None:
+                    tool.duration_seconds = duration_seconds
+                tool.error_message = error_message
+                self._popup_tools.pop(call_id)
                 return
 
     def append_tool_output(self, call_id: str, chunk: str) -> None:
         """Append output chunk to a running tool's output buffer.
 
         Used for live "tail -f" style output preview in the tool tree.
+        Checks both _active_tools (pre-finalization) and _popup_tools
+        (post-finalization, for backgrounded tools).
 
         Args:
             call_id: Unique identifier for the tool call.
             chunk: Output text chunk (may contain newlines).
         """
+        tool = self._find_output_tool(call_id)
+        if tool is None:
+            return
+
+        # Initialize output_lines if needed
+        if tool.output_lines is None:
+            tool.output_lines = []
+
+        # Split chunk by newlines and add to buffer
+        lines = chunk.splitlines()
+        for line in lines:
+            # Skip empty lines from split
+            if line or chunk == "\n":
+                tool.output_lines.append(line)
+
+        # Trim to max size (keep most recent lines)
+        if len(tool.output_lines) > tool.output_max_lines:
+            tool.output_lines = tool.output_lines[-tool.output_max_lines:]
+
+    def _find_output_tool(self, call_id: str) -> Optional[ActiveToolCall]:
+        """Find the tool that should receive output for a given call_id.
+
+        Checks _active_tools first (running/backgrounded pre-finalization),
+        then _popup_tools (backgrounded post-finalization).
+        """
         for tool in self._active_tools:
-            if tool.call_id == call_id and not tool.completed:
-                # Initialize output_lines if needed
-                if tool.output_lines is None:
-                    tool.output_lines = []
-
-                # Split chunk by newlines and add to buffer
-                lines = chunk.splitlines()
-                for line in lines:
-                    # Skip empty lines from split
-                    if line or chunk == "\n":
-                        tool.output_lines.append(line)
-
-                # Trim to max size (keep most recent lines)
-                if len(tool.output_lines) > tool.output_max_lines:
-                    tool.output_lines = tool.output_lines[-tool.output_max_lines:]
-                return
+            if tool.call_id == call_id and (not tool.completed or tool.backgrounded):
+                return tool
+        # Post-finalization: backgrounded tool lives in _popup_tools
+        popup_tool = self._popup_tools.get(call_id)
+        if popup_tool and popup_tool.backgrounded:
+            return popup_tool
+        return None
 
     def remove_active_tool(self, tool_name: str) -> None:
         """Remove a tool from the active tools list (legacy, now marks as completed).
@@ -986,6 +1039,7 @@ class OutputBuffer:
     def clear_active_tools(self) -> None:
         """Clear all active tools and reset navigation state."""
         self._active_tools.clear()
+        self._popup_tools.clear()
         self._tool_nav_active = False
         self._selected_tool_index = None
 
@@ -1409,6 +1463,9 @@ class OutputBuffer:
         The ToolBlock is inserted at the placeholder position (established when
         the first tool was added), ensuring tools appear in chronological order
         after their preceding text.
+
+        Backgrounded tools are finalized normally into the ToolBlock. Their
+        references survive in _popup_tools for the popup to continue tracking.
         """
         if not self._active_tools:
             return
@@ -1421,9 +1478,16 @@ class OutputBuffer:
         if any_pending:
             return
 
+        # Finalize completed tools; keep non-completed tools active
+        to_finalize = [t for t in self._active_tools if t.completed]
+        to_keep = [t for t in self._active_tools if not t.completed]
+
+        if not to_finalize:
+            return
+
         # Create a copy of the tools for the ToolBlock
         import copy
-        tools_copy = copy.deepcopy(self._active_tools)
+        tools_copy = copy.deepcopy(to_finalize)
 
         # Determine expansion state for the ToolBlock:
         # - If _tools_expanded_before_prompt is set, it means expansion was system-forced
@@ -1474,7 +1538,7 @@ class OutputBuffer:
 
         # Clear placeholder and active tools
         self._tool_placeholder_index = None
-        self._active_tools.clear()
+        self._active_tools = to_keep
 
         # Now that tools are finalized, restore the expanded state if we had saved one
         # This happens AFTER finalization so the ToolBlock captures the visible state
@@ -1488,6 +1552,11 @@ class OutputBuffer:
     def active_tools(self) -> List[ActiveToolCall]:
         """Get list of currently active tools."""
         return list(self._active_tools)
+
+    @property
+    def popup_tools(self) -> Dict[str, ActiveToolCall]:
+        """Get backgrounded tools tracked by the popup (keyed by call_id)."""
+        return self._popup_tools
 
     def _maybe_restore_expanded_state(self) -> None:
         """Restore expanded state if no more pending prompts require expansion.

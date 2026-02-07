@@ -18,7 +18,6 @@ from ..model_provider.types import ToolSchema
 from ..base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
 from shared.trace import trace as _trace_write
-from shared.ai_tool_runner import get_current_tool_output_callback
 
 if TYPE_CHECKING:
     from ..registry import PluginRegistry
@@ -46,7 +45,6 @@ class BackgroundPlugin:
         self._capable_plugins: Dict[str, BackgroundCapable] = {}
         self._initialized = False
         self._agent_name: Optional[str] = None
-        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -148,7 +146,7 @@ is running or completed:
 - When completed: returns final status + full output + returncode
 
 Use stdout_offset to get incremental output (for monitoring progress).
-Set wait=true to block until the task completes.
+Call repeatedly while has_more is true to poll for completion.
 
 Response fields:
 - status: "pending", "running", "completed", "failed", "cancelled"
@@ -172,10 +170,6 @@ Response fields:
                         "stderr_offset": {
                             "type": "integer",
                             "description": "Byte offset to read stderr from (default: 0)"
-                        },
-                        "wait": {
-                            "type": "boolean",
-                            "description": "If true, block until task completes (default: false)"
                         },
                     },
                     "required": ["task_id"]
@@ -237,17 +231,6 @@ Use this to discover which tools can be run in background mode.""",
             "listBackgroundTasks": self._list_tasks,
             "listBackgroundCapableTools": self._list_capable_tools,
         }
-
-    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
-        """Set the callback for streaming output during tool execution."""
-        self._tool_output_callback = callback
-
-    def _stream_output(self, text: str) -> None:
-        """Forward output text to the tool output callback if available."""
-        callback = get_current_tool_output_callback() or self._tool_output_callback
-        if callback and text:
-            for line in text.splitlines():
-                callback(line)
 
     def _start_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Start a background task.
@@ -312,8 +295,8 @@ Use this to discover which tools can be run in background mode.""",
         """Get unified status, output, and result of a background task.
 
         Args:
-            args: Dict containing task_id, and optional stdout_offset,
-                  stderr_offset, and wait flag.
+            args: Dict containing task_id, and optional stdout_offset
+                  and stderr_offset.
 
         Returns:
             Dict with task info including status, output, and result.
@@ -321,11 +304,9 @@ Use this to discover which tools can be run in background mode.""",
         task_id = args.get("task_id")
         stdout_offset = args.get("stdout_offset", 0)
         stderr_offset = args.get("stderr_offset", 0)
-        wait = args.get("wait", False)
         self._trace(
             f"getBackgroundTask: task_id={task_id}, "
-            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}, "
-            f"wait={wait}"
+            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}"
         )
 
         if not task_id:
@@ -358,11 +339,7 @@ Use this to discover which tools can be run in background mode.""",
                     task_id,
                     stdout_offset=stdout_offset,
                     stderr_offset=stderr_offset,
-                    wait=wait
                 )
-                # Stream stdout to popup so user can see output live
-                if info.stdout:
-                    self._stream_output(info.stdout)
                 return {
                     "task_id": info.task_id,
                     "plugin_name": plugin_name,
