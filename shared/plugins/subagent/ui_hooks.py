@@ -246,7 +246,9 @@ class AgentUIHooks(Protocol):
         success: bool,
         duration_seconds: float,
         error_message: Optional[str] = None,
-        call_id: Optional[str] = None
+        call_id: Optional[str] = None,
+        backgrounded: bool = False,
+        continuation_id: Optional[str] = None,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -257,6 +259,10 @@ class AgentUIHooks(Protocol):
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
             call_id: Unique identifier for this tool call (for correlation).
+            backgrounded: True if tool was auto-backgrounded (still producing output).
+            continuation_id: Session ID for tools that expect follow-up calls
+                (e.g., interactive shell sessions). The popup stays open across
+                tools sharing the same continuation_id.
         """
         ...
 

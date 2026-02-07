@@ -146,7 +146,7 @@ is running or completed:
 - When completed: returns final status + full output + returncode
 
 Use stdout_offset to get incremental output (for monitoring progress).
-Set wait=true to block until the task completes.
+Call repeatedly while has_more is true to poll for completion.
 
 Response fields:
 - status: "pending", "running", "completed", "failed", "cancelled"
@@ -170,10 +170,6 @@ Response fields:
                         "stderr_offset": {
                             "type": "integer",
                             "description": "Byte offset to read stderr from (default: 0)"
-                        },
-                        "wait": {
-                            "type": "boolean",
-                            "description": "If true, block until task completes (default: false)"
                         },
                     },
                     "required": ["task_id"]
@@ -299,8 +295,8 @@ Use this to discover which tools can be run in background mode.""",
         """Get unified status, output, and result of a background task.
 
         Args:
-            args: Dict containing task_id, and optional stdout_offset,
-                  stderr_offset, and wait flag.
+            args: Dict containing task_id, and optional stdout_offset
+                  and stderr_offset.
 
         Returns:
             Dict with task info including status, output, and result.
@@ -308,11 +304,9 @@ Use this to discover which tools can be run in background mode.""",
         task_id = args.get("task_id")
         stdout_offset = args.get("stdout_offset", 0)
         stderr_offset = args.get("stderr_offset", 0)
-        wait = args.get("wait", False)
         self._trace(
             f"getBackgroundTask: task_id={task_id}, "
-            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}, "
-            f"wait={wait}"
+            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}"
         )
 
         if not task_id:
@@ -345,7 +339,6 @@ Use this to discover which tools can be run in background mode.""",
                     task_id,
                     stdout_offset=stdout_offset,
                     stderr_offset=stderr_offset,
-                    wait=wait
                 )
                 return {
                     "task_id": info.task_id,

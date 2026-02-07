@@ -438,6 +438,13 @@ DEFAULT_SEMANTIC_STYLES = {
     "budget_gc_preservable": StyleSpec(fg="warning"),
     "budget_gc_partial": StyleSpec(fg="#5f87ff"),  # Blue
     "budget_gc_ephemeral": StyleSpec(dim=True),
+
+    # Tool output popup
+    "tool_output_popup_border": StyleSpec(fg="#5fafaf"),  # Teal/cyan
+    "tool_output_popup_background": StyleSpec(fg="text", bg="background"),
+    "tool_output_popup_header": StyleSpec(fg="text", bold=True),
+    "tool_output_popup_scroll": StyleSpec(fg="muted", dim=True),
+    "tool_output_popup_hint": StyleSpec(fg="muted", dim=True, italic=True),
 }
 
 
@@ -547,6 +554,10 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
         semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
+        # Tool output popup - use darker colors for light backgrounds
+        semantic["tool_output_popup_border"] = StyleSpec(fg="#007788")
+        semantic["tool_output_popup_scroll"] = StyleSpec(fg="#666666", dim=True)
+        semantic["tool_output_popup_hint"] = StyleSpec(fg="#666666", dim=True, italic=True)
         # Plan blocked/dependency styles - use darker purple for light backgrounds
         semantic["plan_blocked"] = StyleSpec(fg="#7744aa", bg="surface")
         semantic["plan_dependency"] = StyleSpec(fg="#7744aa")
@@ -582,6 +593,10 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
+        # Tool output popup - use brighter colors for high contrast
+        semantic["tool_output_popup_border"] = StyleSpec(fg="#66dddd")
+        semantic["tool_output_popup_scroll"] = StyleSpec(fg="#cccccc", dim=True)
+        semantic["tool_output_popup_hint"] = StyleSpec(fg="#cccccc", dim=True, italic=True)
         # Plan blocked/dependency styles - use bright colors for high contrast
         semantic["plan_blocked"] = StyleSpec(fg="#cc88ff", bg="surface")
         semantic["plan_dependency"] = StyleSpec(fg="#cc88ff")

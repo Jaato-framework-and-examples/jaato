@@ -10,6 +10,13 @@ from shared.plugins.interactive_shell.plugin import (
 )
 
 
+def _unpack(result):
+    """Unpack executor result — may be a plain dict or (dict, metadata) tuple."""
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
 @pytest.fixture
 def plugin(tmp_path):
     """Create an initialized plugin with a temp workspace."""
@@ -78,27 +85,27 @@ class TestSpawnTool:
     """Test the shell_spawn executor."""
 
     def test_spawn_returns_session_id(self, plugin):
-        result = plugin._exec_spawn({'command': 'echo hi'})
+        result = _unpack(plugin._exec_spawn({'command': 'echo hi'}))
         assert 'session_id' in result
         assert 'output' in result
         assert 'hi' in result['output']
 
     def test_spawn_custom_session_name(self, plugin):
-        result = plugin._exec_spawn({
+        result = _unpack(plugin._exec_spawn({
             'command': 'echo named',
             'session_name': 'myshell',
-        })
+        }))
         assert result['session_id'] == 'myshell'
 
     def test_spawn_duplicate_name_deduplicates(self, plugin):
-        r1 = plugin._exec_spawn({
+        r1 = _unpack(plugin._exec_spawn({
             'command': 'bash --norc --noprofile',
             'session_name': 'dup',
-        })
-        r2 = plugin._exec_spawn({
+        }))
+        r2 = _unpack(plugin._exec_spawn({
             'command': 'bash --norc --noprofile',
             'session_name': 'dup',
-        })
+        }))
         assert r1['session_id'] != r2['session_id']
         assert r2['session_id'].startswith('dup_')
 
@@ -114,18 +121,18 @@ class TestSpawnTool:
         """Exceeding max_sessions returns error."""
         sessions = []
         for i in range(4):
-            r = plugin._exec_spawn({
+            r = _unpack(plugin._exec_spawn({
                 'command': 'bash --norc --noprofile',
                 'session_name': f's{i}',
-            })
+            }))
             assert 'error' not in r
             sessions.append(r['session_id'])
 
         # 5th should fail
-        r = plugin._exec_spawn({
+        r = _unpack(plugin._exec_spawn({
             'command': 'bash --norc --noprofile',
             'session_name': 's4',
-        })
+        }))
         assert 'error' in r
         assert 'Maximum concurrent sessions' in r['error']
 
@@ -137,13 +144,13 @@ class TestInputTool:
     """Test the shell_input executor."""
 
     def test_input_and_response(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
-        result = plugin._exec_input({
+        result = _unpack(plugin._exec_input({
             'session_id': sid,
             'input': 'echo tool_test_123\n',
-        })
+        }))
         assert 'tool_test_123' in result['output']
         assert result['is_alive']
 
@@ -162,14 +169,14 @@ class TestInputTool:
         assert 'No session' in result['error']
 
     def test_input_to_exited_session(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'echo done'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'echo done'}))
         sid = spawn['session_id']
         time.sleep(0.5)  # let it exit
 
-        result = plugin._exec_input({
+        result = _unpack(plugin._exec_input({
             'session_id': sid,
             'input': 'hello\n',
-        })
+        }))
         assert 'error' in result or not result.get('is_alive', True)
 
         plugin._exec_close({'session_id': sid})
@@ -179,10 +186,10 @@ class TestReadTool:
     """Test the shell_read executor."""
 
     def test_read_pending_output(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
-        result = plugin._exec_read({'session_id': sid, 'timeout': 0.3})
+        result = _unpack(plugin._exec_read({'session_id': sid, 'timeout': 0.3}))
         assert 'output' in result
         assert isinstance(result['output'], str)
 
@@ -197,23 +204,23 @@ class TestControlTool:
     """Test the shell_control executor."""
 
     def test_ctrl_c(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
         # Start a sleep, interrupt it
-        plugin._exec_input({'session_id': sid, 'input': 'sleep 60\n'})
+        _unpack(plugin._exec_input({'session_id': sid, 'input': 'sleep 60\n'}))
         time.sleep(0.2)
 
-        result = plugin._exec_control({'session_id': sid, 'key': 'c-c'})
+        result = _unpack(plugin._exec_control({'session_id': sid, 'key': 'c-c'}))
         assert result.get('is_alive', False)
 
         plugin._exec_close({'session_id': sid})
 
     def test_control_missing_key(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
-        result = plugin._exec_control({'session_id': sid})
+        result = _unpack(plugin._exec_control({'session_id': sid}))
         assert 'error' in result
 
         plugin._exec_close({'session_id': sid})
@@ -223,9 +230,9 @@ class TestCloseTool:
     """Test the shell_close executor."""
 
     def test_close_returns_exit_status(self, plugin):
-        spawn = plugin._exec_spawn({
+        spawn = _unpack(plugin._exec_spawn({
             'command': "bash --norc --noprofile -c 'exit 7'",
-        })
+        }))
         sid = spawn['session_id']
         time.sleep(0.5)  # let it exit
 
@@ -233,7 +240,7 @@ class TestCloseTool:
         assert result['exit_status'] == 7
 
     def test_close_removes_session(self, plugin):
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
         plugin._exec_close({'session_id': sid})
@@ -257,14 +264,14 @@ class TestListTool:
         assert result['sessions'] == []
 
     def test_list_shows_active_sessions(self, plugin):
-        r1 = plugin._exec_spawn({
+        r1 = _unpack(plugin._exec_spawn({
             'command': 'bash --norc --noprofile',
             'session_name': 'alpha',
-        })
-        r2 = plugin._exec_spawn({
+        }))
+        r2 = _unpack(plugin._exec_spawn({
             'command': 'bash --norc --noprofile',
             'session_name': 'beta',
-        })
+        }))
 
         result = plugin._exec_list({})
         assert result['count'] == 2
@@ -291,13 +298,13 @@ class TestWorkspacePath:
 
         plugin.set_workspace_path(new_path)
 
-        spawn = plugin._exec_spawn({'command': 'bash --norc --noprofile'})
+        spawn = _unpack(plugin._exec_spawn({'command': 'bash --norc --noprofile'}))
         sid = spawn['session_id']
 
-        result = plugin._exec_input({
+        result = _unpack(plugin._exec_input({
             'session_id': sid,
             'input': 'pwd\n',
-        })
+        }))
         assert new_path in result['output']
 
         plugin._exec_close({'session_id': sid})

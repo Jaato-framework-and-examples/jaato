@@ -4,11 +4,14 @@ Plugins can inherit from BackgroundCapableMixin to easily add background
 task support without implementing all protocol methods from scratch.
 """
 
+import logging
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .protocol import BackgroundCapable, TaskHandle, TaskInfo, TaskOutput, TaskResult, TaskStatus
 
@@ -65,6 +68,10 @@ class BackgroundCapableMixin:
         self._bg_tasks: Dict[str, Dict[str, Any]] = {}
         self._bg_lock = threading.Lock()
         self._bg_initialized = False
+        # Tool output callback for streaming to UI during background execution.
+        # Captured per-task at start_background() time so it survives callback
+        # clearing by the session after the tool returns auto_backgrounded.
+        self._bg_tool_output_callback: Optional[Callable[[str], None]] = None
 
     def _ensure_bg_executor(self) -> ThreadPoolExecutor:
         """Lazily initialize the thread pool executor."""
@@ -79,6 +86,35 @@ class BackgroundCapableMixin:
             self._bg_executor.shutdown(wait=False)
             self._bg_executor = None
             self._bg_initialized = False
+
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during background execution.
+
+        This callback is captured per-task at start_background() time so that
+        background tasks can continue streaming to the UI even after the session
+        clears the callback for the next tool call.
+
+        Args:
+            callback: Function that accepts output text chunks, or None to clear.
+        """
+        self._bg_tool_output_callback = callback
+
+    def set_task_done_callback(self, task_id: str, callback: Callable) -> None:
+        """Set a completion callback for a specific background task.
+
+        Called by the ToolExecutor after a task exceeds the auto-background
+        threshold. The callback fires when the task finishes (success or failure).
+
+        Signature: callback(task_id: str, success: bool, error: Optional[str],
+                           duration: Optional[float])
+
+        Args:
+            task_id: The task identifier.
+            callback: Completion callback.
+        """
+        with self._bg_lock:
+            if task_id in self._bg_tasks:
+                self._bg_tasks[task_id]["done_callback"] = callback
 
     # --- BackgroundCapable protocol implementation ---
 
@@ -131,7 +167,8 @@ class BackgroundCapableMixin:
         tool_name: str,
         arguments: Dict[str, Any],
         timeout_seconds: Optional[float] = None,
-        executor_fn: Optional[Callable[[Dict[str, Any]], Any]] = None
+        executor_fn: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        output_callback: Optional[Callable[[str], None]] = None,
     ) -> TaskHandle:
         """Start a tool execution in the background.
 
@@ -179,7 +216,9 @@ class BackgroundCapableMixin:
                 "result": None,
                 "error": None,
                 "future": None,
-                "started_at": None,
+                # Set started_at at creation time so it's available even if the
+                # task completes before the post-submit lock acquisition.
+                "started_at": now,
                 "completed_at": None,
                 "timeout": timeout,
                 # Output streaming buffers
@@ -187,6 +226,12 @@ class BackgroundCapableMixin:
                 "stderr_buffer": bytearray(),
                 "output_lock": threading.Lock(),
                 "returncode": None,
+                # Captured at start time for background streaming to UI.
+                # Explicit parameter takes priority (thread-safe for parallel execution),
+                # falls back to instance-level callback (for sequential execution).
+                "output_callback": output_callback or self._bg_tool_output_callback,
+                # Set later by set_task_done_callback() if auto-backgrounded
+                "done_callback": None,
             }
 
         # Submit to thread pool
@@ -198,8 +243,10 @@ class BackgroundCapableMixin:
 
         with self._bg_lock:
             self._bg_tasks[task_id]["future"] = future
-            self._bg_tasks[task_id]["status"] = TaskStatus.RUNNING
-            self._bg_tasks[task_id]["started_at"] = datetime.now()
+            # Only transition PENDING → RUNNING; if the task already completed
+            # in the thread pool before we get here, don't overwrite its status.
+            if self._bg_tasks[task_id]["status"] == TaskStatus.PENDING:
+                self._bg_tasks[task_id]["status"] = TaskStatus.RUNNING
 
         return handle
 
@@ -262,18 +309,38 @@ class BackgroundCapableMixin:
                 # Fall back to non-streaming execution
                 result = executor_fn(arguments)
 
+            done_callback = None
+            duration = None
             with self._bg_lock:
                 if task_id in self._bg_tasks:
                     self._bg_tasks[task_id]["status"] = TaskStatus.COMPLETED
                     self._bg_tasks[task_id]["result"] = result
                     self._bg_tasks[task_id]["completed_at"] = datetime.now()
+                    done_callback = self._bg_tasks[task_id].get("done_callback")
+                    started = self._bg_tasks[task_id].get("started_at")
+                    if started:
+                        duration = (self._bg_tasks[task_id]["completed_at"] - started).total_seconds()
+
+            if done_callback:
+                try:
+                    done_callback(task_id, True, None, duration)
+                except Exception:
+                    logger.debug("Background task done callback failed", exc_info=True)
 
         except Exception as e:
+            done_callback = None
             with self._bg_lock:
                 if task_id in self._bg_tasks:
                     self._bg_tasks[task_id]["status"] = TaskStatus.FAILED
                     self._bg_tasks[task_id]["error"] = str(e)
                     self._bg_tasks[task_id]["completed_at"] = datetime.now()
+                    done_callback = self._bg_tasks[task_id].get("done_callback")
+
+            if done_callback:
+                try:
+                    done_callback(task_id, False, str(e), None)
+                except Exception:
+                    logger.debug("Background task done callback failed", exc_info=True)
 
     def _get_streaming_executor(
         self,
@@ -385,6 +452,8 @@ class BackgroundCapableMixin:
         if output_lock is None:
             return
 
+        output_cb = task.get("output_callback")
+
         with output_lock:
             if stdout:
                 task["stdout_buffer"].extend(stdout)
@@ -398,6 +467,16 @@ class BackgroundCapableMixin:
                 if len(task["stderr_buffer"]) > self._bg_max_output_buffer:
                     excess = len(task["stderr_buffer"]) - self._bg_max_output_buffer
                     del task["stderr_buffer"][:excess]
+
+        # Forward stdout to the UI output callback (captured per-task at start time)
+        if output_cb and stdout:
+            try:
+                text = stdout.decode('utf-8', errors='replace')
+                for line in text.splitlines():
+                    if line:
+                        output_cb(line)
+            except Exception:
+                pass  # Don't let callback errors break output buffering
 
     def set_returncode(self, task_id: str, returncode: int) -> None:
         """Set the return code for a task (for subprocess-based tasks).
@@ -717,15 +796,26 @@ class BackgroundCapableMixin:
                 "stderr_buffer": bytearray(),
                 "output_lock": threading.Lock(),
                 "returncode": None,
+                # Captured at register time for background streaming to UI
+                "output_callback": self._bg_tool_output_callback,
+                # Set later by set_task_done_callback() if auto-backgrounded
+                "done_callback": None,
             }
 
         # Add callback to update status when future completes
         def on_complete(f: Future) -> None:
+            done_callback = None
+            success = False
+            error = None
+            duration = None
             with self._bg_lock:
                 if task_id not in self._bg_tasks:
                     return
                 task = self._bg_tasks[task_id]
                 task["completed_at"] = datetime.now()
+                started = task.get("started_at")
+                if started:
+                    duration = (task["completed_at"] - started).total_seconds()
                 try:
                     result = f.result()
                     # Handle ToolExecutor's (ok, result) tuple format
@@ -738,15 +828,26 @@ class BackgroundCapableMixin:
                             else:
                                 task["error"] = str(actual_result)
                             task["result"] = actual_result
+                            error = task["error"]
                         else:
                             task["status"] = TaskStatus.COMPLETED
                             task["result"] = actual_result
+                            success = True
                     else:
                         task["status"] = TaskStatus.COMPLETED
                         task["result"] = result
+                        success = True
                 except Exception as e:
                     task["status"] = TaskStatus.FAILED
                     task["error"] = str(e)
+                    error = str(e)
+                done_callback = task.get("done_callback")
+
+            if done_callback:
+                try:
+                    done_callback(task_id, success, error, duration)
+                except Exception:
+                    logger.debug("Background task done callback failed", exc_info=True)
 
         future.add_done_callback(on_complete)
 

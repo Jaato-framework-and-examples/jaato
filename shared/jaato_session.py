@@ -2978,6 +2978,14 @@ NOTES
                 # Emit tool end hook as each completes
                 result = results[fc.id or fc.name]
                 fc_duration = (result.end_time - result.start_time).total_seconds()
+                # Check if tool was auto-backgrounded or has continuation
+                fc_auto_bg = False
+                fc_continuation_id = None
+                if isinstance(result.executor_result, tuple) and len(result.executor_result) == 2:
+                    er = result.executor_result[1]
+                    if isinstance(er, dict):
+                        fc_auto_bg = er.get('auto_backgrounded', False)
+                        fc_continuation_id = er.get('continuation_id')
                 if self._ui_hooks:
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
@@ -2985,7 +2993,9 @@ NOTES
                         success=result.success,
                         duration_seconds=fc_duration,
                         error_message=result.error_message,
-                        call_id=fc.id
+                        call_id=fc.id,
+                        backgrounded=fc_auto_bg,
+                        continuation_id=fc_continuation_id,
                     )
 
         # Build results in original order
@@ -3152,9 +3162,29 @@ NOTES
                     self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
                 self._executor.set_tool_output_callback(tool_output_callback)
 
+                # Set up done callback for auto-backgrounded tasks.
+                # Fires when the background task eventually completes, triggering
+                # a deferred on_tool_call_end to finalize the UI.
+                def task_done_callback(
+                    task_id: str, success: bool, error: 'Optional[str]',
+                    duration: 'Optional[float]',
+                    _call_id=fc.id, _name=name
+                ) -> None:
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_end(
+                            agent_id=self._agent_id,
+                            tool_name=_name,
+                            success=success,
+                            duration_seconds=duration or 0.0,
+                            error_message=error,
+                            call_id=_call_id,
+                        )
+                self._executor.set_task_done_callback(task_done_callback)
+
                 executor_result = self._executor.execute(name, args, call_id=fc.id)
 
                 self._executor.set_tool_output_callback(None)
+                self._executor.set_task_done_callback(None)
             else:
                 executor_result = (False, {"error": f"No executor registered for {name}"})
 
@@ -3163,10 +3193,16 @@ NOTES
             # Determine success and error message
             fc_success = True
             fc_error_message = None
+            fc_auto_backgrounded = False
+            fc_continuation_id = None
             if isinstance(executor_result, tuple) and len(executor_result) == 2:
                 fc_success = executor_result[0]
                 if not fc_success and isinstance(executor_result[1], dict):
                     fc_error_message = executor_result[1].get('error')
+                # Check if tool was auto-backgrounded or has continuation
+                if isinstance(executor_result[1], dict):
+                    fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
+                    fc_continuation_id = executor_result[1].get('continuation_id')
 
             # Record telemetry
             fc_duration = (fc_end - fc_start).total_seconds()
@@ -3186,7 +3222,9 @@ NOTES
                 success=fc_success,
                 duration_seconds=fc_duration,
                 error_message=fc_error_message,
-                call_id=fc.id
+                call_id=fc.id,
+                backgrounded=fc_auto_backgrounded,
+                continuation_id=fc_continuation_id,
             )
 
         return _ToolExecutionResult(
@@ -3255,10 +3293,29 @@ NOTES
                         )
                     self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
 
+                # Set up done callback for auto-backgrounded tasks (parallel path)
+                def task_done_callback(
+                    task_id: str, success: bool, error: 'Optional[str]',
+                    duration: 'Optional[float]',
+                    _call_id=fc.id, _name=name
+                ) -> None:
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_end(
+                            agent_id=self._agent_id,
+                            tool_name=_name,
+                            success=success,
+                            duration_seconds=duration or 0.0,
+                            error_message=error,
+                            call_id=_call_id,
+                        )
+                self._executor.set_task_done_callback(task_done_callback)
+
                 # Pass callback directly - executor will set it in thread-local
                 executor_result = self._executor.execute(
                     name, args, tool_output_callback=tool_output_callback, call_id=fc.id
                 )
+
+                self._executor.set_task_done_callback(None)
             else:
                 executor_result = (False, {"error": f"No executor registered for {name}"})
 
@@ -4419,10 +4476,28 @@ NOTES
                                 )
                             self._executor.set_tool_output_callback(tool_output_callback)
 
+                            # Done callback for auto-backgrounded tasks (legacy path)
+                            def task_done_callback(
+                                task_id: str, success: bool, error: 'Optional[str]',
+                                duration: 'Optional[float]',
+                                _call_id=fc.id, _name=name
+                            ) -> None:
+                                if self._ui_hooks:
+                                    self._ui_hooks.on_tool_call_end(
+                                        agent_id=self._agent_id,
+                                        tool_name=_name,
+                                        success=success,
+                                        duration_seconds=duration or 0.0,
+                                        error_message=error,
+                                        call_id=_call_id,
+                                    )
+                            self._executor.set_task_done_callback(task_done_callback)
+
                         executor_result = self._executor.execute(name, args, call_id=fc.id)
 
-                        # Clear the callback after execution
+                        # Clear the callbacks after execution
                         self._executor.set_tool_output_callback(None)
+                        self._executor.set_task_done_callback(None)
                     else:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
@@ -4430,11 +4505,17 @@ NOTES
                     # Determine success and error message from executor result
                     fc_success = True
                     fc_error_message = None
+                    fc_auto_backgrounded = False
+                    fc_continuation_id = None
                     if isinstance(executor_result, tuple) and len(executor_result) == 2:
                         fc_success = executor_result[0]
                         # Extract error message if tool failed
                         if not fc_success and isinstance(executor_result[1], dict):
                             fc_error_message = executor_result[1].get('error')
+                        # Check if tool was auto-backgrounded or has continuation
+                        if isinstance(executor_result[1], dict):
+                            fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
+                            fc_continuation_id = executor_result[1].get('continuation_id')
 
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
@@ -4445,7 +4526,9 @@ NOTES
                             success=fc_success,
                             duration_seconds=fc_duration,
                             error_message=fc_error_message,
-                            call_id=fc.id
+                            call_id=fc.id,
+                            backgrounded=fc_auto_backgrounded,
+                            continuation_id=fc_continuation_id,
                         )
 
                     turn_data['function_calls'].append({

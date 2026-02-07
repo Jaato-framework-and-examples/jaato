@@ -98,6 +98,12 @@
     "tool_unselected": {"dim": true},
     "tool_indicator": {"fg": "#0055cc", "dim": true},
 
+    "tool_output_popup_border": {"fg": "#006688"},
+    "tool_output_popup_background": {"fg": "text", "bg": "background"},
+    "tool_output_popup_header": {"fg": "text", "bold": true},
+    "tool_output_popup_scroll": {"fg": "#666666"},
+    "tool_output_popup_hint": {"fg": "#666666", "italic": true},
+
     "file_output_header": {"fg": "primary", "bold": true},
 
     "notebook_input_label": {"fg": "success", "bold": true},

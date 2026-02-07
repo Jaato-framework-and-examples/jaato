@@ -227,7 +227,7 @@ class ShellSession:
 
         return {
             'exit_status': exit_status if exit_status is not None else signal_status,
-            'final_output': final_output,
+            'final_output': strip_ansi(final_output),
         }
 
     def _read_until_idle(
@@ -247,7 +247,8 @@ class ShellSession:
                 Defaults to self.max_wait.
 
         Returns:
-            Cleaned text (ANSI stripped) of all output since last read.
+            Raw text output since last read (may contain ANSI escape sequences).
+            Callers should use strip_ansi() when preparing output for the model.
         """
         idle_timeout = idle_timeout if idle_timeout is not None else self.idle_timeout
         max_wait = max_wait if max_wait is not None else self.max_wait
@@ -274,5 +275,4 @@ class ShellSession:
                 # Process exited
                 break
 
-        raw = ''.join(chunks)
-        return strip_ansi(raw)
+        return ''.join(chunks)

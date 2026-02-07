@@ -48,6 +48,7 @@ from rich.table import Table
 from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
+from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
 from typing import TYPE_CHECKING
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
 
 
 # Pattern to strip ANSI escape codes for visible length calculation
-_ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
+_ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;?]*[A-Za-z~]')
 
 
 def _visible_len(text: str) -> int:
@@ -84,7 +85,7 @@ def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bo
         - has_more_right: True if there's content after start+width
     """
     # Pattern to find ANSI sequences
-    ansi_pattern = re.compile(r'(\x1b\[[0-9;]*m)')
+    ansi_pattern = re.compile(r'(\x1b\[[0-9;?]*[A-Za-z~])')
 
     result = []
     visible_pos = 0  # Current visible character position
@@ -178,9 +179,11 @@ class ActiveToolsMarker:
 class ActiveToolCall:
     """Represents an actively executing or completed tool call."""
     name: str
-    args_summary: str  # Truncated string representation of args
+    args_summary: str  # Truncated string representation of args (for tree display)
+    args_full: Optional[str] = None  # Full untruncated args (for popup header)
     call_id: Optional[str] = None  # Unique ID for correlating start/end of same tool call
     completed: bool = False  # True when tool execution finished
+    backgrounded: bool = False  # True when auto-backgrounded (completed but still producing output)
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
     error_message: Optional[str] = None  # Error message if tool failed
@@ -213,6 +216,8 @@ class ActiveToolCall:
     output_max_lines: int = 1000  # Max lines to keep (high limit, rendering does smart truncation)
     output_display_lines: int = 5  # Max lines to show at once when expanded
     output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
+    # Continuation grouping (e.g., interactive shell sessions)
+    continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -250,6 +255,7 @@ class OutputBuffer:
         self._spinner_active: bool = False
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
+        self._popup_tools: Dict[str, ActiveToolCall] = {}  # Backgrounded tools for popup (keyed by call_id)
         self._tools_expanded: bool = tools_expanded  # Toggle between collapsed/expanded tool view
         self._tools_expanded_before_prompt: Optional[bool] = None  # Saved state before permission/clarification forced expansion
         self._rendering: bool = False  # Guard against flushes during render
@@ -277,6 +283,8 @@ class OutputBuffer:
         self._search_query: str = ""
         self._search_matches: List[Tuple[int, int, int]] = []  # (line_index, start_pos, end_pos)
         self._search_current_idx: int = 0
+        # Terminal emulators for tool output (pyte-backed, keyed by call_id)
+        self._tool_emulators: Dict[str, TerminalEmulator] = {}
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -815,6 +823,7 @@ class OutputBuffer:
         self._scroll_offset = 0
         self._spinner_active = False
         self._active_tools.clear()
+        self._tool_emulators.clear()
         self._tool_placeholder_index = None
         self._tool_nav_active = False
         self._selected_block_index = None
@@ -872,16 +881,17 @@ class OutputBuffer:
         """
         _buffer_trace(f"add_active_tool: name={tool_name} call_id={call_id}")
 
-        # If all existing tools are completed, finalize them as a ToolBlock
-        # This ensures proper ordering of text and tool output
+        # If all active tools are completed, finalize them as a ToolBlock
+        # This ensures proper ordering of text and tool output.
         if self._active_tools and all(t.completed for t in self._active_tools):
             self._finalize_completed_tools()
 
-        # Create a summary of args (truncated for display)
+        # Create a summary of args (truncated for tree display, full for popup)
         # Filter out intent args (message, summary, etc.) since they're shown as model text
         intent_arg_names = {"message", "summary", "intent", "rationale"}
         display_args = {k: v for k, v in (tool_args or {}).items() if k not in intent_arg_names}
-        args_str = str(display_args) if display_args else ""
+        args_full = str(display_args) if display_args else ""
+        args_str = args_full
         if len(args_str) > 60:
             args_str = args_str[:57] + "..."
 
@@ -907,17 +917,36 @@ class OutputBuffer:
                 self._last_turn_source = "model"
             self._tool_placeholder_index = len(self._lines)
 
-        self._active_tools.append(ActiveToolCall(
-            name=tool_name, args_summary=args_str, call_id=call_id
-        ))
+        # Detect continuation grouping: tools with a session_id arg participate
+        continuation_id = (tool_args or {}).get("session_id")
+        tool = ActiveToolCall(
+            name=tool_name, args_summary=args_str,
+            args_full=args_full or None,
+            call_id=call_id, continuation_id=continuation_id,
+        )
+        # If joining an existing continuation group, carry over the shared emulator
+        if continuation_id and continuation_id in self._tool_emulators:
+            emulator = self._tool_emulators[continuation_id]
+            tool.output_lines = emulator.get_lines()
+        self._active_tools.append(tool)
         # Scroll to show the full tool tree (prioritizing top if it's taller than visible area)
         self.scroll_to_show_tool_tree()
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
                             error_message: Optional[str] = None,
-                            call_id: Optional[str] = None) -> None:
+                            call_id: Optional[str] = None,
+                            backgrounded: bool = False,
+                            continuation_id: Optional[str] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
+
+        When backgrounded=True, the tool is marked completed for tree purposes
+        but keeps accepting output and stays visible in the popup until the
+        background task finishes (a second call with backgrounded=False).
+
+        When continuation_id is provided, the tool belongs to a continuation
+        group (e.g., interactive shell session) and the popup stays open
+        across tools sharing the same continuation_id.
 
         Args:
             tool_name: Name of the tool that finished.
@@ -925,54 +954,132 @@ class OutputBuffer:
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
             call_id: Unique identifier for this tool call (for correlation).
+            backgrounded: True if tool was auto-backgrounded (still producing output).
+            continuation_id: Session ID for continuation grouping (popup stays open).
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
-            f"duration={duration_seconds} call_id={call_id}"
+            f"duration={duration_seconds} call_id={call_id} backgrounded={backgrounded}"
         )
 
         for tool in self._active_tools:
             # Match by call_id if provided, otherwise by name (for backwards compatibility)
             if call_id:
-                if tool.call_id == call_id and not tool.completed:
-                    tool.completed = True
-                    tool.success = success
-                    tool.duration_seconds = duration_seconds
-                    tool.error_message = error_message
-                    return
+                if tool.call_id == call_id:
+                    # Transition: backgrounded → truly completed (done callback fired)
+                    if tool.completed and tool.backgrounded and not backgrounded:
+                        tool.backgrounded = False
+                        tool.success = success
+                        if duration_seconds is not None:
+                            tool.duration_seconds = duration_seconds
+                        tool.error_message = error_message
+                        self._popup_tools.pop(call_id, None)
+                        self._tool_emulators.pop(call_id, None)
+                        return
+                    # Normal completion
+                    if not tool.completed:
+                        tool.completed = True
+                        tool.backgrounded = backgrounded
+                        tool.success = success
+                        tool.duration_seconds = duration_seconds
+                        tool.error_message = error_message
+                        if backgrounded and call_id:
+                            self._popup_tools[call_id] = tool
+                        # Continuation grouping
+                        self._apply_continuation(tool, call_id, continuation_id)
+                        return
             elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
+                tool.backgrounded = backgrounded
                 tool.success = success
                 tool.duration_seconds = duration_seconds
                 tool.error_message = error_message
                 return
 
+        # Tool not found in _active_tools — check _popup_tools (post-finalization)
+        if call_id and call_id in self._popup_tools:
+            tool = self._popup_tools[call_id]
+            if tool.completed and tool.backgrounded and not backgrounded:
+                tool.backgrounded = False
+                tool.success = success
+                if duration_seconds is not None:
+                    tool.duration_seconds = duration_seconds
+                tool.error_message = error_message
+                self._popup_tools.pop(call_id)
+                self._tool_emulators.pop(call_id, None)
+                return
+
+    def _apply_continuation(self, tool: ActiveToolCall, call_id: str,
+                            continuation_id: Optional[str]) -> None:
+        """Apply continuation grouping logic after a tool completes.
+
+        If continuation_id is provided (session still alive), the tool joins or
+        creates a continuation group. The emulator is re-keyed from call_id to
+        continuation_id so subsequent tools in the group share the same emulator.
+
+        If no continuation_id from events but the tool already had one from its
+        args (e.g., shell_close closing the session), clean up the group.
+        """
+        if continuation_id:
+            tool.continuation_id = continuation_id
+            # Re-key emulator from call_id to continuation_id (first tool in group)
+            if call_id in self._tool_emulators and continuation_id not in self._tool_emulators:
+                self._tool_emulators[continuation_id] = self._tool_emulators.pop(call_id)
+            self._popup_tools[continuation_id] = tool
+        elif tool.continuation_id:
+            # Tool had continuation_id from args but events didn't confirm it
+            # — session is closing (e.g., shell_close)
+            self._popup_tools.pop(tool.continuation_id, None)
+            self._tool_emulators.pop(tool.continuation_id, None)
+            tool.continuation_id = None
+
     def append_tool_output(self, call_id: str, chunk: str) -> None:
         """Append output chunk to a running tool's output buffer.
 
+        Uses a pyte terminal emulator to correctly interpret ANSI control
+        sequences (cursor movement, erase, carriage return, colors, etc.)
+        and produce clean visual output lines.
+
         Used for live "tail -f" style output preview in the tool tree.
+        Checks both _active_tools (pre-finalization) and _popup_tools
+        (post-finalization, for backgrounded tools).
 
         Args:
             call_id: Unique identifier for the tool call.
-            chunk: Output text chunk (may contain newlines).
+            chunk: Output text chunk (may contain ANSI sequences, newlines).
+        """
+        tool = self._find_output_tool(call_id)
+        if tool is None:
+            return
+
+        # Get or create terminal emulator for this tool
+        # Use continuation_id as key when tool belongs to a continuation group
+        emulator_key = tool.continuation_id or call_id
+        emulator = self._tool_emulators.get(emulator_key)
+        if emulator is None:
+            emulator = TerminalEmulator()
+            self._tool_emulators[emulator_key] = emulator
+
+        # Feed chunk through pyte (re-add newline stripped by CLI plugin)
+        emulator.feed(chunk + "\n")
+
+        # Reconstruct output_lines from emulator state
+        tool.output_lines = emulator.get_lines()
+
+    def _find_output_tool(self, call_id: str) -> Optional[ActiveToolCall]:
+        """Find the tool that should receive output for a given call_id.
+
+        Checks _active_tools first (running/backgrounded pre-finalization),
+        then _popup_tools (backgrounded post-finalization).
         """
         for tool in self._active_tools:
-            if tool.call_id == call_id and not tool.completed:
-                # Initialize output_lines if needed
-                if tool.output_lines is None:
-                    tool.output_lines = []
-
-                # Split chunk by newlines and add to buffer
-                lines = chunk.splitlines()
-                for line in lines:
-                    # Skip empty lines from split
-                    if line or chunk == "\n":
-                        tool.output_lines.append(line)
-
-                # Trim to max size (keep most recent lines)
-                if len(tool.output_lines) > tool.output_max_lines:
-                    tool.output_lines = tool.output_lines[-tool.output_max_lines:]
-                return
+            if tool.call_id == call_id and (not tool.completed or tool.backgrounded):
+                return tool
+        # Post-finalization: backgrounded tool lives in _popup_tools
+        popup_tool = self._popup_tools.get(call_id)
+        if popup_tool and popup_tool.backgrounded:
+            return popup_tool
+        return None
 
     def remove_active_tool(self, tool_name: str) -> None:
         """Remove a tool from the active tools list (legacy, now marks as completed).
@@ -986,6 +1093,8 @@ class OutputBuffer:
     def clear_active_tools(self) -> None:
         """Clear all active tools and reset navigation state."""
         self._active_tools.clear()
+        self._popup_tools.clear()
+        self._tool_emulators.clear()
         self._tool_nav_active = False
         self._selected_tool_index = None
 
@@ -1409,6 +1518,9 @@ class OutputBuffer:
         The ToolBlock is inserted at the placeholder position (established when
         the first tool was added), ensuring tools appear in chronological order
         after their preceding text.
+
+        Backgrounded tools are finalized normally into the ToolBlock. Their
+        references survive in _popup_tools for the popup to continue tracking.
         """
         if not self._active_tools:
             return
@@ -1421,9 +1533,16 @@ class OutputBuffer:
         if any_pending:
             return
 
+        # Finalize completed tools; keep non-completed tools active
+        to_finalize = [t for t in self._active_tools if t.completed]
+        to_keep = [t for t in self._active_tools if not t.completed]
+
+        if not to_finalize:
+            return
+
         # Create a copy of the tools for the ToolBlock
         import copy
-        tools_copy = copy.deepcopy(self._active_tools)
+        tools_copy = copy.deepcopy(to_finalize)
 
         # Determine expansion state for the ToolBlock:
         # - If _tools_expanded_before_prompt is set, it means expansion was system-forced
@@ -1474,7 +1593,7 @@ class OutputBuffer:
 
         # Clear placeholder and active tools
         self._tool_placeholder_index = None
-        self._active_tools.clear()
+        self._active_tools = to_keep
 
         # Now that tools are finalized, restore the expanded state if we had saved one
         # This happens AFTER finalization so the ToolBlock captures the visible state
@@ -1488,6 +1607,11 @@ class OutputBuffer:
     def active_tools(self) -> List[ActiveToolCall]:
         """Get list of currently active tools."""
         return list(self._active_tools)
+
+    @property
+    def popup_tools(self) -> Dict[str, ActiveToolCall]:
+        """Get backgrounded tools tracked by the popup (keyed by call_id)."""
+        return self._popup_tools
 
     def _maybe_restore_expanded_state(self) -> None:
         """Restore expanded state if no more pending prompts require expansion.
@@ -2494,11 +2618,10 @@ class OutputBuffer:
             for tool in block.tools:
                 height += 1  # Tool line
                 # Output preview - always shown when block is expanded
-                # Match _render_tool_output_lines: overhead=2 for ToolBlocks, then max(3, visible-overhead)
+                # Finalized ToolBlocks cap at 70% of visible height (same as file output)
                 if tool.output_lines:
                     total_lines = len(tool.output_lines)
-                    overhead = 2  # Separator + header (same as _calculate_tool_output_overhead returns for ToolBlocks)
-                    max_display_lines = max(3, self._visible_height - overhead)
+                    max_display_lines = max(5, int(self._visible_height * 0.7))
                     display_count = min(total_lines, max_display_lines)
                     height += display_count
                     # Truncation indicator if content exceeds display
@@ -2772,7 +2895,8 @@ class OutputBuffer:
                 scroll_down_key = self._format_key_hint("nav_down")
                 output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
-    def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+    def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool,
+                                   finalized: bool = False) -> None:
         """Render output lines for a tool.
 
         Uses the same approach as _render_permission_prompt: calculates available
@@ -2780,6 +2904,10 @@ class OutputBuffer:
 
         For notebook output (content with <nb-row> markers), renders as a 2-column
         table with labels (In[n]:, Out[n]:) on the left and content on the right.
+
+        Args:
+            finalized: If True, cap display lines like file output (70% of visible
+                       height) instead of filling all available space.
         """
         continuation = "   " if is_last else "│  "
         prefix = "    "
@@ -2814,6 +2942,10 @@ class OutputBuffer:
         available_space = self._visible_height - overhead
         # Minimum 3 to show something useful even on tiny terminals
         max_content_lines = max(3, available_space)
+
+        # Finalized ToolBlocks: cap like file output (70% of visible height)
+        if finalized:
+            max_content_lines = max(5, int(self._visible_height * 0.7))
 
         # Use shared helper for smart truncation (beginning + ellipsis + end)
         self._render_truncated_lines(
@@ -3578,7 +3710,7 @@ class OutputBuffer:
         """
         import re
         # Strip ANSI codes for pattern matching
-        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+        clean_line = re.sub(r'\x1b\[[0-9;?]*[A-Za-z~]', '', line)
         # Options line has multiple [x]word patterns
         # Pattern: [letter(s)]rest_of_word repeated multiple times
         pattern = r'\[[a-z]+\][a-z]*'
@@ -3866,7 +3998,7 @@ class OutputBuffer:
 
                 # Tool output - use shared rendering method with smart truncation
                 if show_tool_output and tool.output_lines:
-                    self._render_tool_output_lines(output, tool, is_last)
+                    self._render_tool_output_lines(output, tool, is_last, finalized=True)
 
                 # Error message
                 if not tool.success and tool.error_message:

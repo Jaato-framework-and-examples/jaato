@@ -230,6 +230,8 @@ class ToolCallEndEvent(Event):
     success: bool = True
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
+    backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
+    continuation_id: Optional[str] = None  # Session ID for continuation grouping (e.g., interactive shell)
 
 
 @dataclass

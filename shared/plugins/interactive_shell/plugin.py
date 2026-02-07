@@ -20,6 +20,8 @@ from typing import Dict, List, Any, Callable, Optional
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from .session import ShellSession
+from .ansi import strip_ansi
+from shared.ai_tool_runner import get_current_tool_output_callback
 
 
 # Maximum concurrent interactive sessions
@@ -59,6 +61,7 @@ class InteractiveShellPlugin:
         self._workspace_root: Optional[str] = None
         self._agent_name: Optional[str] = None
         self._initialized = False
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
@@ -370,10 +373,21 @@ what it outputs and respond appropriately. The output includes everything
 the program printed until it stopped and waited for input.
 
 WHEN TO USE vs cli_based_tool:
-- Non-interactive commands (ls, grep, git status) → use cli_based_tool
-- Commands with -y/--yes flags or that accept piped stdin → use cli_based_tool
-- Anything that asks questions, prompts for passwords, or runs a REPL → use shell_spawn
-- If unsure → try cli_based_tool first; use shell_spawn if it needs interaction
+These tools spawn a real PTY session — use them ONLY when the command
+requires interactive back-and-forth input during execution. Do NOT use
+shell_spawn for commands that simply run and produce output:
+- Non-interactive commands (ls, grep, git status, make) → use cli_based_tool
+- Commands with -y/--yes flags or piped stdin → use cli_based_tool
+- Shell scripts that run to completion without prompts → use cli_based_tool
+- Build commands (npm run build, cargo build, pytest) → use cli_based_tool
+Use shell_spawn ONLY when the program will ask questions, prompt for
+passwords, or present a REPL that requires you to type responses:
+- Password prompts (ssh, sudo) → shell_spawn
+- REPLs (python, node, psql) → shell_spawn
+- Wizards (npm init, interactive installers) → shell_spawn
+- Debuggers (gdb, pdb) → shell_spawn
+If unsure → try cli_based_tool first; use shell_spawn only if it hangs
+waiting for input that cli_based_tool cannot provide
 
 IMPORTANT NOTES:
 - Always end text input with \\n — that's pressing Enter
@@ -455,9 +469,11 @@ IMPORTANT NOTES:
             with self._lock:
                 self._sessions[session_id] = session
 
+            self._stream_output(initial_output)
+
             result = {
                 'session_id': session_id,
-                'output': initial_output,
+                'output': strip_ansi(initial_output),
                 'is_alive': session.is_alive,
             }
 
@@ -470,6 +486,8 @@ IMPORTANT NOTES:
                 f"spawn: id={session_id} output_len={len(initial_output)} "
                 f"alive={session.is_alive}"
             )
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
             return result
 
         except Exception as exc:
@@ -501,10 +519,14 @@ IMPORTANT NOTES:
 
         try:
             output = session.send_input(text)
-            return {
-                'output': output,
+            self._stream_output(output)
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except Exception as exc:
             self._trace(f"input: id={session_id} FAILED: {exc}")
             return {'error': f'shell_input: {exc}', 'is_alive': session.is_alive}
@@ -525,10 +547,14 @@ IMPORTANT NOTES:
 
         try:
             output = session.read_output(timeout=timeout)
-            return {
-                'output': output,
+            self._stream_output(output)
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except Exception as exc:
             return {'error': f'shell_read: {exc}', 'is_alive': session.is_alive}
 
@@ -556,10 +582,14 @@ IMPORTANT NOTES:
 
         try:
             output = session.send_control(key)
-            return {
-                'output': output,
+            self._stream_output(output)
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except ValueError as exc:
             return {'error': str(exc)}
         except Exception as exc:
@@ -611,6 +641,29 @@ IMPORTANT NOTES:
         return {'sessions': sessions, 'count': len(sessions)}
 
     # --- Helpers ---
+
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during tool execution.
+
+        Called by ToolExecutor before/after each tool call. Also supports
+        thread-local fallback for parallel execution.
+        """
+        self._tool_output_callback = callback
+
+    def _stream_output(self, text: str) -> None:
+        """Forward raw output text to the tool output callback if available.
+
+        Splits on \\n only (not \\r) to preserve carriage returns and ANSI
+        escape sequences within lines for proper terminal emulation by pyte.
+        """
+        callback = get_current_tool_output_callback() or self._tool_output_callback
+        if callback and text:
+            parts = text.split('\n')
+            # Remove trailing empty from trailing \n (avoids extra blank line)
+            if parts and not parts[-1]:
+                parts.pop()
+            for chunk in parts:
+                callback(chunk)
 
     def _get_session(self, session_id: str) -> Optional[ShellSession]:
         """Look up a session by ID."""
