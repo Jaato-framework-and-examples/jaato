@@ -218,6 +218,7 @@ class ActiveToolCall:
     output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
     # Continuation grouping (e.g., interactive shell sessions)
     continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
+    show_output: bool = True  # Whether to render output_lines in the main panel (popup unaffected)
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -924,10 +925,16 @@ class OutputBuffer:
             args_full=args_full or None,
             call_id=call_id, continuation_id=continuation_id,
         )
-        # If joining an existing continuation group, carry over the shared emulator
+        # If joining an existing continuation group, carry over shared state
         if continuation_id and continuation_id in self._tool_emulators:
             emulator = self._tool_emulators[continuation_id]
             tool.output_lines = emulator.get_lines()
+            tool.show_output = False  # Continuation follow-ups hide output in main panel
+            # Inherit the original command as popup header (e.g., show "sh script.sh"
+            # instead of "{'session_id': '...', 'input': '10\n'}")
+            original = self._popup_tools.get(continuation_id)
+            if original:
+                tool.display_args_summary = original.display_args_summary or original.args_full or original.args_summary
         self._active_tools.append(tool)
         # Scroll to show the full tool tree (prioritizing top if it's taller than visible area)
         self.scroll_to_show_tool_tree()
@@ -937,7 +944,8 @@ class OutputBuffer:
                             error_message: Optional[str] = None,
                             call_id: Optional[str] = None,
                             backgrounded: bool = False,
-                            continuation_id: Optional[str] = None) -> None:
+                            continuation_id: Optional[str] = None,
+                            show_output: Optional[bool] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         When backgrounded=True, the tool is marked completed for tree purposes
@@ -956,6 +964,8 @@ class OutputBuffer:
             call_id: Unique identifier for this tool call (for correlation).
             backgrounded: True if tool was auto-backgrounded (still producing output).
             continuation_id: Session ID for continuation grouping (popup stays open).
+            show_output: Whether to render output_lines in the main panel.
+                None means keep current value. The popup is unaffected.
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
@@ -983,6 +993,8 @@ class OutputBuffer:
                         tool.success = success
                         tool.duration_seconds = duration_seconds
                         tool.error_message = error_message
+                        if show_output is not None:
+                            tool.show_output = show_output
                         if backgrounded and call_id:
                             self._popup_tools[call_id] = tool
                         # Continuation grouping
@@ -2752,7 +2764,7 @@ class OutputBuffer:
 
                 # Tool output preview
                 show_output = tool.expanded if self._tool_nav_active else True
-                if show_output and tool.output_lines:
+                if show_output and tool.show_output and tool.output_lines:
                     self._render_tool_output_lines(output, tool, is_last)
 
                 # Permission/error info
@@ -3997,7 +4009,7 @@ class OutputBuffer:
                     output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
 
                 # Tool output - use shared rendering method with smart truncation
-                if show_tool_output and tool.output_lines:
+                if show_tool_output and tool.show_output and tool.output_lines:
                     self._render_tool_output_lines(output, tool, is_last, finalized=True)
 
                 # Error message
