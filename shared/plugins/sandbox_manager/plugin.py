@@ -425,18 +425,13 @@ class SandboxManagerPlugin:
         elif subcommand == "add":
             if not path:
                 return {"error": "Path is required for 'sandbox add'"}
-            # Parse --readonly / --readwrite flags from the path argument
+            # Parse optional access mode from the beginning of the path argument
+            # Syntax: sandbox add [readonly|readwrite] <path>
             access = "readwrite"
-            parts = path.split()
-            filtered_parts = []
-            for part in parts:
-                if part == "--readonly":
-                    access = "readonly"
-                elif part == "--readwrite":
-                    access = "readwrite"
-                else:
-                    filtered_parts.append(part)
-            path = " ".join(filtered_parts)
+            parts = path.split(None, 1)  # split into at most 2 parts
+            if parts[0] in ("readonly", "readwrite"):
+                access = parts[0]
+                path = parts[1] if len(parts) > 1 else ""
             if not path:
                 return {"error": "Path is required for 'sandbox add'"}
             return self._cmd_add(path, access=access)
@@ -458,17 +453,16 @@ class SandboxManagerPlugin:
             ("can access for file operations and command execution.", ""),
             ("", ""),
             ("USAGE", "bold"),
-            ("    sandbox [subcommand] [path]", ""),
+            ("    sandbox [subcommand] [access] [path]", ""),
             ("", ""),
             ("SUBCOMMANDS", "bold"),
             ("    list              Show all effective sandbox paths from all config levels", "dim"),
             ("                      Displays path, action (allow/deny), source, and timestamp", "dim"),
             ("                      (this is the default when no subcommand is given)", "dim"),
             ("", ""),
-            ("    add <path>        Allow a path for the current session (default: readwrite)", "dim"),
+            ("    add [access] <path>  Allow a path for the current session", "dim"),
             ("                      Path is added to session-level allowlist", "dim"),
-            ("                      Use --readonly for read-only access", "dim"),
-            ("                      Use --readwrite for full access (default)", "dim"),
+            ("                      access: readonly or readwrite (default: readwrite)", "dim"),
             ("                      Takes precedence over workspace/global denials", "dim"),
             ("", ""),
             ("    remove <path>     Block a path for the current session", "dim"),
@@ -480,12 +474,12 @@ class SandboxManagerPlugin:
             ("EXAMPLES", "bold"),
             ("    sandbox                   List all sandbox paths", "dim"),
             ("    sandbox list              Same as above", "dim"),
-            ("    sandbox add /tmp/scratch           Allow readwrite access to /tmp/scratch", "dim"),
-            ("    sandbox add ~/projects             Allow readwrite access to home projects", "dim"),
-            ("    sandbox add /docs --readonly        Allow read-only access to /docs", "dim"),
-            ("    sandbox add ~/data --readwrite      Allow full access to ~/data", "dim"),
-            ("    sandbox remove /etc                 Block access to /etc", "dim"),
-            ("    sandbox remove ~/.ssh               Block access to SSH keys", "dim"),
+            ("    sandbox add /tmp/scratch              Allow readwrite access to /tmp/scratch", "dim"),
+            ("    sandbox add ~/projects                Allow readwrite access to home projects", "dim"),
+            ("    sandbox add readonly /docs            Allow read-only access to /docs", "dim"),
+            ("    sandbox add readwrite ~/data          Allow full access to ~/data", "dim"),
+            ("    sandbox remove /etc                   Block access to /etc", "dim"),
+            ("    sandbox remove ~/.ssh                 Block access to SSH keys", "dim"),
             ("", ""),
             ("CONFIGURATION HIERARCHY", "bold"),
             ("    Sandbox paths are configured at three levels (later overrides earlier):", ""),
