@@ -980,7 +980,7 @@ class RichClient:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                   error_message=None, call_id=None, backgrounded=False,
-                                  continuation_id=None, show_output=None):
+                                  continuation_id=None, show_output=None, show_popup=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
                     buffer.mark_tool_completed(
@@ -988,6 +988,7 @@ class RichClient:
                         call_id=call_id, backgrounded=backgrounded,
                         continuation_id=continuation_id,
                         show_output=show_output,
+                        show_popup=show_popup,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     if display:
@@ -4073,6 +4074,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         backgrounded=event.backgrounded,
                         continuation_id=event.continuation_id,
                         show_output=event.show_output,
+                        show_popup=event.show_popup,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     display.refresh()
@@ -4084,6 +4086,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         event.duration_seconds, event.error_message, event.call_id,
                         continuation_id=event.continuation_id,
                         show_output=event.show_output,
+                        show_popup=event.show_popup,
                     )
 
             elif isinstance(event, ToolOutputEvent):

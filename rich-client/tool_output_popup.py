@@ -88,7 +88,7 @@ class ToolOutputPopup:
         result = [
             t for t in buffer.active_tools
             if (not t.completed or t.backgrounded or t.continuation_id)
-            and t.output_lines and t.call_id
+            and t.output_lines and t.call_id and t.show_popup
         ]
         seen = {self._get_popup_key(t) for t in result}
         for key, tool in buffer.popup_tools.items():

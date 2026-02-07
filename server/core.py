@@ -1301,7 +1301,7 @@ class JaatoServer:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
-                                 continuation_id=None, show_output=None):
+                                 continuation_id=None, show_output=None, show_popup=None):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -1312,6 +1312,7 @@ class JaatoServer:
                     backgrounded=backgrounded,
                     continuation_id=continuation_id,
                     show_output=show_output,
+                    show_popup=show_popup,
                 ))
 
             def on_tool_output(self, agent_id, call_id, chunk):

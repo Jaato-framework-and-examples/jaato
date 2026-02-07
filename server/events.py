@@ -233,6 +233,7 @@ class ToolCallEndEvent(Event):
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
     continuation_id: Optional[str] = None  # Session ID for continuation grouping (e.g., interactive shell)
     show_output: Optional[bool] = None  # Whether to render output_lines in the main panel (None = default True)
+    show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
 
 
 @dataclass
