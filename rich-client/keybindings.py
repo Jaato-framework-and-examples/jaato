@@ -159,6 +159,9 @@ DEFAULT_KEYBINDINGS = {
     "tool_output_up": "up",   # Scroll up within expanded tool output (same as nav_up)
     "tool_output_down": "down",  # Scroll down within expanded tool output (same as nav_down)
 
+    # Tool output popup
+    "tool_output_popup_tab": "c-o",  # Cycle between running tools in output popup
+
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
     "permission_prev": "s-tab",   # Previous permission option
@@ -347,6 +350,9 @@ class KeybindingConfig:
     tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
     tool_output_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_up"])
     tool_output_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_down"])
+
+    # Tool output popup
+    tool_output_popup_tab: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_popup_tab"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])

@@ -96,8 +96,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._initialized = False
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
-        # Callback for streaming output during execution (tail -f style)
-        self._tool_output_callback: Optional[Callable[[str], None]] = None
+        # Note: tool output callback is managed by BackgroundCapableMixin
+        # (self._bg_tool_output_callback) via set_tool_output_callback()
         # Workspace root for path sandboxing (None = no sandboxing)
         self._workspace_root: Optional[str] = None
         # Plugin registry for checking authorized external paths
@@ -189,11 +189,12 @@ class CLIToolPlugin(BackgroundCapableMixin):
 
         When set, the plugin will stream output lines to the callback during
         command execution, enabling live "tail -f" style preview in the UI.
+        Also sets the mixin's callback for background task streaming.
 
         Args:
             callback: Function that accepts output chunks, or None to disable.
         """
-        self._tool_output_callback = callback
+        super().set_tool_output_callback(callback)
         self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
 
     def _get_effective_output_callback(self) -> Optional[Callable[[str], None]]:
@@ -209,8 +210,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         thread_callback = get_current_tool_output_callback()
         if thread_callback is not None:
             return thread_callback
-        # Fall back to instance-level (sequential execution)
-        return self._tool_output_callback
+        # Fall back to instance-level from mixin (sequential execution)
+        return self._bg_tool_output_callback
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
@@ -368,6 +369,19 @@ ERROR HANDLING:
 - "Command not found" - check if the required tool is installed, or try an alternative command
 - "No such file or directory" - verify the path exists before operating on it
 - When a step fails, decide whether to: retry with a workaround, skip if goal is met, or report the blocker
+
+NO INTERACTIVITY — this tool runs commands via subprocess, NOT a PTY/TTY.
+It captures stdout/stderr and returns them when the process exits.
+It CANNOT handle any form of interactive input during execution:
+- Password prompts (ssh, sudo, mysql -p) — the process will hang waiting for input
+- REPLs (python, node, psql) — no way to send commands after launch
+- Wizards or installers that ask questions (npm init, apt install without -y)
+- Debuggers (gdb, pdb) — no interactive stepping possible
+- Programs that read from /dev/tty directly
+
+If a command requires ANY back-and-forth interaction, use the shell_spawn /
+shell_input tools instead — they provide a real PTY session where you can
+read output and send input repeatedly.
 
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
