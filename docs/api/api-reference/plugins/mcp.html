@@ -61,8 +61,8 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../providers/index.html">Overview</a></li>
-          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
           <li><a href="../providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
           <li><a href="../providers/github-models.html">GitHub Models</a></li>
           <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
           <li><a href="../providers/antigravity.html">Antigravity</a></li>
@@ -130,7 +130,7 @@
             <li><strong>Multi-Server Support</strong>: Connect to multiple MCP servers simultaneously</li>
             <li><strong>Background Connection</strong>: Runs async MCP protocol in background thread</li>
             <li><strong>Environment Variable Expansion</strong>: Support for <code>${VAR}</code> syntax in config</li>
-            <li><strong>Vertex AI Compatible</strong>: Cleans schemas for Vertex AI compatibility</li>
+            <li><strong>Schema Cleaning</strong>: Cleans schemas for provider compatibility</li>
           </ul>
 
           <h2 id="how-it-works">How It Works</h2>
@@ -481,7 +481,7 @@ export SLACK_BOT_TOKEN="xoxb-xxxxxxxxxxxx"</code></pre>
           <p>
             The plugin automatically removes unsupported JSON Schema fields
             (<code>$schema</code>, <code>$ref</code>, <code>$defs</code>, etc.)
-            for Vertex AI compatibility. If you see schema errors, the MCP
+            for provider compatibility. If you see schema errors, the MCP
             server may be using unsupported schema features.
           </p>
         </div>

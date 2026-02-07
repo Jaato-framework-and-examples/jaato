@@ -61,8 +61,8 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../providers/index.html">Overview</a></li>
-          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
           <li><a href="../providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
           <li><a href="../providers/github-models.html">GitHub Models</a></li>
           <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
           <li><a href="../providers/antigravity.html">Antigravity</a></li>
@@ -267,8 +267,8 @@ config = SessionConfig(
               <tr><td><code>turn_count</code></td><td><code>int</code></td><td>Number of turns</td></tr>
               <tr><td><code>turn_accounting</code></td><td><code>List[Dict]</code></td><td>Token usage per turn</td></tr>
               <tr><td><code>user_inputs</code></td><td><code>List[str]</code></td><td>Original prompts</td></tr>
-              <tr><td><code>project</code></td><td><code>str | None</code></td><td>GCP project ID</td></tr>
-              <tr><td><code>location</code></td><td><code>str | None</code></td><td>Vertex AI location</td></tr>
+              <tr><td><code>project</code></td><td><code>str | None</code></td><td>Cloud project ID (if applicable)</td></tr>
+              <tr><td><code>location</code></td><td><code>str | None</code></td><td>Provider region (if applicable)</td></tr>
               <tr><td><code>model</code></td><td><code>str | None</code></td><td>Model name</td></tr>
             </tbody>
           </table>
@@ -296,8 +296,8 @@ config = SessionConfig(
     {"prompt": 500, "output": 1200, "total": 1700}
   ],
   "project": "my-project",
-  "location": "us-central1",
-  "model": "gemini-2.5-flash",
+  "location": null,
+  "model": "claude-sonnet-4-20250514",
   "history": [...]
 }</code></pre>
           </div>
@@ -344,7 +344,7 @@ Available sessions:
 Resuming session: 20240114_091500
 Description: "Setting up CI/CD"
 Turns: 8
-Model: gemini-2.5-flash
+Model: claude-sonnet-4-20250514
 
 Session resumed successfully.</code></pre>
           </div>

@@ -67,7 +67,12 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
           <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
     </aside>
@@ -125,7 +130,7 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import PluginRegistry
 
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 
 # Discover each type
 tools = registry.discover(plugin_kind="tool")
@@ -193,7 +198,7 @@ print(f"Providers: {providers}")</code></pre>
           <div class="code-label">Tool plugins (via registry)</div>
           <div class="code-block">
             <pre><code class="language-python"># Tool plugins: discover → expose → configure
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 registry.discover()
 registry.expose_tool("cli")
 registry.expose_tool("file_edit")
@@ -360,7 +365,7 @@ print(registry.list_available())
           <div class="code-block">
             <pre><code class="language-python">from shared import PluginRegistry
 
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 
 # Step 1: Discover what's available
 registry.discover()
@@ -632,7 +637,7 @@ class WeatherPlugin:
           <div class="code-block">
             <pre><code class="language-python">from my_plugins import WeatherPlugin
 
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 registry.discover()  # Discover built-ins
 
 # Register custom plugin

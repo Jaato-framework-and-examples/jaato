@@ -67,8 +67,12 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
           <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
           <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
     </aside>
@@ -87,34 +91,49 @@
           <h2 id="requirements">Requirements</h2>
           <ul>
             <li>Python 3.10 or higher</li>
-            <li>Google AI credentials (see table)</li>
+            <li>Credentials for at least one AI provider (see table)</li>
           </ul>
 
-          <h2 id="auth-options">Authentication Options</h2>
+          <h2 id="auth-options">Choose a Provider</h2>
           <table>
             <thead>
               <tr>
-                <th>Method</th>
+                <th>Provider</th>
                 <th>Use Case</th>
                 <th>Setup</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>API Key</strong></td>
-                <td>Personal, experimentation</td>
-                <td><a href="https://aistudio.google.com/apikey" target="_blank">Get key</a></td>
+                <td><strong>Anthropic</strong></td>
+                <td>Complex reasoning, code generation</td>
+                <td><a href="../api-reference/providers/anthropic.html">Setup guide</a></td>
               </tr>
               <tr>
-                <td><strong>Vertex AI</strong></td>
-                <td>Enterprise, production</td>
-                <td><a href="../api-reference/providers/google-genai.html#vertex-ai">Setup guide</a></td>
+                <td><strong>Google GenAI</strong></td>
+                <td>Long context, multimodal</td>
+                <td><a href="../api-reference/providers/google-genai.html">Setup guide</a></td>
+              </tr>
+              <tr>
+                <td><strong>GitHub Models</strong></td>
+                <td>Multi-model access via single API</td>
+                <td><a href="../api-reference/providers/github-models.html">Setup guide</a></td>
+              </tr>
+              <tr>
+                <td><strong>Ollama</strong></td>
+                <td>Local models, privacy, no API costs</td>
+                <td><a href="../api-reference/providers/ollama.html">Setup guide</a></td>
+              </tr>
+              <tr>
+                <td><strong>Claude CLI</strong></td>
+                <td>Claude Pro/Max subscribers</td>
+                <td><a href="../api-reference/providers/claude-cli.html">Setup guide</a></td>
               </tr>
             </tbody>
           </table>
           <p>
-            See the <a href="../api-reference/providers/google-genai.html">Google GenAI Provider</a>
-            reference for detailed configuration options.
+            See the <a href="../api-reference/providers/index.html">Providers Reference</a>
+            for detailed configuration options for each provider.
           </p>
         </div>
         <div class="panel-code">
@@ -157,17 +176,24 @@ pip install -r requirements.txt</code></pre>
           </p>
         </div>
         <div class="panel-code">
-          <div class="code-label">.env (API Key)</div>
+          <div class="code-label">.env (Anthropic)</div>
           <div class="code-block">
-            <pre><code class="language-bash">GOOGLE_GENAI_API_KEY=AIza...your-key
+            <pre><code class="language-bash">JAATO_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-...your-key
+MODEL_NAME=claude-sonnet-4-20250514</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env (Google GenAI)</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_PROVIDER=google_genai
+GOOGLE_GENAI_API_KEY=AIza...your-key
 MODEL_NAME=gemini-2.5-flash</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">.env (Vertex AI)</div>
+          <div class="code-label" style="margin-top: 24px;">.env (Ollama - local)</div>
           <div class="code-block">
-            <pre><code class="language-bash">PROJECT_ID=my-gcp-project
-LOCATION=us-central1
-MODEL_NAME=gemini-2.5-flash</code></pre>
+            <pre><code class="language-bash">JAATO_PROVIDER=ollama
+OLLAMA_MODEL=qwen3:32b</code></pre>
           </div>
         </div>
       </section>
@@ -177,20 +203,26 @@ MODEL_NAME=gemini-2.5-flash</code></pre>
         <div class="panel-explanation">
           <h2 id="basic-usage">Basic Usage</h2>
           <p>
-            Create a client, connect to a model, and send a message.
+            Create a client, connect, and send a message. When called without
+            arguments, <code>connect()</code> reads <code>JAATO_PROVIDER</code>
+            and <code>MODEL_NAME</code> from your environment (or <code>.env</code> file).
           </p>
 
           <h3>Steps</h3>
           <ol>
             <li>Import <code>JaatoClient</code></li>
-            <li>Create client and connect</li>
+            <li>Create client and call <code>connect()</code></li>
             <li>Use <code>generate()</code> for text completion</li>
           </ol>
 
           <div class="callout callout-info">
-            <div class="callout-title">Note</div>
-            <code>generate()</code> is for one-shot completions.
-            For multi-turn conversations, see <code>send_message()</code> below.
+            <div class="callout-title">Environment Variable Resolution</div>
+            <code>connect()</code> resolves configuration from environment variables:
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+              <li><code>JAATO_PROVIDER</code> &mdash; selects the provider</li>
+              <li><code>MODEL_NAME</code> &mdash; selects the model</li>
+              <li>Provider-specific vars (e.g., <code>ANTHROPIC_API_KEY</code>, <code>OLLAMA_MODEL</code>) &mdash; authentication and overrides</li>
+            </ul>
           </div>
         </div>
         <div class="panel-code">
@@ -199,7 +231,7 @@ MODEL_NAME=gemini-2.5-flash</code></pre>
             <pre><code class="language-python">from shared import JaatoClient
 
 client = JaatoClient()
-client.connect(model="gemini-2.5-flash")  # Uses env config
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 response = client.generate("What is 2 + 2?")
 print(response)  # "4"</code></pre>
@@ -253,10 +285,10 @@ print(response)  # "4"</code></pre>
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(model="gemini-2.5-flash")  # Uses API key from env
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Discover and expose plugins
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 
 # Expose the CLI plugin for shell commands
