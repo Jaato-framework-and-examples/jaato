@@ -800,6 +800,13 @@ class JaatoServer:
         with self._with_session_env(), self._in_workspace():
             self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
+            # Wire formatter pipeline into runtime so output formatters can
+            # contribute system instructions (e.g., mermaid rendering hints)
+            if self._formatter_pipeline:
+                runtime = self._jaato.get_runtime()
+                if runtime:
+                    runtime.set_formatter_pipeline(self._formatter_pipeline)
+
             gc_result = load_gc_from_file()
         gc_threshold = None
         gc_strategy = None

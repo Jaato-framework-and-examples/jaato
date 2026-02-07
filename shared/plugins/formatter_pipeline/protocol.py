@@ -152,3 +152,27 @@ class ConfigurableFormatter(FormatterPlugin, Protocol):
 #                 return True
 #             return False  # Skip this formatter - LSP not available
 #     """
+#
+# get_system_instructions() -> Optional[str]:
+#     """Return system instructions describing this formatter's capabilities.
+#
+#     Called by FormatterPipeline.get_system_instructions() during session
+#     configuration. Allows output formatters to inform the model about
+#     rendering capabilities it can take advantage of.
+#
+#     Unlike tool plugins (which always contribute instructions), formatter
+#     instructions are optional - most formatters silently transform output
+#     without the model needing to know. Only implement this when the model
+#     can actively benefit from knowing about the formatter (e.g., using
+#     mermaid diagrams because the pipeline renders them graphically).
+#
+#     Returns:
+#         System instruction string, or None if no instructions needed.
+#
+#     Example:
+#         def get_system_instructions(self) -> Optional[str]:
+#             return (
+#                 "The output pipeline renders ```mermaid code blocks as "
+#                 "graphical diagrams. Feel free to use mermaid syntax."
+#             )
+#     """

@@ -171,6 +171,27 @@ class FormatterPipeline:
         for formatter in self._formatters:
             formatter.reset()
 
+    # ==================== System Instructions ====================
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Collect system instructions from registered formatters.
+
+        Iterates all formatters and collects instructions from those that
+        implement the optional get_system_instructions() method. This allows
+        output formatters to inform the model about rendering capabilities
+        it can take advantage of (e.g., mermaid diagram rendering).
+
+        Returns:
+            Combined instruction string, or None if no formatter contributes.
+        """
+        parts = []
+        for formatter in self._formatters:
+            if hasattr(formatter, "get_system_instructions"):
+                instr = formatter.get_system_instructions()
+                if instr:
+                    parts.append(instr)
+        return "\n\n".join(parts) if parts else None
+
     # ==================== Convenience Methods ====================
 
     def format(self, text: str) -> str:

@@ -156,6 +156,27 @@ class MermaidFormatterPlugin:
         """Update console width for rendering."""
         self._console_width = max(20, width)
 
+    def get_system_instructions(self) -> Optional[str]:
+        """Inform the model about mermaid diagram rendering capability.
+
+        Returns instructions only when rendering is actually available
+        (plugin enabled and a renderer is installed). This avoids
+        encouraging mermaid usage when diagrams would just pass through
+        as raw code blocks.
+        """
+        if not self._enabled:
+            return None
+
+        if not renderer.is_renderer_available():
+            return None
+
+        return (
+            "The output pipeline renders ```mermaid code blocks as graphical "
+            "diagrams in the terminal. When a visual diagram would aid "
+            "understanding (architecture, flows, state machines, sequences, "
+            "ER diagrams), prefer using mermaid syntax over ASCII art."
+        )
+
     def _render_diagram(self, source: str) -> str:
         """Render a mermaid diagram and return terminal output.
 

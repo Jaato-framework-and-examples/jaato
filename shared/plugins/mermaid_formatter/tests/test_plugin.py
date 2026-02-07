@@ -230,6 +230,56 @@ class TestFlushAndReset:
         assert result == ["clean text"]
 
 
+class TestSystemInstructions:
+    """Tests for get_system_instructions()."""
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_returns_instructions_when_enabled_and_available(self, mock_renderer):
+        mock_renderer.is_renderer_available.return_value = True
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        instr = plugin.get_system_instructions()
+        assert instr is not None
+        assert "mermaid" in instr.lower()
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_returns_none_when_disabled(self, mock_renderer):
+        mock_renderer.is_renderer_available.return_value = True
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+        plugin._enabled = False
+
+        assert plugin.get_system_instructions() is None
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_returns_none_when_renderer_unavailable(self, mock_renderer):
+        mock_renderer.is_renderer_available.return_value = False
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        assert plugin.get_system_instructions() is None
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_disabled_via_env_var(self, mock_renderer, monkeypatch):
+        mock_renderer.is_renderer_available.return_value = True
+        monkeypatch.setenv("JAATO_MERMAID_BACKEND", "off")
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        assert plugin.get_system_instructions() is None
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_mentions_diagram_types(self, mock_renderer):
+        """Instructions should hint at useful diagram types."""
+        mock_renderer.is_renderer_available.return_value = True
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        instr = plugin.get_system_instructions()
+        assert "flow" in instr.lower() or "sequence" in instr.lower()
+
+
 class TestFallbackRendering:
     """Tests for fallback when no renderer is available."""
 
