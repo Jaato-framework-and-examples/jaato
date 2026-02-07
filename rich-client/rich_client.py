@@ -3518,6 +3518,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionInfoEvent,
         SessionDescriptionUpdatedEvent,
         MemoryListEvent,
+        SandboxPathsEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
@@ -3707,13 +3708,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     )
 
     # Set up sandbox path provider for @@ completion (server mode)
-    # In server mode, we use the workspace_path from the connection setup
-    # and /tmp as the default sandbox paths. The server may provide additional
-    # authorized paths via events in the future.
+    # Initial defaults; refreshed dynamically via SandboxPathsEvent and SessionInfoEvent
     _server_sandbox_paths: list[tuple[str, str]] = []
     if workspace_path:
         _server_sandbox_paths.append((str(workspace_path), "workspace"))
     _server_sandbox_paths.append(("/tmp", "system temp"))
+
+    def _update_sandbox_paths(paths_data: list[dict]) -> None:
+        """Update the mutable sandbox paths cache from event data."""
+        _server_sandbox_paths.clear()
+        for entry in paths_data:
+            _server_sandbox_paths.append((entry.get("path", ""), entry.get("description", "")))
 
     def get_sandbox_paths_for_completion():
         """Return sandbox-allowed root paths for @@ completion."""
@@ -4352,6 +4357,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 nonlocal available_memories
                 available_memories = event.memories
 
+            elif isinstance(event, SandboxPathsEvent):
+                # Refresh sandbox paths for @@ completion cache
+                _update_sandbox_paths(event.paths)
+
             elif isinstance(event, SessionInfoEvent):
                 # Store state snapshot for local use (completion, display)
                 # Note: available_sessions already declared nonlocal in SessionListEvent handler
@@ -4364,6 +4373,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_models = event.models
                 if event.memories:
                     available_memories = event.memories
+                if event.sandbox_paths:
+                    _update_sandbox_paths(event.sandbox_paths)
 
                 # Track session ID for recovery reattachment
                 if event.session_id:
