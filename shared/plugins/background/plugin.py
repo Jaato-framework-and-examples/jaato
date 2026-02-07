@@ -18,6 +18,7 @@ from ..model_provider.types import ToolSchema
 from ..base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
 from shared.trace import trace as _trace_write
+from shared.ai_tool_runner import get_current_tool_output_callback
 
 if TYPE_CHECKING:
     from ..registry import PluginRegistry
@@ -45,6 +46,7 @@ class BackgroundPlugin:
         self._capable_plugins: Dict[str, BackgroundCapable] = {}
         self._initialized = False
         self._agent_name: Optional[str] = None
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -236,6 +238,17 @@ Use this to discover which tools can be run in background mode.""",
             "listBackgroundCapableTools": self._list_capable_tools,
         }
 
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during tool execution."""
+        self._tool_output_callback = callback
+
+    def _stream_output(self, text: str) -> None:
+        """Forward output text to the tool output callback if available."""
+        callback = get_current_tool_output_callback() or self._tool_output_callback
+        if callback and text:
+            for line in text.splitlines():
+                callback(line)
+
     def _start_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Start a background task.
 
@@ -347,6 +360,9 @@ Use this to discover which tools can be run in background mode.""",
                     stderr_offset=stderr_offset,
                     wait=wait
                 )
+                # Stream stdout to popup so user can see output live
+                if info.stdout:
+                    self._stream_output(info.stdout)
                 return {
                     "task_id": info.task_id,
                     "plugin_name": plugin_name,
