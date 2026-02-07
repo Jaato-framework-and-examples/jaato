@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mermaid Formatter - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../providers/ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="gc.html">GC</a></li>
+          <li><a href="mermaid-formatter.html" class="active">Mermaid Formatter</a></li>
+          <li><a href="other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Mermaid Formatter</h1>
+          <p class="lead">
+            Streaming formatter that renders Mermaid diagrams inline in the terminal
+            using the best available graphics protocol, with a Unicode half-block
+            fallback that works everywhere.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>mermaid_formatter</code></td>
+              </tr>
+              <tr>
+                <td><strong>Type</strong></td>
+                <td>Formatter Pipeline Plugin</td>
+              </tr>
+              <tr>
+                <td><strong>Priority</strong></td>
+                <td><code>28</code> (structural formatting range)</td>
+              </tr>
+              <tr>
+                <td><strong>Dependencies</strong></td>
+                <td><code>Pillow</code> (required), <code>mmdc</code> (optional, recommended)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="features">Features</h2>
+          <ul>
+            <li><strong>Auto-detection</strong>: Picks the best graphics protocol for your terminal</li>
+            <li><strong>4 rendering backends</strong>: Kitty, iTerm2, Sixel, Unicode half-blocks</li>
+            <li><strong>Streaming</strong>: Detects mermaid blocks incrementally across chunks</li>
+            <li><strong>Artifact saving</strong>: PNG files saved for vision capture feedback</li>
+            <li><strong>Graceful degradation</strong>: Falls back to syntax-highlighted code when no renderer is installed</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">How it works</div>
+          <div class="code-block">
+            <pre><code class="language-text">Model output containing a mermaid block:
+
+  "Here's the architecture:
+   ```mermaid
+   graph TD
+       A[Client] -->|HTTP| B[Server]
+       B --> C[Database]
+       B --> D[Cache]
+   ```
+   As shown above..."
+
+The formatter:
+1. Yields "Here's the architecture:" immediately
+2. Buffers the mermaid source
+3. Renders to PNG via mmdc
+4. Displays inline using terminal protocol
+5. Saves artifact to /tmp/jaato_vision/
+6. Yields "As shown above..."</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Install mermaid-cli (recommended)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Gold standard renderer (requires Node.js)
+npm install -g @mermaid-js/mermaid-cli
+
+# Verify installation
+mmdc --version</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Terminal Graphics Backends -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="backends">Terminal Graphics Backends</h2>
+          <p>
+            The plugin auto-selects the best rendering backend based on your terminal.
+            Detection uses <code>shared/terminal_caps.py</code>, which reads
+            <code>TERM_PROGRAM</code> and <code>TERM</code> environment variables
+            and caches the result process-wide.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Backend</th>
+                <th>Protocol</th>
+                <th>Supported Terminals</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>kitty</code></td>
+                <td>Kitty graphics protocol</td>
+                <td>Kitty, Ghostty</td>
+              </tr>
+              <tr>
+                <td><code>iterm</code></td>
+                <td>iTerm2 inline images</td>
+                <td>iTerm2, WezTerm, Mintty</td>
+              </tr>
+              <tr>
+                <td><code>sixel</code></td>
+                <td>Sixel bitmap</td>
+                <td>foot, mlterm</td>
+              </tr>
+              <tr>
+                <td><code>rich_pixels</code></td>
+                <td>Unicode half-blocks (&#x2580;)</td>
+                <td>All terminals</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Multiplexer handling</div>
+            tmux and screen strip graphics escape sequences, so the plugin
+            automatically falls back to <code>rich_pixels</code> when a
+            multiplexer is detected. Override with
+            <code>JAATO_MERMAID_BACKEND=kitty</code> if you have tmux
+            passthrough enabled.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Backend selection priority</div>
+          <div class="code-block">
+            <pre><code class="language-python"># 1. Explicit override (always wins)
+os.environ["JAATO_MERMAID_BACKEND"] = "kitty"
+
+# 2. Global graphics override
+os.environ["JAATO_GRAPHICS_PROTOCOL"] = "sixel"
+
+# 3. Auto-detection from TERM_PROGRAM
+#    kitty/ghostty    → Kitty protocol
+#    iTerm.app/WezTerm → iTerm2 protocol
+#    foot/mlterm       → Sixel protocol
+
+# 4. Universal fallback
+#    Everything else   → Unicode half-blocks</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Backend output examples</div>
+          <div class="code-block">
+            <pre><code class="language-text"># Kitty: sends PNG via escape sequences
+ESC_Gf=100,a=T,m=1;base64data...ESC\
+ESC_Gm=0;base64data...ESC\
+
+# iTerm2: single OSC escape sequence
+ESC]1337;File=inline=1;size=N:base64...BEL
+
+# Sixel: DCS with color palette + bitmap
+ESC P0;1;0q"1;1;W;H #0;2;R;G;B ...data... ESC\
+
+# rich_pixels: Unicode half-block characters
+▀▀▀▀▀▀▀▀▀  (with ANSI fg/bg colors)
+▀▀▀▀▀▀▀▀▀  (2 pixels per cell height)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Mermaid Rendering -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="rendering">Mermaid Rendering</h2>
+          <p>
+            Diagrams are converted from Mermaid source text to PNG using the first
+            available renderer. The rendering step is separate from the terminal
+            display step, allowing different combinations.
+          </p>
+
+          <h3>mmdc (mermaid-cli)</h3>
+          <p>
+            The official Mermaid CLI tool. Uses Puppeteer to render diagrams in a
+            headless browser. Supports all Mermaid diagram types and themes.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Install</strong></td><td><code>npm install -g @mermaid-js/mermaid-cli</code></td></tr>
+              <tr><td><strong>Requires</strong></td><td>Node.js</td></tr>
+              <tr><td><strong>Detection</strong></td><td><code>shutil.which("mmdc")</code></td></tr>
+              <tr><td><strong>Timeout</strong></td><td>30 seconds</td></tr>
+            </tbody>
+          </table>
+
+          <h3>mermaid-py (Python fallback)</h3>
+          <p>
+            Python package that produces SVG, converted to PNG via cairosvg.
+            Used when mmdc is not available.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Install</strong></td><td><code>pip install mermaid cairosvg</code></td></tr>
+              <tr><td><strong>Optional extra</strong></td><td><code>pip install jaato[mermaid]</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Passthrough (no renderer)</h3>
+          <p>
+            When neither renderer is available, the source is emitted as a
+            <code>```mermaid</code> code block with a dim install hint. The
+            downstream <code>code_block_formatter</code> applies syntax highlighting.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Rendering pipeline</div>
+          <div class="code-block">
+            <pre><code class="language-text">```mermaid source
+    │
+    ├── mmdc available?
+    │   └── YES → subprocess mmdc → PNG bytes
+    │
+    ├── mermaid-py available?
+    │   └── YES → mermaid.Graph → SVG → cairosvg → PNG bytes
+    │
+    └── Neither available
+        └── Pass through as ```mermaid code block
+            + hint: "npm install -g @mermaid-js/mermaid-cli"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Supported diagram types (via mmdc)</div>
+          <div class="code-block">
+            <pre><code class="language-text">graph TD/LR      Flowcharts
+sequenceDiagram  Sequence diagrams
+classDiagram     Class diagrams
+stateDiagram     State diagrams
+erDiagram        Entity relationship
+gantt             Gantt charts
+pie               Pie charts
+gitgraph         Git branch diagrams
+mindmap          Mind maps
+timeline         Timelines
+quadrantChart    Quadrant charts
+sankey            Sankey diagrams</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>JAATO_MERMAID_BACKEND</h3>
+          <p>
+            Force a specific graphics backend, overriding auto-detection.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>string</code></td></tr>
+              <tr><td><strong>Values</strong></td><td><code>kitty</code>, <code>iterm</code>, <code>sixel</code>, <code>ascii</code>, <code>off</code></td></tr>
+              <tr><td><strong>Default</strong></td><td>Auto-detect</td></tr>
+            </tbody>
+          </table>
+          <p>Setting <code>off</code> disables diagram rendering entirely.</p>
+
+          <h3>JAATO_MERMAID_THEME</h3>
+          <p>
+            Mermaid rendering theme.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>string</code></td></tr>
+              <tr><td><strong>Values</strong></td><td><code>default</code>, <code>dark</code>, <code>forest</code>, <code>neutral</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>default</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>JAATO_MERMAID_SCALE</h3>
+          <p>
+            Rasterization scale factor. Higher values produce sharper images
+            on retina/HiDPI displays but use more memory.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>int</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>2</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>JAATO_GRAPHICS_PROTOCOL</h3>
+          <p>
+            Global terminal graphics protocol override. Affects all plugins
+            that use <code>shared/terminal_caps.py</code>, not just the
+            mermaid formatter.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>string</code></td></tr>
+              <tr><td><strong>Values</strong></td><td><code>kitty</code>, <code>iterm</code>, <code>sixel</code>, <code>none</code></td></tr>
+              <tr><td><strong>Default</strong></td><td>Auto-detect</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment variable examples</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Force Kitty protocol (e.g., inside tmux with passthrough)
+export JAATO_MERMAID_BACKEND=kitty
+
+# Use dark theme for diagrams
+export JAATO_MERMAID_THEME=dark
+
+# Higher resolution for retina displays
+export JAATO_MERMAID_SCALE=3
+
+# Disable diagram rendering entirely
+export JAATO_MERMAID_BACKEND=off
+
+# Save artifacts to custom directory
+export JAATO_VISION_DIR=~/diagrams</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Pipeline configuration (.jaato/formatters.json)</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "formatters": [
+    {"name": "hidden_content_filter", "enabled": true},
+    {"name": "diff_formatter", "enabled": true},
+    {"name": "table_formatter", "enabled": true},
+    {"name": "mermaid_formatter", "enabled": true, "config": {
+      "theme": "dark",
+      "scale": 2,
+      "background": "transparent"
+    }},
+    {"name": "code_block_formatter", "enabled": true,
+     "config": {"line_numbers": true}}
+  ]
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Programmatic configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.mermaid_formatter import create_plugin
+
+formatter = create_plugin()
+formatter.initialize({
+    "theme": "dark",
+    "scale": 2,
+    "background": "white",
+    "console_width": 120,
+})
+formatter.set_console_width(terminal_width)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Artifact Output -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="artifacts">Artifact Output</h2>
+          <p>
+            Every rendered diagram is saved as a PNG file in the artifact directory
+            (<code>JAATO_VISION_DIR</code>, default <code>/tmp/jaato_vision</code>).
+            This integrates with the vision capture system, enabling:
+          </p>
+          <ul>
+            <li><strong>Model feedback loop</strong>: The model can "see" its own diagrams and iterate</li>
+            <li><strong>Export</strong>: Users can open/share the high-fidelity PNG files</li>
+            <li><strong>Documentation</strong>: Artifacts persist across turns for reference</li>
+          </ul>
+
+          <p>
+            Files are named sequentially: <code>mermaid_001.png</code>,
+            <code>mermaid_002.png</code>, etc. The counter resets when the
+            plugin is re-initialized.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Artifact output</div>
+          <div class="code-block">
+            <pre><code class="language-text"># After rendering a diagram, the output includes:
+
+[rendered diagram inline]
+    [saved: /tmp/jaato_vision/mermaid_001.png]
+
+# Multiple diagrams in one turn:
+[first diagram]
+    [saved: /tmp/jaato_vision/mermaid_001.png]
+
+[second diagram]
+    [saved: /tmp/jaato_vision/mermaid_002.png]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Vision capture integration</div>
+          <div class="code-block">
+            <pre><code class="language-text">Pipeline flow:
+
+  mermaid_formatter (priority 28)
+      │
+      ├── Renders diagram inline
+      ├── Saves PNG to JAATO_VISION_DIR
+      │
+      ▼
+  vision_capture_formatter (priority 95)
+      │
+      └── Observes rendered output
+          for model feedback loop</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dependencies -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="dependencies">Dependencies</h2>
+
+          <h3>Required</h3>
+          <table>
+            <thead>
+              <tr><th>Package</th><th>Purpose</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Pillow>=10.0.0</code></td>
+                <td>Image processing for all graphics backends</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Optional</h3>
+          <table>
+            <thead>
+              <tr><th>Package</th><th>Purpose</th><th>Install</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>@mermaid-js/mermaid-cli</code></td>
+                <td>High-fidelity Mermaid rendering</td>
+                <td><code>npm install -g @mermaid-js/mermaid-cli</code></td>
+              </tr>
+              <tr>
+                <td><code>cairosvg>=2.7.0</code></td>
+                <td>SVG to PNG conversion</td>
+                <td><code>pip install jaato[mermaid]</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick setup</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Minimal (Unicode half-block rendering only)
+pip install jaato
+
+# With mermaid-cli (recommended)
+pip install jaato
+npm install -g @mermaid-js/mermaid-cli
+
+# Full setup (all optional deps)
+pip install jaato[mermaid]
+npm install -g @mermaid-js/mermaid-cli</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check availability</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.mermaid_formatter.renderer import (
+    is_renderer_available
+)
+from shared.terminal_caps import detect
+
+# Check if rendering will work
+print(is_renderer_available())  # True/False
+
+# Check which graphics backend will be used
+caps = detect()
+print(caps["graphics"])  # "kitty"/"iterm"/"sixel"/None</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
