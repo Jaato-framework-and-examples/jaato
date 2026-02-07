@@ -385,10 +385,10 @@ from shared.plugins.permission import (
 
 # Create client
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Create registry and expose tools
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 registry.expose_tool("cli")
 registry.expose_tool("file_edit")

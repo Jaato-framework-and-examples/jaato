@@ -137,8 +137,8 @@
           <div class="code-label">Creating sessions</div>
           <div class="code-block">
             <pre><code class="language-python"># Via JaatoClient (most common)
-client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
+client = JaatoClient()
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 client.configure_tools(registry)
 session = client.get_session()
 

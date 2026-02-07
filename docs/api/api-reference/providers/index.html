@@ -195,25 +195,22 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient
 
-# Uses JAATO_PROVIDER env var
+# Recommended: configure via .env file
+# JAATO_PROVIDER=anthropic
+# MODEL_NAME=claude-sonnet-4-20250514
 client = JaatoClient()
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()  # Reads provider and model from env
 
-# Explicit provider selection
+# Override provider in code (model still from env)
 client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()
 
-# Google GenAI
+# Override both provider and model in code
 client = JaatoClient(provider_name="google_genai")
 client.connect(model="gemini-2.5-flash")
 
-# Ollama (local models)
 client = JaatoClient(provider_name="ollama")
-client.connect(model="qwen3:32b")
-
-# Claude CLI (uses subscription)
-client = JaatoClient(provider_name="claude_cli")
-client.connect(model="claude-sonnet-4-20250514")</code></pre>
+client.connect(model="qwen3:32b")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Discover available providers</div>
@@ -305,11 +302,11 @@ MODEL_NAME=openai/gpt-4o</code></pre>
 
 # Explicit provider (overrides JAATO_PROVIDER env var)
 client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()  # Reads MODEL_NAME from env
 
-# Uses JAATO_PROVIDER env var
+# Everything from env
 client = JaatoClient()
-client.connect(model="your-model-name")</code></pre>
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env</code></pre>
           </div>
         </div>
       </section>

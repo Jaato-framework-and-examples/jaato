@@ -141,7 +141,7 @@
 
 # JaatoClient creates runtime internally
 client = JaatoClient()
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 client.configure_tools(registry)
 
 # Access runtime for subagent creation
@@ -160,7 +160,7 @@ sub_response = sub_session.send_message("Research...")</code></pre>
 
 # Create runtime directly
 runtime = JaatoRuntime(provider_name="anthropic")
-runtime.connect(project=None, location=None)
+runtime.connect()  # Reads provider config from env
 
 # Configure plugins
 registry = PluginRegistry()
@@ -278,11 +278,15 @@ runtime.register_provider("google_genai")  # For subagents</code></pre>
         <div class="panel-code">
           <div class="code-label">Connection</div>
           <div class="code-block">
-            <pre><code class="language-python"># Anthropic (API key or OAuth)
-runtime = JaatoRuntime(provider_name="anthropic")
-runtime.connect(project=None, location=None)
+            <pre><code class="language-python"># Recommended: reads config from env
+runtime = JaatoRuntime()  # Uses JAATO_PROVIDER env var
+runtime.connect()
 
-# Google GenAI (Vertex AI)
+# Or with explicit provider
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect()
+
+# Google GenAI (Vertex AI) with explicit project/location
 runtime = JaatoRuntime(provider_name="google_genai")
 runtime.connect(
     project="my-gcp-project",
@@ -363,7 +367,7 @@ if not runtime.verify_auth(allow_interactive=True):
 )
 
 runtime = JaatoRuntime()
-runtime.connect(project, location)
+runtime.connect()  # Reads provider config from env
 
 # Setup registry
 registry = PluginRegistry()
@@ -504,7 +508,7 @@ review = reviewer.send_message("Review this code...", on_output)</code></pre>
           <div class="code-block">
             <pre><code class="language-python"># Main agent uses Anthropic
 runtime = JaatoRuntime(provider_name="anthropic")
-runtime.connect(project=None, location=None)
+runtime.connect()
 runtime.configure_plugins(registry)
 
 # Register Google GenAI for subagents
@@ -590,7 +594,7 @@ from shared.plugins.model_provider.base import ProviderConfig
 
 # Create runtime with primary provider
 runtime = JaatoRuntime(provider_name="anthropic")
-runtime.connect(project=None, location=None)
+runtime.connect()
 
 # Register additional providers
 runtime.register_provider("google_genai")

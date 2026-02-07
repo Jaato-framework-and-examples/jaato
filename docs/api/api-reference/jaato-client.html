@@ -119,10 +119,10 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
-client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
+client = JaatoClient()
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
-registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 registry.expose_tool("cli")
 client.configure_tools(registry)
@@ -248,29 +248,33 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
 
           <h3>connect</h3>
           <div class="method-signature">
-            <span class="method-name">connect</span>(<span class="param">project</span>: <span class="type">str</span>, <span class="param">location</span>: <span class="type">str</span>, <span class="param">model</span>: <span class="type">str</span>) -> <span class="type">None</span>
+            <span class="method-name">connect</span>(<span class="param">project</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>, <span class="param">location</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>, <span class="param">model</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>) -> <span class="type">None</span>
           </div>
 
-          <p>Establishes a connection to the AI provider with the specified configuration.</p>
+          <p>
+            Establishes a connection to the AI provider. When called without arguments,
+            reads configuration from environment variables (<code>JAATO_PROVIDER</code>,
+            <code>MODEL_NAME</code>, and provider-specific variables).
+          </p>
 
           <ul class="param-list">
             <li>
               <span class="param-name">project</span>
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
-              <div class="param-desc">Cloud project ID (required for Vertex AI, optional for other providers)</div>
+              <div class="param-desc">Cloud project ID (required for Vertex AI, read from <code>JAATO_GOOGLE_PROJECT</code> if not set)</div>
             </li>
             <li>
               <span class="param-name">location</span>
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
-              <div class="param-desc">Provider region (required for Vertex AI, optional for other providers)</div>
+              <div class="param-desc">Provider region (required for Vertex AI, read from <code>JAATO_GOOGLE_LOCATION</code> if not set)</div>
             </li>
             <li>
               <span class="param-name">model</span>
               <span class="param-type">str</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Model name (e.g., <code>claude-sonnet-4-20250514</code>, <code>gemini-2.5-flash</code>)</div>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Model name. If not provided, reads from <code>MODEL_NAME</code> env var (or provider-specific vars like <code>OLLAMA_MODEL</code>)</div>
             </li>
           </ul>
 
@@ -343,35 +347,30 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Connection</div>
+          <div class="code-label">Connection (recommended: env-based)</div>
           <div class="code-block">
-            <pre><code class="language-python"># Anthropic
-client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
-
-# Google GenAI (Vertex AI)
-client = JaatoClient(provider_name="google_genai")
-client.connect(
-    project="my-gcp-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
+            <pre><code class="language-python"># Reads JAATO_PROVIDER and MODEL_NAME from env
+client = JaatoClient()
+client.connect()
 
 # Check connection
 if client.is_connected:
     print(f"Connected to {client.model_name}")</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Using environment variables</div>
+          <div class="code-label" style="margin-top: 24px;">Connection with explicit overrides</div>
           <div class="code-block">
-            <pre><code class="language-python">import os
-from dotenv import load_dotenv
+            <pre><code class="language-python"># Override provider and model in code
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")
 
-load_dotenv()
-
-# Provider auto-detected from JAATO_PROVIDER env var
-client = JaatoClient()
-client.connect(model=os.getenv("MODEL_NAME"))</code></pre>
+# Google GenAI (Vertex AI) with project/location
+client = JaatoClient(provider_name="google_genai")
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Runtime &amp; Session access</div>
@@ -394,7 +393,7 @@ history = main_session.get_history()</code></pre>
           <div class="code-block">
             <pre><code class="language-python"># For providers with OAuth (Anthropic, Antigravity)
 client = JaatoClient(provider_name="anthropic")
-client.connect(project=None, location=None, model="claude-sonnet-4-20250514")
+client.connect()  # Reads MODEL_NAME from env
 
 # Verify auth - triggers browser OAuth if needed
 if not client.verify_auth(
@@ -491,10 +490,10 @@ client.configure_tools(registry, permission_plugin, ledger)</code></pre>
 )
 
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Setup registry
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 registry.expose_tool("cli")
 registry.expose_tool("file_edit")
@@ -1182,7 +1181,7 @@ if share:
 from shared import JaatoClient, CancelledException
 
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 # ... configure tools ...
 
 # Enable streaming for mid-generation cancellation

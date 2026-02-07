@@ -203,20 +203,26 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
         <div class="panel-explanation">
           <h2 id="basic-usage">Basic Usage</h2>
           <p>
-            Create a client, connect to a model, and send a message.
+            Create a client, connect, and send a message. When called without
+            arguments, <code>connect()</code> reads <code>JAATO_PROVIDER</code>
+            and <code>MODEL_NAME</code> from your environment (or <code>.env</code> file).
           </p>
 
           <h3>Steps</h3>
           <ol>
             <li>Import <code>JaatoClient</code></li>
-            <li>Create client and connect</li>
+            <li>Create client and call <code>connect()</code></li>
             <li>Use <code>generate()</code> for text completion</li>
           </ol>
 
           <div class="callout callout-info">
-            <div class="callout-title">Note</div>
-            <code>generate()</code> is for one-shot completions.
-            For multi-turn conversations, see <code>send_message()</code> below.
+            <div class="callout-title">Environment Variable Resolution</div>
+            <code>connect()</code> resolves configuration from environment variables:
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+              <li><code>JAATO_PROVIDER</code> &mdash; selects the provider</li>
+              <li><code>MODEL_NAME</code> &mdash; selects the model</li>
+              <li>Provider-specific vars (e.g., <code>ANTHROPIC_API_KEY</code>, <code>OLLAMA_MODEL</code>) &mdash; authentication and overrides</li>
+            </ul>
           </div>
         </div>
         <div class="panel-code">
@@ -224,8 +230,8 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient
 
-client = JaatoClient()  # Uses JAATO_PROVIDER env var
-client.connect(model="claude-sonnet-4-20250514")  # Uses env config
+client = JaatoClient()
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 response = client.generate("What is 2 + 2?")
 print(response)  # "4"</code></pre>
@@ -279,10 +285,10 @@ print(response)  # "4"</code></pre>
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(model="claude-sonnet-4-20250514")  # Uses env config
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Discover and expose plugins
-registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 
 # Expose the CLI plugin for shell commands

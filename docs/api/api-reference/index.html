@@ -231,9 +231,9 @@
 from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 registry.expose_tool("cli")
 

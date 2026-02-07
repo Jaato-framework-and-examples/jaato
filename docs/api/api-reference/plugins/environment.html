@@ -283,7 +283,7 @@ shell_info = executors["get_environment"]({"aspect": "shell"})</code></pre>
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(project_id, location, model_name)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 registry = PluginRegistry()
 registry.discover()

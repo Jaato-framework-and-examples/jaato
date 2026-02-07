@@ -113,8 +113,8 @@
             <pre><code class="language-python">from shared import JaatoClient, Message, Role
 
 # Your code doesn't know which provider
-client = JaatoClient()  # Uses default provider
-client.connect(project, location, model)
+client = JaatoClient()
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 # Same API regardless of provider
 response = client.send_message(
@@ -127,7 +127,7 @@ history = client.get_history()
 for msg in history:
     print(f"{msg.role}: {msg.text}")
 
-# Switch provider = change one line
+# Switch provider = change env var or one line
 client = JaatoClient(provider_name="anthropic")
 # Rest of code unchanged!</code></pre>
           </div>
@@ -190,14 +190,17 @@ client = JaatoClient(provider_name="anthropic")
         <div class="panel-code">
           <div class="code-label">Using providers</div>
           <div class="code-block">
-            <pre><code class="language-python"># Uses JAATO_PROVIDER env var
+            <pre><code class="language-python"># Recommended: configure via .env file
+# JAATO_PROVIDER=anthropic
+# MODEL_NAME=claude-sonnet-4-20250514
 client = JaatoClient()
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()  # Reads provider and model from env
 
-# Explicit provider selection
+# Override provider in code (model still from env)
 client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")
+client.connect()
 
+# Override both provider and model in code
 client = JaatoClient(provider_name="google_genai")
 client.connect(model="gemini-2.5-flash")
 
@@ -591,7 +594,7 @@ provider.initialize(ProviderConfig(
     extra={"timeout": 60}   # Provider-specific
 ))
 
-# Connect to a model
+# Connect to a model (or read MODEL_NAME from env)
 provider.connect("claude-sonnet-4-20250514")</code></pre>
           </div>
 
@@ -600,12 +603,13 @@ provider.connect("claude-sonnet-4-20250514")</code></pre>
             <pre><code class="language-python">from shared import JaatoClient
 
 # JaatoClient handles provider setup
-client = JaatoClient()  # Uses JAATO_PROVIDER env var
-client.connect(model="claude-sonnet-4-20250514")
+# Reads JAATO_PROVIDER and MODEL_NAME from env
+client = JaatoClient()
+client.connect()
 
-# Or specify provider explicitly
+# Or specify provider explicitly (model still from env)
 client = JaatoClient(provider_name="anthropic")
-client.connect(model="claude-sonnet-4-20250514")</code></pre>
+client.connect()</code></pre>
           </div>
         </div>
       </section>

@@ -895,9 +895,9 @@ def create_plugin():
 
 # Create client and registry
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 
 # Expose your plugin
@@ -1025,7 +1025,7 @@ pip install jaato-plugin-weather
 # Plugin is now discoverable
 from shared import PluginRegistry
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry()
 registry.discover()  # Finds your plugin!
 registry.expose_tool("weather")</code></pre>
           </div>

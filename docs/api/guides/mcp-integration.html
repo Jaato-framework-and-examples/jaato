@@ -133,9 +133,9 @@
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 
 # Expose MCP plugin - connects to all servers
@@ -392,7 +392,7 @@ uvx mcp-server-fetch</code></pre>
           <div class="code-block">
             <pre><code class="language-python">from shared import PluginRegistry
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry()
 registry.discover()
 registry.expose_tool("mcp")
 
@@ -464,9 +464,9 @@ for tool in filesystem_tools:
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry(model_name=client.model_name)
 registry.discover()
 registry.expose_tool("mcp")
 client.configure_tools(registry)
@@ -573,7 +573,7 @@ SLACK_TOKEN=xoxb-xxxxxxxxxxxx</code></pre>
 load_dotenv()
 
 # Now MCP plugin will substitute env vars
-registry = PluginRegistry(model_name=model)
+registry = PluginRegistry()
 registry.discover()
 registry.expose_tool("mcp")</code></pre>
           </div>
