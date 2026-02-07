@@ -173,13 +173,16 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         return p
 
     def _is_path_allowed(self, path: str) -> bool:
-        """Check if a path is allowed for access.
+        """Check if a path is allowed for read access.
 
         A path is allowed if:
         1. The path is within the workspace_root (or CWD if not configured)
         2. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        3. The path is authorized via the plugin registry
+        3. The path is authorized via the plugin registry (read or readwrite)
+
+        This plugin is read-only, so it always checks with mode="read".
+        Both "readonly" and "readwrite" authorized paths allow read access.
 
         Args:
             path: Path to check.
@@ -196,11 +199,13 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         abs_path = str(resolved.absolute())
 
         # Use shared sandbox utility with .jaato containment support and /tmp access
+        # Always mode="read" since this plugin is read-only
         allowed = check_path_with_jaato_containment(
             abs_path,
             workspace,
             self._plugin_registry,
-            allow_tmp=getattr(self, '_allow_tmp', True)
+            allow_tmp=getattr(self, '_allow_tmp', True),
+            mode="read"
         )
 
         if not allowed:

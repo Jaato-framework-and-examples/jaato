@@ -196,14 +196,15 @@ class MultiFileExecutor:
     def __init__(
         self,
         resolve_path_fn: Callable[[str], Path],
-        is_path_allowed_fn: Callable[[str], bool],
+        is_path_allowed_fn: Callable,
         trace_fn: Optional[Callable[[str], None]] = None
     ):
         """Initialize the multi-file executor.
 
         Args:
             resolve_path_fn: Function to resolve relative paths to absolute Path objects
-            is_path_allowed_fn: Function to check if a path is within sandbox
+            is_path_allowed_fn: Function to check if a path is within sandbox.
+                Signature: (path: str, mode: str = "read") -> bool
             trace_fn: Optional function for debug tracing
         """
         self._resolve_path = resolve_path_fn
@@ -244,7 +245,7 @@ class MultiFileExecutor:
                 resolved_str = str(resolved)
 
                 # Check sandbox
-                if not self._is_path_allowed(resolved_str):
+                if not self._is_path_allowed(resolved_str, mode="write"):
                     return False, f"Path outside workspace: {op.path}", i
 
                 # Check file exists (unless being created in same batch)
@@ -278,7 +279,7 @@ class MultiFileExecutor:
                 resolved_str = str(resolved)
 
                 # Check sandbox
-                if not self._is_path_allowed(resolved_str):
+                if not self._is_path_allowed(resolved_str, mode="write"):
                     return False, f"Path outside workspace: {op.path}", i
 
                 # Check file doesn't exist (unless being deleted in same batch)
@@ -296,7 +297,7 @@ class MultiFileExecutor:
                 resolved_str = str(resolved)
 
                 # Check sandbox
-                if not self._is_path_allowed(resolved_str):
+                if not self._is_path_allowed(resolved_str, mode="write"):
                     return False, f"Path outside workspace: {op.path}", i
 
                 # Check file exists (unless being created in same batch)
@@ -321,9 +322,9 @@ class MultiFileExecutor:
                 dest_str = str(dest_resolved)
 
                 # Check sandbox for both paths
-                if not self._is_path_allowed(source_str):
+                if not self._is_path_allowed(source_str, mode="write"):
                     return False, f"Source path outside workspace: {op.source_path}", i
-                if not self._is_path_allowed(dest_str):
+                if not self._is_path_allowed(dest_str, mode="write"):
                     return False, f"Destination path outside workspace: {op.dest_path}", i
 
                 # Check source exists (unless being created in same batch)

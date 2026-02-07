@@ -706,7 +706,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         return path_tokens
 
-    def _is_path_within_workspace(self, path: str) -> bool:
+    def _is_path_within_workspace(self, path: str, mode: str = "write") -> bool:
         """Check if a path is allowed for access.
 
         A path is allowed if:
@@ -714,7 +714,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         2. The path is within the workspace_root
         3. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        4. The path is authorized via the plugin registry
+        4. The path is authorized via the plugin registry (respecting access mode)
 
         Handles:
         - Absolute paths
@@ -725,6 +725,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         Args:
             path: The path to check.
+            mode: Access mode - "read" or "write" (default: "write").
+                 CLI defaults to "write" since commands can perform any operation.
+                 Paths authorized as "readonly" are blocked for CLI access.
 
         Returns:
             True if the path is allowed, False otherwise.
@@ -745,11 +748,12 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             allowed = check_path_with_jaato_containment(
                 expanded,
                 self._workspace_root,
-                self._plugin_registry
+                self._plugin_registry,
+                mode=mode
             )
 
             if not allowed:
-                self._trace(f"_is_path_within_workspace: {path} blocked (outside sandbox)")
+                self._trace(f"_is_path_within_workspace: {path} blocked (outside sandbox, mode={mode})")
             return allowed
 
         except (OSError, ValueError):
