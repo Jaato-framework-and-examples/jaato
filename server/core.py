@@ -99,7 +99,6 @@ from .events import (
     MidTurnPromptInjectedEvent,
     MidTurnInterruptEvent,
     MemoryListEvent,
-    SandboxPathsEvent,
     serialize_event,
     deserialize_event,
 )
@@ -1302,7 +1301,7 @@ class JaatoServer:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
-                                 continuation_id=None, show_output=None):
+                                 continuation_id=None, show_output=None, show_popup=None):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -1313,6 +1312,7 @@ class JaatoServer:
                     backgrounded=backgrounded,
                     continuation_id=continuation_id,
                     show_output=show_output,
+                    show_popup=show_popup,
                 ))
 
             def on_tool_output(self, agent_id, call_id, chunk):
@@ -2162,43 +2162,6 @@ class JaatoServer:
 
         return None
 
-    def _get_sandbox_paths(self) -> list[dict[str, str]]:
-        """Build the list of sandbox-allowed paths for @@ completion.
-
-        Returns:
-            List of {path, description} dicts for the client's completion cache.
-        """
-        paths = []
-        if not self._jaato:
-            return paths
-
-        runtime = self._jaato.get_runtime()
-        registry = runtime.registry if runtime else None
-        if not registry:
-            return paths
-
-        # Workspace root
-        workspace = registry.get_workspace_path()
-        if workspace:
-            paths.append({"path": workspace, "description": "workspace"})
-
-        # Authorized external paths from sandbox manager / plugins
-        try:
-            import os
-            authorized = registry.list_authorized_paths()
-            for auth_path, source in authorized.items():
-                # Skip if same as workspace (already added)
-                if workspace and os.path.realpath(auth_path) == os.path.realpath(workspace):
-                    continue
-                paths.append({"path": auth_path, "description": f"allowed ({source})"})
-        except Exception:
-            pass
-
-        # System temp directory
-        paths.append({"path": "/tmp", "description": "system temp"})
-
-        return paths
-
     def stop(self) -> bool:
         """Stop current operation.
 
@@ -2255,10 +2218,6 @@ class JaatoServer:
                 mem_plugin = self._find_plugin_for_command("memory")
                 if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
                     self.emit(MemoryListEvent(memories=mem_plugin.get_memory_metadata()))
-
-            # After sandbox commands, push updated sandbox paths for @@ completion cache
-            if command.lower() == "sandbox":
-                self.emit(SandboxPathsEvent(paths=self._get_sandbox_paths()))
 
             # Handle HelpLines result - emit HelpTextEvent for pager display
             if isinstance(result, HelpLines):

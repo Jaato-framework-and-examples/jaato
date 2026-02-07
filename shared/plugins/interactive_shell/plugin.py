@@ -553,7 +553,7 @@ IMPORTANT NOTES:
                 'is_alive': session.is_alive,
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id, "show_output": False})
+                return (result, {"continuation_id": session_id, "show_output": False, "show_popup": False})
             return result
         except Exception as exc:
             return {'error': f'shell_read: {exc}', 'is_alive': session.is_alive}
