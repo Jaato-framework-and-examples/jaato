@@ -1461,6 +1461,11 @@ class SessionManager:
             if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
                 memories_data = mem_plugin.get_memory_metadata()
 
+        # Get sandbox paths from the session's server for @@ completion cache
+        sandbox_paths_data = []
+        if session.server:
+            sandbox_paths_data = session.server._get_sandbox_paths()
+
         return SessionInfoEvent(
             session_id=session.session_id,
             session_name=session.name,
@@ -1471,6 +1476,7 @@ class SessionManager:
             models=models_data,
             user_inputs=session.user_inputs,  # Command history for prompt restoration
             memories=memories_data,
+            sandbox_paths=sandbox_paths_data,
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:

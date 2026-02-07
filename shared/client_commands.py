@@ -94,6 +94,9 @@ def build_file_reference_help_text() -> List[Tuple[str, str]]:
         ("  - @src/main.py      - Reference a file (contents included)", "dim"),
         ("  - @./config.json    - Reference with explicit relative path", "dim"),
         ("  - @~/documents/     - Reference with home directory", "dim"),
+        ("  Use @@path to browse sandbox-allowed paths (workspace, external, /tmp).", "dim"),
+        ("  - @@                - Show all sandbox-allowed root paths", "dim"),
+        ("  - @@/tmp/output/    - Browse files in an allowed path", "dim"),
         ("", "dim"),
     ]
 
