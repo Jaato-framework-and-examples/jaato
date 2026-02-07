@@ -20,6 +20,7 @@ from typing import Dict, List, Any, Callable, Optional
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from .session import ShellSession
+from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 
 
@@ -468,9 +469,11 @@ IMPORTANT NOTES:
             with self._lock:
                 self._sessions[session_id] = session
 
+            self._stream_output(initial_output)
+
             result = {
                 'session_id': session_id,
-                'output': initial_output,
+                'output': strip_ansi(initial_output),
                 'is_alive': session.is_alive,
             }
 
@@ -483,7 +486,8 @@ IMPORTANT NOTES:
                 f"spawn: id={session_id} output_len={len(initial_output)} "
                 f"alive={session.is_alive}"
             )
-            self._stream_output(initial_output)
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
             return result
 
         except Exception as exc:
@@ -516,10 +520,13 @@ IMPORTANT NOTES:
         try:
             output = session.send_input(text)
             self._stream_output(output)
-            return {
-                'output': output,
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except Exception as exc:
             self._trace(f"input: id={session_id} FAILED: {exc}")
             return {'error': f'shell_input: {exc}', 'is_alive': session.is_alive}
@@ -541,10 +548,13 @@ IMPORTANT NOTES:
         try:
             output = session.read_output(timeout=timeout)
             self._stream_output(output)
-            return {
-                'output': output,
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except Exception as exc:
             return {'error': f'shell_read: {exc}', 'is_alive': session.is_alive}
 
@@ -573,10 +583,13 @@ IMPORTANT NOTES:
         try:
             output = session.send_control(key)
             self._stream_output(output)
-            return {
-                'output': output,
+            result = {
+                'output': strip_ansi(output),
                 'is_alive': session.is_alive,
             }
+            if session.is_alive:
+                return (result, {"continuation_id": session_id})
+            return result
         except ValueError as exc:
             return {'error': str(exc)}
         except Exception as exc:
@@ -638,11 +651,19 @@ IMPORTANT NOTES:
         self._tool_output_callback = callback
 
     def _stream_output(self, text: str) -> None:
-        """Forward output text to the tool output callback if available."""
+        """Forward raw output text to the tool output callback if available.
+
+        Splits on \\n only (not \\r) to preserve carriage returns and ANSI
+        escape sequences within lines for proper terminal emulation by pyte.
+        """
         callback = get_current_tool_output_callback() or self._tool_output_callback
         if callback and text:
-            for line in text.splitlines():
-                callback(line)
+            parts = text.split('\n')
+            # Remove trailing empty from trailing \n (avoids extra blank line)
+            if parts and not parts[-1]:
+                parts.pop()
+            for chunk in parts:
+                callback(chunk)
 
     def _get_session(self, session_id: str) -> Optional[ShellSession]:
         """Look up a session by ID."""

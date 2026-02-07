@@ -1010,8 +1010,10 @@ class PTDisplay:
         if not self._tool_output_popup.is_visible:
             return []
 
-        # Calculate popup dimensions
-        popup_width = max(40, min(80, int(self._width * 0.5)))
+        # Calculate popup dimensions — adapt width to content
+        popup_width = self._tool_output_popup.get_content_width(
+            buffer, min_width=40, max_width=min(120, int(self._width * 0.85))
+        )
         max_height = max(8, min(25, int(self._height * 0.6)))
 
         rendered = self._tool_output_popup.render(buffer, width=popup_width, max_height=max_height)
@@ -1023,7 +1025,9 @@ class PTDisplay:
         if not self._tool_output_popup.is_visible:
             return 0
 
-        popup_width = max(40, min(80, int(self._width * 0.5)))
+        popup_width = self._tool_output_popup.get_content_width(
+            buffer, min_width=40, max_width=min(120, int(self._width * 0.85))
+        )
         max_height = max(8, min(25, int(self._height * 0.6)))
         rendered = self._tool_output_popup.render(buffer, width=popup_width, max_height=max_height)
         rendered_str = self._renderer.render(rendered)
