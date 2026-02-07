@@ -30,6 +30,7 @@ ipython-pygments-lexers>=1.0.0  # IPython syntax highlighting (handles !shell, %
 
 # Mermaid diagram rendering dependencies
 Pillow>=10.0.0  # Image processing for terminal graphics backends (half-block, sixel, etc.)
+mermaid-py>=0.5.0  # Mermaid diagram parsing (fallback renderer when mmdc unavailable)
 
 # AST search plugin dependencies (optional)
 ast-grep-py>=0.30.0  # AST-based structural code search

@@ -65,6 +65,7 @@ vision = [
     "cairosvg>=2.7.0",  # SVG to PNG conversion for screenshots
 ]
 mermaid = [
+    "mermaid-py>=0.5.0",  # Mermaid diagram parsing (fallback when mmdc unavailable)
     "cairosvg>=2.7.0",  # SVG to PNG conversion (for mermaid-py SVG output)
 ]
 all = [
