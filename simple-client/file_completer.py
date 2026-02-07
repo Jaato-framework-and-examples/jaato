@@ -543,10 +543,15 @@ class AtFileCompleter(Completer):
         A valid @ is one that:
         - Is at start of string, or preceded by whitespace/punctuation
         - Is not part of an email address pattern
+        - Is not part of a @@ (double-at sandbox path) pattern
         """
         # Find the last @ in the text
         at_pos = text.rfind('@')
         if at_pos == -1:
+            return -1
+
+        # Check if this @ is part of @@ (double-at for sandbox paths)
+        if at_pos > 0 and text[at_pos - 1] == '@':
             return -1
 
         # Check if this @ looks like a file reference
@@ -588,6 +593,195 @@ class AtFileCompleter(Completer):
         }
 
         return type_map.get(ext, 'file')
+
+
+class DoubleAtSandboxCompleter(AtFileCompleter):
+    """Complete sandbox-allowed paths after @@ symbol with fuzzy matching.
+
+    Triggers completion when user types @@, providing:
+    - Fuzzy suggestions for sandbox-allowed root paths (workspace, authorized external, /tmp)
+    - Filesystem navigation within selected root paths (reuses AtFileCompleter logic)
+    - Visual dropdown with path descriptions
+
+    Two-phase completion:
+    1. Root selection: "@@" or "@@/home/us" -> fuzzy match against sandbox root paths
+    2. Navigation: "@@/home/user/external/" -> list files in that directory
+
+    Example usage:
+        "Review @@/home/user/external/src/main.py"
+        "@@ext" -> matches "/home/user/external" (fuzzy)
+        "@@/tmp/output/" -> lists files in /tmp/output/
+    """
+
+    def __init__(
+        self,
+        sandbox_path_provider: Optional[Callable[[], list[tuple[str, str]]]] = None,
+        **kwargs,
+    ):
+        """Initialize the completer.
+
+        Args:
+            sandbox_path_provider: Callback returning list of (path, description) tuples
+                for sandbox-allowed root paths. Example:
+                [("/home/user/project", "workspace"), ("/tmp", "system temp")]
+            **kwargs: Passed to AtFileCompleter for filesystem navigation.
+        """
+        super().__init__(**kwargs)
+        self._sandbox_path_provider = sandbox_path_provider
+
+    def set_sandbox_path_provider(
+        self, provider: Callable[[], list[tuple[str, str]]]
+    ) -> None:
+        """Set the sandbox path provider callback.
+
+        Args:
+            provider: Callback returning list of (path, description) tuples.
+        """
+        self._sandbox_path_provider = provider
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions for the current document.
+
+        Looks for @@ patterns and provides sandbox path completions.
+        Phase 1: Fuzzy match against sandbox root paths.
+        Phase 2: Filesystem navigation within a matched root.
+        """
+        text = document.text_before_cursor
+
+        # Find the @@ position
+        at_pos = self._find_double_at_position(text)
+        if at_pos == -1:
+            return
+
+        # Extract the path portion after @@
+        path_text = text[at_pos + 2:]
+
+        # Skip if there's a space right after @@
+        if path_text and path_text[0] == ' ':
+            return
+
+        # Get sandbox-allowed paths
+        sandbox_paths = self._get_sandbox_paths()
+        if not sandbox_paths:
+            return
+
+        # Phase 2: Check if we're navigating within a sandbox root
+        for root_path, desc in sandbox_paths:
+            root_norm = root_path.rstrip('/')
+            root_prefix = root_norm + '/'
+            if path_text.startswith(root_prefix):
+                # Filesystem navigation within this root
+                remaining = path_text[len(root_prefix):]
+                yield from self._complete_within_root(root_norm, remaining)
+                return
+
+        # Phase 1: Root selection mode - fuzzy match against sandbox paths
+        items = [(path, desc) for path, desc in sandbox_paths]
+        matched = FuzzyMatcher.filter_and_sort(path_text, items)
+        start_pos = -len(path_text) if path_text else 0
+
+        for path, desc, score in matched:
+            is_dir = os.path.isdir(path)
+            display = path + ("/" if is_dir else "")
+            yield Completion(
+                path,
+                start_position=start_pos,
+                display=display,
+                display_meta=desc,
+            )
+
+    def _complete_within_root(
+        self, root_path: str, remaining: str
+    ) -> Iterable[Completion]:
+        """Complete filesystem paths within a sandbox root directory.
+
+        Reuses AtFileCompleter's _parse_path, _list_entries, and _get_file_type
+        for maximum code sharing.
+
+        Args:
+            root_path: Absolute path to the sandbox root directory.
+            remaining: The path portion after the root (may be empty).
+        """
+        dir_path, partial_name = self._parse_path(remaining)
+
+        if dir_path:
+            list_dir = os.path.normpath(os.path.join(root_path, dir_path))
+        else:
+            list_dir = root_path
+
+        if not os.path.isdir(list_dir):
+            return
+
+        try:
+            entries = self._list_entries(list_dir)
+        except (OSError, PermissionError):
+            return
+
+        # Build items for fuzzy matching: (name, full_path)
+        items = [(name, os.path.join(list_dir, name)) for name in entries]
+
+        # Apply fuzzy matching (shared with AtFileCompleter)
+        matched = FuzzyMatcher.filter_and_sort(partial_name, items)
+        start_pos = -len(partial_name) if partial_name else 0
+
+        for name, full_path, score in matched:
+            is_dir = os.path.isdir(full_path)
+
+            if self.only_directories and not is_dir:
+                continue
+
+            if self.file_filter and not is_dir:
+                if not self.file_filter(name):
+                    continue
+
+            if is_dir:
+                display = name + "/"
+                display_meta = "directory"
+            else:
+                display = name
+                display_meta = self._get_file_type(full_path)
+
+            yield Completion(
+                name,
+                start_position=start_pos,
+                display=display,
+                display_meta=display_meta,
+            )
+
+    def _find_double_at_position(self, text: str) -> int:
+        """Find the position of @@ that starts a sandbox path reference.
+
+        Returns -1 if no valid @@ reference is found.
+        A valid @@ is one that:
+        - Is at start of string, or preceded by whitespace/punctuation
+        - Is not preceded by alphanumeric/dot/underscore/hyphen (like email)
+        """
+        at_pos = text.rfind('@@')
+        if at_pos == -1:
+            return -1
+
+        # Check preceding character
+        if at_pos > 0:
+            prev_char = text[at_pos - 1]
+            if prev_char.isalnum() or prev_char in '._-':
+                return -1
+
+        return at_pos
+
+    def _get_sandbox_paths(self) -> list[tuple[str, str]]:
+        """Get the list of sandbox-allowed paths from the provider.
+
+        Returns:
+            List of (path, description) tuples, or empty list if no provider.
+        """
+        if not self._sandbox_path_provider:
+            return []
+        try:
+            return self._sandbox_path_provider()
+        except Exception:
+            return []
 
 
 class PercentPromptCompleter(Completer):
@@ -889,10 +1083,10 @@ class FileReferenceProcessor:
         """
         import re
 
-        # Pattern to match @path references
-        # Matches @ followed by a path (letters, numbers, /, ., _, -, ~)
+        # Pattern to match @path and @@path references
+        # Matches @ or @@ followed by a path (letters, numbers, /, ., _, -, ~)
         # Stops at whitespace or end of string
-        pattern = r'@([~/\w.\-]+(?:/[~/\w.\-]*)*)'
+        pattern = r'@@?([~/\w.\-]+(?:/[~/\w.\-]*)*)'
 
         references = []
 
@@ -1420,10 +1614,12 @@ class PluginCommandCompleter(Completer):
 class CombinedCompleter(Completer):
     """Combined completer for commands, file references, prompts, slash commands, and plugin commands.
 
-    Merges CommandCompleter, AtFileCompleter, PercentPromptCompleter, SlashCommandCompleter,
-    SessionIdCompleter, and PluginCommandCompleter to provide:
+    Merges CommandCompleter, AtFileCompleter, DoubleAtSandboxCompleter,
+    PercentPromptCompleter, SlashCommandCompleter, SessionIdCompleter,
+    and PluginCommandCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
+    - Sandbox path completion after @@ symbols
     - Prompt/skill completion after % symbols
     - Slash command completion after / symbols (from .jaato/commands/)
     - Session ID completion after session commands (delete-session, resume)
@@ -1458,6 +1654,12 @@ class CombinedCompleter(Completer):
         """
         self._command_completer = CommandCompleter(commands)
         self._file_completer = AtFileCompleter(
+            only_directories=only_directories,
+            expanduser=expanduser,
+            base_path=base_path,
+            file_filter=file_filter,
+        )
+        self._sandbox_completer = DoubleAtSandboxCompleter(
             only_directories=only_directories,
             expanduser=expanduser,
             base_path=base_path,
@@ -1503,6 +1705,18 @@ class CombinedCompleter(Completer):
                      Each object should have 'name' and 'description' attributes.
         """
         self._prompt_completer.set_prompt_provider(provider)
+
+    def set_sandbox_path_provider(
+        self, provider: Callable[[], list[tuple[str, str]]]
+    ) -> None:
+        """Set the sandbox path provider for @@sandbox completion.
+
+        Args:
+            provider: Callback returning list of (path, description) tuples
+                     for sandbox-allowed root paths. Example:
+                     [("/home/user/project", "workspace"), ("/tmp", "system temp")]
+        """
+        self._sandbox_completer.set_sandbox_path_provider(provider)
 
     def add_commands(self, commands: list[tuple[str, str]]) -> None:
         """Add commands dynamically (e.g., from plugins).
@@ -1582,13 +1796,15 @@ class CombinedCompleter(Completer):
 
         # Normal mode: yield completions from all sources
         # CommandCompleter will only yield if appropriate (single word, no @ or /)
-        # AtFileCompleter will only yield if @ is present
+        # AtFileCompleter will only yield if @ is present (but not @@)
+        # DoubleAtSandboxCompleter will only yield if @@ is present
         # PercentPromptCompleter will only yield if % is present
         # SlashCommandCompleter will only yield if / is present at start of word
         # SessionIdCompleter will only yield after session commands (delete-session, resume)
         # PluginCommandCompleter will yield for plugin commands with completions
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
+        yield from self._sandbox_completer.get_completions(document, complete_event)
         yield from self._prompt_completer.get_completions(document, complete_event)
         yield from self._slash_completer.get_completions(document, complete_event)
         yield from self._session_completer.get_completions(document, complete_event)
