@@ -1241,6 +1241,9 @@ class RichClient:
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
 
+        # Set up sandbox path provider for @@ completion
+        self._setup_sandbox_path_provider()
+
         # Subscribe to prompt library changes for dynamic tool refresh
         self._setup_prompt_library_subscription()
 
@@ -1310,6 +1313,44 @@ class RichClient:
             completion_provider,
             commands_with_completions
         )
+
+    def _setup_sandbox_path_provider(self) -> None:
+        """Set up the sandbox path provider for @@ completion.
+
+        Provides the list of sandbox-allowed root paths by querying the
+        plugin registry for the workspace root and authorized external paths.
+        """
+        if not self.registry:
+            return
+
+        registry = self.registry
+
+        def get_sandbox_paths() -> list[tuple[str, str]]:
+            """Return list of (path, description) tuples for sandbox-allowed roots."""
+            paths = []
+
+            # Workspace root
+            workspace = registry.get_workspace_path()
+            if workspace:
+                paths.append((workspace, "workspace"))
+
+            # Authorized external paths from sandbox manager / plugins
+            try:
+                authorized = registry.list_authorized_paths()
+                for auth_path, source in authorized.items():
+                    # Skip if same as workspace (already added)
+                    if workspace and os.path.realpath(auth_path) == os.path.realpath(workspace):
+                        continue
+                    paths.append((auth_path, f"allowed ({source})"))
+            except Exception:
+                pass
+
+            # System temp directory
+            paths.append(("/tmp", "system temp"))
+
+            return paths
+
+        self._input_handler.set_sandbox_path_provider(get_sandbox_paths)
 
     def _setup_prompt_library_subscription(self) -> None:
         """Subscribe to prompt library changes for dynamic tool refresh.
@@ -1827,7 +1868,7 @@ class RichClient:
         )
         if self._input_handler.has_completion:
             self._display.add_system_message(
-                "Tab completion enabled. Use @file for files, %prompt for skills.",
+                "Tab completion enabled. Use @file for files, @@path for sandbox paths, %prompt for skills.",
                 style="system_info"
             )
         self._display.add_system_message(
@@ -3665,6 +3706,21 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         {"model", "memory remove", "memory edit"}  # Commands that need argument completion
     )
 
+    # Set up sandbox path provider for @@ completion (server mode)
+    # In server mode, we use the workspace_path from the connection setup
+    # and /tmp as the default sandbox paths. The server may provide additional
+    # authorized paths via events in the future.
+    _server_sandbox_paths: list[tuple[str, str]] = []
+    if workspace_path:
+        _server_sandbox_paths.append((str(workspace_path), "workspace"))
+    _server_sandbox_paths.append(("/tmp", "system temp"))
+
+    def get_sandbox_paths_for_completion():
+        """Return sandbox-allowed root paths for @@ completion."""
+        return list(_server_sandbox_paths)
+
+    input_handler.set_sandbox_path_provider(get_sandbox_paths_for_completion)
+
     def on_input(text: str) -> None:
         """Callback when user submits input in PTDisplay."""
         try:
@@ -3832,7 +3888,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
-                            "Tab completion enabled. Use @file for files, %prompt for skills.",
+                            "Tab completion enabled. Use @file for files, @@path for sandbox paths, %prompt for skills.",
                             style="system_info"
                         )
                     display.add_system_message(
