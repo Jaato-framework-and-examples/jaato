@@ -160,12 +160,13 @@ class InteractiveShellPlugin:
             ToolSchema(
                 name='shell_spawn',
                 description=(
-                    'Start a new interactive shell session with a command. '
-                    'Use this for programs that require interactive input: '
+                    'Start a new interactive process and return its session_id. '
+                    'Use shell_input(session_id=...) for ALL subsequent '
+                    'interactions — calling shell_spawn again creates a '
+                    'SEPARATE process, it does NOT send input to this one. '
+                    'Use for programs that require interactive input: '
                     'REPLs (python, node, psql), password prompts (ssh, sudo), '
-                    'wizards (npm init), debuggers (gdb, pdb), or any program '
-                    'that asks questions. Returns the initial output so you can '
-                    'see what the program printed and decide what to type.'
+                    'wizards (npm init), debuggers (gdb, pdb).'
                 ),
                 parameters={
                     "type": "object",
@@ -202,12 +203,11 @@ class InteractiveShellPlugin:
             ToolSchema(
                 name='shell_input',
                 description=(
-                    'Send text input to a running interactive session and '
-                    'return whatever the program outputs in response. '
-                    'The output is everything the program printed until it '
-                    'went quiet (waiting for more input). You do NOT need to '
-                    'predict what the output will look like — just read it '
-                    'and decide what to do next.'
+                    'Send text input to a running interactive session (by '
+                    'session_id from shell_spawn) and return whatever the '
+                    'program outputs next. This is the ONLY tool for '
+                    'interacting with an already-running session — do not '
+                    'use shell_spawn to send input.'
                 ),
                 parameters={
                     "type": "object",
@@ -341,36 +341,26 @@ class InteractiveShellPlugin:
         """Return system instructions for interactive shell tools."""
         return """INTERACTIVE SHELL SESSIONS (interactive_shell plugin):
 
-Use these tools when a command requires interactive input that CANNOT be
-handled with flags or pipes. Examples: REPLs, password prompts, wizards,
-debuggers, SSH sessions, interactive installers.
-
-TOOL ROLES — read this carefully:
-- shell_spawn: Start a NEW process. Call this ONCE per command. It returns
-  a session_id and the initial output. Do NOT call shell_spawn again to
-  send input to an already-running session.
-- shell_input: Send input to an EXISTING session (by session_id). This is
-  what you use for ALL subsequent interactions after shell_spawn. Whenever
-  a session is already running and waiting for input, use shell_input.
-- shell_read: Check for new output without sending input.
-- shell_control: Send Ctrl+C, Ctrl+D, etc.
-- shell_close: Terminate a session when done.
-- shell_list: See what sessions are currently running.
+STATE MODEL:
+Sessions are STATEFUL and PERSISTENT. shell_spawn creates one process
+that remains alive across multiple tool calls. You interact with it
+using the session_id returned by shell_spawn. The process remembers
+everything — previous input, output, state, working directory, variables.
 
 WORKFLOW:
-1. shell_spawn(command="ssh user@host") → creates session, returns session_id + initial output
+1. shell_spawn(command=...) → session_id + initial output
 2. Read the output. Understand what the program is asking.
-3. shell_input(session_id=..., input="your response\\n") → see next output
-4. Repeat steps 2-3 (using shell_input, NEVER shell_spawn) until done.
-5. shell_close(session_id=...) → clean up
+3. shell_input(session_id=..., input="response\\n") → next output
+4. Repeat 2-3 until done.
+5. shell_close(session_id=...)
 
-CRITICAL: Once a session exists, ALWAYS use shell_input to send data to it.
-Calling shell_spawn again would start a SECOND unrelated process — it does
-NOT send input to an existing one.
-
-You do NOT need to know the program's prompt format in advance. Just read
-what it outputs and respond appropriately. The output includes everything
-the program printed until it stopped and waited for input.
+TOOL ROLES:
+- shell_spawn: Start a NEW process (once per command). Returns session_id.
+- shell_input: Send input to an EXISTING session. Use for ALL interactions after spawn.
+- shell_read: Check for new output without sending input.
+- shell_control: Send Ctrl+C, Ctrl+D, etc.
+- shell_close: Terminate a session.
+- shell_list: See running sessions.
 
 WHEN TO USE vs cli_based_tool:
 These tools spawn a real PTY session — use them ONLY when the command
@@ -388,6 +378,14 @@ passwords, or present a REPL that requires you to type responses:
 - Debuggers (gdb, pdb) → shell_spawn
 If unsure → try cli_based_tool first; use shell_spawn only if it hangs
 waiting for input that cli_based_tool cannot provide
+
+COMMON MISTAKES:
+- Calling shell_spawn to send input to a running session. shell_spawn
+  starts a NEW process — use shell_input instead.
+- Spawning multiple sessions for the same command. Spawn once, then use
+  shell_input with the session_id for all subsequent interactions.
+- Losing track of the session_id. Note the session_id from shell_spawn
+  and reuse it consistently.
 
 IMPORTANT NOTES:
 - Always end text input with \\n — that's pressing Enter
