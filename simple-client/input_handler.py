@@ -266,6 +266,18 @@ class InputHandler:
         if self._completer:
             self._completer.set_permission_mode(enabled, options)
 
+    def set_sandbox_path_provider(
+        self, provider: Callable[[], List]
+    ) -> None:
+        """Set the sandbox path provider for @@sandbox completion.
+
+        Args:
+            provider: Callback returning list of (path, description) tuples
+                     for sandbox-allowed root paths.
+        """
+        if self._completer:
+            self._completer.set_sandbox_path_provider(provider)
+
     def set_available_themes(self, theme_names: List[str]) -> None:
         """Set available theme names for completion.
 
