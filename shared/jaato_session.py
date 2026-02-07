@@ -2981,11 +2981,13 @@ NOTES
                 # Check if tool was auto-backgrounded or has continuation
                 fc_auto_bg = False
                 fc_continuation_id = None
+                fc_show_output = None
                 if isinstance(result.executor_result, tuple) and len(result.executor_result) == 2:
                     er = result.executor_result[1]
                     if isinstance(er, dict):
                         fc_auto_bg = er.get('auto_backgrounded', False)
                         fc_continuation_id = er.get('continuation_id')
+                        fc_show_output = er.get('show_output')
                 if self._ui_hooks:
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
@@ -2996,6 +2998,7 @@ NOTES
                         call_id=fc.id,
                         backgrounded=fc_auto_bg,
                         continuation_id=fc_continuation_id,
+                        show_output=fc_show_output,
                     )
 
         # Build results in original order
@@ -3195,6 +3198,7 @@ NOTES
             fc_error_message = None
             fc_auto_backgrounded = False
             fc_continuation_id = None
+            fc_show_output = None
             if isinstance(executor_result, tuple) and len(executor_result) == 2:
                 fc_success = executor_result[0]
                 if not fc_success and isinstance(executor_result[1], dict):
@@ -3203,6 +3207,7 @@ NOTES
                 if isinstance(executor_result[1], dict):
                     fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
                     fc_continuation_id = executor_result[1].get('continuation_id')
+                    fc_show_output = executor_result[1].get('show_output')
 
             # Record telemetry
             fc_duration = (fc_end - fc_start).total_seconds()
@@ -3225,6 +3230,7 @@ NOTES
                 call_id=fc.id,
                 backgrounded=fc_auto_backgrounded,
                 continuation_id=fc_continuation_id,
+                show_output=fc_show_output,
             )
 
         return _ToolExecutionResult(
@@ -4507,6 +4513,7 @@ NOTES
                     fc_error_message = None
                     fc_auto_backgrounded = False
                     fc_continuation_id = None
+                    fc_show_output = None
                     if isinstance(executor_result, tuple) and len(executor_result) == 2:
                         fc_success = executor_result[0]
                         # Extract error message if tool failed
@@ -4516,6 +4523,7 @@ NOTES
                         if isinstance(executor_result[1], dict):
                             fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
                             fc_continuation_id = executor_result[1].get('continuation_id')
+                            fc_show_output = executor_result[1].get('show_output')
 
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
@@ -4529,6 +4537,7 @@ NOTES
                             call_id=fc.id,
                             backgrounded=fc_auto_backgrounded,
                             continuation_id=fc_continuation_id,
+                            show_output=fc_show_output,
                         )
 
                     turn_data['function_calls'].append({
