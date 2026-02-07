@@ -179,7 +179,8 @@ class ActiveToolsMarker:
 class ActiveToolCall:
     """Represents an actively executing or completed tool call."""
     name: str
-    args_summary: str  # Truncated string representation of args
+    args_summary: str  # Truncated string representation of args (for tree display)
+    args_full: Optional[str] = None  # Full untruncated args (for popup header)
     call_id: Optional[str] = None  # Unique ID for correlating start/end of same tool call
     completed: bool = False  # True when tool execution finished
     backgrounded: bool = False  # True when auto-backgrounded (completed but still producing output)
@@ -885,11 +886,12 @@ class OutputBuffer:
         if self._active_tools and all(t.completed for t in self._active_tools):
             self._finalize_completed_tools()
 
-        # Create a summary of args (truncated for display)
+        # Create a summary of args (truncated for tree display, full for popup)
         # Filter out intent args (message, summary, etc.) since they're shown as model text
         intent_arg_names = {"message", "summary", "intent", "rationale"}
         display_args = {k: v for k, v in (tool_args or {}).items() if k not in intent_arg_names}
-        args_str = str(display_args) if display_args else ""
+        args_full = str(display_args) if display_args else ""
+        args_str = args_full
         if len(args_str) > 60:
             args_str = args_str[:57] + "..."
 
@@ -918,8 +920,9 @@ class OutputBuffer:
         # Detect continuation grouping: tools with a session_id arg participate
         continuation_id = (tool_args or {}).get("session_id")
         tool = ActiveToolCall(
-            name=tool_name, args_summary=args_str, call_id=call_id,
-            continuation_id=continuation_id,
+            name=tool_name, args_summary=args_str,
+            args_full=args_full or None,
+            call_id=call_id, continuation_id=continuation_id,
         )
         # If joining an existing continuation group, carry over the shared emulator
         if continuation_id and continuation_id in self._tool_emulators:

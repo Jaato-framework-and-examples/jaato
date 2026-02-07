@@ -72,6 +72,13 @@ class ToolOutputPopup:
         """Get the popup tracking key for a tool (continuation_id or call_id)."""
         return tool.continuation_id or tool.call_id
 
+    @staticmethod
+    def _get_header_text(tool: "ActiveToolCall") -> str:
+        """Get the header text for the popup — full untruncated args."""
+        if tool.display_args_summary is not None:
+            return tool.display_args_summary
+        return tool.args_full or tool.args_summary
+
     def _get_running_tools(self, buffer: "OutputBuffer") -> List["ActiveToolCall"]:
         """Get list of running, backgrounded, or continuation tools with output.
 
@@ -259,8 +266,8 @@ class ToolOutputPopup:
             if width > max_line_width:
                 max_line_width = width
 
-        # Also consider sticky header (args summary)
-        args_text = tracked.display_args_summary if tracked.display_args_summary is not None else tracked.args_summary
+        # Also consider sticky header (full args for popup)
+        args_text = self._get_header_text(tracked)
         if args_text:
             # "❯ " prefix = 2 chars
             max_line_width = max(max_line_width, len(args_text) + 2)
@@ -332,14 +339,13 @@ class ToolOutputPopup:
         # Build content
         elements = []
 
-        # Sticky header: command/args summary
+        # Sticky header: full command/args (not truncated — popup width adapts)
         content_width = width - 4  # Panel borders
-        args_text = tracked.display_args_summary if tracked.display_args_summary is not None else tracked.args_summary
+        args_text = self._get_header_text(tracked)
         if args_text:
             header = Text()
             header.append("❯ ", style=self._style("tool_output_popup_border", "cyan"))
             header.append(args_text, style=self._style("tool_output_popup_header", "bold"))
-            header.truncate(content_width)
             elements.append(header)
             elements.append(Text("─" * content_width, style=self._style("tool_output_popup_scroll", "dim")))
 
