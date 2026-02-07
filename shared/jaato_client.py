@@ -835,6 +835,11 @@ class JaatoClient:
         if self._session:
             self._session.set_session_plugin(plugin, config)
 
+        # Give the plugin a reference to this client for user command execution
+        # (e.g., save, resume, sessions, delete-session, backtoturn)
+        if hasattr(plugin, 'set_client'):
+            plugin.set_client(self)
+
     def remove_session_plugin(self) -> None:
         """Remove the session plugin."""
         if self._session:
