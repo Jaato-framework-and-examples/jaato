@@ -152,11 +152,11 @@ class AgentRegistry:
                         _, tool_name, tool_args, call_id = event
                         agent_info.output_buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
                     elif event_type == "tool_end":
-                        _, tool_name, success, duration_seconds, error_message, call_id, continuation_id, show_output = event
+                        _, tool_name, success, duration_seconds, error_message, call_id, continuation_id, show_output, show_popup = event
                         agent_info.output_buffer.mark_tool_completed(
                             tool_name, success, duration_seconds, error_message,
                             call_id=call_id, continuation_id=continuation_id,
-                            show_output=show_output,
+                            show_output=show_output, show_popup=show_popup,
                         )
                     elif event_type == "tool_output":
                         _, call_id, chunk = event
@@ -196,12 +196,13 @@ class AgentRegistry:
         call_id: Optional[str] = None,
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
+        show_popup: Optional[bool] = None,
     ) -> None:
         """Queue tool end event for an agent that hasn't been created yet."""
         with self._lock:
             if agent_id not in self._pending_events:
                 self._pending_events[agent_id] = []
-            self._pending_events[agent_id].append(("tool_end", tool_name, success, duration_seconds, error_message, call_id, continuation_id, show_output))
+            self._pending_events[agent_id].append(("tool_end", tool_name, success, duration_seconds, error_message, call_id, continuation_id, show_output, show_popup))
 
     def queue_tool_output(self, agent_id: str, call_id: str, chunk: str) -> None:
         """Queue tool output event for an agent that hasn't been created yet."""

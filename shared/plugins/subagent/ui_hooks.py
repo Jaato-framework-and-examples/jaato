@@ -250,6 +250,7 @@ class AgentUIHooks(Protocol):
         backgrounded: bool = False,
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
+        show_popup: Optional[bool] = None,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -266,6 +267,9 @@ class AgentUIHooks(Protocol):
                 tools sharing the same continuation_id.
             show_output: Whether to render output_lines in the main panel.
                 None means use default (True). The popup is unaffected.
+            show_popup: Whether to track/update the tool output popup.
+                None means use default (True). False prevents this tool from
+                becoming the tracked popup tool or updating popup content.
         """
         ...
 

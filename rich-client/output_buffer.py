@@ -219,6 +219,7 @@ class ActiveToolCall:
     # Continuation grouping (e.g., interactive shell sessions)
     continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
     show_output: bool = True  # Whether to render output_lines in the main panel (popup unaffected)
+    show_popup: bool = True  # Whether to track/update the tool output popup
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -945,7 +946,8 @@ class OutputBuffer:
                             call_id: Optional[str] = None,
                             backgrounded: bool = False,
                             continuation_id: Optional[str] = None,
-                            show_output: Optional[bool] = None) -> None:
+                            show_output: Optional[bool] = None,
+                            show_popup: Optional[bool] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         When backgrounded=True, the tool is marked completed for tree purposes
@@ -966,6 +968,9 @@ class OutputBuffer:
             continuation_id: Session ID for continuation grouping (popup stays open).
             show_output: Whether to render output_lines in the main panel.
                 None means keep current value. The popup is unaffected.
+            show_popup: Whether to track/update the tool output popup.
+                None means keep current value. False prevents this tool from
+                becoming the tracked popup tool.
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
@@ -995,10 +1000,13 @@ class OutputBuffer:
                         tool.error_message = error_message
                         if show_output is not None:
                             tool.show_output = show_output
-                        if backgrounded and call_id:
+                        if show_popup is not None:
+                            tool.show_popup = show_popup
+                        if backgrounded and call_id and tool.show_popup:
                             self._popup_tools[call_id] = tool
-                        # Continuation grouping
-                        self._apply_continuation(tool, call_id, continuation_id)
+                        # Continuation grouping (skip popup tracking if show_popup=False)
+                        if tool.show_popup:
+                            self._apply_continuation(tool, call_id, continuation_id)
                         return
             elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
