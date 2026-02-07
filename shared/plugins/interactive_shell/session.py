@@ -69,6 +69,11 @@ class ShellSession:
         spawn_env['GIT_PAGER'] = 'cat'
         # Force dumb terminal to reduce escape sequences
         spawn_env['TERM'] = 'dumb'
+        # Prevent spawned shells from writing to the user's history file
+        spawn_env['HISTFILE'] = ''
+        spawn_env['HISTSIZE'] = '0'
+        spawn_env['SAVEHIST'] = '0'
+        spawn_env['fish_history'] = ''
         if env:
             spawn_env.update(env)
 
