@@ -102,7 +102,12 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
           <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
     </aside>
@@ -232,7 +237,7 @@ flowchart TB
     end
 
     subgraph External["External Services"]
-        VAI[Vertex AI<br/>Gemini Models]
+        VAI[AI Provider<br/>Models]
         MCPS[MCP Servers]
         Shell[Local Shell]
     end
@@ -338,8 +343,8 @@ sequenceDiagram
 
         <h3>3. Model Provider Plugins</h3>
         <p>
-          Abstract AI provider SDKs to provide a uniform interface. Currently supports
-          Google GenAI/Vertex AI. Anthropic support coming soon.
+          Abstract AI provider SDKs to provide a uniform interface. Supports
+          Anthropic, Google GenAI, GitHub Models, Claude CLI, Antigravity, and Ollama.
         </p>
         <ul>
           <li><strong>Location:</strong> <code>shared/plugins/model_provider/*/</code></li>
@@ -372,7 +377,12 @@ sequenceDiagram
 │       ├── model_provider/     # Provider abstraction
 │       │   ├── base.py         # ModelProviderPlugin protocol
 │       │   ├── types.py        # Provider-agnostic types
-│       │   └── google_genai/   # Google GenAI implementation
+│       │   ├── anthropic/      # Anthropic Claude
+│       │   ├── google_genai/   # Google GenAI / Vertex AI
+│       │   ├── github_models/  # GitHub Models API
+│       │   ├── claude_cli/     # Claude CLI wrapper
+│       │   ├── antigravity/    # Google IDE backend
+│       │   └── ollama/         # Ollama local models
 │       │
 │       ├── cli/                # CLI tool plugin
 │       ├── mcp/                # MCP integration

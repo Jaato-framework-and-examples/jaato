@@ -58,7 +58,12 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/anthropic.html">Anthropic</a></li>
           <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
 
@@ -200,7 +205,7 @@
               <tr><th>Field</th><th>Description</th><th>Examples</th></tr>
             </thead>
             <tbody>
-              <tr><td><code>model</code></td><td>Model name</td><td><code>gemini-2.5-flash</code></td></tr>
+              <tr><td><code>model</code></td><td>Model name</td><td><code>claude-sonnet-4-20250514</code></td></tr>
               <tr><td><code>context_limit</code></td><td>Max context size</td><td><code>1048576</code></td></tr>
               <tr><td><code>total_tokens</code></td><td>Total tokens used</td><td><code>15234</code></td></tr>
               <tr><td><code>prompt_tokens</code></td><td>Input tokens</td><td><code>12000</code></td></tr>
@@ -242,7 +247,7 @@ shell_info = executors["get_environment"]({"aspect": "shell"})</code></pre>
           <div class="code-label" style="margin-top: 24px;">Response: context aspect</div>
           <div class="code-block">
             <pre><code class="language-json">{
-  "model": "gemini-2.5-flash",
+  "model": "claude-sonnet-4-20250514",
   "context_limit": 1048576,
   "total_tokens": 15234,
   "prompt_tokens": 12000,
@@ -278,7 +283,7 @@ shell_info = executors["get_environment"]({"aspect": "shell"})</code></pre>
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(project_id, location, model_name)
+client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 registry = PluginRegistry()
 registry.discover()
