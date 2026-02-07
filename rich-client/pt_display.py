@@ -42,6 +42,7 @@ from budget_panel import BudgetPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
+from tool_output_popup import ToolOutputPopup
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings, format_key_for_display
 from theme import ThemeConfig, load_theme
@@ -463,6 +464,8 @@ class PTDisplay:
         self._plan_panel.set_theme(self._theme)
         self._budget_panel = BudgetPanel(toggle_key=self._keybinding_config.toggle_budget)
         self._budget_panel.set_theme(self._theme)
+        self._tool_output_popup = ToolOutputPopup(tab_key=self._keybinding_config.tool_output_popup_tab)
+        self._tool_output_popup.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
@@ -999,6 +1002,37 @@ class PTDisplay:
 
         rendered = self._budget_panel.render(popup_height, popup_width)
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
+
+    def _get_tool_output_popup_content(self):
+        """Get rendered tool output popup content as ANSI for prompt_toolkit."""
+        buffer = self._get_active_buffer()
+
+        if not self._tool_output_popup.is_visible:
+            return []
+
+        # Calculate popup dimensions — adapt width to content
+        popup_width = self._tool_output_popup.get_content_width(
+            buffer, min_width=40, max_width=min(120, int(self._width * 0.85))
+        )
+        max_height = max(8, min(25, int(self._height * 0.6)))
+
+        rendered = self._tool_output_popup.render(buffer, width=popup_width, max_height=max_height)
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
+
+    def _get_tool_output_popup_height(self):
+        """Calculate tool output popup height dynamically."""
+        buffer = self._get_active_buffer()
+        if not self._tool_output_popup.is_visible:
+            return 0
+
+        popup_width = self._tool_output_popup.get_content_width(
+            buffer, min_width=40, max_width=min(120, int(self._width * 0.85))
+        )
+        max_height = max(8, min(25, int(self._height * 0.6)))
+        rendered = self._tool_output_popup.render(buffer, width=popup_width, max_height=max_height)
+        rendered_str = self._renderer.render(rendered)
+        line_count = rendered_str.count('\n') + 1
+        return min(line_count, self._height - 4)
 
     def _get_plan_popup_content(self):
         """Get rendered plan popup content as ANSI for prompt_toolkit."""
@@ -1753,6 +1787,14 @@ class PTDisplay:
             buffer.toggle_tools_expanded()
             self._app.invalidate()
 
+        @kb.add(*keys.get_key_args("tool_output_popup_tab"), filter=not_in_search_mode)
+        def handle_tool_output_popup_tab(event):
+            """Handle Ctrl+O - cycle between running tools in output popup."""
+            if self._tool_output_popup.is_visible:
+                buffer = self._get_active_buffer()
+                self._tool_output_popup.cycle_tool(buffer)
+                self._app.invalidate()
+
         @kb.add(*keys.get_key_args("open_editor"), filter=not_in_search_mode)
         def handle_open_editor(event):
             """Handle Ctrl+G - open current input in external editor ($EDITOR)."""
@@ -2108,6 +2150,20 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
+        # Tool output popup (floating overlay, auto-shown for expanded running tools)
+        # The filter calls update() so visibility is evaluated fresh each render
+        # cycle — the content getter then skips the redundant update() call.
+        def _tool_output_popup_filter():
+            self._tool_output_popup.update(self._get_active_buffer())
+            return self._tool_output_popup.is_visible
+        tool_output_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_tool_output_popup_content),
+                height=self._get_tool_output_popup_height,
+            ),
+            filter=Condition(_tool_output_popup_filter),
+        )
+
         # Root layout with session bar at top, then tab bar, status bar, output, bars, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
@@ -2136,6 +2192,12 @@ class PTDisplay:
                     left=1,
                     content=agent_popup_window,
                     z_index=50,
+                ),
+                Float(
+                    top=4,  # Below status bar area
+                    right=1,  # Right-aligned
+                    content=tool_output_popup_window,
+                    z_index=75,  # Above budget/agent, below plan
                 ),
                 # Plan popup LAST so it renders on top of everything
                 Float(
