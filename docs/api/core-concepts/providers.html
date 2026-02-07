@@ -67,7 +67,12 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
           <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
     </aside>
@@ -139,60 +144,65 @@ client = JaatoClient(provider_name="anthropic")
               <tr>
                 <th>Provider</th>
                 <th>Name</th>
-                <th>Status</th>
+                <th>Models</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>Google GenAI</strong></td>
-                <td><code>google_genai</code></td>
-                <td>Available</td>
-              </tr>
-              <tr>
-                <td><strong>Anthropic</strong></td>
+                <td><strong><a href="../api-reference/providers/anthropic.html">Anthropic</a></strong></td>
                 <td><code>anthropic</code></td>
-                <td>Planned</td>
+                <td>Claude 3, 3.5, Sonnet 4, Opus 4</td>
               </tr>
               <tr>
-                <td><strong>OpenAI</strong></td>
-                <td><code>openai</code></td>
-                <td>Planned</td>
+                <td><strong><a href="../api-reference/providers/google-genai.html">Google GenAI</a></strong></td>
+                <td><code>google_genai</code></td>
+                <td>Gemini 1.5, 2.0, 2.5</td>
+              </tr>
+              <tr>
+                <td><strong><a href="../api-reference/providers/github-models.html">GitHub Models</a></strong></td>
+                <td><code>github_models</code></td>
+                <td>GPT-4o, Claude, Gemini, Llama</td>
+              </tr>
+              <tr>
+                <td><strong><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></strong></td>
+                <td><code>claude_cli</code></td>
+                <td>Claude (via subscription)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="../api-reference/providers/antigravity.html">Antigravity</a></strong></td>
+                <td><code>antigravity</code></td>
+                <td>Gemini 3, Claude (via Google)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="../api-reference/providers/ollama.html">Ollama</a></strong></td>
+                <td><code>ollama</code></td>
+                <td>Qwen, Llama, Mistral (local)</td>
               </tr>
             </tbody>
           </table>
 
-          <h3>Google GenAI Provider</h3>
           <p>
-            The default provider. Supports:
+            All providers support function calling and streaming. Set the provider
+            via <code>JAATO_PROVIDER</code> environment variable or pass
+            <code>provider_name</code> to <code>JaatoClient()</code>.
           </p>
-          <ul>
-            <li>Vertex AI (Google Cloud)</li>
-            <li>Google AI Studio</li>
-            <li>Gemini models (1.5, 2.0, 2.5)</li>
-            <li>Function calling</li>
-            <li>Multimodal (images, documents)</li>
-          </ul>
         </div>
         <div class="panel-code">
-          <div class="code-label">Using Google GenAI</div>
+          <div class="code-label">Using providers</div>
           <div class="code-block">
-            <pre><code class="language-python"># Default provider
+            <pre><code class="language-python"># Uses JAATO_PROVIDER env var
 client = JaatoClient()
+client.connect(model="claude-sonnet-4-20250514")
 
-# Explicit
+# Explicit provider selection
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")
+
 client = JaatoClient(provider_name="google_genai")
+client.connect(model="gemini-2.5-flash")
 
-# Connect to Vertex AI
-client.connect(
-    project="my-gcp-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
-
-# List available models
-models = client.list_available_models(prefix="gemini")
-for model in models:
-    print(model)</code></pre>
+client = JaatoClient(provider_name="ollama")
+client.connect(model="qwen3:32b")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Discover providers</div>
@@ -201,11 +211,12 @@ for model in models:
 
 # Find available providers
 providers = discover_providers()
-print(f"Available: {providers}")
-# ['google_genai']
+print(f"Available: {list(providers.keys())}")
+# ['anthropic', 'google_genai', 'github_models',
+#  'claude_cli', 'antigravity', 'ollama']
 
 # Load a specific provider
-provider = load_provider("google_genai")
+provider = load_provider("anthropic")
 print(f"Loaded: {provider.name}")</code></pre>
           </div>
         </div>
@@ -378,7 +389,7 @@ class ModelProviderPlugin(Protocol):
 
           <div class="callout callout-info">
             <div class="callout-title">Provider Support</div>
-            Both Google GenAI and GitHub Models providers support streaming.
+            All providers support streaming.
             Use <code>supports_streaming()</code> to check at runtime.
           </div>
         </div>
@@ -439,34 +450,38 @@ response = provider.send_message_streaming(
             types. This happens transparently inside the provider.
           </p>
 
-          <h3>Type Mapping</h3>
+          <h3>Type Mapping (per provider)</h3>
+          <p>
+            Each provider converts jaato types to its SDK's native format.
+            This happens transparently inside the provider.
+          </p>
           <table>
             <thead>
               <tr>
                 <th>jaato Type</th>
-                <th>Google SDK</th>
+                <th>Purpose</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td><code>Message</code></td>
-                <td><code>types.Content</code></td>
+                <td>Conversation message (maps to each SDK's message type)</td>
               </tr>
               <tr>
                 <td><code>Part</code></td>
-                <td><code>types.Part</code></td>
+                <td>Message content piece (text, images, function calls)</td>
               </tr>
               <tr>
                 <td><code>ToolSchema</code></td>
-                <td><code>types.FunctionDeclaration</code></td>
+                <td>Tool declaration (maps to each SDK's tool definition)</td>
               </tr>
               <tr>
                 <td><code>FunctionCall</code></td>
-                <td><code>types.FunctionCall</code></td>
+                <td>Model's tool invocation request</td>
               </tr>
               <tr>
                 <td><code>ToolResult</code></td>
-                <td><code>types.FunctionResponse</code></td>
+                <td>Tool execution result</td>
               </tr>
             </tbody>
           </table>
@@ -479,41 +494,33 @@ response = provider.send_message_streaming(
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Type conversion (internal)</div>
+          <div class="code-label">Type conversion (internal, per provider)</div>
           <div class="code-block">
-            <pre><code class="language-python"># Inside google_genai provider:
+            <pre><code class="language-python"># Each provider implements type conversion.
+# Example: inside a provider implementation:
 
-from google import genai
-from shared import Message, Part, ToolSchema
+from shared import Message, Part, ToolSchema, ProviderResponse
 
-def to_sdk_content(msg: Message) -> genai.types.Content:
-    """Convert jaato Message to SDK Content."""
-    sdk_parts = []
-    for part in msg.parts:
-        if part.text:
-            sdk_parts.append(genai.types.Part(
-                text=part.text
-            ))
-        elif part.function_call:
-            sdk_parts.append(genai.types.Part(
-                function_call=genai.types.FunctionCall(
-                    name=part.function_call.name,
-                    args=part.function_call.args
-                )
-            ))
-    return genai.types.Content(
-        role=msg.role.value,
-        parts=sdk_parts
-    )
+def to_sdk_messages(msg: Message):
+    """Convert jaato Message to SDK-specific format."""
+    # Each provider maps jaato types to its SDK:
+    # - Anthropic: anthropic.types.MessageParam
+    # - Google: genai.types.Content
+    # - GitHub: azure.ai.inference ChatRequestMessage
+    ...
 
 def from_sdk_response(resp) -> ProviderResponse:
     """Convert SDK response to jaato type."""
-    # Extract text, function calls, usage...
+    # All providers return the same ProviderResponse
     return ProviderResponse(
         text=...,
         function_calls=...,
         usage=...
-    )</code></pre>
+    )
+
+# Your code never sees SDK-specific types —
+# the same Message, ToolSchema, ProviderResponse
+# works across all providers.</code></pre>
           </div>
         </div>
       </section>
@@ -562,7 +569,11 @@ def from_sdk_response(resp) -> ProviderResponse:
             Authentication methods, environment variables, and detailed configuration
             are documented in each provider's reference page:
             <ul style="margin-top: 8px; margin-bottom: 0;">
-              <li><a href="../api-reference/providers/google-genai.html">Google GenAI Provider</a></li>
+              <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
+              <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+              <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+              <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+              <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
             </ul>
           </div>
         </div>
@@ -572,18 +583,16 @@ def from_sdk_response(resp) -> ProviderResponse:
             <pre><code class="language-python">from shared import ProviderConfig, load_provider
 
 # Load any provider
-provider = load_provider("google_genai")  # or "anthropic", "openai"
+provider = load_provider("anthropic")  # or "google_genai", etc.
 
 # Configure with ProviderConfig
 provider.initialize(ProviderConfig(
     api_key="...",          # Common
-    project="...",          # Provider-specific
-    location="...",         # Provider-specific
     extra={"timeout": 60}   # Provider-specific
 ))
 
 # Connect to a model
-provider.connect("model-name")</code></pre>
+provider.connect("claude-sonnet-4-20250514")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Via JaatoClient (recommended)</div>
@@ -591,17 +600,12 @@ provider.connect("model-name")</code></pre>
             <pre><code class="language-python">from shared import JaatoClient
 
 # JaatoClient handles provider setup
-client = JaatoClient()  # Default provider
-
-# Connect with credentials
-client.connect(
-    project="my-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
+client = JaatoClient()  # Uses JAATO_PROVIDER env var
+client.connect(model="claude-sonnet-4-20250514")
 
 # Or specify provider explicitly
-client = JaatoClient(provider_name="google_genai")</code></pre>
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")</code></pre>
           </div>
         </div>
       </section>
@@ -808,18 +812,12 @@ from shared.plugins.model_provider.types import (
 #   ├── __init__.py
 #   ├── base.py          # Protocol definition
 #   ├── types.py         # Unified types
-#   └── google_genai/
-#       ├── __init__.py
-#       ├── provider.py  # Implementation
-#       └── converters.py # Type conversion
-
-# Future providers:
-#   ├── anthropic/
-#   │   ├── provider.py
-#   │   └── converters.py
-#   └── openai/
-#       ├── provider.py
-#       └── converters.py</code></pre>
+#   ├── anthropic/       # Anthropic Claude
+#   ├── google_genai/    # Google GenAI / Vertex AI
+#   ├── github_models/   # GitHub Models API
+#   ├── claude_cli/      # Claude CLI wrapper
+#   ├── antigravity/     # Google IDE backend
+#   └── ollama/          # Ollama local models</code></pre>
           </div>
         </div>
       </section>

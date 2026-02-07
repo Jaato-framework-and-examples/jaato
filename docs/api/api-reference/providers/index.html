@@ -61,8 +61,8 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="index.html" class="active">Overview</a></li>
-          <li><a href="google-genai.html">Google GenAI</a></li>
           <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
           <li><a href="github-models.html">GitHub Models</a></li>
           <li><a href="claude-cli.html">Claude CLI</a></li>
           <li><a href="antigravity.html">Antigravity</a></li>
@@ -195,21 +195,25 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient
 
-# Uses JAATO_PROVIDER env var or google_genai
+# Uses JAATO_PROVIDER env var
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect(model="claude-sonnet-4-20250514")
 
 # Explicit provider selection
 client = JaatoClient(provider_name="anthropic")
-client.connect(None, None, "claude-sonnet-4-20250514")
+client.connect(model="claude-sonnet-4-20250514")
+
+# Google GenAI
+client = JaatoClient(provider_name="google_genai")
+client.connect(model="gemini-2.5-flash")
 
 # Ollama (local models)
 client = JaatoClient(provider_name="ollama")
-client.connect(None, None, "qwen3:32b")
+client.connect(model="qwen3:32b")
 
 # Claude CLI (uses subscription)
 client = JaatoClient(provider_name="claude_cli")
-client.connect(None, None, "claude-sonnet-4-20250514")</code></pre>
+client.connect(model="claude-sonnet-4-20250514")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Discover available providers</div>
@@ -257,7 +261,8 @@ print(f"Loaded: {provider.name}")</code></pre>
 
           <h3>4. Default</h3>
           <p>
-            If nothing is specified, defaults to <code>google_genai</code>.
+            If nothing is specified, defaults to <code>google_genai</code>. Set <code>JAATO_PROVIDER</code>
+            to change the default.
           </p>
 
           <table>
@@ -271,7 +276,7 @@ print(f"Loaded: {provider.name}")</code></pre>
             <tbody>
               <tr>
                 <td><code>JAATO_PROVIDER</code></td>
-                <td><code>google_genai</code>, <code>github_models</code></td>
+                <td><code>anthropic</code>, <code>google_genai</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code></td>
                 <td>Default provider for all sessions</td>
               </tr>
             </tbody>
@@ -299,12 +304,12 @@ MODEL_NAME=openai/gpt-4o</code></pre>
             <pre><code class="language-python">from shared import JaatoClient
 
 # Explicit provider (overrides JAATO_PROVIDER env var)
-client = JaatoClient(provider_name="github_models")
-client.connect(model="openai/gpt-4o")
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")
 
-# Uses JAATO_PROVIDER env var, or google_genai default
+# Uses JAATO_PROVIDER env var
 client = JaatoClient()
-client.connect(model="gemini-2.5-flash")</code></pre>
+client.connect(model="your-model-name")</code></pre>
           </div>
         </div>
       </section>
@@ -366,7 +371,7 @@ client.connect(model="gemini-2.5-flash")</code></pre>
           <div class="code-label">Provider capabilities</div>
           <div class="code-block">
             <pre><code class="language-python"># Check provider capabilities
-provider = load_provider("google_genai")
+provider = load_provider("anthropic")  # or any provider
 
 # Structured output support
 if provider.supports_structured_output():
@@ -378,7 +383,6 @@ if provider.supports_structured_output():
 # Context limits
 limit = provider.get_context_limit()
 print(f"Context window: {limit:,} tokens")
-# Context window: 1,048,576 tokens
 
 # Token counting
 tokens = provider.count_tokens("Hello world")
@@ -392,8 +396,10 @@ print(f"Token count: {tokens}")</code></pre>
         <div class="panel-explanation">
           <h2 id="next-steps">Next Steps</h2>
           <ul>
+            <li><a href="anthropic.html">Anthropic Provider</a> - Claude API, OAuth, extended thinking</li>
             <li><a href="google-genai.html">Google GenAI Provider</a> - GCP integration, Vertex AI</li>
             <li><a href="github-models.html">GitHub Models Provider</a> - Multi-model access, enterprise SSO</li>
+            <li><a href="ollama.html">Ollama Provider</a> - Local models, no API costs</li>
             <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
             <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
           </ul>
@@ -405,18 +411,12 @@ print(f"Token count: {tokens}")</code></pre>
 ├── __init__.py
 ├── base.py              # Protocol definition
 ├── types.py             # Unified types
-├── google_genai/
-│   ├── __init__.py
-│   ├── provider.py      # Implementation
-│   ├── converters.py    # Type conversion
-│   ├── env.py           # Environment resolution
-│   └── errors.py        # Auth exceptions
-└── github_models/
-    ├── __init__.py
-    ├── provider.py      # Implementation
-    ├── converters.py    # Type conversion
-    ├── env.py           # Environment resolution
-    └── errors.py        # Auth exceptions</code></pre>
+├── anthropic/           # Anthropic Claude
+├── google_genai/        # Google GenAI / Vertex AI
+├── github_models/       # GitHub Models API
+├── claude_cli/          # Claude CLI wrapper
+├── antigravity/         # Google IDE backend
+└── ollama/              # Ollama local models</code></pre>
           </div>
         </div>
       </section>

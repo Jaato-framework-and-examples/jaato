@@ -61,8 +61,8 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="providers/index.html">Overview</a></li>
-          <li><a href="providers/google-genai.html">Google GenAI</a></li>
           <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
           <li><a href="providers/github-models.html">GitHub Models</a></li>
           <li><a href="providers/claude-cli.html">Claude CLI</a></li>
           <li><a href="providers/antigravity.html">Antigravity</a></li>
@@ -141,13 +141,13 @@
 
 # JaatoClient creates runtime internally
 client = JaatoClient()
-client.connect(project, location, model)
+client.connect(model="claude-sonnet-4-20250514")
 client.configure_tools(registry)
 
 # Access runtime for subagent creation
 runtime = client.get_runtime()
 sub_session = runtime.create_session(
-    model="gemini-2.5-flash",
+    model="claude-sonnet-4-20250514",
     tools=["cli", "web_search"],
     system_instructions="You are a researcher."
 )
@@ -213,15 +213,15 @@ helper = runtime.create_session(
         <div class="panel-code">
           <div class="code-label">Create runtime</div>
           <div class="code-block">
-            <pre><code class="language-python"># Default provider (Google GenAI)
-runtime = JaatoRuntime()
-
-# Explicit provider
+            <pre><code class="language-python"># Explicit provider
 runtime = JaatoRuntime(provider_name="anthropic")
 
-# Cross-provider support
+# Or Google GenAI
 runtime = JaatoRuntime(provider_name="google_genai")
-runtime.register_provider("anthropic")  # For subagents</code></pre>
+
+# Cross-provider support
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.register_provider("google_genai")  # For subagents</code></pre>
           </div>
         </div>
       </section>
@@ -278,16 +278,16 @@ runtime.register_provider("anthropic")  # For subagents</code></pre>
         <div class="panel-code">
           <div class="code-label">Connection</div>
           <div class="code-block">
-            <pre><code class="language-python"># Google GenAI (Vertex AI)
+            <pre><code class="language-python"># Anthropic (API key or OAuth)
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project=None, location=None)
+
+# Google GenAI (Vertex AI)
 runtime = JaatoRuntime(provider_name="google_genai")
 runtime.connect(
     project="my-gcp-project",
     location="us-central1"
 )
-
-# Anthropic (API key or OAuth)
-runtime = JaatoRuntime(provider_name="anthropic")
-runtime.connect(project=None, location=None)
 
 # Verify auth with interactive login
 if not runtime.verify_auth(allow_interactive=True):
@@ -477,19 +477,19 @@ print(f"Ledger: {runtime.ledger}")</code></pre>
           <div class="code-block">
             <pre><code class="language-python"># Main agent session (all tools)
 main = runtime.create_session(
-    model="gemini-2.5-flash"
+    model="claude-sonnet-4-20250514"
 )
 
 # Research subagent (specific tools)
 researcher = runtime.create_session(
-    model="gemini-2.5-flash",
+    model="claude-sonnet-4-20250514",
     tools=["web_search", "web_fetch"],
     system_instructions="You are a research assistant."
 )
 
 # Code review subagent
 reviewer = runtime.create_session(
-    model="gemini-2.5-flash",
+    model="claude-sonnet-4-20250514",
     tools=["file_edit", "cli"],
     system_instructions="You are a code reviewer."
 )
@@ -502,20 +502,20 @@ review = reviewer.send_message("Review this code...", on_output)</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Cross-provider subagent</div>
           <div class="code-block">
-            <pre><code class="language-python"># Main agent uses Google GenAI
-runtime = JaatoRuntime(provider_name="google_genai")
-runtime.connect(project, location)
+            <pre><code class="language-python"># Main agent uses Anthropic
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project=None, location=None)
 runtime.configure_plugins(registry)
 
-# Register Anthropic for subagents
-runtime.register_provider("anthropic")
+# Register Google GenAI for subagents
+runtime.register_provider("google_genai")
 
 # Create session with different provider
-claude_session = runtime.create_session(
-    model="claude-sonnet-4-20250514",
-    provider_name="anthropic",
+gemini_session = runtime.create_session(
+    model="gemini-2.5-flash",
+    provider_name="google_genai",
     tools=["cli"],
-    system_instructions="You are a Claude assistant."
+    system_instructions="You are a research assistant."
 )</code></pre>
           </div>
         </div>
@@ -589,28 +589,28 @@ claude_session = runtime.create_session(
 from shared.plugins.model_provider.base import ProviderConfig
 
 # Create runtime with primary provider
-runtime = JaatoRuntime(provider_name="google_genai")
-runtime.connect(project, location)
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project=None, location=None)
 
 # Register additional providers
-runtime.register_provider("anthropic")
+runtime.register_provider("google_genai")
 runtime.register_provider("ollama")
 
 # List models from each provider
-gemini_models = runtime.list_available_models(
-    prefix="gemini",
-    provider_name="google_genai"
-)
 claude_models = runtime.list_available_models(
     prefix="claude",
     provider_name="anthropic"
+)
+gemini_models = runtime.list_available_models(
+    prefix="gemini",
+    provider_name="google_genai"
 )
 local_models = runtime.list_available_models(
     provider_name="ollama"
 )
 
-print(f"Gemini: {gemini_models}")
 print(f"Claude: {claude_models}")
+print(f"Gemini: {gemini_models}")
 print(f"Local: {local_models}")</code></pre>
           </div>
 

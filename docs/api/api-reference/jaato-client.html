@@ -70,8 +70,8 @@
         <div class="sidebar-title">Provider Reference</div>
         <ul class="sidebar-nav">
           <li><a href="providers/index.html">Overview</a></li>
-          <li><a href="providers/google-genai.html">Google GenAI</a></li>
           <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
           <li><a href="providers/github-models.html">GitHub Models</a></li>
           <li><a href="providers/claude-cli.html">Claude CLI</a></li>
           <li><a href="providers/antigravity.html">Antigravity</a></li>
@@ -119,14 +119,10 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
-client = JaatoClient()
-client.connect(
-    project="my-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")
 
-registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 registry.discover()
 registry.expose_tool("cli")
 client.configure_tools(registry)
@@ -261,20 +257,20 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
             <li>
               <span class="param-name">project</span>
               <span class="param-type">str</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Google Cloud project ID</div>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Cloud project ID (required for Vertex AI, optional for other providers)</div>
             </li>
             <li>
               <span class="param-name">location</span>
               <span class="param-type">str</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Vertex AI region (e.g., <code>us-central1</code>, <code>global</code>)</div>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Provider region (required for Vertex AI, optional for other providers)</div>
             </li>
             <li>
               <span class="param-name">model</span>
               <span class="param-type">str</span>
               <span class="param-required">required</span>
-              <div class="param-desc">Model name (e.g., <code>gemini-2.5-flash</code>)</div>
+              <div class="param-desc">Model name (e.g., <code>claude-sonnet-4-20250514</code>, <code>gemini-2.5-flash</code>)</div>
             </li>
           </ul>
 
@@ -349,9 +345,12 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
         <div class="panel-code">
           <div class="code-label">Connection</div>
           <div class="code-block">
-            <pre><code class="language-python">client = JaatoClient()
+            <pre><code class="language-python"># Anthropic
+client = JaatoClient(provider_name="anthropic")
+client.connect(model="claude-sonnet-4-20250514")
 
-# Connect to Vertex AI
+# Google GenAI (Vertex AI)
+client = JaatoClient(provider_name="google_genai")
 client.connect(
     project="my-gcp-project",
     location="us-central1",
@@ -360,12 +359,7 @@ client.connect(
 
 # Check connection
 if client.is_connected:
-    print(f"Connected to {client.model_name}")
-
-# List available models
-models = client.list_available_models(prefix="gemini")
-for model in models:
-    print(model)</code></pre>
+    print(f"Connected to {client.model_name}")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Using environment variables</div>
@@ -375,12 +369,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Provider auto-detected from JAATO_PROVIDER env var
 client = JaatoClient()
-client.connect(
-    project=os.getenv("PROJECT_ID"),
-    location=os.getenv("LOCATION"),
-    model=os.getenv("MODEL_NAME")
-)</code></pre>
+client.connect(model=os.getenv("MODEL_NAME"))</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Runtime &amp; Session access</div>
@@ -388,7 +379,7 @@ client.connect(
             <pre><code class="language-python"># Access runtime for subagent creation
 runtime = client.get_runtime()
 sub_session = runtime.create_session(
-    model="gemini-2.5-flash",
+    model="claude-sonnet-4-20250514",
     tools=["cli", "web_search"],
     system_instructions="You are a researcher."
 )
@@ -1423,24 +1414,24 @@ session.set_retry_callback(None)</code></pre>
         <div class="panel-code">
           <div class="code-label">Example .env file</div>
           <div class="code-block">
-            <pre><code class="language-bash"># Provider selection
+            <pre><code class="language-bash"># Provider selection (choose one)
 JAATO_PROVIDER=anthropic
+MODEL_NAME=claude-sonnet-4-20250514
 
-# Google GenAI
-PROJECT_ID=my-gcp-project
-LOCATION=us-central1
-MODEL_NAME=gemini-2.5-flash
-
-# Anthropic
+# Anthropic credentials
 ANTHROPIC_API_KEY=sk-ant-api03-...
 
-# GitHub Models
-GITHUB_TOKEN=ghp_...
-JAATO_GITHUB_ORGANIZATION=my-org
+# Google GenAI credentials (if using google_genai)
+# GOOGLE_GENAI_API_KEY=AIza...
+# Or for Vertex AI:
+# JAATO_GOOGLE_PROJECT=my-gcp-project
+# JAATO_GOOGLE_LOCATION=us-central1
 
-# Ollama
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen3:32b
+# GitHub Models credentials (if using github_models)
+# GITHUB_TOKEN=ghp_...
+
+# Ollama (if using ollama)
+# OLLAMA_HOST=http://localhost:11434
 
 # General settings
 AI_USE_CHAT_FUNCTIONS=1
@@ -1450,9 +1441,7 @@ JAATO_GC_THRESHOLD=80.0
 
 # Rate limiting
 AI_REQUEST_INTERVAL=0.5
-AI_RETRY_ATTEMPTS=5
-AI_RETRY_BASE_DELAY=1.0
-AI_RETRY_MAX_DELAY=30.0</code></pre>
+AI_RETRY_ATTEMPTS=5</code></pre>
           </div>
         </div>
       </section>
