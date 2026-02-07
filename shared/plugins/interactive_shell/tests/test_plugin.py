@@ -236,7 +236,7 @@ class TestCloseTool:
         sid = spawn['session_id']
         time.sleep(0.5)  # let it exit
 
-        result = plugin._exec_close({'session_id': sid})
+        result = _unpack(plugin._exec_close({'session_id': sid}))
         assert result['exit_status'] == 7
 
     def test_close_removes_session(self, plugin):
