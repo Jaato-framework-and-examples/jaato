@@ -275,6 +275,15 @@ class ToolExecutor:
                 result = fn(name, args)
             else:
                 result = fn(args)
+            # Unwrap plugin metadata tuples: (result_dict, metadata_dict)
+            # Plugins can return (result, {"continuation_id": ...}) to pass
+            # metadata through to the session layer. Merge metadata into result
+            # so it appears at executor_result[1] — same level as auto_backgrounded.
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+                actual_result, metadata = result
+                if isinstance(actual_result, dict):
+                    actual_result.update(metadata)
+                return True, actual_result
             return True, result
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
@@ -544,6 +553,15 @@ class ToolExecutor:
                 result = fn(name, args)
             else:
                 result = fn(args)
+            # Unwrap plugin metadata tuples: (result_dict, metadata_dict)
+            # Plugins can return (result, {"continuation_id": ...}) to pass
+            # metadata through to the session layer. Merge metadata into result
+            # so it appears at executor_result[1] — same level as auto_backgrounded.
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+                actual_result, metadata = result
+                if isinstance(actual_result, dict):
+                    actual_result.update(metadata)
+                result = actual_result
             # Inject permission metadata if available and result is a dict
             if permission_meta and isinstance(result, dict):
                 result['_permission'] = permission_meta
