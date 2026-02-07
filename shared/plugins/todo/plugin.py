@@ -351,8 +351,11 @@ class TodoPlugin:
             ),
             ToolSchema(
                 name="addStep",
-                description="Add a new step to the plan during execution. Can only be called "
-                           "AFTER startPlan has been approved.",
+                description="Add a new step to an existing plan during execution. "
+                           "Use this when you discover missing steps, need a corrective action after "
+                           "a failure, or realize additional work is needed. "
+                           "ALWAYS prefer this over recreating the plan with createPlan. "
+                           "Can only be called AFTER startPlan has been approved.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -724,6 +727,12 @@ class TodoPlugin:
             "- **Check getBlockedSteps()** to see what's waiting on what\n"
             "- **Check getTaskEvents()** to review cross-agent activity\n"
             "- **Subagents see each other's events** - they can coordinate peer-to-peer\n\n"
+            "# MODIFYING PLANS DURING EXECUTION\n\n"
+            "- NEVER recreate a plan from scratch while one is active. Use addStep instead.\n"
+            "- When a step fails and you need a corrective action: mark it failed, then addStep.\n"
+            "- When you realize a step is missing: addStep(description, after_step_id?) to insert it.\n"
+            "- When a step is no longer needed: updateStep(step_id, status='skipped').\n"
+            "- Only use completePlan(status='failed') + createPlan if the entire plan premise was wrong.\n\n"
             "# STEP STATUS RULES\n\n"
             "- 'completed': ONLY if fully accomplished\n"
             "- 'failed': Could not achieve goal (errors, limitations, partial)\n"
@@ -781,6 +790,22 @@ class TodoPlugin:
 
         if not all(isinstance(s, str) for s in steps):
             return {"error": "all steps must be strings"}
+
+        # Guard: warn if there's already an active started plan
+        existing_plan = self._get_current_plan()
+        if existing_plan and existing_plan.started and existing_plan.status == PlanStatus.ACTIVE:
+            pending = [s for s in existing_plan.steps if s.status == StepStatus.PENDING]
+            in_progress = [s for s in existing_plan.steps if s.status == StepStatus.IN_PROGRESS]
+            return {
+                "error": (
+                    f"An active plan already exists: '{existing_plan.title}' "
+                    f"({len(pending)} pending, {len(in_progress)} in progress). "
+                    "Do NOT recreate the plan from scratch. Instead:\n"
+                    "- Use addStep(description, after_step_id?) to insert new steps\n"
+                    "- Use updateStep(step_id, status='skipped') to skip steps that are no longer needed\n"
+                    "- Use completePlan(status='failed') first if you truly need to abandon the plan"
+                ),
+            }
 
         # Create plan
         plan = TodoPlan.create(title=title, step_descriptions=steps)
@@ -981,7 +1006,11 @@ class TodoPlugin:
         elif new_status == StepStatus.FAILED:
             if progress["pending"] > 0:
                 response["instruction"] = (
-                    "Step failed. Decide whether to retry, skip, or proceed to remaining steps."
+                    "Step failed. Decide whether to: "
+                    "(1) use addStep to insert a corrective/alternative step, "
+                    "(2) skip remaining steps if the goal is already met, or "
+                    "(3) proceed to the next pending step. "
+                    "Do NOT recreate the plan from scratch with createPlan."
                 )
 
         return response
