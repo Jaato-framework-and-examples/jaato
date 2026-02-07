@@ -3,6 +3,7 @@
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from jaato import ToolSchema
 from datetime import datetime, timezone
+from shared.terminal_caps import detect as detect_terminal_caps
 import json
 import os
 import platform
@@ -310,58 +311,12 @@ class EnvironmentPlugin:
     def _get_terminal_info(self) -> Dict[str, Any]:
         """Get terminal emulation and capability information.
 
-        Detects whether stdout is connected to a real terminal (TTY) to
-        distinguish interactive sessions from headless contexts where
-        output goes to a file or pipe.
+        Delegates to shared.terminal_caps for detection logic, which
+        caches results process-wide. This allows other plugins (e.g.,
+        mermaid_formatter) to access the same data without triggering
+        a model tool call.
         """
-        # Detect if stdout is connected to a TTY
-        is_interactive = sys.stdout.isatty()
-
-        info: Dict[str, Any] = {
-            "interactive": is_interactive,
-            "term": os.environ.get("TERM"),
-            "term_program": os.environ.get("TERM_PROGRAM"),
-            "colorterm": os.environ.get("COLORTERM"),
-        }
-
-        # Detect terminal multiplexers
-        multiplexer = None
-        if os.environ.get("TMUX"):
-            multiplexer = "tmux"
-        elif os.environ.get("STY"):
-            multiplexer = "screen"
-        elif "screen" in (info["term"] or ""):
-            multiplexer = "screen"
-        info["multiplexer"] = multiplexer
-
-        # Detect color capability
-        # When not interactive (headless/file output), colors are meaningless
-        if not is_interactive:
-            info["color_depth"] = "none"
-        else:
-            term = (info["term"] or "").lower()
-            colorterm = (info["colorterm"] or "").lower()
-            if colorterm in ("truecolor", "24bit") or "truecolor" in colorterm:
-                info["color_depth"] = "24bit"
-            elif "256color" in term or "256" in colorterm:
-                info["color_depth"] = "256"
-            elif term and term != "dumb":
-                info["color_depth"] = "basic"
-            else:
-                info["color_depth"] = "none"
-
-        # Detect if running in common terminal emulators
-        term_program = info["term_program"] or ""
-        if term_program:
-            info["emulator"] = term_program
-        elif "xterm" in (info["term"] or "").lower():
-            info["emulator"] = "xterm-compatible"
-        elif "linux" in (info["term"] or "").lower():
-            info["emulator"] = "linux-console"
-        else:
-            info["emulator"] = None
-
-        return info
+        return detect_terminal_caps()
 
     def _get_context_info(self) -> Dict[str, Any]:
         """Get context window usage and GC threshold information.
