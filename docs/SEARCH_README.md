@@ -16,17 +16,17 @@ The jaato API documentation includes a full-text search feature powered by [Lunr
 
 ## How It Works
 
-1. **Search Index**: A pre-built JSON index (`docs/api/assets/js/search-index.json`) contains all page content, titles, headings, and snippets.
+1. **Search Index**: A pre-built JSON index (`docs/docs/assets/js/search-index.json`) contains all page content, titles, headings, and snippets.
 
 2. **Lunr.js**: Loaded from CDN (`https://unpkg.com/lunr@2.3.9/lunr.min.js`), Lunr.js provides the search engine that runs entirely in the browser.
 
-3. **Search UI**: Custom JavaScript in `docs/api/assets/js/docs.js` handles:
+3. **Search UI**: Custom JavaScript in `docs/docs/assets/js/docs.js` handles:
    - Loading the index
    - Building the Lunr index
    - Performing searches
    - Displaying results with dropdown
 
-4. **Styling**: CSS in `docs/api/assets/css/style.css` provides the search results dropdown appearance.
+4. **Styling**: CSS in `docs/docs/assets/css/style.css` provides the search results dropdown appearance.
 
 ## File Structure
 
@@ -35,7 +35,7 @@ docs/
 ├── generate_search_index.py       # Generate search index from HTML
 ├── add_lunr_to_html.py           # Add Lunr.js script tag to HTML files
 ├── SEARCH_README.md              # This file
-└── api/
+└── docs/
     ├── assets/
     │   ├── css/
     │   │   └── style.css         # Includes search result styles
@@ -57,23 +57,23 @@ python3 docs/generate_search_index.py
 ```
 
 This will:
-1. Scan all HTML files in `docs/api/`
+1. Scan all HTML files in `docs/docs/`
 2. Extract titles, headings, and text content
-3. Generate a new `docs/api/assets/js/search-index.json` file
+3. Generate a new `docs/docs/assets/js/search-index.json` file
 
 **Output example**:
 ```
 ============================================================
 Lunr.js Search Index Generator
 ============================================================
-Scanning /home/user/jaato/docs/api for HTML files...
+Scanning /home/user/jaato/docs/docs for HTML files...
 Found 22 HTML files
   Processing: index.html
   Processing: core-concepts/providers.html
   ...
 Successfully indexed 22 documents
 
-Writing index to: /home/user/jaato/docs/api/assets/js/search-index.json
+Writing index to: /home/user/jaato/docs/docs/assets/js/search-index.json
 Index file size: 77.3 KB
 Total documents: 22
 
@@ -124,7 +124,7 @@ The current implementation loads Lunr.js from a CDN. To make it completely self-
 
 1. Download Lunr.js:
    ```bash
-   curl -o docs/api/assets/js/lunr.min.js https://unpkg.com/lunr@2.3.9/lunr.min.js
+   curl -o docs/docs/assets/js/lunr.min.js https://unpkg.com/lunr@2.3.9/lunr.min.js
    ```
 
 2. Update HTML files to use local copy:
@@ -156,7 +156,7 @@ The current implementation loads Lunr.js from a CDN. To make it completely self-
 
 ### Adjust search behavior
 
-Edit `docs/api/assets/js/docs.js`, function `performSearch()`:
+Edit `docs/docs/assets/js/docs.js`, function `performSearch()`:
 
 ```javascript
 // Change number of results
@@ -170,7 +170,7 @@ var searchQuery = query.split(/\s+/).map(function(term) {
 
 ### Adjust search result appearance
 
-Edit `docs/api/assets/css/style.css`, `.search-results` section:
+Edit `docs/docs/assets/css/style.css`, `.search-results` section:
 
 ```css
 .search-results {

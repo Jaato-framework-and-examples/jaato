@@ -1,5 +1,5 @@
 /**
- * jaato API Documentation - Interactive functionality
+ * jaato Documentation - Interactive functionality
  */
 
 (function() {
@@ -284,37 +284,37 @@
 
     console.log('[getBasePath] pathname:', path);
 
-    // Find the /api/ directory in the path - this is our base
-    var apiIndex = path.indexOf('/api/');
-    if (apiIndex === -1) {
+    // Find the /docs/ directory in the path - this is our base
+    var docsIndex = path.indexOf('/docs/');
+    if (docsIndex === -1) {
       // Fallback: not in expected structure
-      console.warn('[getBasePath] /api/ not found in path, using root');
+      console.warn('[getBasePath] /docs/ not found in path, using root');
       return './';
     }
 
-    // Get the path after /api/
-    var pathAfterApi = path.substring(apiIndex + 5); // +5 for '/api/'
+    // Get the path after /docs/
+    var pathAfterDocs = path.substring(docsIndex + 6); // +6 for '/docs/'
 
-    console.log('[getBasePath] pathAfterApi:', pathAfterApi);
+    console.log('[getBasePath] pathAfterDocs:', pathAfterDocs);
 
-    // Remove filename to get directory path after /api/
-    var lastSlash = pathAfterApi.lastIndexOf('/');
-    var dirAfterApi = lastSlash > 0 ? pathAfterApi.substring(0, lastSlash) : '';
+    // Remove filename to get directory path after /docs/
+    var lastSlash = pathAfterDocs.lastIndexOf('/');
+    var dirAfterDocs = lastSlash > 0 ? pathAfterDocs.substring(0, lastSlash) : '';
 
-    console.log('[getBasePath] dirAfterApi:', dirAfterApi);
+    console.log('[getBasePath] dirAfterDocs:', dirAfterDocs);
 
-    // Count depth (number of directory levels after /api/)
-    var depth = dirAfterApi === '' ? 0 : (dirAfterApi.match(/\//g) || []).length + 1;
+    // Count depth (number of directory levels after /docs/)
+    var depth = dirAfterDocs === '' ? 0 : (dirAfterDocs.match(/\//g) || []).length + 1;
 
     console.log('[getBasePath] depth:', depth);
 
-    // If at root of /api/, no traversal needed
+    // If at root of /docs/, no traversal needed
     if (depth === 0) {
       console.log('[getBasePath] returning: ./');
       return './';
     }
 
-    // Build relative path to go up to /api/ root
+    // Build relative path to go up to /docs/ root
     var base = '';
     for (var i = 0; i < depth; i++) {
       base += '../';
