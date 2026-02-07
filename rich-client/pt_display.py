@@ -1006,8 +1006,6 @@ class PTDisplay:
     def _get_tool_output_popup_content(self):
         """Get rendered tool output popup content as ANSI for prompt_toolkit."""
         buffer = self._get_active_buffer()
-        # Update popup state (auto-show/auto-dismiss)
-        self._tool_output_popup.update(buffer)
 
         if not self._tool_output_popup.is_visible:
             return []
@@ -2149,12 +2147,17 @@ class PTDisplay:
         )
 
         # Tool output popup (floating overlay, auto-shown for expanded running tools)
+        # The filter calls update() so visibility is evaluated fresh each render
+        # cycle — the content getter then skips the redundant update() call.
+        def _tool_output_popup_filter():
+            self._tool_output_popup.update(self._get_active_buffer())
+            return self._tool_output_popup.is_visible
         tool_output_popup_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_tool_output_popup_content),
                 height=self._get_tool_output_popup_height,
             ),
-            filter=Condition(lambda: self._tool_output_popup.is_visible),
+            filter=Condition(_tool_output_popup_filter),
         )
 
         # Root layout with session bar at top, then tab bar, status bar, output, bars, input
