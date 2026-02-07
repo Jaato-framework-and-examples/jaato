@@ -460,6 +460,27 @@ def create_plugin() -> ExamplePlugin:
        return {'result': 'some value'}
    ```
 
+5. **Executor Metadata** (optional): Executors can return a `(result_dict, metadata_dict)` tuple to pass UI hints to the presentation layer. The metadata dict is merged into the result by `ToolExecutor` before being forwarded to the session.
+
+   | Key | Type | Default | Description |
+   |-----|------|---------|-------------|
+   | `continuation_id` | `str` | — | Groups consecutive tool calls into a single popup session (e.g., an interactive shell session ID). The UI keeps the same popup open for calls sharing a `continuation_id`. |
+   | `show_output` | `bool` | `True` | Controls whether the tool result appears in the main output panel. Set to `False` for tool calls whose output is only relevant inside a popup (e.g., `shell_input`). |
+   | `show_popup` | `bool` | `True` | Controls whether the popup panel tracks/updates for this tool call. Set to `False` for silent background reads that should not shift popup focus (e.g., `shell_read`). |
+
+   When metadata is not needed, return a plain dict as usual. Example from the `interactive_shell` plugin:
+
+   ```python
+   def _exec_input(self, args: Dict[str, Any]) -> Any:
+       session_id = args.get('session_id')
+       # ... execute input ...
+       result = {'session_id': session_id, 'output': output}
+       if session.is_alive:
+           # Group into popup, hide from main output panel
+           return (result, {"continuation_id": session_id, "show_output": False})
+       return result
+   ```
+
 ### Plugin with Configuration
 
 If your plugin needs configuration, handle it in `initialize()`:

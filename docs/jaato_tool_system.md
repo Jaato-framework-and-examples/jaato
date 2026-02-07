@@ -413,7 +413,9 @@ Once a tool is available (core or activated), execution follows this pipeline:
 │  │  4. EXECUTE                                      │                │
 │  │     ├─ Call executor(arguments)                  │                │
 │  │     ├─ Handle streaming if supported             │                │
-│  │     └─ Capture result                            │                │
+│  │     ├─ Capture result                            │                │
+│  │     └─ Unwrap metadata tuple if returned         │                │
+│  │        (see Executor Metadata below)             │                │
 │  └────────┬────────────────────────────────────────┘                │
 │           │                                                          │
 │           ▼                                                          │
@@ -427,6 +429,8 @@ Once a tool is available (core or activated), execution follows this pipeline:
 │  ┌─────────────────────────────────────────────────┐                │
 │  │  6. RETURN TO MODEL                              │                │
 │  │     └─ (success: bool, result: str/dict)         │                │
+│  │        Result may include merged metadata keys   │                │
+│  │        (continuation_id, show_output, show_popup) │                │
 │  └─────────────────────────────────────────────────┘                │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -458,6 +462,18 @@ Model: "Read config.json, check git status, and list directory"
 ```
 
 **Configuration:** `JAATO_PARALLEL_TOOLS=true` (default)
+
+### Executor Metadata
+
+Executors can optionally return a `(result_dict, metadata_dict)` tuple instead of a plain dict. The `ToolExecutor` merges the metadata into the result before forwarding it to the session and UI layers. This enables plugins to communicate presentation hints without changing the core result structure.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `continuation_id` | `str` | — | Groups tool calls into a single popup session (e.g., interactive shell) |
+| `show_output` | `bool` | `True` | Controls main output panel visibility for this tool call |
+| `show_popup` | `bool` | `True` | Controls popup panel tracking/visibility for this tool call |
+
+See the [Plugin README](../shared/plugins/README.md#executor-metadata) for full details and code examples.
 
 ---
 

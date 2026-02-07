@@ -314,6 +314,37 @@ executor.clear_executors()</code></pre>
             <li><code>traceback</code> - Full traceback (if exception)</li>
             <li><code>_permission</code> - Permission metadata (if applicable)</li>
           </ul>
+
+          <h3>Executor Metadata</h3>
+          <p>
+            Executors may return a <code>(result_dict, metadata_dict)</code> tuple.
+            The metadata is merged into the result dict before it is returned.
+          </p>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>continuation_id</code></td>
+                <td><code>str</code></td>
+                <td>—</td>
+                <td>Groups consecutive tool calls into a single popup session</td>
+              </tr>
+              <tr>
+                <td><code>show_output</code></td>
+                <td><code>bool</code></td>
+                <td><code>true</code></td>
+                <td>Controls main output panel visibility for this call</td>
+              </tr>
+              <tr>
+                <td><code>show_popup</code></td>
+                <td><code>bool</code></td>
+                <td><code>true</code></td>
+                <td>Controls popup panel tracking/visibility for this call</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
           <div class="code-label">Executing tools</div>
@@ -343,6 +374,24 @@ success, result = executor.execute(
     {"file": "data.csv"},
     call_id="call_12345"
 )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Executor metadata tuple</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Executor returning metadata:
+def _exec_input(self, args):
+    result = {"output": "..."}
+    return (result, {
+        "continuation_id": "sess_1",
+        "show_output": False,
+    })
+
+# ToolExecutor merges metadata into result:
+success, result = executor.execute(
+    "shell_input", {"session_id": "sess_1", "text": "ls"}
+)
+# result == {"output": "...", "continuation_id": "sess_1",
+#            "show_output": False}</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Error handling</div>
