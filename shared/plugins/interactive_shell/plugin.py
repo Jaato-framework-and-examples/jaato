@@ -487,7 +487,7 @@ IMPORTANT NOTES:
                 f"alive={session.is_alive}"
             )
             if session.is_alive:
-                return (result, {"continuation_id": session_id})
+                return (result, {"continuation_id": session_id, "show_output": True})
             return result
 
         except Exception as exc:
@@ -525,7 +525,7 @@ IMPORTANT NOTES:
                 'is_alive': session.is_alive,
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id})
+                return (result, {"continuation_id": session_id, "show_output": False})
             return result
         except Exception as exc:
             self._trace(f"input: id={session_id} FAILED: {exc}")
@@ -553,7 +553,7 @@ IMPORTANT NOTES:
                 'is_alive': session.is_alive,
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id})
+                return (result, {"continuation_id": session_id, "show_output": False})
             return result
         except Exception as exc:
             return {'error': f'shell_read: {exc}', 'is_alive': session.is_alive}
@@ -588,7 +588,7 @@ IMPORTANT NOTES:
                 'is_alive': session.is_alive,
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id})
+                return (result, {"continuation_id": session_id, "show_output": False})
             return result
         except ValueError as exc:
             return {'error': str(exc)}
@@ -617,7 +617,7 @@ IMPORTANT NOTES:
             self._trace(
                 f"close: id={session_id} exit_status={result.get('exit_status')}"
             )
-            return result
+            return (result, {"show_output": True})
 
         except Exception as exc:
             # Clean up even on error

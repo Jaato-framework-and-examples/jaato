@@ -249,6 +249,7 @@ class AgentUIHooks(Protocol):
         call_id: Optional[str] = None,
         backgrounded: bool = False,
         continuation_id: Optional[str] = None,
+        show_output: Optional[bool] = None,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -263,6 +264,8 @@ class AgentUIHooks(Protocol):
             continuation_id: Session ID for tools that expect follow-up calls
                 (e.g., interactive shell sessions). The popup stays open across
                 tools sharing the same continuation_id.
+            show_output: Whether to render output_lines in the main panel.
+                None means use default (True). The popup is unaffected.
         """
         ...
 
