@@ -726,8 +726,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Args:
             path: The path to check.
             mode: Access mode - "read" or "write" (default: "write").
-                 CLI defaults to "write" since commands can perform any operation.
-                 Paths authorized as "readonly" are blocked for CLI access.
+                 CLI defaults to "write" since commands can both read and
+                 write. This requires "readwrite" authorized paths; "readonly"
+                 paths are not accessible via CLI (use readFile/glob/grep).
 
         Returns:
             True if the path is allowed, False otherwise.
