@@ -102,6 +102,7 @@ class EventType(str, Enum):
 
     # Command list (Server -> Client)
     COMMAND_LIST = "command.list"
+    COMMAND_LIST_REFRESH = "command.list_refresh"
 
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
@@ -829,6 +830,17 @@ class CommandListEvent(Event):
 
 
 @dataclass
+class CommandListRefreshEvent(Event):
+    """Signal that the command list should be refreshed.
+
+    Emitted by core.py after commands that change completion state
+    (e.g., references select/unselect). The IPC client handles this
+    by re-requesting the full command list from the daemon.
+    """
+    type: EventType = field(default=EventType.COMMAND_LIST_REFRESH)
+
+
+@dataclass
 class ToolStatusEvent(Event):
     """Tool status information for client display."""
     type: EventType = field(default=EventType.TOOL_STATUS)
@@ -1029,6 +1041,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
+    EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
     EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.HISTORY_REQUEST.value: HistoryRequest,

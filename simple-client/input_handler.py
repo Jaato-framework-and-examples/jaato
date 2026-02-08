@@ -219,6 +219,11 @@ class InputHandler:
         if self._completer:
             self._completer.add_commands(commands)
 
+    def clear_plugin_commands(self) -> None:
+        """Clear all plugin-contributed commands."""
+        if self._completer:
+            self._completer.clear_plugin_commands()
+
     def set_session_provider(self, provider: Callable[[], List]) -> None:
         """Set the session ID provider for completion.
 
