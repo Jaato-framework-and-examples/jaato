@@ -78,8 +78,8 @@ class TestDefaults:
     """Tests for default values."""
 
     def test_default_base_url(self):
-        """Default base URL should be Z.AI's Anthropic endpoint."""
-        assert DEFAULT_ZHIPUAI_BASE_URL == "https://api.z.ai/api/anthropic/v1"
+        """Default base URL should be Z.AI's Anthropic endpoint (no /v1 suffix)."""
+        assert DEFAULT_ZHIPUAI_BASE_URL == "https://api.z.ai/api/anthropic"
 
     def test_default_model(self):
         """Default model should be glm-4.7."""

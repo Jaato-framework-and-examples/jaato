@@ -9,7 +9,9 @@ from typing import Optional
 
 
 # Default Z.AI Anthropic-compatible API endpoint
-DEFAULT_ZHIPUAI_BASE_URL = "https://api.z.ai/api/anthropic/v1"
+# NOTE: The Anthropic SDK appends /v1/messages to this base URL internally.
+# Do NOT include /v1 here or requests will hit /v1/v1/messages (404).
+DEFAULT_ZHIPUAI_BASE_URL = "https://api.z.ai/api/anthropic"
 
 # Default model for Zhipu AI
 DEFAULT_ZHIPUAI_MODEL = "glm-4.7"
@@ -34,7 +36,7 @@ def resolve_base_url() -> str:
     1. ZHIPUAI_BASE_URL environment variable
 
     Returns:
-        Base URL (default: https://api.z.ai/api/anthropic/v1).
+        Base URL (default: https://api.z.ai/api/anthropic).
     """
     return os.environ.get("ZHIPUAI_BASE_URL", DEFAULT_ZHIPUAI_BASE_URL)
 

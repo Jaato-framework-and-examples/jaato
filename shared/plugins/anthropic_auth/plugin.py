@@ -44,6 +44,36 @@ class AnthropicAuthPlugin:
         """Return the plugin name."""
         return "anthropic_auth"
 
+    @property
+    def provider_name(self) -> str:
+        """Return the provider name this auth plugin serves."""
+        return "anthropic"
+
+    @property
+    def provider_display_name(self) -> str:
+        """Return human-readable provider name."""
+        return "Anthropic (Claude)"
+
+    def get_default_models(self) -> List[Dict[str, str]]:
+        """Return default models available for this provider."""
+        return [
+            {"name": "anthropic/claude-sonnet-4-5-20250929", "description": "Claude Sonnet 4.5 — balanced speed and capability"},
+            {"name": "anthropic/claude-opus-4-6", "description": "Claude Opus 4.6 — most capable"},
+            {"name": "anthropic/claude-haiku-4-5-20251001", "description": "Claude Haiku 4.5 — fastest"},
+        ]
+
+    def verify_credentials(self) -> bool:
+        """Check if valid credentials exist after authentication."""
+        try:
+            from ..model_provider.anthropic.oauth import load_tokens
+            from ..model_provider.anthropic.env import resolve_api_key, resolve_oauth_token
+            tokens = load_tokens()
+            if tokens and not tokens.is_expired:
+                return True
+            return bool(resolve_oauth_token() or resolve_api_key())
+        except Exception:
+            return False
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin."""
         pass

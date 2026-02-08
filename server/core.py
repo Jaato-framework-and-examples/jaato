@@ -162,6 +162,7 @@ class JaatoServer:
         on_event: Optional[EventCallback] = None,
         workspace_path: Optional[str] = None,
         session_id: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
     ):
         """Initialize the server.
 
@@ -173,8 +174,11 @@ class JaatoServer:
                            If provided, the server will chdir to this path
                            when processing requests.
             session_id: Unique identifier for this session (used in logs).
+            env_overrides: Optional dict of env vars that take precedence over
+                          the .env file (e.g., from post-auth wizard).
         """
         self.env_file = env_file
+        self._env_overrides = env_overrides or {}
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
@@ -602,6 +606,10 @@ class JaatoServer:
         # Filter out None values and store as session env
         self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
 
+        # Apply overrides (e.g., provider/model from post-auth wizard)
+        if self._env_overrides:
+            self._session_env.update(self._env_overrides)
+
         def get_config(key: str) -> Optional[str]:
             """Get config value from session env, falling back to global env."""
             return self._session_env.get(key) or os.environ.get(key)
@@ -860,14 +868,15 @@ class JaatoServer:
         # This must happen after _create_main_agent() so client has the agent registered
         if self._jaato:
             usage = self._jaato.get_context_usage()
+            context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
             self.emit(ContextUpdatedEvent(
                 agent_id="main",
                 total_tokens=usage.get('total_tokens', 0),
                 prompt_tokens=usage.get('prompt_tokens', 0),
                 output_tokens=usage.get('output_tokens', 0),
-                context_limit=usage.get('context_limit', 128000),
+                context_limit=context_limit,
                 percent_used=usage.get('percent_used', 0.0),
-                tokens_remaining=usage.get('tokens_remaining', 128000),
+                tokens_remaining=usage.get('tokens_remaining', context_limit),
                 turns=usage.get('turns', 0),
                 gc_threshold=gc_threshold,
                 gc_strategy=gc_strategy,
@@ -2235,20 +2244,27 @@ class JaatoServer:
         if command.lower() == "save":
             parsed_args["user_inputs"] = self._original_inputs.copy()
 
-        # Find and configure plugin output callback for real-time output
+        # Find and configure plugin output callback for real-time output.
+        # User commands run outside agent context, so we buffer _emit() output
+        # and send as a SystemMessageEvent (not AgentOutputEvent).
         plugin = self._find_plugin_for_command(command)
+        output_parts = []
         if plugin and hasattr(plugin, 'set_output_callback'):
-            # Create callback that emits events
             def output_callback(source: str, text: str, mode: str) -> None:
-                self.emit(AgentOutputEvent(
-                    text=text,
-                    source=source,
-                    mode=mode,
-                ))
+                output_parts.append(text)
             plugin.set_output_callback(output_callback)
 
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
+
+            # Send accumulated _emit() output as a single system message
+            if output_parts:
+                combined = "".join(output_parts).rstrip("\n")
+                if combined:
+                    self.emit(SystemMessageEvent(
+                        message=combined,
+                        style="info",
+                    ))
 
             # After memory commands, push updated memory list for completion cache
             # (must run before HelpLines early return so memory list/help also refresh)
@@ -2510,14 +2526,15 @@ class JaatoServer:
                 # Emit initial context update so toolbar shows correct usage
                 if self._jaato:
                     usage = self._jaato.get_context_usage()
+                    context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
                     self.emit(ContextUpdatedEvent(
                         agent_id="main",
                         total_tokens=usage.get('total_tokens', 0),
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
-                        context_limit=usage.get('context_limit', 128000),
+                        context_limit=context_limit,
                         percent_used=usage.get('percent_used', 0.0),
-                        tokens_remaining=usage.get('tokens_remaining', 128000),
+                        tokens_remaining=usage.get('tokens_remaining', context_limit),
                         turns=usage.get('turns', 0),
                         gc_threshold=gc_threshold,
                         gc_strategy=gc_strategy,

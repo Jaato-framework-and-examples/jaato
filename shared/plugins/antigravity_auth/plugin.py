@@ -45,6 +45,33 @@ class AntigravityAuthPlugin:
         """Return the plugin name."""
         return "antigravity_auth"
 
+    @property
+    def provider_name(self) -> str:
+        """Return the provider name this auth plugin serves."""
+        return "antigravity"
+
+    @property
+    def provider_display_name(self) -> str:
+        """Return human-readable provider name."""
+        return "Google Antigravity"
+
+    def get_default_models(self) -> List[Dict[str, str]]:
+        """Return default models available for this provider."""
+        return [
+            {"name": "antigravity-gemini-3-pro", "description": "Gemini 3 Pro via Antigravity"},
+            {"name": "antigravity-gemini-3-flash", "description": "Gemini 3 Flash via Antigravity"},
+            {"name": "antigravity-claude-sonnet-4-5", "description": "Claude Sonnet 4.5 via Antigravity"},
+        ]
+
+    def verify_credentials(self) -> bool:
+        """Check if valid credentials exist after authentication."""
+        try:
+            from ..model_provider.antigravity.oauth import load_tokens
+            tokens = load_tokens()
+            return bool(tokens)
+        except Exception:
+            return False
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin."""
         pass
