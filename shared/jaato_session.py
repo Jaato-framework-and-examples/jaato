@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand, OutputCallback
+from .plugins.base import HelpLines, UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
 from .instruction_budget import (
@@ -4415,6 +4415,10 @@ NOTES
         result: Any
     ) -> None:
         """Inject a user command execution into conversation history."""
+        # HelpLines is display-only (rendered via pager, not serializable) — skip
+        if isinstance(result, HelpLines):
+            return
+
         current_history = self.get_history()
 
         user_message = Message(
