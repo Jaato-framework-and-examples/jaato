@@ -14,11 +14,12 @@ from typing import Dict, Optional, List, Any
 
 
 class InstructionSource(Enum):
-    """The 4 tracked instruction source layers."""
+    """The 5 tracked instruction source layers."""
     SYSTEM = "system"           # System instructions (children: base, client, framework)
     PLUGIN = "plugin"           # Plugin instructions (children: per-tool)
     ENRICHMENT = "enrichment"   # Prompt enrichment pipeline additions
     CONVERSATION = "conversation"  # Message history (children: per-turn)
+    THINKING = "thinking"       # Extended thinking output tokens (cumulative per session)
 
 
 class GCPolicy(Enum):
@@ -44,6 +45,7 @@ DEFAULT_SOURCE_POLICIES: Dict[InstructionSource, GCPolicy] = {
     InstructionSource.PLUGIN: GCPolicy.PARTIAL,
     InstructionSource.ENRICHMENT: GCPolicy.EPHEMERAL,
     InstructionSource.CONVERSATION: GCPolicy.PARTIAL,
+    InstructionSource.THINKING: GCPolicy.EPHEMERAL,  # Output tokens, not context
 }
 
 
@@ -224,21 +226,40 @@ class InstructionBudget:
     entries: Dict[InstructionSource, SourceEntry] = field(default_factory=dict)
     context_limit: int = 128_000  # Model's context window
 
+    # Sources excluded from context window calculations (output-only tokens)
+    _NON_CONTEXT_SOURCES = frozenset({InstructionSource.THINKING})
+
     def total_tokens(self) -> int:
-        """Total tokens across all sources."""
+        """Total context tokens across all sources (excludes output-only sources)."""
+        return sum(
+            entry.total_tokens() for source, entry in self.entries.items()
+            if source not in self._NON_CONTEXT_SOURCES
+        )
+
+    def total_tokens_all(self) -> int:
+        """Total tokens across ALL sources including output-only (e.g. thinking)."""
         return sum(entry.total_tokens() for entry in self.entries.values())
 
     def gc_eligible_tokens(self) -> int:
         """Total tokens that can be reclaimed by GC."""
-        return sum(entry.gc_eligible_tokens() for entry in self.entries.values())
+        return sum(
+            entry.gc_eligible_tokens() for source, entry in self.entries.items()
+            if source not in self._NON_CONTEXT_SOURCES
+        )
 
     def locked_tokens(self) -> int:
         """Total tokens that can never be GC'd."""
-        return sum(entry.locked_tokens() for entry in self.entries.values())
+        return sum(
+            entry.locked_tokens() for source, entry in self.entries.items()
+            if source not in self._NON_CONTEXT_SOURCES
+        )
 
     def preservable_tokens(self) -> int:
         """Total tokens that are preservable."""
-        return sum(entry.preservable_tokens() for entry in self.entries.values())
+        return sum(
+            entry.preservable_tokens() for source, entry in self.entries.items()
+            if source not in self._NON_CONTEXT_SOURCES
+        )
 
     def utilization_percent(self) -> float:
         """Context window utilization as percentage."""
