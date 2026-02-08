@@ -342,6 +342,7 @@ class SessionManager:
         client_id: str,
         session_name: Optional[str] = None,
         workspace_path: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -349,6 +350,8 @@ class SessionManager:
             client_id: The requesting client.
             session_name: Optional name (auto-generated if not provided).
             workspace_path: Client's working directory for file operations.
+            env_overrides: Optional env vars that override the .env file
+                          (e.g., JAATO_PROVIDER/MODEL_NAME from post-auth wizard).
 
         Returns:
             The session ID (empty string on failure).
@@ -383,7 +386,7 @@ class SessionManager:
         logger.info(f"  Client config: {client_config}")
 
         # Create JaatoServer for this session
-        # Provider is determined by env_file, not passed explicitly
+        # Provider is determined by env_file, with optional overrides
         server = JaatoServer(
             env_file=session_env_file,
             provider=None,  # Let env_file determine provider
@@ -391,6 +394,7 @@ class SessionManager:
             on_event=lambda e: self._emit_to_client(client_id, e),
             workspace_path=workspace_path,
             session_id=session_id,
+            env_overrides=env_overrides,
         )
 
         # Initialize the server (events go directly to requesting client)

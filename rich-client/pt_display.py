@@ -1524,10 +1524,11 @@ class PTDisplay:
                 self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-                buffer.set_permission_focus(
-                    self._permission_response_options,
-                    self._permission_focus_index
-                )
+                if buffer:
+                    buffer.set_permission_focus(
+                        self._permission_response_options,
+                        self._permission_focus_index
+                    )
                 self._app.invalidate()
             else:
                 # Normal mode: trigger tab completion
@@ -1546,10 +1547,11 @@ class PTDisplay:
                 self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-                buffer.set_permission_focus(
-                    self._permission_response_options,
-                    self._permission_focus_index
-                )
+                if buffer:
+                    buffer.set_permission_focus(
+                        self._permission_response_options,
+                        self._permission_focus_index
+                    )
                 self._app.invalidate()
             else:
                 # Normal mode: trigger previous completion
@@ -3140,10 +3142,11 @@ class PTDisplay:
             self._permission_focus_index = 0
         # Update output buffer with focus state for inline highlighting (use correct buffer)
         buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-        buffer.set_permission_focus(
-            self._permission_response_options,
-            self._permission_focus_index
-        )
+        if buffer:
+            buffer.set_permission_focus(
+                self._permission_response_options,
+                self._permission_focus_index
+            )
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
