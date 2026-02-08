@@ -271,23 +271,48 @@ class MermaidFormatterPlugin:
         return self._fallback_code_block(source)
 
     def _fallback_with_diagnostic(self, source: str, error: str) -> str:
-        """Show the mermaid source with a syntax error diagnostic.
+        """Show truncated mermaid source around the error with a diagnostic.
 
-        Matches the visual style of code_validation_formatter:
-            ```mermaid
-            ...source...
-            ```
-                ┌─ Mermaid Validation ─
-                │ SyntaxError: Parse error on line 8: ...
-                └─
+        Parses the error for a line number and shows a context window
+        of CONTEXT_RADIUS lines above/below. When no line number is
+        found, shows the first few lines.  The diagnostic box follows
+        the code_validation_formatter visual style.
         """
-        block = f"```mermaid\n{source}\n```\n"
+        CONTEXT_RADIUS = 2
+        MAX_LINES_NO_LINENUM = 5
+        source_lines = source.splitlines()
+
+        line_match = re.search(r'[Ll]ine\s+(\d+)', error)
+
+        if line_match:
+            error_idx = int(line_match.group(1)) - 1  # 0-indexed
+            error_idx = max(0, min(error_idx, len(source_lines) - 1))
+
+            start = max(0, error_idx - CONTEXT_RADIUS)
+            end = min(len(source_lines), error_idx + CONTEXT_RADIUS + 1)
+
+            parts = []
+            if start > 0:
+                parts.append(f"  ... ({start} lines above)")
+            for i in range(start, end):
+                marker = f"       \u2190 line {i + 1}" if i == error_idx else ""
+                parts.append(f"{source_lines[i]}{marker}")
+            if end < len(source_lines):
+                parts.append(f"  ... ({len(source_lines) - end} lines below)")
+            truncated = "\n".join(parts)
+        elif len(source_lines) > MAX_LINES_NO_LINENUM:
+            head = "\n".join(source_lines[:MAX_LINES_NO_LINENUM])
+            truncated = f"{head}\n  ... ({len(source_lines) - MAX_LINES_NO_LINENUM} more lines)"
+        else:
+            truncated = source
+
+        block = f"```mermaid\n{truncated}\n```\n"
         indent = "    \u2502 "
-        lines = ["    \u250c\u2500 Mermaid Validation \u2500"]
+        diag = ["    \u250c\u2500 Mermaid Validation \u2500"]
         for err_line in error.splitlines():
-            lines.append(f"{indent}{err_line}")
-        lines.append("    \u2514\u2500")
-        return block + "\n".join(lines) + "\n"
+            diag.append(f"{indent}{err_line}")
+        diag.append("    \u2514\u2500")
+        return block + "\n".join(diag) + "\n"
 
     def _fallback_code_block(self, source: str) -> str:
         """Show the source as a passthrough code block.

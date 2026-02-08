@@ -346,6 +346,126 @@ class TestFallbackRendering:
         assert "rendering unavailable" not in output
 
 
+class TestDiagnosticTruncation:
+    """Tests for error diagnostic source truncation."""
+
+    def _make_source(self, n_lines):
+        """Build a mermaid source with N body lines."""
+        lines = ["graph TD"]
+        for i in range(2, n_lines + 1):
+            lines.append(f"    node{i - 1} --> node{i}")
+        return "\n".join(lines)
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_truncates_around_error_line(self, mock_renderer):
+        """Large source should show only a context window around the error."""
+        source = self._make_source(20)
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 10"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        # Should show context around line 10, not the full source
+        assert "lines above" in output
+        assert "lines below" in output
+        assert "\u2190 line 10" in output
+        # Line 1 (graph TD) should be omitted
+        assert "graph TD" not in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_short_source_not_truncated(self, mock_renderer):
+        """Short source with a line number should show the full source."""
+        source = "graph TD\n    A --> B\n    B --> C"
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 2"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        # All lines visible, no ellipsis
+        assert "graph TD" in output
+        assert "A --> B" in output
+        assert "B --> C" in output
+        assert "lines above" not in output
+        assert "lines below" not in output
+        assert "\u2190 line 2" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_no_line_number_shows_head(self, mock_renderer):
+        """Error without a line number should show first few lines."""
+        source = self._make_source(15)
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: unexpected token"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        assert "more lines)" in output
+        # First line should be visible
+        assert "graph TD" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_error_near_start(self, mock_renderer):
+        """Error on line 1 should not show 'lines above'."""
+        source = self._make_source(20)
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 1"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        assert "lines above" not in output
+        assert "lines below" in output
+        assert "\u2190 line 1" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_error_near_end(self, mock_renderer):
+        """Error on last line should not show 'lines below'."""
+        source = self._make_source(20)
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 20"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        assert "lines above" in output
+        assert "lines below" not in output
+        assert "\u2190 line 20" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_line_number_out_of_range_clamped(self, mock_renderer):
+        """Error line beyond source length should clamp to last line."""
+        source = "graph TD\n    A --> B"
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 99"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk(f"```mermaid\n{source}\n```"))
+        output = "".join(chunks)
+
+        # Should not crash, should show source
+        assert "A --> B" in output
+        assert "Mermaid Validation" in output
+
+
 class TestArtifactSaving:
     """Tests for PNG artifact file saving."""
 
