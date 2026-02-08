@@ -2261,10 +2261,6 @@ NOTES
                             user_prompt_preview
                         )
 
-                    # Notify UI via output that streaming was interrupted for mid-turn prompt
-                    if on_output:
-                        on_output("system", "[Processing your input...]", "write")
-
                     # Process the mid-turn prompt - this sends it to the model
                     # The partial response is preserved in provider history
                     mid_turn_response = self._check_and_handle_mid_turn_prompt(
@@ -2383,12 +2379,28 @@ NOTES
                                 tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
                             )
                             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                partial = get_all_text()
-                                cancel_msg = "[Generation cancelled]"
-                                if on_output and not cancellation_notified:
-                                    on_output("system", cancel_msg, "write")
-                                self._notify_model_of_cancellation(cancel_msg, partial)
-                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                                # Check if this was a mid-turn interrupt
+                                if self._mid_turn_interrupt:
+                                    self._trace("MID_TURN_INTERRUPT: Processing user prompt after interleaved tool result streaming")
+                                    self._mid_turn_interrupt = False
+                                    self._cancel_token = CancelToken()
+                                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                                        use_streaming, on_output, wrapped_usage_callback, turn_data
+                                    )
+                                    if mid_turn_response:
+                                        response = mid_turn_response
+                                    else:
+                                        partial = get_all_text()
+                                        if partial:
+                                            return partial
+                                        return ""
+                                else:
+                                    partial = get_all_text()
+                                    cancel_msg = "[Generation cancelled]"
+                                    if on_output and not cancellation_notified:
+                                        on_output("system", cancel_msg, "write")
+                                    self._notify_model_of_cancellation(cancel_msg, partial)
+                                    return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                             # Check for mid-turn prompts after interleaved tool execution
                             # Only inject if response doesn't have more function calls
@@ -2439,12 +2451,41 @@ NOTES
                         tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
                     )
                     if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                        partial = get_all_text()
-                        cancel_msg = "[Generation cancelled]"
-                        if on_output and not cancellation_notified:
-                            on_output("system", cancel_msg, "write")
-                        self._notify_model_of_cancellation(cancel_msg, partial)
-                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                        # Check if this was a mid-turn interrupt (user prompt during tool result streaming)
+                        if self._mid_turn_interrupt:
+                            self._trace("MID_TURN_INTERRUPT: Processing user prompt after tool result streaming")
+                            self._mid_turn_interrupt = False
+                            self._cancel_token = CancelToken()
+
+                            if self._on_mid_turn_interrupt:
+                                pending_prompts = self._message_queue.peek_all()
+                                preview = ""
+                                for pm in pending_prompts:
+                                    if pm.source_type in (SourceType.USER, SourceType.PARENT, SourceType.SYSTEM):
+                                        preview = pm.text[:100] if pm.text else ""
+                                        break
+                                partial = get_all_text()
+                                self._on_mid_turn_interrupt(len(partial) if partial else 0, preview)
+
+                            mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                                use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            if mid_turn_response:
+                                response = mid_turn_response
+                                # Fall through to normal processing
+                            else:
+                                self._trace("MID_TURN_INTERRUPT: No prompt in queue after tool result streaming")
+                                partial = get_all_text()
+                                if partial:
+                                    return partial
+                                return ""
+                        else:
+                            partial = get_all_text()
+                            cancel_msg = "[Generation cancelled]"
+                            if on_output and not cancellation_notified:
+                                on_output("system", cancel_msg, "write")
+                            self._notify_model_of_cancellation(cancel_msg, partial)
+                            return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                     if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                         import sys
@@ -3388,6 +3429,52 @@ NOTES
                 )
             ]
 
+        # Check for queued mid-turn prompts to inject between tool executions.
+        # This ensures user prompts are processed during tool-calling chains,
+        # not just after the model finishes all tool calls.
+        # The prompt is appended to the last tool result to maintain the
+        # tool_use → tool_result protocol required by providers.
+        injected_prompts: List[str] = []
+        while True:
+            msg = self._message_queue.pop_first_parent_message()
+            if msg is None:
+                break
+            self._trace(
+                f"MID_TURN_PROMPT_PIGGYBACK: Injecting prompt from "
+                f"{msg.source_type.value}:{msg.source_id}: {msg.text[:100]}..."
+            )
+            # Notify callback for UI (removes from pending bar)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(msg.text)
+            # Emit the prompt as user output so UI shows it
+            if on_output:
+                source = "parent" if msg.source_type == SourceType.PARENT else "user"
+                on_output(source, msg.text, "write")
+            injected_prompts.append(msg.text)
+
+        if injected_prompts and tool_results:
+            combined_prompt = "\n\n".join(injected_prompts)
+            last = tool_results[-1]
+            result_text = str(last.result) if last.result is not None else ""
+            tool_results = tool_results[:-1] + [
+                ToolResult(
+                    call_id=last.call_id,
+                    name=last.name,
+                    result=(
+                        f"{result_text}\n\n"
+                        f"<user_message>{combined_prompt}</user_message>\n"
+                        f"The user has sent a new message during your tool execution. "
+                        f"Please address their input in your next response."
+                    ),
+                    is_error=last.is_error,
+                    attachments=last.attachments
+                )
+            ]
+            self._trace(
+                f"MID_TURN_PROMPT_PIGGYBACK: Injected {len(injected_prompts)} prompt(s) "
+                f"into last tool result"
+            )
+
         # Proactive rate limiting
         self._pacer.pace()
 
@@ -3790,6 +3877,14 @@ NOTES
                 first_chunk_after_tools = [False]  # Use list to allow mutation in closure
 
                 def streaming_callback(chunk: str) -> None:
+                    # Check for pending mid-turn prompts during tool result streaming
+                    # This mirrors the interrupt detection in the initial streaming callback
+                    if self._message_queue.has_parent_messages():
+                        self._trace("MID_TURN_INTERRUPT: Detected pending user prompt during tool result streaming")
+                        self._mid_turn_interrupt = True
+                        if self._cancel_token:
+                            self._cancel_token.cancel()
+
                     if on_output:
                         # First chunk after tool results starts a new block
                         mode = "append" if first_chunk_after_tools[0] else "write"

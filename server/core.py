@@ -214,8 +214,6 @@ class JaatoServer:
         # Track which agent is currently executing a tool (for permission/clarification routing)
         self._current_tool_agent_id: str = "main"
 
-        # Queue for mid-turn prompts (messages sent while model is running)
-        self._mid_turn_prompt_queue: queue.Queue[str] = queue.Queue()
 
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
@@ -2100,43 +2098,6 @@ class JaatoServer:
             return
 
         self._channel_input_queue.put(response)
-
-    def has_pending_mid_turn_prompt(self) -> bool:
-        """Check if there are pending mid-turn prompts.
-
-        Returns:
-            True if there are queued prompts.
-        """
-        return not self._mid_turn_prompt_queue.empty()
-
-    def get_pending_mid_turn_prompt(self) -> Optional[str]:
-        """Get the next pending mid-turn prompt if available.
-
-        Returns:
-            The prompt text, or None if no prompts are queued.
-        """
-        try:
-            prompt = self._mid_turn_prompt_queue.get_nowait()
-            # Emit event that the prompt is being injected
-            self.emit(MidTurnPromptInjectedEvent(text=prompt))
-            return prompt
-        except queue.Empty:
-            return None
-
-    def clear_mid_turn_prompts(self) -> int:
-        """Clear all pending mid-turn prompts.
-
-        Returns:
-            Number of prompts cleared.
-        """
-        count = 0
-        while not self._mid_turn_prompt_queue.empty():
-            try:
-                self._mid_turn_prompt_queue.get_nowait()
-                count += 1
-            except queue.Empty:
-                break
-        return count
 
     def _find_plugin_for_command(self, command: str) -> Any:
         """Find the plugin that provides a user command.
