@@ -6,12 +6,15 @@ from unittest.mock import patch, MagicMock
 
 from ..renderer import (
     render,
+    RenderResult,
     is_renderer_available,
     _find_mmdc,
     _render_mmdc,
     _render_kroki,
     _check_kroki,
     _get_kroki_url,
+    _extract_kroki_error,
+    _extract_mmdc_error,
 )
 
 
@@ -54,10 +57,11 @@ class TestRenderMmdc:
     """Tests for mmdc rendering."""
 
     @patch("shutil.which")
-    def test_returns_none_when_mmdc_missing(self, mock_which):
+    def test_returns_empty_when_mmdc_missing(self, mock_which):
         mock_which.return_value = None
         result = _render_mmdc("graph TD\n    A-->B", "default", 2, "white")
-        assert result is None
+        assert result.png is None
+        assert result.error is None
 
     @patch("subprocess.run")
     @patch("shutil.which")
@@ -79,11 +83,13 @@ class TestRenderMmdc:
 
     @patch("subprocess.run")
     @patch("shutil.which")
-    def test_handles_mmdc_failure(self, mock_which, mock_run):
+    def test_handles_mmdc_failure_with_error(self, mock_which, mock_run):
         mock_which.return_value = "/usr/local/bin/mmdc"
-        mock_run.return_value = MagicMock(returncode=1, stderr="error")
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: Parse error on line 1")
         result = _render_mmdc("invalid", "default", 2, "white")
-        assert result is None
+        assert result.png is None
+        assert result.error is not None
+        assert "error" in result.error.lower()
 
     @patch("subprocess.run")
     @patch("shutil.which")
@@ -92,7 +98,7 @@ class TestRenderMmdc:
         mock_which.return_value = "/usr/local/bin/mmdc"
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="mmdc", timeout=30)
         result = _render_mmdc("graph TD", "default", 2, "white")
-        assert result is None
+        assert result.png is None
 
 
 class TestGetKrokiUrl:
@@ -184,15 +190,33 @@ class TestRenderKroki:
         mock_get_opener.return_value = mock_opener
 
         result = _render_kroki("graph TD\n    A-->B", "default")
-        assert result == b"\x89PNG fake data"
+        assert result.png == b"\x89PNG fake data"
+        assert result.error is None
 
     @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_returns_none_on_error(self, mock_get_opener):
+    def test_returns_empty_on_network_error(self, mock_get_opener):
         mock_opener = MagicMock()
         mock_opener.open.side_effect = Exception("timeout")
         mock_get_opener.return_value = mock_opener
         result = _render_kroki("graph TD", "default")
-        assert result is None
+        assert result.png is None
+        assert result.error is None
+
+    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
+    def test_returns_error_on_400(self, mock_get_opener):
+        import urllib.error
+        err = urllib.error.HTTPError(
+            "https://kroki.io/mermaid/png", 400, "Bad Request", {},
+            MagicMock(read=MagicMock(return_value=b"Error 400: SyntaxError: Parse error on line 3"))
+        )
+        err.read = MagicMock(return_value=b"Error 400: SyntaxError: Parse error on line 3")
+        mock_opener = MagicMock()
+        mock_opener.open.side_effect = err
+        mock_get_opener.return_value = mock_opener
+        result = _render_kroki("bad diagram", "default")
+        assert result.png is None
+        assert result.error is not None
+        assert "SyntaxError" in result.error
 
     @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
     def test_injects_theme_directive(self, mock_get_opener):
@@ -273,30 +297,42 @@ class TestRender:
     @patch("shared.plugins.mermaid_formatter.renderer._render_kroki")
     @patch("shared.plugins.mermaid_formatter.renderer._render_mmdc")
     def test_tries_mmdc_first(self, mock_mmdc, mock_kroki):
-        mock_mmdc.return_value = b"png from mmdc"
-        mock_kroki.return_value = b"png from kroki"
+        mock_mmdc.return_value = RenderResult(png=b"png from mmdc")
+        mock_kroki.return_value = RenderResult(png=b"png from kroki")
 
         result = render("graph TD")
-        assert result == b"png from mmdc"
+        assert result.png == b"png from mmdc"
         mock_kroki.assert_not_called()
 
     @patch("shared.plugins.mermaid_formatter.renderer._render_kroki")
     @patch("shared.plugins.mermaid_formatter.renderer._render_mmdc")
     def test_falls_back_to_kroki(self, mock_mmdc, mock_kroki):
-        mock_mmdc.return_value = None
-        mock_kroki.return_value = b"png from kroki"
+        mock_mmdc.return_value = RenderResult()
+        mock_kroki.return_value = RenderResult(png=b"png from kroki")
 
         result = render("graph TD")
-        assert result == b"png from kroki"
+        assert result.png == b"png from kroki"
 
     @patch("shared.plugins.mermaid_formatter.renderer._render_kroki")
     @patch("shared.plugins.mermaid_formatter.renderer._render_mmdc")
-    def test_returns_none_when_nothing_available(self, mock_mmdc, mock_kroki):
-        mock_mmdc.return_value = None
-        mock_kroki.return_value = None
+    def test_returns_empty_when_nothing_available(self, mock_mmdc, mock_kroki):
+        mock_mmdc.return_value = RenderResult()
+        mock_kroki.return_value = RenderResult()
 
         result = render("graph TD")
-        assert result is None
+        assert result.png is None
+        assert result.error is None
+
+    @patch("shared.plugins.mermaid_formatter.renderer._render_kroki")
+    @patch("shared.plugins.mermaid_formatter.renderer._render_mmdc")
+    def test_propagates_syntax_error(self, mock_mmdc, mock_kroki):
+        """When mmdc not available and kroki returns syntax error, propagate it."""
+        mock_mmdc.return_value = RenderResult()
+        mock_kroki.return_value = RenderResult(error="SyntaxError: bad")
+
+        result = render("graph TD")
+        assert result.png is None
+        assert result.error == "SyntaxError: bad"
 
 
 class TestIsRendererAvailable:
@@ -329,3 +365,42 @@ class TestIsRendererAvailable:
         with patch("shared.plugins.mermaid_formatter.renderer._check_kroki") as mock_kroki:
             is_renderer_available()
             mock_kroki.assert_not_called()
+
+
+class TestExtractKrokiError:
+    """Tests for kroki 400 error extraction."""
+
+    def test_strips_error_prefix(self):
+        body = "Error 400: SyntaxError: Parse error on line 3"
+        result = _extract_kroki_error(body)
+        assert result == "SyntaxError: Parse error on line 3"
+
+    def test_strips_stack_trace(self):
+        body = (
+            "Error 400: SyntaxError: Parse error\n"
+            "Expecting 'SQE', got 'PS'\n"
+            "    at Worker.convert (file:///usr/local/kroki/src/worker.js:44:15)\n"
+            "    at async file:///usr/local/kroki/src/index.js:31:28"
+        )
+        result = _extract_kroki_error(body)
+        assert "SyntaxError" in result
+        assert "Expecting" in result
+        assert "Worker.convert" not in result
+
+    def test_empty_body(self):
+        assert _extract_kroki_error("") is None
+        assert _extract_kroki_error(None) is None
+
+
+class TestExtractMmdcError:
+    """Tests for mmdc stderr error extraction."""
+
+    def test_extracts_error_line(self):
+        stderr = "Processing: input.mmd\nError: Parse error on line 5\nDone"
+        result = _extract_mmdc_error(stderr)
+        assert "Error" in result
+        assert "Parse error" in result
+
+    def test_empty_stderr(self):
+        assert _extract_mmdc_error("") is None
+        assert _extract_mmdc_error(None) is None

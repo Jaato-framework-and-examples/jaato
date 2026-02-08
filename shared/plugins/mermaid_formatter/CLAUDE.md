@@ -14,6 +14,21 @@ The `mermaid` PyPI package (`mermaid-py`) was removed because it is **not** a na
 
 There is no native Python mermaid renderer. Mermaid is a JavaScript library that requires a browser DOM to produce SVG. Every Python package either shells out to Node.js, calls an external API, or generates HTML that needs a browser.
 
+## `RenderResult` and Syntax Error Feedback
+
+`render()` returns a `RenderResult(png, error)` NamedTuple:
+- `.png` is set on success (bytes)
+- `.error` is set when the diagram has a syntax error (str, extracted from kroki 400 body or mmdc stderr)
+- Both `None` when no renderer is available at all
+
+The plugin uses `.error` to show a validation diagnostic block (matching `code_validation_formatter` visual style) and the system instructions tell the model to fix and re-emit the diagram. This provides a self-correction loop without needing a mermaid LSP server.
+
+Error extraction: `_extract_kroki_error()` strips the `Error 400:` prefix and stack trace from kroki responses. `_extract_mmdc_error()` finds the first error line in mmdc stderr.
+
+## HTTP Client
+
+All kroki HTTP calls go through `shared.http.get_url_opener()` for proxy and Kerberos support. A `User-Agent: jaato/1.0` header is required — kroki.io returns 403 for Python's default `Python-urllib` user agent.
+
 ## `is_renderer_available()` Contract
 
 This function determines whether system instructions should tell the model to use ` ```mermaid ` blocks. It must reflect actual rendering capability:
@@ -53,6 +68,6 @@ For mmdc, theme is passed via the `-t` CLI flag.
 
 | File | Responsibility |
 |------|---------------|
-| `renderer.py` | Source text → PNG bytes (strategy chain) |
-| `plugin.py` | Streaming block detection + fallback formatting |
+| `renderer.py` | Source text → `RenderResult(png, error)` (strategy chain) |
+| `plugin.py` | Streaming block detection + diagnostic display + fallback |
 | `backends/` | PNG bytes → terminal output (kitty/iterm/sixel/unicode) |

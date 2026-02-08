@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from ..plugin import MermaidFormatterPlugin, create_plugin
+from ..renderer import RenderResult
 
 
 class TestPluginProperties:
@@ -111,7 +112,7 @@ class TestBlockDetection:
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_detect_mermaid_block_renders(self, mock_renderer):
         """When renderer returns None, falls back to code block."""
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -145,7 +146,7 @@ class TestBlockDetection:
 
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_text_before_mermaid_block_yielded_immediately(self, mock_renderer):
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -156,7 +157,7 @@ class TestBlockDetection:
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_multiple_mermaid_blocks(self, mock_renderer):
         """Test handling multiple mermaid blocks in sequence."""
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -177,7 +178,7 @@ class TestFlushAndReset:
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_flush_incomplete_mermaid_block(self, mock_renderer):
         """Incomplete block at turn end should be flushed."""
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -285,7 +286,7 @@ class TestFallbackRendering:
 
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_fallback_shows_hint(self, mock_renderer):
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -297,7 +298,7 @@ class TestFallbackRendering:
 
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_fallback_preserves_source(self, mock_renderer):
-        mock_renderer.render.return_value = None
+        mock_renderer.render.return_value = RenderResult()
         plugin = MermaidFormatterPlugin()
         plugin.initialize()
 
@@ -309,6 +310,40 @@ class TestFallbackRendering:
         assert "graph TD" in output
         assert "A-->B" in output
 
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_syntax_error_shows_diagnostic(self, mock_renderer):
+        """Syntax errors from renderer should show validation block."""
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 3:\nExpecting 'SQE', got 'PS'"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->|bad(...)|B\n```"))
+        output = "".join(chunks)
+
+        # Should show the source
+        assert "```mermaid" in output
+        assert "A-->|bad(...)|B" in output
+        # Should show validation diagnostic
+        assert "Mermaid Validation" in output
+        assert "SyntaxError" in output
+        assert "Parse error" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_syntax_error_no_passthrough_hint(self, mock_renderer):
+        """Syntax error should NOT show the 'rendering unavailable' hint."""
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: bad syntax"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\nbad\n```"))
+        output = "".join(chunks)
+
+        assert "rendering unavailable" not in output
+
 
 class TestArtifactSaving:
     """Tests for PNG artifact file saving."""
@@ -317,7 +352,7 @@ class TestArtifactSaving:
     @patch("shared.plugins.mermaid_formatter.plugin.select_backend")
     def test_saves_artifact(self, mock_select_backend, mock_renderer, tmp_path):
         # Setup
-        mock_renderer.render.return_value = b"\x89PNG fake data"
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG fake data")
         mock_backend = MagicMock()
         mock_backend.render.return_value = "[rendered]\n"
         mock_select_backend.return_value = mock_backend
@@ -340,7 +375,7 @@ class TestArtifactSaving:
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     @patch("shared.plugins.mermaid_formatter.plugin.select_backend")
     def test_artifact_counter_increments(self, mock_select_backend, mock_renderer, tmp_path):
-        mock_renderer.render.return_value = b"\x89PNG fake data"
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG fake data")
         mock_backend = MagicMock()
         mock_backend.render.return_value = "[rendered]\n"
         mock_select_backend.return_value = mock_backend

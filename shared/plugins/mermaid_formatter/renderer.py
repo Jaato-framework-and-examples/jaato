@@ -13,15 +13,22 @@ is unavailable (e.g., showing the raw mermaid source as a code block).
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import urllib.request
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from shared.http import get_url_opener
 
 logger = logging.getLogger(__name__)
+
+
+class RenderResult(NamedTuple):
+    """Result of a render attempt."""
+    png: Optional[bytes] = None
+    error: Optional[str] = None
 
 # Cache renderer availability checks
 _mmdc_path: Optional[str] = None
@@ -30,7 +37,7 @@ _kroki_available: Optional[bool] = None
 
 
 def render(source: str, theme: str = "default", scale: int = 2,
-           background: str = "white") -> Optional[bytes]:
+           background: str = "white") -> RenderResult:
     """Render Mermaid diagram source to PNG bytes.
 
     Args:
@@ -40,19 +47,20 @@ def render(source: str, theme: str = "default", scale: int = 2,
         background: Background color (default white).
 
     Returns:
-        PNG image bytes, or None if no renderer is available.
+        RenderResult with .png (bytes) on success, or .error (str)
+        with a syntax error message when the diagram source is invalid.
     """
     # Try mmdc first (local, gold standard)
-    png = _render_mmdc(source, theme, scale, background)
-    if png is not None:
-        return png
+    result = _render_mmdc(source, theme, scale, background)
+    if result.png is not None:
+        return result
 
     # Try kroki.io POST API (remote, no local deps)
-    png = _render_kroki(source, theme)
-    if png is not None:
-        return png
+    result = _render_kroki(source, theme)
+    if result.png is not None or result.error is not None:
+        return result
 
-    return None
+    return RenderResult()
 
 
 def is_renderer_available() -> bool:
@@ -119,7 +127,7 @@ def _check_kroki() -> bool:
 
 
 def _render_mmdc(source: str, theme: str, scale: int,
-                 background: str) -> Optional[bytes]:
+                 background: str) -> RenderResult:
     """Render using mermaid-cli (mmdc).
 
     mmdc is the official Mermaid CLI tool from @mermaid-js/mermaid-cli.
@@ -127,7 +135,7 @@ def _render_mmdc(source: str, theme: str, scale: int,
     """
     mmdc = _find_mmdc()
     if mmdc is None:
-        return None
+        return RenderResult()
 
     with tempfile.TemporaryDirectory(prefix="jaato_mermaid_") as tmpdir:
         input_path = os.path.join(tmpdir, "input.mmd")
@@ -159,27 +167,28 @@ def _render_mmdc(source: str, theme: str, scale: int,
         ]
 
         try:
-            result = subprocess.run(
+            proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            if result.returncode != 0:
-                logger.debug("mmdc failed: %s", result.stderr)
-                return None
+            if proc.returncode != 0:
+                logger.debug("mmdc failed: %s", proc.stderr)
+                error = _extract_mmdc_error(proc.stderr)
+                return RenderResult(error=error)
 
             if os.path.exists(output_path):
                 with open(output_path, "rb") as f:
-                    return f.read()
-            return None
+                    return RenderResult(png=f.read())
+            return RenderResult()
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.debug("mmdc execution error: %s", e)
-            return None
+            return RenderResult()
 
 
-def _render_kroki(source: str, theme: str) -> Optional[bytes]:
+def _render_kroki(source: str, theme: str) -> RenderResult:
     """Render using kroki POST API.
 
     Sends the mermaid source as plain text to kroki's POST endpoint
@@ -191,7 +200,8 @@ def _render_kroki(source: str, theme: str) -> Optional[bytes]:
         theme: Mermaid theme name.
 
     Returns:
-        PNG image bytes, or None if rendering failed.
+        RenderResult with .png on success, .error on syntax error (400),
+        or empty on other failures.
     """
     # Inject theme via mermaid init directive (unless already present)
     if theme != "default" and not source.lstrip().startswith("%%{"):
@@ -209,8 +219,53 @@ def _render_kroki(source: str, theme: str) -> Optional[bytes]:
         opener = get_url_opener(url)
         with opener.open(req, timeout=30) as resp:
             if resp.status == 200:
-                return resp.read()
-        return None
+                return RenderResult(png=resp.read())
+        return RenderResult()
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.debug("kroki rendering failed: %s %s", e, body)
+        error = _extract_kroki_error(body) if e.code == 400 else None
+        return RenderResult(error=error)
     except Exception as e:
         logger.debug("kroki rendering failed: %s", e)
+        return RenderResult()
+
+
+def _extract_kroki_error(body: str) -> Optional[str]:
+    """Extract the mermaid syntax error from a kroki 400 response body.
+
+    Kroki returns bodies like:
+        Error 400: SyntaxError: Parse error on line 8:
+        ...alls renderer.render(...)| renderer_py
+        -----------------------^
+        Expecting 'SQE', ... got 'PS'
+        Error: Syntax error in graph
+        ...stack trace...
+
+    We strip the "Error 400: " prefix and the stack trace, keeping
+    just the SyntaxError through the "Expecting..." line.
+    """
+    if not body:
         return None
+    # Strip "Error 400: " prefix
+    msg = re.sub(r"^Error \d+:\s*", "", body)
+    # Cut at stack trace ("    at ...")
+    cut = re.search(r"\n\s+at ", msg)
+    if cut:
+        msg = msg[:cut.start()]
+    return msg.strip() or None
+
+
+def _extract_mmdc_error(stderr: str) -> Optional[str]:
+    """Extract a useful error message from mmdc stderr."""
+    if not stderr:
+        return None
+    # mmdc outputs "Error: ..." lines with parse errors
+    for line in stderr.splitlines():
+        if "error" in line.lower():
+            return line.strip()
+    return stderr.strip()[:200] or None

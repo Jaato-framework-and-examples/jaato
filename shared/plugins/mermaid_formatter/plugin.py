@@ -174,15 +174,18 @@ class MermaidFormatterPlugin:
             "The output pipeline renders ```mermaid code blocks as graphical "
             "diagrams in the terminal. When a visual diagram would aid "
             "understanding (architecture, flows, state machines, sequences, "
-            "ER diagrams), prefer using mermaid syntax over ASCII art."
+            "ER diagrams), prefer using mermaid syntax over ASCII art. "
+            "If a mermaid block has a syntax error, the error will be shown "
+            "inline — fix the diagram and re-emit it."
         )
 
     def _render_diagram(self, source: str) -> str:
         """Render a mermaid diagram and return terminal output.
 
-        Tries to render via mmdc/mermaid-py → PNG → terminal backend.
-        Falls back to showing the source as a formatted code block
-        with a hint about installing mermaid-cli.
+        Tries to render via mmdc/kroki → PNG → terminal backend.
+        On syntax error, shows the source with the diagnostic appended
+        (matching code_validation_formatter visual style).
+        When no renderer is available, shows a passthrough code block.
 
         Args:
             source: Mermaid diagram source text.
@@ -194,21 +197,20 @@ class MermaidFormatterPlugin:
         if not source:
             return ""
 
-        # Try rendering to PNG
-        png_data = renderer.render(
+        result = renderer.render(
             source,
             theme=self._theme,
             scale=self._scale,
             background=self._background,
         )
 
-        if png_data is not None:
+        if result.png is not None:
             # Save artifact if directory configured
-            artifact_path = self._save_artifact(png_data)
+            artifact_path = self._save_artifact(result.png)
 
             # Select backend and render for terminal
             backend = select_backend(max_width=self._console_width)
-            rendered = backend.render(png_data, max_width=self._console_width)
+            rendered = backend.render(result.png, max_width=self._console_width)
 
             # Add artifact path reference
             if artifact_path:
@@ -216,16 +218,36 @@ class MermaidFormatterPlugin:
 
             return "\n" + rendered
 
-        # No renderer available - fall back to code block passthrough
-        # Return as ```mermaid block so code_block_formatter can handle it
+        if result.error is not None:
+            # Syntax error — show source with diagnostic appended
+            return self._fallback_with_diagnostic(source, result.error)
+
+        # No renderer available — passthrough code block
         return self._fallback_code_block(source)
 
-    def _fallback_code_block(self, source: str) -> str:
-        """Format source as a code block with an install hint.
+    def _fallback_with_diagnostic(self, source: str, error: str) -> str:
+        """Show the mermaid source with a syntax error diagnostic.
 
-        Returns the source wrapped in ```mermaid fences so the
-        downstream code_block_formatter will syntax-highlight it.
-        Prepends a dim hint about installing mermaid-cli.
+        Matches the visual style of code_validation_formatter:
+            ```mermaid
+            ...source...
+            ```
+                ┌─ Mermaid Validation ─
+                │ SyntaxError: Parse error on line 8: ...
+                └─
+        """
+        block = f"```mermaid\n{source}\n```\n"
+        indent = "    \u2502 "
+        lines = ["    \u250c\u2500 Mermaid Validation \u2500"]
+        for err_line in error.splitlines():
+            lines.append(f"{indent}{err_line}")
+        lines.append("    \u2514\u2500")
+        return block + "\n".join(lines) + "\n"
+
+    def _fallback_code_block(self, source: str) -> str:
+        """Show the source as a passthrough code block.
+
+        Used when no renderer is available at all (not installed / unreachable).
         """
         hint = (
             "\x1b[2m[mermaid diagram - rendering unavailable; "
