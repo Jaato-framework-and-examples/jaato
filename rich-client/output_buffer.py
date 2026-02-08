@@ -3590,6 +3590,22 @@ class OutputBuffer:
 
         return result
 
+    def _render_prerendered(self, text: str, width: int) -> Text:
+        """Render pre-rendered content (mermaid pixel art), truncating rows that overflow.
+
+        Each pixel row is truncated individually with _truncate_line_to_width
+        so the art is cropped cleanly on the right instead of wrapping
+        chaotically when the terminal is narrower than the rendered width.
+        """
+        clean = text[len(PRERENDERED_LINE_PREFIX):]
+        rows = clean.split('\n')
+        result = Text()
+        for i, row in enumerate(rows):
+            if i > 0:
+                result.append("\n")
+            result.append_text(self._truncate_line_to_width(row, width, width))
+        return result
+
     def _render_table_to_text(self, table: Table, width: Optional[int] = None) -> Text:
         """Render a Rich Table to a Text object for appending to output.
 
@@ -4407,9 +4423,8 @@ class OutputBuffer:
                         if cached is not None:
                             output.append_text(cached)
                         elif line.text.startswith(PRERENDERED_LINE_PREFIX):
-                            # Pre-rendered content (mermaid diagrams) — parse ANSI, don't wrap
-                            clean = line.text[len(PRERENDERED_LINE_PREFIX):]
-                            content = Text.from_ansi(clean)
+                            # Pre-rendered content (mermaid diagrams) — truncate per row, don't wrap
+                            content = self._render_prerendered(line.text, wrap_width)
                             self._cache_line_content(line, content, wrap_width)
                             output.append_text(content)
                         elif has_ansi:
@@ -4439,9 +4454,8 @@ class OutputBuffer:
                         if cached is not None:
                             output.append_text(cached)
                         elif line.text.startswith(PRERENDERED_LINE_PREFIX):
-                            # Pre-rendered content (mermaid diagrams) — parse ANSI, don't wrap
-                            clean = line.text[len(PRERENDERED_LINE_PREFIX):]
-                            content = Text.from_ansi(clean)
+                            # Pre-rendered content (mermaid diagrams) — truncate per row, don't wrap
+                            content = self._render_prerendered(line.text, wrap_width)
                             self._cache_line_content(line, content, wrap_width)
                             output.append_text(content)
                         elif has_ansi:

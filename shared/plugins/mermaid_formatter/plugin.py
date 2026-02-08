@@ -235,8 +235,7 @@ class MermaidFormatterPlugin:
             # Save artifact if directory configured
             artifact_path = self._save_artifact(result.png)
 
-            # Account for panel borders in server mode
-            render_width = max(20, self._console_width - 4)
+            render_width = max(20, self._console_width)
 
             # Select backend and render for terminal
             backend = select_backend(max_width=render_width)
