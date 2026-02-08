@@ -139,6 +139,8 @@ class AgentState:
         # Per-agent formatter pipeline for output formatting
         # Initialized lazily via JaatoServer._get_agent_pipeline()
         self.formatter_pipeline: Optional[Any] = None
+        # Pending formatter feedback for auto-continuation
+        self.pending_formatter_feedback: Optional[str] = None
 
 
 class JaatoServer:
@@ -1174,13 +1176,11 @@ class JaatoServer:
                                 mode="append",
                             ))
 
-                    # Collect turn feedback from formatters for model self-correction
+                    # Collect turn feedback from formatters for auto-continuation
                     agent_pipeline.collect_turn_feedback()
                     feedback = agent_pipeline.get_pending_feedback()
-                    if feedback and server._jaato:
-                        session = server._jaato.get_session()
-                        if session and session.agent_id == agent_id:
-                            session.set_pending_formatter_feedback(feedback)
+                    if feedback and agent_id in server._agents:
+                        server._agents[agent_id].pending_formatter_feedback = feedback
 
                     # Reset pipeline for next turn
                     agent_pipeline.reset()
@@ -1997,6 +1997,29 @@ class JaatoServer:
                         on_usage_update=usage_update_callback,
                         on_gc_threshold=gc_threshold_callback,
                     )
+
+                    # Auto-continuation for formatter feedback
+                    # When formatters detect errors in model text output (syntax errors,
+                    # validation failures), the model needs to see the feedback eagerly —
+                    # not wait for the next user prompt. Loop here to inject feedback
+                    # as a hidden prompt and let the model self-correct.
+                    max_feedback_continuations = 2
+                    for _attempt in range(max_feedback_continuations):
+                        main_agent = server._agents.get("main")
+                        if not main_agent or not main_agent.pending_formatter_feedback:
+                            break
+                        feedback = main_agent.pending_formatter_feedback
+                        main_agent.pending_formatter_feedback = None
+                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
+                        feedback_prompt = (
+                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
+                        )
+                        server._jaato.send_message(
+                            feedback_prompt,
+                            on_output=output_callback,
+                            on_usage_update=usage_update_callback,
+                            on_gc_threshold=gc_threshold_callback,
+                        )
 
                     # Update context usage
                     if server._jaato:

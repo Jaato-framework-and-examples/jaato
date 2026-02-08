@@ -60,9 +60,9 @@ For mmdc, theme is passed via the `-t` CLI flag.
 
 ## Turn Feedback for Model Self-Correction
 
-When a mermaid diagram has a syntax error, the plugin stores feedback via `get_turn_feedback()`. After flush at turn-end, the pipeline collects this feedback and the server injects it as a `<hidden>` block into the next user prompt. The model sees the error and can self-correct.
+When a mermaid diagram has a syntax error, the plugin stores feedback via `get_turn_feedback()`. After flush at turn-end, the pipeline collects this feedback and the server **auto-continues** — immediately calling `send_message()` again with the feedback as a `<hidden>` prompt. The model sees the error eagerly and can self-correct within the same user interaction.
 
-Flow: render error → `_turn_feedback` stored → `get_turn_feedback()` called by pipeline → server stores on session → `send_message()` prepends `<hidden>[Formatter Feedback]...</hidden>` → model self-corrects.
+Flow: render error → `_turn_feedback` stored → `get_turn_feedback()` called by pipeline → server stores on `AgentState` → model thread auto-continues with `<hidden>[Formatter Feedback]...</hidden>` → model self-corrects.
 
 `get_turn_feedback()` is one-shot: returns and clears. `reset()` also clears it.
 
