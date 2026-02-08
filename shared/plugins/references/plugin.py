@@ -28,7 +28,9 @@ from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionC
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths
 from ..base import (
     UserCommand,
+    CommandParameter,
     CommandCompletion,
+    HelpLines,
     PromptEnrichmentResult,
     ToolResultEnrichmentResult,
 )
@@ -657,8 +659,9 @@ class ReferencesPlugin:
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return tool executors."""
         return {
-            "selectReferences": self._execute_select,
-            "listReferences": self._execute_list,
+            "selectReferences": self._execute_select,   # model tool
+            "listReferences": self._execute_list,        # model tool
+            "references": self._execute_references_cmd,  # user command
         }
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -842,6 +845,152 @@ class ReferencesPlugin:
             ),
         }
 
+    def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
+        """Execute the 'references' user command.
+
+        Subcommands:
+            list [all|selected|unselected]  - List reference sources
+            select <ref-id>                 - Select a reference source
+            unselect <ref-id>               - Unselect a reference source
+            help                            - Show usage help
+        """
+        subcommand = args.get("subcommand", "list")
+        target = args.get("target", "")
+
+        self._trace(f"references cmd: subcommand={subcommand}, target={target}")
+
+        if subcommand == "list":
+            return self._cmd_references_list(target)
+        elif subcommand == "select":
+            if not target:
+                return {"error": "Usage: references select <ref-id>"}
+            return self._cmd_references_select(target)
+        elif subcommand == "unselect":
+            if not target:
+                return {"error": "Usage: references unselect <ref-id>"}
+            return self._cmd_references_unselect(target)
+        elif subcommand == "help":
+            return self._cmd_references_help()
+        else:
+            return {"error": f"Unknown subcommand: {subcommand}. Use: list, select, unselect, help"}
+
+    def _cmd_references_list(self, filter_arg: str) -> HelpLines:
+        """Execute 'references list [all|selected|unselected]'."""
+        filter_arg = filter_arg.strip().lower() if filter_arg else "all"
+
+        if filter_arg == "selected":
+            sources = [s for s in self._sources if s.id in self._selected_source_ids]
+        elif filter_arg == "unselected":
+            sources = [s for s in self._sources if s.id not in self._selected_source_ids]
+        else:
+            sources = self._sources
+
+        return self._format_list_as_help_lines(sources, filter_arg)
+
+    def _cmd_references_select(self, ref_id: str) -> Dict[str, Any]:
+        """Execute 'references select <ref-id>'."""
+        ref_id = ref_id.strip()
+
+        # Look up the source
+        source = next((s for s in self._sources if s.id == ref_id), None)
+        if not source:
+            return {"error": f"Reference '{ref_id}' not found."}
+
+        if ref_id in self._selected_source_ids:
+            return {"status": "already_selected", "message": f"Reference '{ref_id}' is already selected."}
+
+        self._selected_source_ids.append(ref_id)
+        self._authorize_source_path(source)
+        self._trace(f"references select: selected '{ref_id}'")
+
+        return {
+            "status": "selected",
+            "message": f"Selected reference '{source.name}' ({ref_id}).",
+            "source": source.to_instruction(),
+        }
+
+    def _cmd_references_unselect(self, ref_id: str) -> Dict[str, Any]:
+        """Execute 'references unselect <ref-id>'."""
+        ref_id = ref_id.strip()
+
+        if ref_id not in self._selected_source_ids:
+            return {"error": f"Reference '{ref_id}' is not currently selected."}
+
+        self._selected_source_ids.remove(ref_id)
+        self._trace(f"references unselect: unselected '{ref_id}'")
+
+        source = next((s for s in self._sources if s.id == ref_id), None)
+        name = source.name if source else ref_id
+        return {
+            "status": "unselected",
+            "message": f"Unselected reference '{name}' ({ref_id}).",
+        }
+
+    def _format_list_as_help_lines(self, sources: List[ReferenceSource], filter_label: str) -> HelpLines:
+        """Format a list of reference sources as HelpLines for pager display."""
+        lines: List[tuple] = []
+
+        lines.append(("Reference Sources", "bold"))
+        lines.append(("", ""))
+
+        if not sources:
+            lines.append((f"  No {filter_label} references found.", "dim"))
+            return HelpLines(lines=lines)
+
+        selected_set = set(self._selected_source_ids)
+
+        lines.append((f"  Showing: {filter_label} ({len(sources)} source(s))", "dim"))
+        lines.append(("", ""))
+
+        for source in sources:
+            is_selected = source.id in selected_set
+            status = "[selected]" if is_selected else "[unselected]"
+
+            lines.append((f"  {source.id}  {status}", "bold"))
+            lines.append((f"    Name:        {source.name}", ""))
+            lines.append((f"    Description: {source.description}", "dim"))
+            lines.append((f"    Type: {source.type.value}  |  Mode: {source.mode.value}", "dim"))
+            if source.tags:
+                lines.append((f"    Tags: {', '.join(source.tags)}", "dim"))
+            lines.append((f"    Access: {self._get_access_summary(source)}", "dim"))
+            lines.append(("", ""))
+
+        return HelpLines(lines=lines)
+
+    def _cmd_references_help(self) -> HelpLines:
+        """Return detailed help text for pager display."""
+        return HelpLines(lines=[
+            ("References Command", "bold"),
+            ("", ""),
+            ("Manage reference sources for the current session.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    references [subcommand] [target]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list [all|selected|unselected]", "dim"),
+            ("        List reference sources, optionally filtered by selection status.", "dim"),
+            ("        Default: all", "dim"),
+            ("", ""),
+            ("    select <ref-id>", "dim"),
+            ("        Select a reference source by ID. The source's content instructions", "dim"),
+            ("        are returned so the model can fetch and incorporate them.", "dim"),
+            ("", ""),
+            ("    unselect <ref-id>", "dim"),
+            ("        Unselect a previously selected reference source.", "dim"),
+            ("", ""),
+            ("    help", "dim"),
+            ("        Show this help message.", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    references                          List all references", "dim"),
+            ("    references list                     Same as above", "dim"),
+            ("    references list selected            Show only selected references", "dim"),
+            ("    references list unselected          Show only unselected references", "dim"),
+            ("    references select my-ref-001        Select a reference by ID", "dim"),
+            ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
+        ])
+
     def _get_access_summary(self, source: ReferenceSource) -> str:
         """Get brief access method description."""
         from .models import SourceType
@@ -950,29 +1099,92 @@ class ReferencesPlugin:
 
     def get_auto_approved_tools(self) -> List[str]:
         """All tools are auto-approved - this is a user-triggered plugin."""
-        return ["selectReferences", "listReferences"]
+        return ["selectReferences", "listReferences", "references"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
-        These commands can be typed directly by the user (human or agent)
-        to interact with reference sources without model mediation.
-
-        listReferences: share_with_model=True - shows available sources, model should know
-        selectReferences: share_with_model=True - selection results should be known by model
+        Single 'references' command with subcommands: list, select, unselect.
+        share_with_model=True so the model sees selection changes.
         """
         return [
-            UserCommand("listReferences", "List available reference sources", share_with_model=True),
-            UserCommand("selectReferences", "Select reference sources to include", share_with_model=True),
+            UserCommand(
+                name="references",
+                description="Manage reference sources (list|select|unselect)",
+                share_with_model=True,
+                parameters=[
+                    CommandParameter(
+                        name="subcommand",
+                        description="Action: list, select, or unselect",
+                        required=False,
+                    ),
+                    CommandParameter(
+                        name="target",
+                        description="Filter or reference ID",
+                        required=False,
+                        capture_rest=True,
+                    ),
+                ],
+            ),
         ]
 
     def get_command_completions(
         self, command: str, args: List[str]
     ) -> List[CommandCompletion]:
-        """Return completion options for reference command arguments.
+        """Return completion options for the references command.
 
-        These commands take no arguments, so no completions needed.
+        Provides multi-level completions:
+        - Level 1: list, select, unselect
+        - Level 2 for list: all, selected, unselected
+        - Level 2 for select: IDs of unselected selectable sources
+        - Level 2 for unselect: IDs of currently selected sources
         """
+        if command != "references":
+            return []
+
+        subcommands = [
+            CommandCompletion("list", "List reference sources"),
+            CommandCompletion("select", "Select a reference source"),
+            CommandCompletion("unselect", "Unselect a reference source"),
+            CommandCompletion("help", "Show detailed help"),
+        ]
+
+        if len(args) <= 1:
+            if args:
+                partial = args[0].lower()
+                return [s for s in subcommands if s.value.startswith(partial)]
+            return subcommands
+
+        if len(args) == 2:
+            subcommand = args[0].lower()
+            partial = args[1].lower()
+
+            if subcommand == "list":
+                filters = [
+                    CommandCompletion("all", "Show all references"),
+                    CommandCompletion("selected", "Show only selected references"),
+                    CommandCompletion("unselected", "Show only unselected references"),
+                ]
+                return [f for f in filters if f.value.startswith(partial)]
+
+            if subcommand == "select":
+                selected_set = set(self._selected_source_ids)
+                options = [
+                    CommandCompletion(s.id, s.name)
+                    for s in self._sources
+                    if s.id not in selected_set
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+
+            if subcommand == "unselect":
+                selected_set = set(self._selected_source_ids)
+                options = [
+                    CommandCompletion(s.id, s.name)
+                    for s in self._sources
+                    if s.id in selected_set
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+
         return []
 
     # ==================== Prompt Enrichment ====================
