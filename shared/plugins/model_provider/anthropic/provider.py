@@ -1066,7 +1066,7 @@ class AnthropicProvider:
         """
         return True
 
-    # ==================== Agent Context ====================
+    # ==================== Agent Context & Tracing ====================
 
     def set_agent_context(
         self,
@@ -1084,6 +1084,23 @@ class AnthropicProvider:
         self._agent_type = agent_type
         self._agent_name = agent_name
         self._agent_id = agent_id
+
+    def _get_trace_prefix(self) -> str:
+        """Get the trace prefix including agent context."""
+        if self._agent_type == "main":
+            return "anthropic:main"
+        elif self._agent_name:
+            return f"anthropic:subagent:{self._agent_name}"
+        else:
+            return f"anthropic:subagent:{self._agent_id}"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message for debugging provider interactions.
+
+        No-op by default. Subclasses (e.g., ZhipuAIProvider) override
+        this to write to the provider trace log.
+        """
+        pass
 
     # ==================== Streaming ====================
 
@@ -1257,6 +1274,8 @@ class AnthropicProvider:
 
         try:
             # Use the streaming API
+            self._trace(f"STREAM_START msg_count={len(messages)}")
+            chunk_count = 0
             with self._client.messages.stream(
                 model=self._model_name,
                 messages=messages,
@@ -1265,6 +1284,7 @@ class AnthropicProvider:
                 for event in stream:
                     # Check for cancellation
                     if cancel_token and cancel_token.is_cancelled:
+                        self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
                         was_cancelled = True
                         finish_reason = FinishReason.CANCELLED
                         break
@@ -1273,6 +1293,7 @@ class AnthropicProvider:
                     initial_usage = extract_message_start(event)
                     if initial_usage:
                         usage = initial_usage
+                        self._trace(f"STREAM_MSG_START prompt={usage.prompt_tokens} cache_creation={usage.cache_creation_tokens} cache_read={usage.cache_read_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
                             on_usage_update(usage)
 
@@ -1282,6 +1303,7 @@ class AnthropicProvider:
                         if block_info["type"] == "tool_use":
                             # Start tracking a new tool call
                             idx = block_info["index"]
+                            self._trace(f"STREAM_TOOL_START idx={idx} name={block_info['name']}")
                             current_tool_calls[idx] = {
                                 "id": block_info["id"],
                                 "name": block_info["name"],
@@ -1295,6 +1317,7 @@ class AnthropicProvider:
                     # Handle text deltas
                     text_chunk = extract_text_from_stream_event(event)
                     if text_chunk:
+                        chunk_count += 1
                         accumulated_text.append(text_chunk)
                         on_chunk(text_chunk)
 
@@ -1335,6 +1358,7 @@ class AnthropicProvider:
                                 name=original_name,
                                 args=args,
                             )
+                            self._trace(f"STREAM_FUNC_CALL name={fc.name}")
                             # Notify caller about function call detection (for UI positioning)
                             if on_function_call:
                                 on_function_call(fc)
@@ -1362,10 +1386,14 @@ class AnthropicProvider:
                                 output_tokens=delta_usage.output_tokens,
                                 total_tokens=usage.prompt_tokens + delta_usage.output_tokens,
                             )
+                            self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                             if on_usage_update and usage.total_tokens > 0:
                                 on_usage_update(usage)
 
+            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
+
         except Exception as e:
+            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
             # If cancelled during iteration, treat as cancellation
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True

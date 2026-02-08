@@ -122,6 +122,21 @@ class ZhipuAIProvider(AnthropicProvider):
         """Provider identifier."""
         return "zhipuai"
 
+    def _get_trace_prefix(self) -> str:
+        """Get the trace prefix including agent context."""
+        if self._agent_type == "main":
+            return "zhipuai:main"
+        elif self._agent_name:
+            return f"zhipuai:subagent:{self._agent_name}"
+        else:
+            return f"zhipuai:subagent:{self._agent_id}"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to provider trace log for debugging."""
+        from shared.trace import provider_trace
+        prefix = self._get_trace_prefix()
+        provider_trace(prefix, msg)
+
     def initialize(self, config: Optional[ProviderConfig] = None) -> None:
         """Initialize the provider.
 
@@ -135,6 +150,8 @@ class ZhipuAIProvider(AnthropicProvider):
             ZhipuAIAPIKeyNotFoundError: If no API key is found.
             ImportError: If anthropic package is not installed.
         """
+        self._trace("[INIT] Starting initialization")
+
         try:
             import anthropic
         except ImportError as e:
@@ -152,7 +169,10 @@ class ZhipuAIProvider(AnthropicProvider):
             or get_stored_api_key()
         )
         if not self._api_key:
+            self._trace("[INIT] No API key found")
             raise ZhipuAIAPIKeyNotFoundError()
+
+        self._trace(f"[INIT] API key resolved (len={len(self._api_key)})")
 
         # Resolve base URL from config, environment, or stored credentials
         self._base_url = (
@@ -167,11 +187,14 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Ensure base URL doesn't have trailing slash
         self._base_url = self._base_url.rstrip("/")
+        self._trace(f"[INIT] base_url={self._base_url}")
 
         # Optional context length override
         self._context_length_override = (
             config.extra.get("context_length") or resolve_context_length()
         )
+        if self._context_length_override:
+            self._trace(f"[INIT] context_length_override={self._context_length_override}")
 
         # Zhipu AI's Anthropic API may not support caching/thinking - force disable
         self._enable_caching = False
@@ -183,16 +206,21 @@ class ZhipuAIProvider(AnthropicProvider):
         self._oauth_token = None
 
         # Create the client
+        self._trace("[INIT] Creating client")
         self._client = self._create_client()
+        self._trace("[INIT] Initialization complete")
 
     def _create_client(self) -> Any:
         """Create Anthropic client pointing to Zhipu AI server."""
         import anthropic
 
-        return anthropic.Anthropic(
+        self._trace(f"[_create_client] Creating Anthropic client with base_url={self._base_url}")
+        client = anthropic.Anthropic(
             base_url=self._base_url,
             api_key=self._api_key,
         )
+        self._trace("[_create_client] Client created successfully")
+        return client
 
     def verify_auth(
         self,
@@ -211,12 +239,15 @@ class ZhipuAIProvider(AnthropicProvider):
         Returns:
             True if an API key is available.
         """
+        self._trace("[AUTH] Verifying credentials")
         api_key = resolve_api_key() or get_stored_api_key()
         if api_key:
+            self._trace("[AUTH] API key found")
             if on_message:
                 on_message("Found Zhipu AI API key")
             return True
 
+        self._trace("[AUTH] No credentials found")
         if on_message:
             on_message("No Zhipu AI credentials found")
         return False
@@ -230,6 +261,8 @@ class ZhipuAIProvider(AnthropicProvider):
         # For Zhipu AI, we don't have a model listing API via the Anthropic endpoint,
         # so we just accept the model name and let the API validate it
         self._model_name = model_name
+        context_limit = self.get_context_limit()
+        self._trace(f"[CONNECT] model={model_name} context_limit={context_limit}")
         logger.info(f"Connected to Zhipu AI model: {model_name}")
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
@@ -268,9 +301,11 @@ class ZhipuAIProvider(AnthropicProvider):
         Zhipu AI-specific issues.
         """
         error_str = str(error).lower()
+        self._trace(f"[API_ERROR] {type(error).__name__}: {error}")
 
         # Check for authentication errors
         if "401" in error_str or "unauthorized" in error_str or "invalid api key" in error_str:
+            self._trace("[API_ERROR] Authentication failure (401/unauthorized)")
             raise ZhipuAIConnectionError(
                 "Invalid API key. Check your ZHIPUAI_API_KEY.\n"
                 f"Original error: {error}"
@@ -278,6 +313,7 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Check for rate limiting
         if "429" in error_str or "rate limit" in error_str:
+            self._trace("[API_ERROR] Rate limit exceeded (429)")
             raise RuntimeError(
                 f"Zhipu AI rate limit exceeded. Please wait and try again.\n"
                 f"Original error: {error}"
@@ -285,6 +321,7 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Check for model not found
         if "404" in error_str and "model" in error_str:
+            self._trace(f"[API_ERROR] Model not found: {self._model_name}")
             raise RuntimeError(
                 f"Model '{self._model_name}' not found on Zhipu AI.\n"
                 f"Available models: {', '.join(KNOWN_MODELS)}\n"
