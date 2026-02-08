@@ -318,6 +318,10 @@ class TaskEventBus:
         Called automatically when a step_completed event is published.
         Notifies all steps that were waiting on this dependency.
 
+        Waiters are only removed after the resolver callback succeeds.
+        If the resolver raises, the waiter is re-added so it can be
+        retried on the next matching event.
+
         Args:
             event: The step_completed event.
         """
@@ -331,23 +335,26 @@ class TaskEventBus:
             f"{event.source_agent}:*/{event.source_step_id}",
         ]
 
-        waiters_to_notify = []
+        # Collect waiters with their originating keys (for re-adding on failure)
+        waiters_with_keys: list = []
         with self._sub_lock:
             for key in keys_to_check:
                 if key in self._dependency_waiters:
-                    waiters_to_notify.extend(self._dependency_waiters.pop(key))
+                    for waiter in self._dependency_waiters.pop(key):
+                        waiters_with_keys.append((key, waiter))
 
-        if not waiters_to_notify:
+        if not waiters_with_keys:
             return
 
         logger.debug(
             "Resolving dependencies for %s:%s - %d waiters",
-            event.source_agent, event.source_step_id, len(waiters_to_notify)
+            event.source_agent, event.source_step_id, len(waiters_with_keys)
         )
 
-        # Notify waiters via the dependency resolver
+        # Notify waiters via the dependency resolver.
+        # On failure, re-add the waiter so it can be retried.
         if self._dependency_resolver:
-            for waiting_agent, waiting_plan_id, waiting_step_id in waiters_to_notify:
+            for key, (waiting_agent, waiting_plan_id, waiting_step_id) in waiters_with_keys:
                 try:
                     self._dependency_resolver(
                         waiting_agent,
@@ -356,10 +363,18 @@ class TaskEventBus:
                         event
                     )
                 except Exception as e:
-                    logger.exception(
-                        "Error resolving dependency for %s:%s: %s",
-                        waiting_agent, waiting_step_id, e
+                    logger.warning(
+                        "Dependency resolution failed for %s:%s (%s), "
+                        "re-adding waiter for retry: %s",
+                        waiting_agent, waiting_step_id, key, e
                     )
+                    # Re-add the waiter so the next matching event retries
+                    with self._sub_lock:
+                        if key not in self._dependency_waiters:
+                            self._dependency_waiters[key] = []
+                        self._dependency_waiters[key].append(
+                            (waiting_agent, waiting_plan_id, waiting_step_id)
+                        )
 
     def set_dependency_resolver(
         self,
