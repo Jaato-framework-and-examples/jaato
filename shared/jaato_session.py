@@ -940,6 +940,20 @@ class JaatoSession:
                 context=context
             )
 
+        # Set reliability plugin for tool failure tracking
+        if self._runtime.reliability_plugin:
+            self._executor.set_reliability_plugin(self._runtime.reliability_plugin)
+            # Set session context for pattern tracking
+            self._runtime.reliability_plugin.set_session_context(
+                session_id=self._session_id,
+            )
+            # Set model context
+            if self._model_name:
+                available = self._runtime.list_available_models(
+                    provider_name=self._provider_name_override
+                )
+                self._runtime.reliability_plugin.set_model_context(self._model_name, available)
+
         # Set this session as parent for subagent plugin (for cancellation propagation)
         if self._runtime.registry:
             subagent_plugin = self._runtime.registry.get_plugin("subagent")
@@ -967,6 +981,14 @@ class JaatoSession:
             self._user_commands = {}
             for cmd in self._runtime.registry.get_exposed_user_commands():
                 self._user_commands[cmd.name] = cmd
+
+        # Add reliability plugin user commands and executors
+        if self._runtime.reliability_plugin:
+            for cmd in self._runtime.reliability_plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+            # Register reliability command executor
+            for name, fn in self._runtime.reliability_plugin.get_executors().items():
+                self._executor.register(name, fn)
 
         # Register built-in model command
         self._register_model_command()
@@ -1577,6 +1599,13 @@ NOTES
             # Recreate session with existing history
             self._create_provider_session(history=history)
 
+            # Update reliability plugin with new model context
+            if self._runtime.reliability_plugin:
+                available = self._runtime.list_available_models(
+                    provider_name=self._provider_name_override
+                )
+                self._runtime.reliability_plugin.set_model_context(model_name, available)
+
             return {
                 "success": True,
                 "previous_model": old_model,
@@ -1866,6 +1895,10 @@ NOTES
         # Increment turn counter
         self._turn_index += 1
 
+        # Notify reliability plugin of turn start
+        if self._runtime.reliability_plugin:
+            self._runtime.reliability_plugin.on_turn_start(self._turn_index)
+
         # Wrap entire turn with telemetry span
         with self._telemetry.turn_span(
             session_id=self._agent_id,
@@ -1916,6 +1949,10 @@ NOTES
 
             # Notify session plugin
             self._notify_session_turn_complete()
+
+            # Notify reliability plugin of turn end
+            if self._runtime.reliability_plugin:
+                self._runtime.reliability_plugin.on_turn_end()
 
             return response
 
@@ -2145,6 +2182,10 @@ NOTES
                         nonlocal first_chunk_sent
                         # Accumulate text for potential mid-turn interrupt preservation
                         accumulated_streaming_text.append(chunk)
+
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(chunk)
 
                         # Check for pending mid-turn prompts during streaming
                         # This allows user input to interrupt the current generation
@@ -2429,6 +2470,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                     elif part.function_call:
@@ -2567,6 +2611,9 @@ NOTES
                             on_output("model", part.text, "write")
                         # Forward to parent for visibility
                         self._forward_to_parent("MODEL_OUTPUT", part.text)
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(part.text)
                     accumulated_text.append(part.text)
 
             # Final check for mid-turn prompts before completing the turn
@@ -2597,6 +2644,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                 # Check if the mid-turn response triggered more function calls
