@@ -191,3 +191,43 @@ class TestPipelineCollectTurnFeedback:
         assert first == "Once only."
         second = pipeline.collect_turn_feedback()
         assert second is None
+
+
+class MockFormatterWithWorkspacePath(MockFormatter):
+    """Mock formatter that accepts set_workspace_path()."""
+
+    def __init__(self, name="workspace_aware", priority=50):
+        super().__init__(name, priority)
+        self.workspace_path = None
+
+    def set_workspace_path(self, path):
+        self.workspace_path = path
+
+
+class TestPipelineSetWorkspacePath:
+    """Tests for FormatterPipeline.set_workspace_path()."""
+
+    def test_propagates_to_formatters_with_method(self):
+        pipeline = FormatterPipeline()
+        fmt = MockFormatterWithWorkspacePath("aware", 10)
+        pipeline.register(fmt)
+
+        pipeline.set_workspace_path("/home/user/project")
+
+        assert fmt.workspace_path == "/home/user/project"
+
+    def test_skips_formatters_without_method(self):
+        pipeline = FormatterPipeline()
+        plain = MockFormatter("plain", 10)
+        aware = MockFormatterWithWorkspacePath("aware", 20)
+        pipeline.register(plain)
+        pipeline.register(aware)
+
+        pipeline.set_workspace_path("/some/path")
+
+        # plain formatter should not crash (no set_workspace_path)
+        assert aware.workspace_path == "/some/path"
+
+    def test_empty_pipeline_no_error(self):
+        pipeline = FormatterPipeline()
+        pipeline.set_workspace_path("/path")  # Should not raise

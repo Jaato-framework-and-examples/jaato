@@ -48,6 +48,7 @@ from rich.table import Table
 from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
+from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
 from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
@@ -4375,6 +4376,12 @@ class OutputBuffer:
                         cached = self._get_cached_line_content(line, wrap_width)
                         if cached is not None:
                             output.append_text(cached)
+                        elif line.text.startswith(PRERENDERED_LINE_PREFIX):
+                            # Pre-rendered content (mermaid diagrams) — parse ANSI, don't wrap
+                            clean = line.text[len(PRERENDERED_LINE_PREFIX):]
+                            content = Text.from_ansi(clean)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
                         elif has_ansi:
                             # Text contains ANSI codes from syntax highlighting - wrap to width
                             content = self._wrap_ansi_text(line.text, wrap_width)
@@ -4401,6 +4408,12 @@ class OutputBuffer:
                         cached = self._get_cached_line_content(line, wrap_width)
                         if cached is not None:
                             output.append_text(cached)
+                        elif line.text.startswith(PRERENDERED_LINE_PREFIX):
+                            # Pre-rendered content (mermaid diagrams) — parse ANSI, don't wrap
+                            clean = line.text[len(PRERENDERED_LINE_PREFIX):]
+                            content = Text.from_ansi(clean)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
                         elif has_ansi:
                             # Text contains ANSI codes from syntax highlighting - wrap to width
                             content = self._wrap_ansi_text(line.text, wrap_width)

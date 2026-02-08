@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from ..plugin import MermaidFormatterPlugin, create_plugin
 from ..renderer import RenderResult
+from shared.plugins.formatter_pipeline.pipeline import PRERENDERED_LINE_PREFIX
 
 
 class TestPluginProperties:
@@ -469,3 +470,109 @@ class TestTurnFeedback:
 
         assert plugin._turn_feedback is None
         assert plugin.get_turn_feedback() is None
+
+
+class TestPrerenderedPrefix:
+    """Tests for PRERENDERED_LINE_PREFIX on rendered output lines."""
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    @patch("shared.plugins.mermaid_formatter.plugin.select_backend")
+    def test_rendered_lines_have_prefix(self, mock_select_backend, mock_renderer):
+        """Successfully rendered diagram lines should have PRERENDERED_LINE_PREFIX."""
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG fake data")
+        mock_backend = MagicMock()
+        mock_backend.render.return_value = "\x1b[38;2;255;0;0m▀▀▀\x1b[0m\n\x1b[38;2;0;255;0m▀▀▀\x1b[0m\n"
+        mock_select_backend.return_value = mock_backend
+
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
+        output = "".join(chunks)
+
+        # Non-empty lines should have the prefix
+        for line in output.split('\n'):
+            if line.strip():
+                assert line.startswith(PRERENDERED_LINE_PREFIX), f"Line missing prefix: {repr(line)}"
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    @patch("shared.plugins.mermaid_formatter.plugin.select_backend")
+    def test_empty_lines_no_prefix(self, mock_select_backend, mock_renderer):
+        """Empty/blank lines in rendered output should NOT have the prefix."""
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG fake data")
+        mock_backend = MagicMock()
+        mock_backend.render.return_value = "line1\n\nline3\n"
+        mock_select_backend.return_value = mock_backend
+
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
+        output = "".join(chunks)
+
+        for line in output.split('\n'):
+            if not line.strip():
+                assert not line.startswith(PRERENDERED_LINE_PREFIX)
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_fallback_no_prefix(self, mock_renderer):
+        """Fallback code blocks (no renderer) should NOT have the prefix."""
+        mock_renderer.render.return_value = RenderResult()  # Both None
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
+        output = "".join(chunks)
+
+        assert PRERENDERED_LINE_PREFIX not in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_syntax_error_no_prefix(self, mock_renderer):
+        """Syntax error diagnostics should NOT have the prefix."""
+        mock_renderer.render.return_value = RenderResult(error="SyntaxError: bad")
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        chunks = list(plugin.process_chunk("```mermaid\nbad\n```"))
+        output = "".join(chunks)
+
+        assert PRERENDERED_LINE_PREFIX not in output
+
+
+class TestWorkspacePath:
+    """Tests for set_workspace_path() and artifact directory resolution."""
+
+    def test_set_workspace_path_sets_artifact_dir(self):
+        """set_workspace_path() should set artifact dir to <workspace>/.jaato/vision/."""
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        plugin.set_workspace_path("/home/user/project")
+
+        assert plugin._artifact_dir == "/home/user/project/.jaato/vision"
+
+    def test_env_var_takes_priority_over_workspace(self, monkeypatch):
+        """JAATO_VISION_DIR env var should take priority over workspace path."""
+        monkeypatch.setenv("JAATO_VISION_DIR", "/custom/vision")
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        plugin.set_workspace_path("/home/user/project")
+
+        # env var should win
+        assert plugin._artifact_dir == "/custom/vision"
+
+    def test_no_workspace_no_env_artifact_dir_is_none(self):
+        """Without workspace or env var, artifact dir should be None."""
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        assert plugin._artifact_dir is None
+
+    def test_initialize_with_env_var(self, monkeypatch):
+        """initialize() should set artifact dir from JAATO_VISION_DIR."""
+        monkeypatch.setenv("JAATO_VISION_DIR", "/env/vision")
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        assert plugin._artifact_dir == "/env/vision"

@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from . import renderer
 from .backends import select_backend
+from shared.plugins.formatter_pipeline.pipeline import PRERENDERED_LINE_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -152,13 +153,25 @@ class MermaidFormatterPlugin:
             self._enabled = False
 
         # Artifact directory for saving rendered diagrams
-        self._artifact_dir = os.environ.get(
-            "JAATO_VISION_DIR", "/tmp/jaato_vision"
-        )
+        # JAATO_VISION_DIR env var takes priority; otherwise set_workspace_path()
+        # will resolve to <workspace>/.jaato/vision/ when called by the pipeline.
+        env_vision_dir = os.environ.get("JAATO_VISION_DIR")
+        if env_vision_dir:
+            self._artifact_dir = env_vision_dir
+        # else: remains None until set_workspace_path() is called
 
     def set_console_width(self, width: int) -> None:
         """Update console width for rendering."""
         self._console_width = max(20, width)
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set workspace path for artifact directory resolution.
+
+        Resolves to <workspace>/.jaato/vision/ unless JAATO_VISION_DIR
+        env var is set (env var takes priority).
+        """
+        if not os.environ.get("JAATO_VISION_DIR"):
+            self._artifact_dir = os.path.join(path, ".jaato", "vision")
 
     def get_system_instructions(self) -> Optional[str]:
         """Inform the model about mermaid diagram rendering capability.
@@ -222,13 +235,24 @@ class MermaidFormatterPlugin:
             # Save artifact if directory configured
             artifact_path = self._save_artifact(result.png)
 
+            # Account for panel borders in server mode
+            render_width = max(20, self._console_width - 4)
+
             # Select backend and render for terminal
-            backend = select_backend(max_width=self._console_width)
-            rendered = backend.render(result.png, max_width=self._console_width)
+            backend = select_backend(max_width=render_width)
+            rendered = backend.render(result.png, max_width=render_width)
 
             # Add artifact path reference
             if artifact_path:
                 rendered += f"    \x1b[2m[saved: {artifact_path}]\x1b[0m\n"
+
+            # Prefix each non-empty rendered line so the output buffer
+            # skips wrapping (preserves pixel-aligned half-block art)
+            lines = rendered.split('\n')
+            rendered = '\n'.join(
+                PRERENDERED_LINE_PREFIX + line if line.strip() else line
+                for line in lines
+            )
 
             return "\n" + rendered
 

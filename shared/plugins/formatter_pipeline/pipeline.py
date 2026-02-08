@@ -32,6 +32,12 @@ from datetime import datetime
 from .protocol import FormatterPlugin, ConfigurableFormatter
 from shared.trace import trace as _trace_write
 
+# Sentinel prefix for pre-rendered lines (e.g. mermaid diagram half-block art).
+# Lines with this prefix have already been rendered with precise ANSI positioning
+# and must NOT be re-wrapped by the output buffer — wrapping breaks pixel-aligned
+# half-block characters.  Null bytes never appear in normal model text output.
+PRERENDERED_LINE_PREFIX = "\x00\x01PRE\x00"
+
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
@@ -102,6 +108,16 @@ class FormatterPipeline:
         for formatter in self._formatters:
             if isinstance(formatter, ConfigurableFormatter):
                 formatter.set_console_width(width)
+
+    def set_workspace_path(self, path: str) -> None:
+        """Propagate workspace path to formatters that accept it.
+
+        Formatters like mermaid_formatter use the workspace path to resolve
+        artifact directories (e.g. <workspace>/.jaato/vision/).
+        """
+        for formatter in self._formatters:
+            if hasattr(formatter, "set_workspace_path"):
+                formatter.set_workspace_path(path)
 
     def process_chunk(self, chunk: str) -> Iterator[str]:
         """Process a chunk through all formatters.

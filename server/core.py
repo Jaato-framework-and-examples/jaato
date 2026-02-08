@@ -957,6 +957,10 @@ class JaatoServer:
         # Create pipeline from registry (formatters wire themselves)
         self._formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
 
+        # Propagate workspace path so formatters can resolve artifact dirs
+        if self._workspace_path:
+            self._formatter_pipeline.set_workspace_path(self._workspace_path)
+
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
     def _get_agent_pipeline(self, agent_id: str) -> Optional[Any]:
@@ -996,6 +1000,8 @@ class JaatoServer:
             if not config_loaded:
                 formatter_registry.use_defaults()
             agent.formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
+            if self._workspace_path:
+                agent.formatter_pipeline.set_workspace_path(self._workspace_path)
             self._trace(f"Created formatter pipeline for agent {agent_id}")
         return agent.formatter_pipeline
 

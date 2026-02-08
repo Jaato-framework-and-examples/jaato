@@ -49,6 +49,22 @@ The directive is only injected when theme is not `"default"` and when the source
 
 For mmdc, theme is passed via the `-t` CLI flag.
 
+## Pre-Rendered Line Marker
+
+Rendered diagrams use `PRERENDERED_LINE_PREFIX` (from `formatter_pipeline`) to mark each output line. The `rich_pixels` backend produces ANSI-encoded half-block characters (`▀`) that are pixel-aligned — re-wrapping them breaks the art. The prefix is a null-byte sentinel (`"\x00\x01PRE\x00"`) that never appears in normal model text.
+
+The output buffer (`output_buffer.py`) detects this prefix, strips it, and calls `Text.from_ansi()` **without wrapping** — preserving the pixel grid.
+
+## Artifact Path Resolution
+
+The plugin resolves the artifact directory (for saving rendered PNGs) as follows:
+
+1. **`JAATO_VISION_DIR` env var** — if set, always used (explicit override)
+2. **`set_workspace_path(path)`** — resolves to `<workspace>/.jaato/vision/`
+3. **Neither set** — artifacts are not saved (`_artifact_dir` remains `None`)
+
+No hardcoded `/tmp` fallback. The pipeline propagates `set_workspace_path()` from `server/core.py`.
+
 ## Key Environment Variables
 
 | Variable | Purpose |
@@ -57,6 +73,7 @@ For mmdc, theme is passed via the `-t` CLI flag.
 | `JAATO_MERMAID_BACKEND` | `kitty`, `iterm`, `sixel`, `ascii`, `off` |
 | `JAATO_MERMAID_THEME` | `default`, `dark`, `forest`, `neutral` |
 | `JAATO_MERMAID_SCALE` | Integer scale factor (default: `2`) |
+| `JAATO_VISION_DIR` | Override artifact directory for rendered PNGs |
 
 ## Turn Feedback for Model Self-Correction
 
