@@ -485,6 +485,11 @@ class OutputBuffer:
         Returns:
             Number of display lines when rendered.
         """
+        # Fast path: prerendered content (mermaid diagrams) — just count newlines
+        if text.startswith(PRERENDERED_LINE_PREFIX):
+            clean = text[len(PRERENDERED_LINE_PREFIX):]
+            return clean.count('\n') + 1
+
         if not self._measure_console:
             self._measure_console = Console(width=self._console_width, force_terminal=True)
 
@@ -548,6 +553,29 @@ class OutputBuffer:
         if not output:
             return 1
         return output.count('\n') + 1
+
+    @staticmethod
+    def _coalesce_prerendered_lines(lines: list) -> list:
+        """Merge consecutive PRERENDERED_LINE_PREFIX lines into single entries.
+
+        Rendered diagrams produce one line per pixel row. Keeping them as
+        separate OutputLines causes inter-item spacing gaps and O(N)
+        measurement overhead.  Coalescing into one entry with embedded
+        newlines fixes both issues.
+        """
+        result = []
+        buf = []
+        for line in lines:
+            if line.startswith(PRERENDERED_LINE_PREFIX):
+                buf.append(line[len(PRERENDERED_LINE_PREFIX):])
+            else:
+                if buf:
+                    result.append(PRERENDERED_LINE_PREFIX + '\n'.join(buf))
+                    buf = []
+                result.append(line)
+        if buf:
+            result.append(PRERENDERED_LINE_PREFIX + '\n'.join(buf))
+        return result
 
     def _add_line(self, source: str, text: str, style: str, is_turn_start: bool = False) -> None:
         """Add a line to the buffer with measured display lines.
@@ -716,6 +744,7 @@ class OutputBuffer:
                     full_text = self._formatter_pipeline.format(full_text)
 
             lines = full_text.split('\n')
+            lines = self._coalesce_prerendered_lines(lines)
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
                 self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
@@ -742,6 +771,7 @@ class OutputBuffer:
                 full_text = self._formatter_pipeline.format(full_text)
 
         lines_text = full_text.split('\n')
+        lines_text = self._coalesce_prerendered_lines(lines_text)
 
         result = []
         for i, line_text in enumerate(lines_text):
