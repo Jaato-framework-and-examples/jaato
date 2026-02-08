@@ -16,9 +16,10 @@ import os
 import shutil
 import subprocess
 import tempfile
-import urllib.error
 import urllib.request
 from typing import Optional
+
+from shared.http import get_url_opener
 
 logger = logging.getLogger(__name__)
 
@@ -99,10 +100,12 @@ def _check_kroki() -> bool:
         req = urllib.request.Request(
             url,
             data=b"graph TD\n    A-->B",
-            headers={"Content-Type": "text/plain"},
+            headers={"Content-Type": "text/plain",
+                     "User-Agent": "jaato/1.0"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        opener = get_url_opener(url)
+        with opener.open(req, timeout=5) as resp:
             _kroki_available = resp.status == 200
     except Exception:
         _kroki_available = False
@@ -199,10 +202,12 @@ def _render_kroki(source: str, theme: str) -> Optional[bytes]:
         req = urllib.request.Request(
             url,
             data=source.encode("utf-8"),
-            headers={"Content-Type": "text/plain"},
+            headers={"Content-Type": "text/plain",
+                     "User-Agent": "jaato/1.0"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        opener = get_url_opener(url)
+        with opener.open(req, timeout=30) as resp:
             if resp.status == 200:
                 return resp.read()
         return None
