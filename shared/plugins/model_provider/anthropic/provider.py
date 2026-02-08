@@ -1153,6 +1153,7 @@ class AnthropicProvider:
                 cancel_token=cancel_token,
                 on_usage_update=on_usage_update,
                 on_function_call=on_function_call,
+                on_thinking=on_thinking,
             )
 
             self._last_usage = response.usage
@@ -1226,6 +1227,7 @@ class AnthropicProvider:
                 cancel_token=cancel_token,
                 on_usage_update=on_usage_update,
                 on_function_call=on_function_call,
+                on_thinking=on_thinking,
             )
 
             self._last_usage = response.usage
@@ -1249,6 +1251,7 @@ class AnthropicProvider:
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
         """Stream a response from the Anthropic API.
 
@@ -1258,6 +1261,7 @@ class AnthropicProvider:
         # State for accumulating response
         accumulated_text: List[str] = []  # Text chunks for current text block
         accumulated_thinking: List[str] = []  # Thinking chunks
+        thinking_emitted = False  # Whether thinking was emitted via callback
         parts: List[Part] = []  # Ordered parts preserving interleaving
         current_tool_calls: Dict[int, Dict[str, Any]] = {}  # index -> {id, name, json_chunks}
         finish_reason = FinishReason.UNKNOWN
@@ -1301,6 +1305,12 @@ class AnthropicProvider:
                     block_info = extract_content_block_start(event)
                     if block_info:
                         if block_info["type"] == "tool_use":
+                            # Emit thinking before tool calls if not yet emitted
+                            # (handles thinking → tool_use without text)
+                            if not thinking_emitted and accumulated_thinking and on_thinking:
+                                thinking_text = ''.join(accumulated_thinking)
+                                on_thinking(thinking_text)
+                                thinking_emitted = True
                             # Start tracking a new tool call
                             idx = block_info["index"]
                             self._trace(f"STREAM_TOOL_START idx={idx} name={block_info['name']}")
@@ -1317,6 +1327,12 @@ class AnthropicProvider:
                     # Handle text deltas
                     text_chunk = extract_text_from_stream_event(event)
                     if text_chunk:
+                        # Emit accumulated thinking before first text chunk
+                        # (model thinks first, then speaks)
+                        if not thinking_emitted and accumulated_thinking and on_thinking:
+                            thinking_text = ''.join(accumulated_thinking)
+                            on_thinking(thinking_text)
+                            thinking_emitted = True
                         chunk_count += 1
                         accumulated_text.append(text_chunk)
                         on_chunk(text_chunk)
@@ -1423,6 +1439,11 @@ class AnthropicProvider:
 
         # Build thinking string
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
+        # Estimate thinking tokens from accumulated text (streaming doesn't provide
+        # separate thinking token counts in message_delta)
+        if thinking and usage.thinking_tokens is None:
+            usage.thinking_tokens = max(1, len(thinking) // 4)
 
         # When cancelled, filter out function_call parts to prevent unpaired tool_use blocks
         # These would cause API errors on next call since there won't be tool_results

@@ -242,6 +242,9 @@ class TokenUsage:
             Anthropic charges 1.25x for 5-min cache, 2x for 1-hour cache.
         reasoning_tokens: Tokens used for reasoning/thinking (OpenAI o-series).
             For Anthropic/Gemini, thinking tokens are included in output_tokens.
+        thinking_tokens: Tokens used for extended thinking (Anthropic/Gemini).
+            Subset of output_tokens spent on thinking content.
+            Extracted from API when available, otherwise estimated from text.
     """
     prompt_tokens: int = 0
     output_tokens: int = 0
@@ -251,6 +254,8 @@ class TokenUsage:
     cache_creation_tokens: Optional[int] = None
     # Reasoning tokens (OpenAI o-series models)
     reasoning_tokens: Optional[int] = None
+    # Thinking tokens (Anthropic/Gemini extended thinking)
+    thinking_tokens: Optional[int] = None
 
 
 class FinishReason(str, Enum):

@@ -555,7 +555,8 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
     """Extract token usage from Anthropic response.
 
     Extracts standard token counts plus cache token information
-    when prompt caching is enabled.
+    when prompt caching is enabled, and thinking tokens when
+    extended thinking is enabled.
     """
     usage = TokenUsage()
 
@@ -575,7 +576,34 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
     if cache_read is not None and cache_read > 0:
         usage.cache_read_tokens = cache_read
 
+    # Extract thinking tokens if available (included in output_tokens)
+    _extract_thinking_tokens(resp_usage, response, usage)
+
     return usage
+
+
+def _extract_thinking_tokens(resp_usage: Any, response: Any, usage: TokenUsage) -> None:
+    """Extract thinking token count from Anthropic response.
+
+    Tries the SDK field first, then estimates from thinking text content.
+    """
+    # Try SDK field (forward-compatible)
+    thinking_tokens = getattr(resp_usage, "thinking_tokens", None)
+    if thinking_tokens is not None and thinking_tokens > 0:
+        usage.thinking_tokens = thinking_tokens
+        return
+
+    # Estimate from thinking content blocks if present
+    if response and hasattr(response, "content"):
+        thinking_text_len = 0
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "thinking":
+                text = getattr(block, "thinking", "")
+                if text:
+                    thinking_text_len += len(text)
+        if thinking_text_len > 0:
+            # Rough estimate: ~4 characters per token for English
+            usage.thinking_tokens = max(1, thinking_text_len // 4)
 
 
 def response_from_anthropic(response: Any) -> ProviderResponse:

@@ -31,6 +31,7 @@ class BudgetPanel:
         "plugin": "Plugin",
         "enrichment": "Enrichment",
         "conversation": "Conversation",
+        "thinking": "Thinking",
     }
 
     def __init__(self, toggle_key: Optional[KeyBinding] = None):
@@ -48,7 +49,7 @@ class BudgetPanel:
         self._agent_order: List[str] = []  # ["_total", "main", "subagent_1", ...]
         self._drill_down_source: Optional[str] = None  # None = top level, or source name
         self._selected_row: int = 0  # Currently selected row in the table
-        self._source_order: List[str] = ["system", "plugin", "enrichment", "conversation"]
+        self._source_order: List[str] = ["system", "plugin", "enrichment", "conversation", "thinking"]
 
     def set_theme(self, theme: "ThemeConfig") -> None:
         """Set the theme configuration for styling."""
