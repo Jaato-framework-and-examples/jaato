@@ -4447,8 +4447,9 @@ class OutputBuffer:
                 # Extended thinking output - render with header/footer and indentation
                 # This is the model's internal reasoning before generating response
                 # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+                indent = "   "  # Left indent for the entire thinking block
                 border = "│ "
-                border_width = len(border)
+                border_width = len(indent) + len(border)
                 if line.is_turn_start:
                     # First render Model header (thinking is part of model turn)
                     header_prefix = "── Model "
@@ -4458,7 +4459,9 @@ class OutputBuffer:
                     output.append("\n")
                     # Then render thinking header: ┌─ Internal thinking ───────┐
                     thinking_header = "┌─ Internal thinking "
-                    remaining = max(0, wrap_width - len(thinking_header) - 1)
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - len(thinking_header) - 1)
+                    output.append(indent)
                     output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
                     output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
@@ -4468,6 +4471,7 @@ class OutputBuffer:
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
+                    output.append(indent)
                     output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
                     output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
                 # Track that we're in thinking mode for footer rendering
@@ -4480,7 +4484,9 @@ class OutputBuffer:
                 if is_last_thinking:
                     # Render footer: └─────────────────────────────────────────┘
                     output.append("\n")
-                    remaining = max(0, wrap_width - 2)  # -2 for └ and ┘
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - 2)  # -2 for └ and ┘
+                    output.append(indent)
                     output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
                     output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))
