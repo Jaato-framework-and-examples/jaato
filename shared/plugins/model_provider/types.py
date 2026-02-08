@@ -280,9 +280,11 @@ class ProviderResponse:
         structured_output: Parsed JSON when response_schema was requested.
             This is populated when the model returns structured JSON output
             conforming to a requested schema.
-        thinking: Extended thinking/reasoning content (Anthropic-specific).
-            When extended thinking is enabled, this contains the model's
-            internal reasoning process before generating the response.
+        thinking: Extended thinking/reasoning content from the model.
+            Populated when models expose their internal reasoning, e.g.
+            Anthropic extended thinking or DeepSeek-R1 reasoning_content.
+            OpenAI o-series models use reasoning internally but do not
+            surface it through this field.
     """
     parts: List[Part] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
@@ -446,6 +448,7 @@ class ThinkingConfig:
     This is a provider-agnostic configuration for thinking capabilities:
     - Anthropic: Extended thinking with budget_tokens
     - Google Gemini: Thinking mode (Gemini 2.0+)
+    - GitHub Models: Reasoning content extraction (DeepSeek-R1, etc.)
 
     Attributes:
         enabled: Whether thinking mode is enabled.
