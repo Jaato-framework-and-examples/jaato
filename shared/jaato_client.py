@@ -530,20 +530,24 @@ class JaatoClient:
         )
 
         # After turn completes, update UI hooks with accounting data
+        # on_agent_turn_completed MUST fire unconditionally — it triggers the
+        # formatter pipeline flush. Some providers report 0 tokens; skipping
+        # the hook would leave buffered content (code blocks) stuck in the pipeline.
         if self._ui_hooks:
-            # Get turn accounting for the latest turn
             turn_accounting = self._session.get_turn_accounting()
             if turn_accounting:
                 last_turn = turn_accounting[-1]
-                self._ui_hooks.on_agent_turn_completed(
-                    agent_id=self._agent_id,
-                    turn_number=len(turn_accounting) - 1,
-                    prompt_tokens=last_turn.get('prompt', 0),
-                    output_tokens=last_turn.get('output', 0),
-                    total_tokens=last_turn.get('total', 0),
-                    duration_seconds=last_turn.get('duration_seconds', 0),
-                    function_calls=last_turn.get('function_calls', [])
-                )
+            else:
+                last_turn = {}
+            self._ui_hooks.on_agent_turn_completed(
+                agent_id=self._agent_id,
+                turn_number=max(0, len(turn_accounting) - 1),
+                prompt_tokens=last_turn.get('prompt', 0),
+                output_tokens=last_turn.get('output', 0),
+                total_tokens=last_turn.get('total', 0),
+                duration_seconds=last_turn.get('duration_seconds', 0),
+                function_calls=last_turn.get('function_calls', [])
+            )
 
             # Update context usage
             usage = self._session.get_context_usage()
