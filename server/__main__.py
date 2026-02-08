@@ -160,6 +160,10 @@ class JaatoDaemon:
         self._ipc_server = None
         self._ws_server = None
 
+        # Session-independent plugins (auth plugins loaded at daemon startup)
+        # These provide user commands that work without an active session/provider.
+        self._daemon_plugins: dict = {}  # name -> plugin instance
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
@@ -180,6 +184,11 @@ class JaatoDaemon:
 
         # Set up event routing
         self._session_manager.set_event_callback(self._route_event)
+
+        # Discover session-independent plugins (auth plugins).
+        # These are loaded at daemon startup so their commands are available
+        # before any session/provider connection exists.
+        self._discover_daemon_plugins()
 
         tasks = []
 
@@ -727,6 +736,17 @@ class JaatoDaemon:
                 ))
             return
 
+        # Handle daemon-level plugin commands when no session is available.
+        # Auth plugins are session-independent — they must work before the user
+        # has connected to any provider.
+        if isinstance(event, CommandRequest):
+            session = self._session_manager.get_client_session(client_id)
+            if not session or not session.server:
+                plugin = self._find_daemon_plugin_for_command(event.command)
+                if plugin:
+                    self._execute_daemon_command(client_id, plugin, event.command, event.args)
+                    return
+
         # Route to session
         self._session_manager.handle_request(client_id, session_id, event)
 
@@ -735,6 +755,112 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server.queue_event(client_id, event)
         # WebSocket routing would be added here
+
+    def _discover_daemon_plugins(self) -> None:
+        """Discover session-independent plugins at daemon startup.
+
+        Scans the plugins directory for modules with SESSION_INDEPENDENT = True.
+        These plugins (typically auth plugins) provide user commands that work
+        without an active session or provider connection.
+        """
+        import importlib
+        import pkgutil
+        from pathlib import Path as _Path
+
+        plugins_dir = _Path(__file__).resolve().parents[1] / "shared" / "plugins"
+
+        for finder, name, ispkg in pkgutil.iter_modules([str(plugins_dir)]):
+            if name.startswith('_') or name in ('base', 'registry'):
+                continue
+            try:
+                module = importlib.import_module(f"shared.plugins.{name}")
+                if not getattr(module, 'SESSION_INDEPENDENT', False):
+                    continue
+                if not hasattr(module, 'create_plugin'):
+                    continue
+
+                plugin = module.create_plugin()
+                self._daemon_plugins[plugin.name] = plugin
+                logger.debug(f"Loaded daemon-level plugin: {plugin.name}")
+
+            except Exception as exc:
+                logger.warning(f"Failed to load daemon plugin '{name}': {exc}")
+
+    def _find_daemon_plugin_for_command(self, command: str):
+        """Find a daemon-level plugin that provides a user command.
+
+        Args:
+            command: The command name to find.
+
+        Returns:
+            The plugin instance or None.
+        """
+        for plugin in self._daemon_plugins.values():
+            if hasattr(plugin, 'get_user_commands'):
+                for cmd in plugin.get_user_commands():
+                    if cmd.name == command:
+                        return plugin
+        return None
+
+    def _execute_daemon_command(
+        self,
+        client_id: str,
+        plugin,
+        command: str,
+        args: list,
+    ) -> None:
+        """Execute a user command on a daemon-level plugin (no session required).
+
+        Sets up output callback to route plugin output to the client via events,
+        parses arguments, and handles HelpLines results.
+
+        Args:
+            client_id: The requesting client.
+            plugin: The daemon-level plugin instance.
+            command: The command name.
+            args: Raw argument list from the client.
+        """
+        from server.events import AgentOutputEvent, HelpTextEvent, SystemMessageEvent
+        from shared.plugins.base import parse_command_args, HelpLines
+
+        # Wire output callback so plugin._emit() reaches the client
+        if hasattr(plugin, 'set_output_callback'):
+            def output_callback(source: str, text: str, mode: str) -> None:
+                self._route_event(client_id, AgentOutputEvent(
+                    text=text,
+                    source=source,
+                    mode=mode,
+                ))
+            plugin.set_output_callback(output_callback)
+
+        try:
+            # Find the UserCommand definition for arg parsing
+            cmd_def = None
+            for cmd in plugin.get_user_commands():
+                if cmd.name == command:
+                    cmd_def = cmd
+                    break
+
+            parsed_args = parse_command_args(cmd_def, ' '.join(args)) if cmd_def else {}
+            result = plugin.execute_user_command(command, parsed_args)
+
+            if isinstance(result, HelpLines):
+                self._route_event(client_id, HelpTextEvent(lines=result.lines))
+            elif isinstance(result, str) and result:
+                self._route_event(client_id, SystemMessageEvent(
+                    message=result,
+                    style="info",
+                ))
+
+        except Exception as e:
+            self._route_event(client_id, SystemMessageEvent(
+                message=f"Command error: {e}",
+                style="error",
+            ))
+
+        finally:
+            if hasattr(plugin, 'set_output_callback'):
+                plugin.set_output_callback(None)
 
     def _get_command_list(self) -> list:
         """Get list of available commands for clients.
@@ -762,6 +888,30 @@ class JaatoDaemon:
             {"name": "tools help", "description": "Show detailed help for tools command"},
         ]
         commands.extend(tools_commands)
+
+        # Session-independent plugin commands (auth plugins).
+        # Available regardless of whether a session is loaded.
+        for plugin in self._daemon_plugins.values():
+            if hasattr(plugin, 'get_user_commands'):
+                for cmd in plugin.get_user_commands():
+                    if hasattr(plugin, 'get_command_completions'):
+                        subcommands = plugin.get_command_completions(cmd.name, [])
+                        if subcommands:
+                            for sub in subcommands:
+                                commands.append({
+                                    "name": f"{cmd.name} {sub.value}",
+                                    "description": sub.description or "",
+                                })
+                        else:
+                            commands.append({
+                                "name": cmd.name,
+                                "description": cmd.description or "",
+                            })
+                    else:
+                        commands.append({
+                            "name": cmd.name,
+                            "description": cmd.description or "",
+                        })
 
         # Get commands from any active session
         # (includes model command from session, plugin commands with subcommands)

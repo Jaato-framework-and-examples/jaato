@@ -15,6 +15,32 @@ from .plugin import MyPlugin, create_plugin
 __all__ = ["MyPlugin", "create_plugin", "PLUGIN_KIND"]
 ```
 
+## Critical: `SESSION_INDEPENDENT` for Auth Plugins
+
+Auth plugins must also declare `SESSION_INDEPENDENT = True` in `__init__.py`.
+Without it, the plugin's commands only appear after a session is loaded — but
+auth plugins exist to establish credentials *before* connecting to a provider.
+
+```python
+# shared/plugins/my_auth/__init__.py
+
+PLUGIN_KIND = "tool"
+SESSION_INDEPENDENT = True  # REQUIRED for auth plugins
+
+from .plugin import MyAuthPlugin, create_plugin
+
+__all__ = ["MyAuthPlugin", "create_plugin", "PLUGIN_KIND", "SESSION_INDEPENDENT"]
+```
+
+**Why this matters:** The daemon (`server/__main__.py`) has two command sources:
+
+1. **Session-bound plugins** — discovered per-session, gated behind `session.is_loaded`
+2. **Daemon-level plugins** — discovered at daemon startup via `SESSION_INDEPENDENT`
+
+Without `SESSION_INDEPENDENT`, auth commands are invisible until a session exists,
+creating a chicken-and-egg problem: users can't authenticate because the auth
+command requires a session, but connecting a session may require authentication.
+
 **Why this matters:** `PluginRegistry._discover_via_directory()` (in `registry.py`)
 checks every module with:
 
@@ -138,17 +164,29 @@ class MyAuthPlugin:
 5. User commands listed in `get_auto_approved_tools()` (prevents permission prompts)
 6. `get_command_completions()` implemented for subcommand autocompletion
 7. Help command returns `HelpLines` (not `str`) for pager display
+8. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
 
 ## IPC Completion Flow
 
-In IPC (daemon) mode, completions flow through:
+In IPC (daemon) mode, completions come from two sources:
 
-1. Server calls `_get_command_list()` in `server/__main__.py`
-2. Iterates `registry.list_exposed()` → finds plugin
-3. Calls `plugin.get_user_commands()` → gets command declarations
-4. Calls `plugin.get_command_completions(cmd.name, [])` → gets subcommands
-5. Pre-expands into `CommandListEvent`: `"my-auth login"`, `"my-auth logout"`, etc.
-6. Client receives event → registers commands for autocompletion
+**Session-independent plugins** (always available):
+1. `_discover_daemon_plugins()` at daemon startup scans for `SESSION_INDEPENDENT = True`
+2. `_get_command_list()` iterates `self._daemon_plugins` unconditionally
+3. Subcommands pre-expanded into `CommandListEvent`
 
-If any step in 1-2 fails (e.g., missing `PLUGIN_KIND`), the entire chain breaks
-silently and the command is treated as prompt text sent to the model.
+**Session-bound plugins** (only when session loaded):
+1. `_get_command_list()` iterates loaded sessions → `registry.list_exposed()`
+2. Calls `plugin.get_user_commands()` → `plugin.get_command_completions()`
+3. Pre-expanded into same `CommandListEvent`
+
+Deduplication (by command name) ensures no duplicates when both sources provide
+the same command.
+
+**Command execution** follows matching priority:
+1. Static commands (session.*, tools.*) → daemon handles directly
+2. Daemon-level plugins → `_execute_daemon_command()` (no session required)
+3. Session plugins → `session_manager.handle_request()` → `server.execute_command()`
+
+If `PLUGIN_KIND` is missing, the plugin is never discovered at either level.
+If `SESSION_INDEPENDENT` is missing from an auth plugin, it only works at level 3.
