@@ -119,7 +119,7 @@ class TestBlockDetection:
         output = "".join(chunks)
 
         # Should contain the fallback hint
-        assert "mermaid-cli" in output
+        assert "rendering unavailable" in output
         # Should contain the source for code_block_formatter
         assert "graph TD" in output
         # Should contain surrounding text
@@ -292,8 +292,8 @@ class TestFallbackRendering:
         chunks = list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
         output = "".join(chunks)
 
-        assert "mermaid-cli" in output
-        assert "npm install" in output
+        assert "rendering unavailable" in output
+        assert "mermaid-cli" in output or "JAATO_KROKI_URL" in output
 
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     def test_fallback_preserves_source(self, mock_renderer):

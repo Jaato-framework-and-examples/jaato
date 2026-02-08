@@ -228,8 +228,8 @@ class MermaidFormatterPlugin:
         Prepends a dim hint about installing mermaid-cli.
         """
         hint = (
-            "\x1b[2m[mermaid diagram - install mermaid-cli for rendered output: "
-            "npm install -g @mermaid-js/mermaid-cli]\x1b[0m\n"
+            "\x1b[2m[mermaid diagram - rendering unavailable; "
+            "install @mermaid-js/mermaid-cli or set JAATO_KROKI_URL]\x1b[0m\n"
         )
         return hint + f"```mermaid\n{source}\n```"
 

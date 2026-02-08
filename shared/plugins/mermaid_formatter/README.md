@@ -6,7 +6,7 @@ Streaming formatter that renders Mermaid diagrams inline in the terminal using t
 
 The mermaid formatter plugin:
 - Detects ` ```mermaid ` code blocks in model output
-- Renders diagrams to PNG via mermaid-cli or mermaid-py
+- Renders diagrams to PNG via mermaid-cli or kroki.io POST API
 - Displays inline using the best terminal graphics protocol
 - Falls back to Unicode half-block art when no native protocol is available
 - Saves PNG artifacts for model feedback via vision capture
@@ -57,17 +57,17 @@ Detection is handled by `shared/terminal_caps.py`, which caches results process-
 
 Diagrams are rendered to PNG using the first available strategy:
 
-1. **mmdc** (mermaid-cli) — Gold standard. Requires Node.js:
+1. **mmdc** (mermaid-cli) — Gold standard, local rendering. Requires Node.js:
    ```bash
    npm install -g @mermaid-js/mermaid-cli
    ```
 
-2. **mermaid-py** — Python package fallback. Produces SVG, converted to PNG via cairosvg:
+2. **kroki.io** — Remote rendering via POST API. No local dependencies. Diagram source is sent as plain text, PNG is returned. For self-hosted or enterprise-firewalled environments:
    ```bash
-   pip install mermaid cairosvg
+   export JAATO_KROKI_URL=http://your-kroki-instance:8000
    ```
 
-3. **Passthrough** — When nothing is available, the source is shown as a syntax-highlighted code block with an install hint.
+3. **Passthrough** — When no renderer is available, the source is shown as a syntax-highlighted code block with a hint.
 
 ## Configuration
 
@@ -75,6 +75,7 @@ Diagrams are rendered to PNG using the first available strategy:
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
+| `JAATO_KROKI_URL` | URL | `https://kroki.io` | Kroki endpoint (for self-hosted instances) |
 | `JAATO_MERMAID_BACKEND` | `kitty`, `iterm`, `sixel`, `ascii`, `off` | auto-detect | Force a specific graphics backend |
 | `JAATO_MERMAID_THEME` | `default`, `dark`, `forest`, `neutral` | `default` | Mermaid diagram theme |
 | `JAATO_MERMAID_SCALE` | Integer | `2` | Rasterization scale factor |
@@ -117,7 +118,7 @@ formatter.initialize({
 shared/plugins/mermaid_formatter/
 ├── __init__.py           # Package exports
 ├── plugin.py             # MermaidFormatterPlugin (streaming block detection)
-├── renderer.py           # Mermaid source → PNG (mmdc / mermaid-py)
+├── renderer.py           # Mermaid source → PNG (mmdc / kroki.io)
 ├── backends/
 │   ├── __init__.py       # Backend protocol + auto-selection
 │   ├── kitty.py          # Kitty graphics protocol
@@ -126,7 +127,7 @@ shared/plugins/mermaid_formatter/
 │   └── rich_pixels.py    # Unicode half-block fallback
 └── tests/
     ├── test_plugin.py    # Block detection + rendering tests
-    ├── test_renderer.py  # mmdc / mermaid-py rendering tests
+    ├── test_renderer.py  # mmdc / kroki rendering tests
     └── test_backends.py  # Backend selection + protocol tests
 ```
 
@@ -162,8 +163,8 @@ MermaidFormatterPlugin.process_chunk()
 
 ### Optional
 
-- `@mermaid-js/mermaid-cli` (npm) — High-fidelity Mermaid rendering
-- `cairosvg>=2.7.0` — SVG→PNG conversion for mermaid-py output
+- `@mermaid-js/mermaid-cli` (npm) — High-fidelity local Mermaid rendering
+- Network access to `kroki.io` (or self-hosted instance via `JAATO_KROKI_URL`)
 
 ## Related
 
