@@ -967,10 +967,16 @@ class JaatoDaemon:
                 style="info",
             ))
 
-        # Create a new session with the authenticated provider
+        # Create a new session with the authenticated provider.
+        # Pass provider/model as env_overrides so they take precedence over
+        # whatever the .env file currently has (user may have declined to persist).
         if self._session_manager:
             session_id = self._session_manager.create_session(
-                client_id, None, workspace_path=workspace_path
+                client_id, None, workspace_path=workspace_path,
+                env_overrides={
+                    "JAATO_PROVIDER": provider_name,
+                    "MODEL_NAME": model_name,
+                },
             )
             if session_id:
                 set_logging_context(
@@ -999,7 +1005,8 @@ class JaatoDaemon:
     ) -> None:
         """Write or update JAATO_PROVIDER and MODEL_NAME in workspace .env file.
 
-        Preserves existing values for other keys.
+        Only replaces active (uncommented) lines. Commented-out lines like
+        ``#JAATO_PROVIDER=...`` are preserved untouched.
         """
         env_path = os.path.join(workspace_path, '.env')
         lines = []

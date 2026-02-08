@@ -162,6 +162,7 @@ class JaatoServer:
         on_event: Optional[EventCallback] = None,
         workspace_path: Optional[str] = None,
         session_id: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
     ):
         """Initialize the server.
 
@@ -173,8 +174,11 @@ class JaatoServer:
                            If provided, the server will chdir to this path
                            when processing requests.
             session_id: Unique identifier for this session (used in logs).
+            env_overrides: Optional dict of env vars that take precedence over
+                          the .env file (e.g., from post-auth wizard).
         """
         self.env_file = env_file
+        self._env_overrides = env_overrides or {}
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
@@ -601,6 +605,10 @@ class JaatoServer:
         raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
         # Filter out None values and store as session env
         self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
+
+        # Apply overrides (e.g., provider/model from post-auth wizard)
+        if self._env_overrides:
+            self._session_env.update(self._env_overrides)
 
         def get_config(key: str) -> Optional[str]:
             """Get config value from session env, falling back to global env."""

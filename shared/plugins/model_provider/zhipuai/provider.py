@@ -4,10 +4,10 @@ This provider enables access to Zhipu AI's GLM models via the Anthropic-compatib
 API endpoint, primarily targeting GLM Coding Plan subscribers.
 
 Zhipu AI offers the GLM family of models including:
-- GLM-4.7: Latest model with native chain-of-thought reasoning
-- GLM-4.7-Flash: Fast inference variant
-- GLM-4: General purpose model
-- GLM-4V: Vision-enabled multimodal model
+- GLM-4.7: Latest flagship with native chain-of-thought reasoning (200K context)
+- GLM-4.7-Flash/Flashx: Fast inference variants (200K context)
+- GLM-4.6: Previous flagship, strong coding (200K context)
+- GLM-4.5/Air/Flash: Balanced and lightweight models (128K context)
 
 Usage:
     provider = ZhipuAIProvider()
@@ -17,7 +17,7 @@ Usage:
 
 Environment variables:
     ZHIPUAI_API_KEY: Zhipu AI API key
-    ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic/v1)
+    ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic)
     ZHIPUAI_MODEL: Default model to use
     ZHIPUAI_CONTEXT_LENGTH: Override context length for models
 """
@@ -47,19 +47,28 @@ from .auth import (
 logger = logging.getLogger(__name__)
 
 
-# Default context limit for Zhipu AI models
-# GLM-4.7 supports 128K context
+# Known GLM models available via the Anthropic-compatible API,
+# with their context window sizes in tokens.
+# Source: Roo Code, lm-deluge, ekai-gateway, moai-adk, Z.AI docs.
+MODEL_CONTEXT_LIMITS = {
+    # GLM-4.7 family — 200K context
+    "glm-4.7": 204800,
+    "glm-4.7-flash": 204800,
+    "glm-4.7-flashx": 204800,
+    # GLM-4.6 family — 200K context
+    "glm-4.6": 204800,
+    # GLM-4.5 family — 128K context
+    "glm-4.5": 131072,
+    "glm-4.5-air": 131072,
+    "glm-4.5-airx": 131072,
+    "glm-4.5-flash": 131072,
+    "glm-4.5-x": 131072,
+}
+
+# Fallback for unknown models
 DEFAULT_CONTEXT_LIMIT = 131072
 
-
-# Known GLM models available via the Anthropic-compatible API
-KNOWN_MODELS = [
-    "glm-4.7",
-    "glm-4.7-flash",
-    "glm-4",
-    "glm-4v",
-    "glm-4-assistant",
-]
+KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
 
 
 class ZhipuAIAPIKeyNotFoundError(Exception):
@@ -245,12 +254,12 @@ class ZhipuAIProvider(AnthropicProvider):
     def get_context_limit(self) -> int:
         """Get context window size.
 
-        Returns context_length_override if set, otherwise the default.
-        GLM-4.7 supports 128K context.
+        Returns context_length_override if set, otherwise looks up the
+        per-model limit from MODEL_CONTEXT_LIMITS.
         """
         if self._context_length_override:
             return self._context_length_override
-        return DEFAULT_CONTEXT_LIMIT
+        return MODEL_CONTEXT_LIMITS.get(self._model_name, DEFAULT_CONTEXT_LIMIT)
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors with Zhipu AI-specific interpretation.

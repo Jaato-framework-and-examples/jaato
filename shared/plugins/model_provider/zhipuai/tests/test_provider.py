@@ -8,6 +8,7 @@ from ..provider import (
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     DEFAULT_CONTEXT_LIMIT,
+    MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
 )
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
@@ -153,7 +154,7 @@ class TestModelListing:
         provider.initialize(ProviderConfig(api_key="test-key"))
         models = provider.list_models(prefix="glm-4.7")
 
-        assert len(models) == 2
+        assert len(models) == 3  # glm-4.7, glm-4.7-flash, glm-4.7-flashx
         assert all(m.startswith("glm-4.7") for m in models)
 
 
@@ -162,7 +163,7 @@ class TestContextLimit:
 
     @patch('anthropic.Anthropic')
     def test_default_context_limit(self, mock_anthropic):
-        """Should return default context limit (128K for GLM-4.7)."""
+        """Should return fallback 128K when no model connected."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
 
@@ -170,51 +171,71 @@ class TestContextLimit:
         assert provider.get_context_limit() == 131072
 
     @patch('anthropic.Anthropic')
+    def test_model_specific_context_limit(self, mock_anthropic):
+        """Should return per-model context limit after connect."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        provider.connect("glm-4.7")
+        assert provider.get_context_limit() == 204800
+
+        provider.connect("glm-4.5")
+        assert provider.get_context_limit() == 131072
+
+    @patch('anthropic.Anthropic')
     def test_custom_context_limit(self, mock_anthropic):
-        """Should use custom context limit from config."""
+        """Should use custom context limit from config (overrides per-model)."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(
             api_key="test-key",
             extra={"context_length": 65536}
         ))
+        provider.connect("glm-4.7")
 
+        # Override takes precedence even though glm-4.7 is 200K
         assert provider.get_context_limit() == 65536
 
 
 class TestVerifyAuth:
-    """Tests for auth verification."""
+    """Tests for auth verification.
 
-    @patch('anthropic.Anthropic')
-    def test_verify_auth_success(self, mock_anthropic):
-        """Should return True when API key is valid."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock()
-        mock_anthropic.return_value = mock_client
+    verify_auth() must work BEFORE initialize() is called — it only checks
+    whether credentials are available, not whether the client can connect.
+    """
 
-        provider = ZhipuAIProvider()
-        provider.initialize(ProviderConfig(api_key="test-key"))
+    @patch.dict('os.environ', {'ZHIPUAI_API_KEY': 'env-key'})
+    def test_verify_auth_with_env_key(self):
+        """Should return True when API key is in environment."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is True
-        assert any("Connected" in m for m in messages)
+        assert any("Found" in m for m in messages)
 
-    @patch('anthropic.Anthropic')
-    def test_verify_auth_failure(self, mock_anthropic):
-        """Should return False when API key is invalid."""
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("401 Unauthorized")
-        mock_anthropic.return_value = mock_client
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value='stored-key')
+    def test_verify_auth_with_stored_key(self, mock_stored):
+        """Should return True when API key is stored."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
-        provider = ZhipuAIProvider()
-        provider.initialize(ProviderConfig(api_key="bad-key"))
+        messages = []
+        result = provider.verify_auth(on_message=messages.append)
+
+        assert result is True
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value=None)
+    def test_verify_auth_no_credentials(self, mock_stored):
+        """Should return False when no credentials are available."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is False
-        assert any("Cannot connect" in m for m in messages)
+        assert any("No" in m for m in messages)
 
 
 class TestErrorHandling:
