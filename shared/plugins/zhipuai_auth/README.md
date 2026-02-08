@@ -36,9 +36,9 @@ After successful authentication, the daemon detects valid credentials via
 1. **Connect prompt** — *"Connect to Zhipu AI (Z.AI) now? [y/n]"*
    (or *"Switch to..."* if a session with a different provider is already active)
 2. **Model selection** — Presents the default model list:
-   - `zhipuai/glm-4.7` — Latest model with native CoT reasoning (128K)
-   - `zhipuai/glm-4.7-flash` — Fast inference variant
-   - `zhipuai/glm-4` — General purpose model
+   - `zhipuai/glm-4.7` — Latest flagship with native CoT reasoning (200K)
+   - `zhipuai/glm-4.7-flash` — Fast inference variant (200K)
+   - `zhipuai/glm-4.6` — Previous flagship, strong coding (200K)
 3. **Persistence prompt** — *"Save provider/model to .env? [y/n]"*
    Writes `JAATO_PROVIDER=zhipuai` and `MODEL_NAME=<model>` to the workspace
    `.env` file, preserving existing values for other keys.

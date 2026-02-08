@@ -868,14 +868,15 @@ class JaatoServer:
         # This must happen after _create_main_agent() so client has the agent registered
         if self._jaato:
             usage = self._jaato.get_context_usage()
+            context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
             self.emit(ContextUpdatedEvent(
                 agent_id="main",
                 total_tokens=usage.get('total_tokens', 0),
                 prompt_tokens=usage.get('prompt_tokens', 0),
                 output_tokens=usage.get('output_tokens', 0),
-                context_limit=usage.get('context_limit', 128000),
+                context_limit=context_limit,
                 percent_used=usage.get('percent_used', 0.0),
-                tokens_remaining=usage.get('tokens_remaining', 128000),
+                tokens_remaining=usage.get('tokens_remaining', context_limit),
                 turns=usage.get('turns', 0),
                 gc_threshold=gc_threshold,
                 gc_strategy=gc_strategy,
@@ -2525,14 +2526,15 @@ class JaatoServer:
                 # Emit initial context update so toolbar shows correct usage
                 if self._jaato:
                     usage = self._jaato.get_context_usage()
+                    context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
                     self.emit(ContextUpdatedEvent(
                         agent_id="main",
                         total_tokens=usage.get('total_tokens', 0),
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
-                        context_limit=usage.get('context_limit', 128000),
+                        context_limit=context_limit,
                         percent_used=usage.get('percent_used', 0.0),
-                        tokens_remaining=usage.get('tokens_remaining', 128000),
+                        tokens_remaining=usage.get('tokens_remaining', context_limit),
                         turns=usage.get('turns', 0),
                         gc_threshold=gc_threshold,
                         gc_strategy=gc_strategy,

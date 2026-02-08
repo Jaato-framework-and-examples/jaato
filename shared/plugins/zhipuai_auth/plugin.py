@@ -50,10 +50,16 @@ class ZhipuAIAuthPlugin:
 
     def get_default_models(self) -> List[Dict[str, str]]:
         """Return default models available for this provider."""
+        from ..model_provider.zhipuai.provider import MODEL_CONTEXT_LIMITS
+
+        def _ctx(model: str) -> str:
+            tokens = MODEL_CONTEXT_LIMITS.get(model)
+            return f" ({tokens // 1024}K)" if tokens else ""
+
         return [
-            {"name": "zhipuai/glm-4.7", "description": "Latest model with native CoT reasoning (128K)"},
-            {"name": "zhipuai/glm-4.7-flash", "description": "Fast inference variant"},
-            {"name": "zhipuai/glm-4", "description": "General purpose model"},
+            {"name": "zhipuai/glm-4.7", "description": f"Latest flagship with native CoT reasoning{_ctx('glm-4.7')}"},
+            {"name": "zhipuai/glm-4.7-flash", "description": f"Fast inference variant{_ctx('glm-4.7-flash')}"},
+            {"name": "zhipuai/glm-4.6", "description": f"Previous flagship, strong coding{_ctx('glm-4.6')}"},
         ]
 
     def verify_credentials(self) -> bool:
@@ -231,11 +237,13 @@ class ZhipuAIAuthPlugin:
             ("    ZHIPUAI_BASE_URL      Custom API endpoint (for enterprise users)", "dim"),
             ("", ""),
             ("AVAILABLE MODELS", "bold"),
-            ("    glm-4.7               Latest model with native CoT reasoning (128K)", "dim"),
-            ("    glm-4.7-flash         Fast inference variant", "dim"),
-            ("    glm-4                 General purpose model", "dim"),
-            ("    glm-4v                Vision-enabled multimodal model", "dim"),
-            ("    glm-4-assistant       Optimized for agentic tasks", "dim"),
+            ("    glm-4.7               Latest flagship with native CoT reasoning (200K)", "dim"),
+            ("    glm-4.7-flash         Fast inference variant (200K)", "dim"),
+            ("    glm-4.7-flashx        Ultra-fast variant (200K)", "dim"),
+            ("    glm-4.6               Previous flagship, strong coding (200K)", "dim"),
+            ("    glm-4.5               Balanced reasoning and coding (128K)", "dim"),
+            ("    glm-4.5-air           Lightweight, cost-effective (128K)", "dim"),
+            ("    glm-4.5-flash         Free tier (128K)", "dim"),
             ("", ""),
             ("NOTES", "bold"),
             ("    - API key format is typically: {id}.{secret}", "dim"),
