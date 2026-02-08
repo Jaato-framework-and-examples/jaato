@@ -1173,6 +1173,15 @@ class JaatoServer:
                                 text=output,
                                 mode="append",
                             ))
+
+                    # Collect turn feedback from formatters for model self-correction
+                    agent_pipeline.collect_turn_feedback()
+                    feedback = agent_pipeline.get_pending_feedback()
+                    if feedback and server._jaato:
+                        session = server._jaato.get_session()
+                        if session and session.agent_id == agent_id:
+                            session.set_pending_formatter_feedback(feedback)
+
                     # Reset pipeline for next turn
                     agent_pipeline.reset()
 

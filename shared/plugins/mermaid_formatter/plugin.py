@@ -38,6 +38,9 @@ class MermaidFormatterPlugin:
         self._buffer = ""
         self._in_mermaid_block = False
 
+        # Turn feedback for model self-correction
+        self._turn_feedback: Optional[str] = None
+
     @property
     def name(self) -> str:
         return "mermaid_formatter"
@@ -120,6 +123,7 @@ class MermaidFormatterPlugin:
         """Reset state for a new turn."""
         self._buffer = ""
         self._in_mermaid_block = False
+        self._turn_feedback = None
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize with configuration."""
@@ -179,6 +183,16 @@ class MermaidFormatterPlugin:
             "inline — fix the diagram and re-emit it."
         )
 
+    def get_turn_feedback(self) -> Optional[str]:
+        """Return feedback about syntax errors detected this turn.
+
+        Called by the pipeline after flush(). Returns and clears any
+        accumulated feedback so the model can self-correct on the next turn.
+        """
+        feedback = self._turn_feedback
+        self._turn_feedback = None
+        return feedback
+
     def _render_diagram(self, source: str) -> str:
         """Render a mermaid diagram and return terminal output.
 
@@ -220,6 +234,13 @@ class MermaidFormatterPlugin:
 
         if result.error is not None:
             # Syntax error — show source with diagnostic appended
+            # Store feedback for model self-correction on next turn
+            self._turn_feedback = (
+                "[Mermaid Validation Feedback]\n"
+                "A mermaid diagram you produced has a syntax error:\n"
+                f"{result.error}\n\n"
+                "Please fix the diagram and re-emit it."
+            )
             return self._fallback_with_diagnostic(source, result.error)
 
         # No renderer available — passthrough code block

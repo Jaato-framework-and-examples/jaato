@@ -392,3 +392,80 @@ class TestArtifactSaving:
         assert len(saved_files) == 2
         assert saved_files[0].name == "mermaid_001.png"
         assert saved_files[1].name == "mermaid_002.png"
+
+
+class TestTurnFeedback:
+    """Tests for get_turn_feedback() — model self-correction loop."""
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_syntax_error_stores_feedback(self, mock_renderer):
+        """Syntax error should produce turn feedback for the model."""
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: Parse error on line 3"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        list(plugin.process_chunk("```mermaid\nbad syntax\n```"))
+
+        feedback = plugin.get_turn_feedback()
+        assert feedback is not None
+        assert "Mermaid Validation Feedback" in feedback
+        assert "SyntaxError" in feedback
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_feedback_cleared_after_retrieval(self, mock_renderer):
+        """get_turn_feedback() should return and clear (one-shot)."""
+        mock_renderer.render.return_value = RenderResult(
+            error="SyntaxError: bad"
+        )
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        list(plugin.process_chunk("```mermaid\nbad\n```"))
+
+        assert plugin.get_turn_feedback() is not None
+        assert plugin.get_turn_feedback() is None  # Second call returns None
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_no_feedback_on_successful_render(self, mock_renderer):
+        """Successful render should not produce feedback."""
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG")
+
+        mock_backend = MagicMock()
+        mock_backend.render.return_value = "[diagram]\n"
+
+        with patch("shared.plugins.mermaid_formatter.plugin.select_backend", return_value=mock_backend):
+            plugin = MermaidFormatterPlugin()
+            plugin.initialize()
+
+            list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
+
+        assert plugin.get_turn_feedback() is None
+
+    def test_no_feedback_on_passthrough(self):
+        """Regular text should not produce feedback."""
+        plugin = MermaidFormatterPlugin()
+        list(plugin.process_chunk("hello world"))
+        assert plugin.get_turn_feedback() is None
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    def test_no_feedback_when_renderer_unavailable(self, mock_renderer):
+        """No renderer available should not produce feedback."""
+        mock_renderer.render.return_value = RenderResult()  # Both None
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+
+        list(plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```"))
+
+        assert plugin.get_turn_feedback() is None
+
+    def test_reset_clears_feedback(self):
+        """reset() should clear any stored feedback."""
+        plugin = MermaidFormatterPlugin()
+        plugin._turn_feedback = "some feedback"
+
+        plugin.reset()
+
+        assert plugin._turn_feedback is None
+        assert plugin.get_turn_feedback() is None

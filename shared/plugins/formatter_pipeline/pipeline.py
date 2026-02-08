@@ -50,6 +50,7 @@ class FormatterPipeline:
         """Initialize an empty pipeline."""
         self._formatters: List[FormatterPlugin] = []
         self._console_width: int = 80
+        self._pending_feedback: Optional[str] = None
 
     def register(self, formatter: FormatterPlugin) -> None:
         """Register a formatter plugin.
@@ -170,6 +171,39 @@ class FormatterPipeline:
         """Reset all formatters for a new turn."""
         for formatter in self._formatters:
             formatter.reset()
+
+    # ==================== Turn Feedback ====================
+
+    def collect_turn_feedback(self) -> Optional[str]:
+        """Collect turn feedback from registered formatters and store it.
+
+        Called after flush() at turn end. Iterates all formatters and collects
+        feedback from those that implement the optional get_turn_feedback()
+        method. Stores the result for retrieval via get_pending_feedback().
+
+        Returns:
+            Combined feedback string, or None if no formatter has feedback.
+        """
+        parts = []
+        for formatter in self._formatters:
+            if hasattr(formatter, "get_turn_feedback"):
+                feedback = formatter.get_turn_feedback()
+                if feedback:
+                    parts.append(feedback)
+        combined = "\n\n".join(parts) if parts else None
+        if combined:
+            self._pending_feedback = combined
+        return combined
+
+    def get_pending_feedback(self) -> Optional[str]:
+        """Return and clear any pending turn feedback.
+
+        Returns:
+            The feedback string stored by collect_turn_feedback(), or None.
+        """
+        feedback = self._pending_feedback
+        self._pending_feedback = None
+        return feedback
 
     # ==================== System Instructions ====================
 

@@ -254,6 +254,9 @@ class JaatoSession:
         # Timeout for waiting on streaming updates when model is idle (seconds)
         self._streaming_wait_timeout: float = 5.0
 
+        # Pending formatter feedback (injected into next user prompt)
+        self._pending_formatter_feedback: Optional[str] = None
+
     @property
     def _telemetry(self) -> 'TelemetryPlugin':
         """Get telemetry plugin from runtime."""
@@ -268,6 +271,18 @@ class JaatoSession:
             width: Terminal width in columns.
         """
         self._terminal_width = width
+
+    def set_pending_formatter_feedback(self, feedback: str) -> None:
+        """Store formatter feedback for injection into the next user prompt.
+
+        Called by the server after collecting turn feedback from the formatter
+        pipeline. The feedback will be prepended as a <hidden> block to the
+        next user message so the model can self-correct.
+
+        Args:
+            feedback: The feedback text to inject.
+        """
+        self._pending_formatter_feedback = feedback
 
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
@@ -1912,6 +1927,16 @@ NOTES
             # so enrichment notifications are visible to the user
             if self._runtime.registry and on_output:
                 self._runtime.registry.set_output_callback(on_output, self._terminal_width)
+
+            # Prepend any pending formatter feedback as a hidden block
+            if self._pending_formatter_feedback:
+                message = (
+                    f"<hidden>[Formatter Feedback]\n"
+                    f"{self._pending_formatter_feedback}</hidden>\n\n"
+                    f"{message}"
+                )
+                self._trace(f"FORMATTER_FEEDBACK injected {len(self._pending_formatter_feedback)} chars")
+                self._pending_formatter_feedback = None
 
             # Run prompt enrichment if registry is available
             processed_message = self._enrich_and_clean_prompt(message)

@@ -839,20 +839,6 @@ class RichClient:
         })
         self._trace(f"_setup_code_validation_formatter: code_validator created, name={code_validator.name}, priority={code_validator.priority}")
 
-        # Set up feedback callback for model self-correction
-        # When validation issues are found, inject them into the conversation
-        def on_validation_feedback(feedback: str) -> None:
-            """Inject validation feedback into the conversation."""
-            if self._display and feedback:
-                # Show feedback in output panel as a system message
-                self._display.add_system_message(
-                    f"[Code Validation] Issues detected in output code blocks",
-                    style="system_warning"
-                )
-                self._trace(f"Code validation feedback: {len(feedback)} chars")
-
-        code_validator.set_feedback_callback(on_validation_feedback)
-
         # Register with display's formatter pipeline
         self._display.register_formatter(code_validator)
 

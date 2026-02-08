@@ -98,3 +98,96 @@ class TestPipelineGetSystemInstructions:
         ))
         result = pipeline.get_system_instructions()
         assert result == "I contribute."
+
+
+class MockFormatterWithFeedback(MockFormatter):
+    """Mock formatter that provides turn feedback."""
+
+    def __init__(self, name="feedback", priority=50, feedback=None):
+        super().__init__(name, priority)
+        self._feedback = feedback
+
+    def get_turn_feedback(self):
+        fb = self._feedback
+        self._feedback = None
+        return fb
+
+
+class TestPipelineCollectTurnFeedback:
+    """Tests for FormatterPipeline.collect_turn_feedback()."""
+
+    def test_no_formatters_returns_none(self):
+        pipeline = FormatterPipeline()
+        assert pipeline.collect_turn_feedback() is None
+
+    def test_formatters_without_method_returns_none(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatter("a", 10))
+        pipeline.register(MockFormatter("b", 20))
+        assert pipeline.collect_turn_feedback() is None
+
+    def test_formatter_returning_none_is_skipped(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback("a", 10, feedback=None))
+        assert pipeline.collect_turn_feedback() is None
+
+    def test_formatter_returning_empty_is_skipped(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback("a", 10, feedback=""))
+        assert pipeline.collect_turn_feedback() is None
+
+    def test_single_formatter_with_feedback(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback(
+            "mermaid", 28, feedback="Syntax error in diagram."
+        ))
+        result = pipeline.collect_turn_feedback()
+        assert result == "Syntax error in diagram."
+
+    def test_multiple_formatters_combined(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback(
+            "fmt_a", 10, feedback="Feedback A."
+        ))
+        pipeline.register(MockFormatter("plain", 20))
+        pipeline.register(MockFormatterWithFeedback(
+            "fmt_b", 30, feedback="Feedback B."
+        ))
+        result = pipeline.collect_turn_feedback()
+        assert "Feedback A." in result
+        assert "Feedback B." in result
+        assert result == "Feedback A.\n\nFeedback B."
+
+    def test_collect_stores_in_pending(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback(
+            "fmt", 10, feedback="Some feedback."
+        ))
+        pipeline.collect_turn_feedback()
+        assert pipeline.get_pending_feedback() == "Some feedback."
+
+    def test_get_pending_clears_feedback(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback(
+            "fmt", 10, feedback="Some feedback."
+        ))
+        pipeline.collect_turn_feedback()
+        pipeline.get_pending_feedback()
+        assert pipeline.get_pending_feedback() is None
+
+    def test_no_feedback_no_pending(self):
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatter("plain", 10))
+        pipeline.collect_turn_feedback()
+        assert pipeline.get_pending_feedback() is None
+
+    def test_one_shot_feedback_drain(self):
+        """get_turn_feedback() is one-shot — second collect returns None."""
+        pipeline = FormatterPipeline()
+        pipeline.register(MockFormatterWithFeedback(
+            "fmt", 10, feedback="Once only."
+        ))
+        first = pipeline.collect_turn_feedback()
+        assert first == "Once only."
+        second = pipeline.collect_turn_feedback()
+        assert second is None

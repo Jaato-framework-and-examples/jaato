@@ -176,3 +176,30 @@ class ConfigurableFormatter(FormatterPlugin, Protocol):
 #                 "graphical diagrams. Feel free to use mermaid syntax."
 #             )
 #     """
+#
+# get_turn_feedback() -> Optional[str]:
+#     """Return feedback from this turn for injection into the next user prompt.
+#
+#     Called by FormatterPipeline.collect_turn_feedback() after flush() at turn
+#     end. Allows formatters that detect issues (syntax errors, validation
+#     failures) to report them back to the model so it can self-correct on
+#     the next turn.
+#
+#     The returned text is prepended to the next user message as a <hidden>
+#     block — the model sees it, but the user doesn't (they already saw the
+#     diagnostic in the terminal output).
+#
+#     Implementations should return and clear any accumulated feedback
+#     (one-shot pattern: each call drains the feedback).
+#
+#     Returns:
+#         Feedback string, or None if no feedback to report.
+#
+#     Example:
+#         def get_turn_feedback(self) -> Optional[str]:
+#             if self._turn_feedback:
+#                 fb = self._turn_feedback
+#                 self._turn_feedback = None
+#                 return fb
+#             return None
+#     """

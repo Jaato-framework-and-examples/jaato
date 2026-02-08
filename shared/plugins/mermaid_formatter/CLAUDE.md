@@ -58,6 +58,14 @@ For mmdc, theme is passed via the `-t` CLI flag.
 | `JAATO_MERMAID_THEME` | `default`, `dark`, `forest`, `neutral` |
 | `JAATO_MERMAID_SCALE` | Integer scale factor (default: `2`) |
 
+## Turn Feedback for Model Self-Correction
+
+When a mermaid diagram has a syntax error, the plugin stores feedback via `get_turn_feedback()`. After flush at turn-end, the pipeline collects this feedback and the server injects it as a `<hidden>` block into the next user prompt. The model sees the error and can self-correct.
+
+Flow: render error → `_turn_feedback` stored → `get_turn_feedback()` called by pipeline → server stores on session → `send_message()` prepends `<hidden>[Formatter Feedback]...</hidden>` → model self-corrects.
+
+`get_turn_feedback()` is one-shot: returns and clears. `reset()` also clears it.
+
 ## Testing Notes
 
 - All renderer strategies are tested via mocks (no real network calls or mmdc binary needed).
