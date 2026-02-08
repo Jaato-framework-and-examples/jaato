@@ -696,7 +696,7 @@ class TestEdgeCases:
         assert len(session_paths) == 0
 
     def test_relative_path_normalized(self, tmp_path):
-        """Test that relative paths are converted to absolute."""
+        """Test that relative paths are resolved against workspace, not server CWD."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / ".jaato" / "sessions" / "test").mkdir(parents=True)
@@ -717,6 +717,57 @@ class TestEdgeCases:
             "path": "relative/path"
         })
 
-        # Path should be normalized to absolute
+        # Path should be resolved relative to workspace, not process CWD
         assert result["status"] == "added"
-        assert os.path.isabs(result["path"])
+        assert result["path"] == str(workspace / "relative" / "path")
+
+    def test_relative_parent_path_resolved_against_workspace(self, tmp_path):
+        """Test that ../../whatever resolves against workspace, not server CWD."""
+        workspace = tmp_path / "deep" / "nested" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / ".jaato" / "sessions" / "test").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test"})
+        plugin.set_workspace_path(str(workspace))
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "../../sibling"
+        })
+
+        assert result["status"] == "added"
+        expected = str(tmp_path / "deep" / "sibling")
+        assert result["path"] == expected
+
+    def test_remove_relative_path_resolved_against_workspace(self, tmp_path):
+        """Test that sandbox remove resolves relative paths against workspace."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test"})
+        plugin.set_workspace_path(str(workspace))
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "relative/path"
+        })
+
+        assert result["status"] == "denied"
+        assert result["path"] == str(workspace / "relative" / "path")
