@@ -2235,20 +2235,27 @@ class JaatoServer:
         if command.lower() == "save":
             parsed_args["user_inputs"] = self._original_inputs.copy()
 
-        # Find and configure plugin output callback for real-time output
+        # Find and configure plugin output callback for real-time output.
+        # User commands run outside agent context, so we buffer _emit() output
+        # and send as a SystemMessageEvent (not AgentOutputEvent).
         plugin = self._find_plugin_for_command(command)
+        output_parts = []
         if plugin and hasattr(plugin, 'set_output_callback'):
-            # Create callback that emits events
             def output_callback(source: str, text: str, mode: str) -> None:
-                self.emit(AgentOutputEvent(
-                    text=text,
-                    source=source,
-                    mode=mode,
-                ))
+                output_parts.append(text)
             plugin.set_output_callback(output_callback)
 
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
+
+            # Send accumulated _emit() output as a single system message
+            if output_parts:
+                combined = "".join(output_parts).rstrip("\n")
+                if combined:
+                    self.emit(SystemMessageEvent(
+                        message=combined,
+                        style="info",
+                    ))
 
             # After memory commands, push updated memory list for completion cache
             # (must run before HelpLines early return so memory list/help also refresh)

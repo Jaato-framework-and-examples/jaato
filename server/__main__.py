@@ -739,16 +739,14 @@ class JaatoDaemon:
                 ))
             return
 
-        # Handle daemon-level plugin commands when no session is available.
-        # Auth plugins are session-independent — they must work before the user
-        # has connected to any provider.
+        # Handle daemon-level plugin commands (session-independent plugins).
+        # These are always routed through the daemon path regardless of session
+        # state, because they need daemon-level features (e.g., post-auth wizard).
         if isinstance(event, CommandRequest):
-            session = self._session_manager.get_client_session(client_id)
-            if not session or not session.server:
-                plugin = self._find_daemon_plugin_for_command(event.command)
-                if plugin:
-                    self._execute_daemon_command(client_id, plugin, event.command, event.args)
-                    return
+            plugin = self._find_daemon_plugin_for_command(event.command)
+            if plugin:
+                self._execute_daemon_command(client_id, plugin, event.command, event.args)
+                return
 
         # Handle post-auth setup response
         from server.events import PostAuthSetupResponse
@@ -829,17 +827,15 @@ class JaatoDaemon:
             command: The command name.
             args: Raw argument list from the client.
         """
-        from server.events import AgentOutputEvent, HelpTextEvent, SystemMessageEvent
+        from server.events import HelpTextEvent, SystemMessageEvent
         from shared.plugins.base import parse_command_args, HelpLines
 
-        # Wire output callback so plugin._emit() reaches the client
+        # Buffer plugin._emit() output — daemon commands run outside any agent
+        # context, so we accumulate output and send as a SystemMessageEvent.
+        output_parts = []
         if hasattr(plugin, 'set_output_callback'):
             def output_callback(source: str, text: str, mode: str) -> None:
-                self._route_event(client_id, AgentOutputEvent(
-                    text=text,
-                    source=source,
-                    mode=mode,
-                ))
+                output_parts.append(text)
             plugin.set_output_callback(output_callback)
 
         try:
@@ -852,6 +848,15 @@ class JaatoDaemon:
 
             parsed_args = parse_command_args(cmd_def, ' '.join(args)) if cmd_def else {}
             result = plugin.execute_user_command(command, parsed_args)
+
+            # Send accumulated _emit() output as a single system message
+            if output_parts:
+                combined = "".join(output_parts).rstrip("\n")
+                if combined:
+                    self._route_event(client_id, SystemMessageEvent(
+                        message=combined,
+                        style="info",
+                    ))
 
             if isinstance(result, HelpLines):
                 self._route_event(client_id, HelpTextEvent(lines=result.lines))

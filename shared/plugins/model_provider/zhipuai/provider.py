@@ -190,31 +190,27 @@ class ZhipuAIProvider(AnthropicProvider):
         allow_interactive: bool = False,
         on_message=None
     ) -> bool:
-        """Verify Zhipu AI API key is valid.
+        """Verify Zhipu AI API key is available.
 
-        Sends a minimal request to verify the API key works.
+        This can be called BEFORE initialize() to check that credentials
+        exist. Checks environment variable and stored credentials.
 
         Args:
             allow_interactive: Ignored (no interactive auth for Zhipu AI).
             on_message: Optional callback for status messages.
 
         Returns:
-            True if API key is valid.
+            True if an API key is available.
         """
-        try:
-            # Send a minimal request to verify auth
-            self._client.messages.create(
-                model=DEFAULT_ZHIPUAI_MODEL,
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
+        api_key = resolve_api_key() or get_stored_api_key()
+        if api_key:
             if on_message:
-                on_message(f"Connected to Zhipu AI at {self._base_url}")
+                on_message("Found Zhipu AI API key")
             return True
-        except Exception as e:
-            if on_message:
-                on_message(f"Cannot connect to Zhipu AI: {e}")
-            return False
+
+        if on_message:
+            on_message("No Zhipu AI credentials found")
+        return False
 
     def connect(self, model_name: str) -> None:
         """Connect to a specific model.

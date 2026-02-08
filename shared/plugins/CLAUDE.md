@@ -165,6 +165,45 @@ class MyAuthPlugin:
 6. `get_command_completions()` implemented for subcommand autocompletion
 7. Help command returns `HelpLines` (not `str`) for pager display
 8. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
+9. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
+
+## Critical: `verify_auth()` in Model Provider Plugins
+
+Model provider plugins (`shared/plugins/model_provider/<name>/provider.py`) must
+implement `verify_auth()` so it works **before `initialize()` is called**.
+
+The runtime calls `verify_auth()` on a **fresh, uninitialized** provider instance
+to check if credentials exist before creating a session (see
+`jaato_runtime.py:verify_auth()` — "Create a temporary provider instance just for
+auth verification. We don't call initialize() yet.").
+
+This means `verify_auth()` must **never** use `self._client` or any state set by
+`initialize()`. It should only check whether credentials are available — not
+whether they are valid (that happens later during `initialize()` + first request).
+
+```python
+# CORRECT — checks credential availability without needing initialized state
+def verify_auth(self, allow_interactive=False, on_message=None) -> bool:
+    api_key = resolve_api_key() or get_stored_api_key()
+    if api_key:
+        if on_message:
+            on_message("Found API key")
+        return True
+    if on_message:
+        on_message("No credentials found")
+    return False
+```
+
+```python
+# WRONG — crashes with 'NoneType' has no attribute 'messages' because
+# self._client is None on an uninitialized provider instance
+def verify_auth(self, allow_interactive=False, on_message=None) -> bool:
+    self._client.messages.create(...)  # self._client is None!
+    return True
+```
+
+**Reference:** See `AnthropicProvider.verify_auth()` for the canonical pattern —
+it checks PKCE tokens, OAuth tokens, and API keys without touching `self._client`.
 
 ## IPC Completion Flow
 

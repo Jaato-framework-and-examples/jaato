@@ -3530,7 +3530,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
         PostAuthSetupEvent,
-        PostAuthSetupResponse,
         MidTurnPromptQueuedEvent,
         MidTurnPromptInjectedEvent,
         MidTurnInterruptEvent,
@@ -3801,7 +3800,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
-        nonlocal pending_workspace_mismatch_request
+        nonlocal pending_workspace_mismatch_request, pending_post_auth_setup
         nonlocal model_running, should_exit, is_reconnecting
         nonlocal init_shown_header, init_current_step
 
@@ -4458,7 +4457,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.set_waiting_for_channel_input(True, event.response_options)
 
             elif isinstance(event, PostAuthSetupEvent):
-                nonlocal pending_post_auth_setup
                 ipc_trace(f"  PostAuthSetupEvent: provider={event.provider_name}")
                 # Store the full event data for the multi-step wizard
                 pending_post_auth_setup = {
@@ -4612,7 +4610,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
-        nonlocal pending_workspace_mismatch_request
+        nonlocal pending_workspace_mismatch_request, pending_post_auth_setup
         nonlocal model_running, should_exit
         pending_exit_confirmation = False
 
@@ -4738,10 +4736,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             display.set_waiting_for_channel_input(True)
                         else:
                             # User declined — send empty response
-                            await client._send_event(PostAuthSetupResponse(
+                            await client.respond_to_post_auth_setup(
                                 request_id=pending_post_auth_setup["request_id"],
                                 connect=False,
-                            ))
+                            )
                             pending_post_auth_setup = None
                             display.set_waiting_for_channel_input(False)
                         continue
@@ -4783,24 +4781,24 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             display.set_waiting_for_channel_input(True)
                         else:
                             # No workspace — send response without persist
-                            await client._send_event(PostAuthSetupResponse(
+                            await client.respond_to_post_auth_setup(
                                 request_id=pending_post_auth_setup["request_id"],
                                 connect=True,
                                 model_name=selected_model,
                                 persist_env=False,
-                            ))
+                            )
                             pending_post_auth_setup = None
                             display.set_waiting_for_channel_input(False)
                         continue
 
                     elif step == "persist":
                         persist = answer in ("y", "yes")
-                        await client._send_event(PostAuthSetupResponse(
+                        await client.respond_to_post_auth_setup(
                             request_id=pending_post_auth_setup["request_id"],
                             connect=True,
                             model_name=pending_post_auth_setup["selected_model"],
                             persist_env=persist,
-                        ))
+                        )
                         pending_post_auth_setup = None
                         display.set_waiting_for_channel_input(False)
                         continue

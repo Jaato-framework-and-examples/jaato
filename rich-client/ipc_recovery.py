@@ -481,6 +481,25 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.respond_to_reference_selection(request_id, response)
 
+    async def respond_to_post_auth_setup(
+        self,
+        request_id: str,
+        connect: bool = False,
+        model_name: str = "",
+        persist_env: bool = False,
+    ) -> None:
+        """Respond to a post-auth setup prompt."""
+        self._check_can_send()
+
+        if self._client:
+            from server.events import PostAuthSetupResponse
+            await self._client._send_event(PostAuthSetupResponse(
+                request_id=request_id,
+                connect=connect,
+                model_name=model_name,
+                persist_env=persist_env,
+            ))
+
     async def stop(self) -> None:
         """Stop current operation."""
         # Allow stop even during reconnection
