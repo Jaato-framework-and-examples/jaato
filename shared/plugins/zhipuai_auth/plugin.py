@@ -38,6 +38,33 @@ class ZhipuAIAuthPlugin:
         """Return the plugin name."""
         return "zhipuai_auth"
 
+    @property
+    def provider_name(self) -> str:
+        """Return the provider name this auth plugin serves."""
+        return "zhipuai"
+
+    @property
+    def provider_display_name(self) -> str:
+        """Return human-readable provider name."""
+        return "Zhipu AI (Z.AI)"
+
+    def get_default_models(self) -> List[Dict[str, str]]:
+        """Return default models available for this provider."""
+        return [
+            {"name": "zhipuai/glm-4.7", "description": "Latest model with native CoT reasoning (128K)"},
+            {"name": "zhipuai/glm-4.7-flash", "description": "Fast inference variant"},
+            {"name": "zhipuai/glm-4", "description": "General purpose model"},
+        ]
+
+    def verify_credentials(self) -> bool:
+        """Check if valid credentials exist after authentication."""
+        try:
+            from ..model_provider.zhipuai.auth import get_stored_api_key
+            from ..model_provider.zhipuai.env import resolve_api_key
+            return bool(resolve_api_key() or get_stored_api_key())
+        except Exception:
+            return False
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin."""
         pass

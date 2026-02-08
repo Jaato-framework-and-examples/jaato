@@ -3529,6 +3529,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         HistoryEvent,
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
+        PostAuthSetupEvent,
+        PostAuthSetupResponse,
         MidTurnPromptQueuedEvent,
         MidTurnPromptInjectedEvent,
         MidTurnInterruptEvent,
@@ -3636,6 +3638,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_clarification_request: Optional[dict] = None
     pending_reference_selection_request: Optional[dict] = None
     pending_workspace_mismatch_request: Optional[dict] = None
+    pending_post_auth_setup: Optional[dict] = None
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
@@ -4454,6 +4457,39 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Enable input mode for response
                 display.set_waiting_for_channel_input(True, event.response_options)
 
+            elif isinstance(event, PostAuthSetupEvent):
+                nonlocal pending_post_auth_setup
+                ipc_trace(f"  PostAuthSetupEvent: provider={event.provider_name}")
+                # Store the full event data for the multi-step wizard
+                pending_post_auth_setup = {
+                    "request_id": event.request_id,
+                    "provider_name": event.provider_name,
+                    "provider_display_name": event.provider_display_name,
+                    "models": event.available_models,
+                    "has_active_session": event.has_active_session,
+                    "current_provider": event.current_provider,
+                    "current_model": event.current_model,
+                    "workspace_path": event.workspace_path,
+                    "step": "connect",  # First step: ask to connect
+                }
+                # Render the first prompt
+                display.append_output("system", "", "write")
+                if event.has_active_session:
+                    display.append_output(
+                        "system",
+                        f"Switch to {event.provider_display_name}? "
+                        f"(currently: {event.current_provider}/{event.current_model}) [y/n]",
+                        "write",
+                    )
+                else:
+                    display.append_output(
+                        "system",
+                        f"Connect to {event.provider_display_name} now? [y/n]",
+                        "write",
+                    )
+                display.refresh()
+                display.set_waiting_for_channel_input(True)
+
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
                 nonlocal server_commands
@@ -4677,6 +4713,97 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     pending_workspace_mismatch_request = None
                     display.set_waiting_for_channel_input(False)
                     continue
+
+                # Handle post-auth setup wizard (multi-step)
+                if pending_post_auth_setup:
+                    step = pending_post_auth_setup.get("step", "")
+                    answer = text.lower().strip()
+
+                    if step == "connect":
+                        if answer in ("y", "yes"):
+                            # Show model selection
+                            models = pending_post_auth_setup["models"]
+                            display.append_output("system", "", "write")
+                            display.append_output("system", "Select a model:", "write")
+                            for i, m in enumerate(models, 1):
+                                desc = m.get("description", "")
+                                display.append_output(
+                                    "system",
+                                    f"  [{i}] {m['name']}"
+                                    + (f" — {desc}" if desc else ""),
+                                    "write",
+                                )
+                            display.refresh()
+                            pending_post_auth_setup["step"] = "model"
+                            display.set_waiting_for_channel_input(True)
+                        else:
+                            # User declined — send empty response
+                            await client._send_event(PostAuthSetupResponse(
+                                request_id=pending_post_auth_setup["request_id"],
+                                connect=False,
+                            ))
+                            pending_post_auth_setup = None
+                            display.set_waiting_for_channel_input(False)
+                        continue
+
+                    elif step == "model":
+                        models = pending_post_auth_setup["models"]
+                        selected_model = ""
+                        # Accept number or name
+                        if answer.isdigit():
+                            idx = int(answer) - 1
+                            if 0 <= idx < len(models):
+                                selected_model = models[idx]["name"]
+                        else:
+                            # Try matching by name
+                            for m in models:
+                                if answer in m["name"].lower():
+                                    selected_model = m["name"]
+                                    break
+
+                        if not selected_model:
+                            display.append_output("system", f"Invalid selection. Enter 1-{len(models)} or model name.", "write")
+                            display.refresh()
+                            display.set_waiting_for_channel_input(True)
+                            continue
+
+                        pending_post_auth_setup["selected_model"] = selected_model
+
+                        # Ask about .env persistence
+                        workspace = pending_post_auth_setup.get("workspace_path", "")
+                        if workspace:
+                            display.append_output("system", "", "write")
+                            display.append_output(
+                                "system",
+                                f"Save provider/model to {workspace}/.env? [y/n]",
+                                "write",
+                            )
+                            display.refresh()
+                            pending_post_auth_setup["step"] = "persist"
+                            display.set_waiting_for_channel_input(True)
+                        else:
+                            # No workspace — send response without persist
+                            await client._send_event(PostAuthSetupResponse(
+                                request_id=pending_post_auth_setup["request_id"],
+                                connect=True,
+                                model_name=selected_model,
+                                persist_env=False,
+                            ))
+                            pending_post_auth_setup = None
+                            display.set_waiting_for_channel_input(False)
+                        continue
+
+                    elif step == "persist":
+                        persist = answer in ("y", "yes")
+                        await client._send_event(PostAuthSetupResponse(
+                            request_id=pending_post_auth_setup["request_id"],
+                            connect=True,
+                            model_name=pending_post_auth_setup["selected_model"],
+                            persist_env=persist,
+                        ))
+                        pending_post_auth_setup = None
+                        display.set_waiting_for_channel_input(False)
+                        continue
 
                 # Handle clarification response
                 if pending_clarification_request:

@@ -164,6 +164,9 @@ class JaatoDaemon:
         # These provide user commands that work without an active session/provider.
         self._daemon_plugins: dict = {}  # name -> plugin instance
 
+        # Pending post-auth setup requests: client_id -> {request_id, provider_name}
+        self._pending_post_auth: dict = {}
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
@@ -747,6 +750,12 @@ class JaatoDaemon:
                     self._execute_daemon_command(client_id, plugin, event.command, event.args)
                     return
 
+        # Handle post-auth setup response
+        from server.events import PostAuthSetupResponse
+        if isinstance(event, PostAuthSetupResponse):
+            self._handle_post_auth_response(client_id, event)
+            return
+
         # Route to session
         self._session_manager.handle_request(client_id, session_id, event)
 
@@ -852,6 +861,11 @@ class JaatoDaemon:
                     style="info",
                 ))
 
+            # After auth command execution, check if credentials are now valid
+            # and offer to set up a session with the provider.
+            if hasattr(plugin, 'verify_credentials') and plugin.verify_credentials():
+                self._offer_post_auth_setup(client_id, plugin)
+
         except Exception as e:
             self._route_event(client_id, SystemMessageEvent(
                 message=f"Command error: {e}",
@@ -861,6 +875,154 @@ class JaatoDaemon:
         finally:
             if hasattr(plugin, 'set_output_callback'):
                 plugin.set_output_callback(None)
+
+    def _offer_post_auth_setup(self, client_id: str, plugin) -> None:
+        """Emit PostAuthSetupEvent to offer session creation after auth success."""
+        import uuid
+        from server.events import PostAuthSetupEvent
+
+        provider_name = getattr(plugin, 'provider_name', '')
+        if not provider_name:
+            return
+
+        # Check if client already has an active session
+        has_active_session = False
+        current_provider = ""
+        current_model = ""
+        if self._session_manager:
+            session = self._session_manager.get_client_session(client_id)
+            if session and session.server:
+                has_active_session = True
+                current_provider = getattr(session.server, '_provider_name', '') or ""
+                current_model = getattr(session.server, '_model_name', '') or ""
+
+        workspace_path = ""
+        if self._ipc_server:
+            workspace_path = self._ipc_server.get_client_workspace(client_id) or ""
+
+        models = []
+        if hasattr(plugin, 'get_default_models'):
+            models = plugin.get_default_models()
+
+        request_id = str(uuid.uuid4())
+        self._pending_post_auth[client_id] = {
+            "request_id": request_id,
+            "provider_name": provider_name,
+        }
+
+        self._route_event(client_id, PostAuthSetupEvent(
+            request_id=request_id,
+            provider_name=provider_name,
+            provider_display_name=getattr(plugin, 'provider_display_name', provider_name),
+            available_models=models,
+            has_active_session=has_active_session,
+            current_provider=current_provider,
+            current_model=current_model,
+            workspace_path=workspace_path,
+        ))
+
+    def _handle_post_auth_response(self, client_id: str, event) -> None:
+        """Handle PostAuthSetupResponse from client.
+
+        Creates/reconfigures session and optionally writes .env file.
+        """
+        from server.events import SystemMessageEvent
+
+        pending = self._pending_post_auth.pop(client_id, None)
+        if not pending or pending["request_id"] != event.request_id:
+            logger.warning(f"No pending post-auth request for client {client_id}")
+            return
+
+        if not event.connect:
+            return
+
+        provider_name = pending["provider_name"]
+        model_name = event.model_name
+
+        if not model_name:
+            self._route_event(client_id, SystemMessageEvent(
+                message="No model selected, skipping session setup.",
+                style="dim",
+            ))
+            return
+
+        # Strip provider prefix from model name if present (e.g., "zhipuai/glm-4.7" -> "glm-4.7")
+        if "/" in model_name:
+            model_name = model_name.split("/", 1)[1]
+
+        workspace_path = None
+        if self._ipc_server:
+            workspace_path = self._ipc_server.get_client_workspace(client_id)
+
+        # Persist to .env if requested
+        if event.persist_env and workspace_path:
+            self._persist_env(workspace_path, provider_name, model_name)
+            self._route_event(client_id, SystemMessageEvent(
+                message=f"Saved JAATO_PROVIDER={provider_name} and MODEL_NAME={model_name} to .env",
+                style="info",
+            ))
+
+        # Create a new session with the authenticated provider
+        if self._session_manager:
+            session_id = self._session_manager.create_session(
+                client_id, None, workspace_path=workspace_path
+            )
+            if session_id:
+                set_logging_context(
+                    session_id=session_id,
+                    client_id=client_id,
+                    workspace_path=workspace_path,
+                )
+                if self._ipc_server:
+                    self._ipc_server.set_client_session(client_id, session_id)
+
+                self._route_event(client_id, SystemMessageEvent(
+                    message=f"Session created with {provider_name} / {model_name}",
+                    style="success",
+                ))
+            else:
+                self._route_event(client_id, SystemMessageEvent(
+                    message="Failed to create session.",
+                    style="error",
+                ))
+
+    def _persist_env(
+        self,
+        workspace_path: str,
+        provider_name: str,
+        model_name: str,
+    ) -> None:
+        """Write or update JAATO_PROVIDER and MODEL_NAME in workspace .env file.
+
+        Preserves existing values for other keys.
+        """
+        env_path = os.path.join(workspace_path, '.env')
+        lines = []
+        seen_provider = False
+        seen_model = False
+
+        # Read existing .env if it exists
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith('JAATO_PROVIDER='):
+                        lines.append(f'JAATO_PROVIDER={provider_name}\n')
+                        seen_provider = True
+                    elif stripped.startswith('MODEL_NAME='):
+                        lines.append(f'MODEL_NAME={model_name}\n')
+                        seen_model = True
+                    else:
+                        lines.append(line)
+
+        # Append missing keys
+        if not seen_provider:
+            lines.append(f'JAATO_PROVIDER={provider_name}\n')
+        if not seen_model:
+            lines.append(f'MODEL_NAME={model_name}\n')
+
+        with open(env_path, 'w') as f:
+            f.writelines(lines)
 
     def _get_command_list(self) -> list:
         """Get list of available commands for clients.

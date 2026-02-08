@@ -124,6 +124,10 @@ class EventType(str, Enum):
     # Session recovery (Server -> Client)
     INTERRUPTED_TURN_RECOVERED = "session.interrupted_turn_recovered"  # Turn recovered after reconnect
 
+    # Post-auth setup flow (Server <-> Client)
+    POST_AUTH_SETUP = "auth.setup"  # Server -> Client: offer session setup after auth
+    POST_AUTH_SETUP_RESPONSE = "auth.setup_response"  # Client -> Server: user's choices
+
     # Workspace management (Client <-> Server)
     WORKSPACE_LIST_REQUEST = "workspace.list"  # Client -> Server
     WORKSPACE_LIST = "workspace.list_response"  # Server -> Client
@@ -428,6 +432,35 @@ class WorkspaceMismatchResolvedEvent(Event):
     session_id: str = ""
     action: str = ""  # "switch", "new_session", "cancel"
     new_session_id: Optional[str] = None  # Set if action is "new_session"
+
+
+@dataclass
+class PostAuthSetupEvent(Event):
+    """Offer session setup after successful authentication.
+
+    Emitted by daemon after an auth command succeeds. The client renders a
+    multi-step wizard and sends back a single PostAuthSetupResponse.
+    """
+    type: EventType = field(default=EventType.POST_AUTH_SETUP)
+    request_id: str = ""
+    provider_name: str = ""        # e.g., "zhipuai"
+    provider_display_name: str = ""  # e.g., "Zhipu AI (Z.AI)"
+    available_models: List[Dict[str, str]] = field(default_factory=list)
+    # ^ [{name: "zhipuai/glm-4.7", description: "..."}, ...]
+    has_active_session: bool = False
+    current_provider: str = ""     # Only set if has_active_session
+    current_model: str = ""        # Only set if has_active_session
+    workspace_path: str = ""
+
+
+@dataclass
+class PostAuthSetupResponse(Event):
+    """User's response to post-auth session setup prompt."""
+    type: EventType = field(default=EventType.POST_AUTH_SETUP_RESPONSE)
+    request_id: str = ""
+    connect: bool = False          # Whether to create/switch session
+    model_name: str = ""           # Selected model (if connect=True)
+    persist_env: bool = False      # Whether to save provider/model to .env
 
 
 @dataclass
@@ -970,6 +1003,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_MISMATCH_REQUESTED.value: WorkspaceMismatchRequestedEvent,
     EventType.WORKSPACE_MISMATCH_RESOLVED.value: WorkspaceMismatchResolvedEvent,
     EventType.WORKSPACE_MISMATCH_RESPONSE.value: WorkspaceMismatchResponseRequest,
+    EventType.POST_AUTH_SETUP.value: PostAuthSetupEvent,
+    EventType.POST_AUTH_SETUP_RESPONSE.value: PostAuthSetupResponse,
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
