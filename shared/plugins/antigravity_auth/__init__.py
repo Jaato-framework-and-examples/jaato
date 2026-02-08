@@ -10,6 +10,9 @@ Commands:
     antigravity-auth accounts     - List all authenticated accounts
 """
 
+# Plugin kind for registry discovery
+PLUGIN_KIND = "tool"
+
 from .plugin import AntigravityAuthPlugin, create_plugin
 
-__all__ = ["AntigravityAuthPlugin", "create_plugin"]
+__all__ = ["AntigravityAuthPlugin", "create_plugin", "PLUGIN_KIND"]
