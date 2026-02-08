@@ -2261,10 +2261,6 @@ NOTES
                             user_prompt_preview
                         )
 
-                    # Notify UI via output that streaming was interrupted for mid-turn prompt
-                    if on_output:
-                        on_output("system", "[Processing your input...]", "write")
-
                     # Process the mid-turn prompt - this sends it to the model
                     # The partial response is preserved in provider history
                     mid_turn_response = self._check_and_handle_mid_turn_prompt(
@@ -2388,8 +2384,6 @@ NOTES
                                     self._trace("MID_TURN_INTERRUPT: Processing user prompt after interleaved tool result streaming")
                                     self._mid_turn_interrupt = False
                                     self._cancel_token = CancelToken()
-                                    if on_output:
-                                        on_output("system", "[Processing your input...]", "write")
                                     mid_turn_response = self._check_and_handle_mid_turn_prompt(
                                         use_streaming, on_output, wrapped_usage_callback, turn_data
                                     )
@@ -2472,9 +2466,6 @@ NOTES
                                         break
                                 partial = get_all_text()
                                 self._on_mid_turn_interrupt(len(partial) if partial else 0, preview)
-
-                            if on_output:
-                                on_output("system", "[Processing your input...]", "write")
 
                             mid_turn_response = self._check_and_handle_mid_turn_prompt(
                                 use_streaming, on_output, wrapped_usage_callback, turn_data
