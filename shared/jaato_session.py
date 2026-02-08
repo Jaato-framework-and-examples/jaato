@@ -1365,6 +1365,22 @@ class JaatoSession:
         # Emit budget update event
         self._emit_instruction_budget_update()
 
+    def _update_thinking_budget(self, thinking_tokens: int) -> None:
+        """Update THINKING entry in instruction budget with cumulative thinking tokens."""
+        if not self._instruction_budget:
+            return
+
+        entry = self._instruction_budget.get_entry(InstructionSource.THINKING)
+        if entry:
+            entry.tokens += thinking_tokens
+        else:
+            self._instruction_budget.set_entry(
+                InstructionSource.THINKING,
+                tokens=thinking_tokens,
+                label="Thinking",
+            )
+        self._emit_instruction_budget_update()
+
     def refresh_tools(self) -> None:
         """Refresh tools from the runtime.
 
@@ -2261,8 +2277,10 @@ NOTES
             pending_calls = len([p for p in response.parts if p.function_call])
             self._emit_turn_progress(turn_data, pending_tool_calls=pending_calls)
 
-            # Emit thinking content if present (extended thinking from providers)
-            if on_output and response.thinking:
+            # Emit thinking content if present (non-streaming only).
+            # For streaming, the provider emits thinking via on_thinking callback
+            # before text starts, so we don't need to emit it again here.
+            if not use_streaming and on_output and response.thinking:
                 self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
                 on_output("thinking", response.thinking, "write")
 
@@ -3972,8 +3990,10 @@ NOTES
                     provider=self._provider
                 )
 
-            # Emit thinking content if present (extended thinking from providers)
-            if on_output and response.thinking:
+            # Emit thinking content if present (non-streaming only).
+            # For streaming, the provider emits thinking via on_thinking callback
+            # before text starts, so we don't need to emit it again here.
+            if not use_streaming and on_output and response.thinking:
                 self._trace(f"SESSION_TOOL_RESULT_THINKING_OUTPUT len={len(response.thinking)}")
                 on_output("thinking", response.thinking, "write")
 
@@ -4279,6 +4299,11 @@ NOTES
             turn_tokens['prompt'] = response.usage.prompt_tokens
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
+
+        # Accumulate thinking tokens (these are summed, not replaced)
+        if response.usage.thinking_tokens:
+            turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + response.usage.thinking_tokens
+            self._update_thinking_budget(response.usage.thinking_tokens)
 
     def _emit_turn_progress(self, turn_data: Dict[str, Any], pending_tool_calls: int) -> None:
         """Emit turn progress event with current token state.
