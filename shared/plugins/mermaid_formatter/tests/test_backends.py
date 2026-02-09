@@ -10,7 +10,6 @@ from ..backends import select_backend, _create_backend
 from ..backends.kitty import KittyBackend
 from ..backends.iterm import ITermBackend
 from ..backends.sixel import SixelBackend
-from ..backends.rich_pixels import RichPixelsBackend
 
 
 def _make_test_png(width=4, height=4) -> bytes:
@@ -28,15 +27,15 @@ def _make_test_png(width=4, height=4) -> bytes:
 class TestBackendSelection:
     """Tests for auto-selection of graphics backend."""
 
-    def test_default_is_rich_pixels(self, monkeypatch):
-        """When no graphics protocol detected, falls back to rich_pixels."""
+    def test_default_is_none(self, monkeypatch):
+        """When no graphics protocol detected, returns None."""
         monkeypatch.delenv("JAATO_MERMAID_BACKEND", raising=False)
         monkeypatch.delenv("JAATO_GRAPHICS_PROTOCOL", raising=False)
         # Ensure terminal_caps detects no graphics
         with patch("shared.plugins.mermaid_formatter.backends.detect_terminal_caps") as mock:
             mock.return_value = {"graphics": None}
             backend = select_backend()
-            assert isinstance(backend, RichPixelsBackend)
+            assert backend is None
 
     def test_env_override_kitty(self, monkeypatch):
         monkeypatch.setenv("JAATO_MERMAID_BACKEND", "kitty")
@@ -53,10 +52,19 @@ class TestBackendSelection:
         backend = select_backend()
         assert isinstance(backend, SixelBackend)
 
-    def test_env_override_ascii(self, monkeypatch):
-        monkeypatch.setenv("JAATO_MERMAID_BACKEND", "ascii")
+    def test_env_override_off(self, monkeypatch):
+        """When backend is 'off', returns None."""
+        monkeypatch.setenv("JAATO_MERMAID_BACKEND", "off")
         backend = select_backend()
-        assert isinstance(backend, RichPixelsBackend)
+        assert backend is None
+
+    def test_env_override_unknown(self, monkeypatch):
+        """Unknown backend name falls through to auto-detect."""
+        monkeypatch.setenv("JAATO_MERMAID_BACKEND", "ascii")
+        with patch("shared.plugins.mermaid_formatter.backends.detect_terminal_caps") as mock:
+            mock.return_value = {"graphics": None}
+            backend = select_backend()
+            assert backend is None
 
     def test_auto_detect_kitty(self, monkeypatch):
         monkeypatch.delenv("JAATO_MERMAID_BACKEND", raising=False)
@@ -181,36 +189,3 @@ class TestSixelBackend:
         assert "B" in result  # char(3+63)
 
 
-class TestRichPixelsBackend:
-    """Tests for Unicode half-block fallback backend."""
-
-    def test_name(self):
-        backend = RichPixelsBackend()
-        assert backend.name == "rich_pixels"
-
-    def test_render_produces_unicode_art(self):
-        png_data = _make_test_png()
-        backend = RichPixelsBackend(max_width=20)
-        result = backend.render(png_data)
-
-        # Should contain half-block characters
-        assert "▀" in result
-        # Should contain ANSI color codes
-        assert "\x1b[" in result
-
-    def test_render_ends_with_reset(self):
-        png_data = _make_test_png()
-        backend = RichPixelsBackend(max_width=20)
-        result = backend.render(png_data)
-
-        # Should end with ANSI reset
-        assert result.rstrip().endswith("\x1b[0m")
-
-    def test_render_without_pillow(self):
-        """Should return helpful message when Pillow is missing."""
-        with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
-            backend = RichPixelsBackend(max_width=20)
-            # This will fail to import PIL inside render()
-            # but should handle it gracefully
-            result = backend.render(b"fake png")
-            assert "Pillow" in result or "▀" in result

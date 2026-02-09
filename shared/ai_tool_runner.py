@@ -95,6 +95,7 @@ class ToolExecutor:
         # Reliability plugin for tracking tool failures and adaptive trust
         self._reliability_plugin: Optional['ReliabilityPlugin'] = None
 
+
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
 
