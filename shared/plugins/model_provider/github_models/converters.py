@@ -356,6 +356,60 @@ def extract_function_calls_from_stream_delta(tool_calls) -> List[FunctionCall]:
     return calls
 
 
+# ==================== Reasoning/Thinking Extraction ====================
+
+def extract_reasoning_from_response(response: "ChatCompletions") -> Optional[str]:
+    """Extract reasoning/thinking content from a non-streaming response.
+
+    Models like DeepSeek-R1 expose chain-of-thought via a `reasoning_content`
+    field on the message.  OpenAI o-series models hide reasoning internally
+    and do not populate this field, so this will return None for them.
+
+    Args:
+        response: SDK ChatCompletions response.
+
+    Returns:
+        Reasoning text if present, None otherwise.
+    """
+    if not response or not getattr(response, "choices", None):
+        return None
+
+    reasoning_parts: List[str] = []
+    for choice in response.choices:
+        msg = getattr(choice, "message", None)
+        if not msg:
+            continue
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning and isinstance(reasoning, str):
+            reasoning_parts.append(reasoning)
+
+    return "\n".join(reasoning_parts) if reasoning_parts else None
+
+
+def extract_reasoning_from_stream_delta(delta: Any) -> Optional[str]:
+    """Extract a reasoning/thinking chunk from a streaming delta.
+
+    In streaming mode, models that expose reasoning (e.g. DeepSeek-R1) send
+    ``reasoning_content`` on the delta alongside ``content``.  The attribute
+    is not formally defined in the ``azure-ai-inference`` SDK, so we use
+    ``hasattr`` / ``getattr`` to probe for it.
+
+    Args:
+        delta: A streaming choice delta object.
+
+    Returns:
+        Reasoning text chunk if present, None otherwise.
+    """
+    if not delta:
+        return None
+
+    reasoning = getattr(delta, "reasoning_content", None)
+    if reasoning and isinstance(reasoning, str):
+        return reasoning
+
+    return None
+
+
 # ==================== Response Conversion ====================
 
 def extract_text_from_response(response: ChatCompletions) -> Optional[str]:
@@ -476,6 +530,7 @@ def response_from_sdk(response: ChatCompletions) -> ProviderResponse:
         usage=extract_usage_from_response(response),
         finish_reason=extract_finish_reason_from_response(response),
         raw=response,
+        thinking=extract_reasoning_from_response(response),
     )
 
 

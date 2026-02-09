@@ -599,6 +599,91 @@ class WeatherPlugin:
         </div>
       </section>
 
+      <!-- Executor Metadata -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="executor-metadata">Executor Metadata</h2>
+          <p>
+            Executors can return a <code>(result_dict, metadata_dict)</code> tuple
+            instead of a plain dict to pass UI hints to the presentation layer.
+            The <code>ToolExecutor</code> merges the metadata into the result
+            before forwarding it.
+          </p>
+
+          <h3>Metadata Keys</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Type</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>continuation_id</code></td>
+                <td><code>str</code></td>
+                <td>—</td>
+                <td>Groups tool calls into a single popup session</td>
+              </tr>
+              <tr>
+                <td><code>show_output</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code></td>
+                <td>Controls main output panel visibility</td>
+              </tr>
+              <tr>
+                <td><code>show_popup</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code></td>
+                <td>Controls popup panel tracking/visibility</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            When metadata is not needed, return a plain dict as usual.
+            The tuple form is only required when you need to communicate
+            presentation hints.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Returning executor metadata</div>
+          <div class="code-block">
+            <pre><code class="language-python">def _exec_input(self, args):
+    session_id = args.get("session_id")
+    text = args.get("text", "")
+
+    session = self._sessions[session_id]
+    output = session.send_input(text)
+
+    result = {
+        "session_id": session_id,
+        "output": output,
+    }
+
+    if session.is_alive:
+        # Group into popup, hide from main panel
+        return (result, {
+            "continuation_id": session_id,
+            "show_output": False,
+        })
+
+    # Session ended — return plain result
+    return result</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">No metadata (default)</div>
+          <div class="code-block">
+            <pre><code class="language-python">def _get_weather(self, args):
+    city = args.get("city")
+    # Plain dict — no metadata needed
+    return {"city": city, "temp": "72°F"}</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Registration -->
       <section class="two-panel">
         <div class="panel-explanation">

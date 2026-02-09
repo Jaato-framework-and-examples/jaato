@@ -469,5 +469,7 @@ Key attributes:
 
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
 - [Sequence Diagrams](docs/sequence-diagram-architecture.md) - Client-server interaction, tool execution flows
+- [Design Philosophy](docs/design-philosophy.md) - Opinionated design decisions and rationale
+- [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

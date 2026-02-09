@@ -4,10 +4,10 @@ This provider enables access to Zhipu AI's GLM models via the Anthropic-compatib
 API endpoint, primarily targeting GLM Coding Plan subscribers.
 
 Zhipu AI offers the GLM family of models including:
-- GLM-4.7: Latest model with native chain-of-thought reasoning
-- GLM-4.7-Flash: Fast inference variant
-- GLM-4: General purpose model
-- GLM-4V: Vision-enabled multimodal model
+- GLM-4.7: Latest flagship with native chain-of-thought reasoning (200K context)
+- GLM-4.7-Flash/Flashx: Fast inference variants (200K context)
+- GLM-4.6: Previous flagship, strong coding (200K context)
+- GLM-4.5/Air/Flash: Balanced and lightweight models (128K context)
 
 Usage:
     provider = ZhipuAIProvider()
@@ -17,7 +17,7 @@ Usage:
 
 Environment variables:
     ZHIPUAI_API_KEY: Zhipu AI API key
-    ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic/v1)
+    ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic)
     ZHIPUAI_MODEL: Default model to use
     ZHIPUAI_CONTEXT_LENGTH: Override context length for models
 """
@@ -33,7 +33,9 @@ from .env import (
     resolve_api_key,
     resolve_base_url,
     resolve_context_length,
+    resolve_enable_thinking,
     resolve_model,
+    resolve_thinking_budget,
 )
 from .auth import (
     get_stored_api_key,
@@ -47,18 +49,34 @@ from .auth import (
 logger = logging.getLogger(__name__)
 
 
-# Default context limit for Zhipu AI models
-# GLM-4.7 supports 128K context
+# Known GLM models available via the Anthropic-compatible API,
+# with their context window sizes in tokens.
+# Source: Roo Code, lm-deluge, ekai-gateway, moai-adk, Z.AI docs.
+MODEL_CONTEXT_LIMITS = {
+    # GLM-4.7 family — 200K context
+    "glm-4.7": 204800,
+    "glm-4.7-flash": 204800,
+    "glm-4.7-flashx": 204800,
+    # GLM-4.6 family — 200K context
+    "glm-4.6": 204800,
+    # GLM-4.5 family — 128K context
+    "glm-4.5": 131072,
+    "glm-4.5-air": 131072,
+    "glm-4.5-airx": 131072,
+    "glm-4.5-flash": 131072,
+    "glm-4.5-x": 131072,
+}
+
+# Fallback for unknown models
 DEFAULT_CONTEXT_LIMIT = 131072
 
+KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
 
-# Known GLM models available via the Anthropic-compatible API
-KNOWN_MODELS = [
+
+# GLM models that support extended thinking (chain-of-thought reasoning)
+# GLM-4.7 has native chain-of-thought reasoning capability
+THINKING_CAPABLE_MODELS = [
     "glm-4.7",
-    "glm-4.7-flash",
-    "glm-4",
-    "glm-4v",
-    "glm-4-assistant",
 ]
 
 
@@ -92,7 +110,8 @@ class ZhipuAIProvider(AnthropicProvider):
     - Custom base_url pointing to Z.AI's Anthropic-compatible endpoint
     - API key authentication via ZHIPUAI_API_KEY
     - Model listing for GLM models
-    - Caching and thinking disabled (may not be supported)
+    - Caching disabled (may not be supported)
+    - Extended thinking for GLM-4.7 (native chain-of-thought reasoning)
 
     All message handling, streaming, and converters are inherited from
     AnthropicProvider since Zhipu AI uses the same API format.
@@ -104,14 +123,28 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url: str = DEFAULT_ZHIPUAI_BASE_URL
         self._context_length_override: Optional[int] = None
 
-        # Disable features that may not be supported by Zhipu AI's API
+        # Caching may not be supported by Zhipu AI's Anthropic-compatible API
         self._enable_caching = False
-        self._enable_thinking = False
 
     @property
     def name(self) -> str:
         """Provider identifier."""
         return "zhipuai"
+
+    def _get_trace_prefix(self) -> str:
+        """Get the trace prefix including agent context."""
+        if self._agent_type == "main":
+            return "zhipuai:main"
+        elif self._agent_name:
+            return f"zhipuai:subagent:{self._agent_name}"
+        else:
+            return f"zhipuai:subagent:{self._agent_id}"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to provider trace log for debugging."""
+        from shared.trace import provider_trace
+        prefix = self._get_trace_prefix()
+        provider_trace(prefix, msg)
 
     def initialize(self, config: Optional[ProviderConfig] = None) -> None:
         """Initialize the provider.
@@ -121,11 +154,15 @@ class ZhipuAIProvider(AnthropicProvider):
                 - api_key: Zhipu AI API key (overrides ZHIPUAI_API_KEY)
                 - extra['base_url']: Override ZHIPUAI_BASE_URL
                 - extra['context_length']: Override context length
+                - extra['enable_thinking']: Enable extended thinking (default: False)
+                - extra['thinking_budget']: Max thinking tokens (default: 10000)
 
         Raises:
             ZhipuAIAPIKeyNotFoundError: If no API key is found.
             ImportError: If anthropic package is not installed.
         """
+        self._trace("[INIT] Starting initialization")
+
         try:
             import anthropic
         except ImportError as e:
@@ -143,7 +180,10 @@ class ZhipuAIProvider(AnthropicProvider):
             or get_stored_api_key()
         )
         if not self._api_key:
+            self._trace("[INIT] No API key found")
             raise ZhipuAIAPIKeyNotFoundError()
+
+        self._trace(f"[INIT] API key resolved (len={len(self._api_key)})")
 
         # Resolve base URL from config, environment, or stored credentials
         self._base_url = (
@@ -158,15 +198,25 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Ensure base URL doesn't have trailing slash
         self._base_url = self._base_url.rstrip("/")
+        self._trace(f"[INIT] base_url={self._base_url}")
 
         # Optional context length override
         self._context_length_override = (
             config.extra.get("context_length") or resolve_context_length()
         )
+        if self._context_length_override:
+            self._trace(f"[INIT] context_length_override={self._context_length_override}")
 
-        # Zhipu AI's Anthropic API may not support caching/thinking - force disable
+        # Caching may not be supported by Zhipu AI's Anthropic-compatible API
         self._enable_caching = False
-        self._enable_thinking = False
+
+        # Extended thinking: configurable for GLM-4.7 which has native CoT reasoning
+        self._enable_thinking = config.extra.get(
+            "enable_thinking", resolve_enable_thinking()
+        )
+        self._thinking_budget = config.extra.get(
+            "thinking_budget", resolve_thinking_budget()
+        )
 
         # Zhipu AI doesn't use OAuth/PKCE - set to disabled
         self._use_pkce = False
@@ -174,47 +224,51 @@ class ZhipuAIProvider(AnthropicProvider):
         self._oauth_token = None
 
         # Create the client
+        self._trace("[INIT] Creating client")
         self._client = self._create_client()
+        self._trace("[INIT] Initialization complete")
 
     def _create_client(self) -> Any:
         """Create Anthropic client pointing to Zhipu AI server."""
         import anthropic
 
-        return anthropic.Anthropic(
+        self._trace(f"[_create_client] Creating Anthropic client with base_url={self._base_url}")
+        client = anthropic.Anthropic(
             base_url=self._base_url,
             api_key=self._api_key,
         )
+        self._trace("[_create_client] Client created successfully")
+        return client
 
     def verify_auth(
         self,
         allow_interactive: bool = False,
         on_message=None
     ) -> bool:
-        """Verify Zhipu AI API key is valid.
+        """Verify Zhipu AI API key is available.
 
-        Sends a minimal request to verify the API key works.
+        This can be called BEFORE initialize() to check that credentials
+        exist. Checks environment variable and stored credentials.
 
         Args:
             allow_interactive: Ignored (no interactive auth for Zhipu AI).
             on_message: Optional callback for status messages.
 
         Returns:
-            True if API key is valid.
+            True if an API key is available.
         """
-        try:
-            # Send a minimal request to verify auth
-            self._client.messages.create(
-                model=DEFAULT_ZHIPUAI_MODEL,
-                max_tokens=1,
-                messages=[{"role": "user", "content": "hi"}],
-            )
+        self._trace("[AUTH] Verifying credentials")
+        api_key = resolve_api_key() or get_stored_api_key()
+        if api_key:
+            self._trace("[AUTH] API key found")
             if on_message:
-                on_message(f"Connected to Zhipu AI at {self._base_url}")
+                on_message("Found Zhipu AI API key")
             return True
-        except Exception as e:
-            if on_message:
-                on_message(f"Cannot connect to Zhipu AI: {e}")
-            return False
+
+        self._trace("[AUTH] No credentials found")
+        if on_message:
+            on_message("No Zhipu AI credentials found")
+        return False
 
     def connect(self, model_name: str) -> None:
         """Connect to a specific model.
@@ -225,6 +279,8 @@ class ZhipuAIProvider(AnthropicProvider):
         # For Zhipu AI, we don't have a model listing API via the Anthropic endpoint,
         # so we just accept the model name and let the API validate it
         self._model_name = model_name
+        context_limit = self.get_context_limit()
+        self._trace(f"[CONNECT] model={model_name} context_limit={context_limit}")
         logger.info(f"Connected to Zhipu AI model: {model_name}")
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
@@ -249,12 +305,24 @@ class ZhipuAIProvider(AnthropicProvider):
     def get_context_limit(self) -> int:
         """Get context window size.
 
-        Returns context_length_override if set, otherwise the default.
-        GLM-4.7 supports 128K context.
+        Returns context_length_override if set, otherwise looks up the
+        per-model limit from MODEL_CONTEXT_LIMITS.
         """
         if self._context_length_override:
             return self._context_length_override
-        return DEFAULT_CONTEXT_LIMIT
+        return MODEL_CONTEXT_LIMITS.get(self._model_name, DEFAULT_CONTEXT_LIMIT)
+
+    def _is_thinking_capable(self) -> bool:
+        """Check if the current model supports extended thinking.
+
+        GLM-4.7 has native chain-of-thought reasoning capability.
+        Flash and other GLM variants do not support it.
+        """
+        if not self._model_name:
+            return False
+        name_lower = self._model_name.lower()
+        # GLM-4.7 supports thinking, but flash variants do not
+        return name_lower.startswith("glm-4.7") and "flash" not in name_lower
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors with Zhipu AI-specific interpretation.
@@ -263,9 +331,11 @@ class ZhipuAIProvider(AnthropicProvider):
         Zhipu AI-specific issues.
         """
         error_str = str(error).lower()
+        self._trace(f"[API_ERROR] {type(error).__name__}: {error}")
 
         # Check for authentication errors
         if "401" in error_str or "unauthorized" in error_str or "invalid api key" in error_str:
+            self._trace("[API_ERROR] Authentication failure (401/unauthorized)")
             raise ZhipuAIConnectionError(
                 "Invalid API key. Check your ZHIPUAI_API_KEY.\n"
                 f"Original error: {error}"
@@ -273,6 +343,7 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Check for rate limiting
         if "429" in error_str or "rate limit" in error_str:
+            self._trace("[API_ERROR] Rate limit exceeded (429)")
             raise RuntimeError(
                 f"Zhipu AI rate limit exceeded. Please wait and try again.\n"
                 f"Original error: {error}"
@@ -280,6 +351,7 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # Check for model not found
         if "404" in error_str and "model" in error_str:
+            self._trace(f"[API_ERROR] Model not found: {self._model_name}")
             raise RuntimeError(
                 f"Model '{self._model_name}' not found on Zhipu AI.\n"
                 f"Available models: {', '.join(KNOWN_MODELS)}\n"

@@ -42,6 +42,7 @@ class SandboxPath:
     path: str
     source: str  # "global", "workspace", or "session"
     action: str  # "allow" or "deny"
+    access: str = "readwrite"  # "readonly" or "readwrite"
     added_at: Optional[str] = None
 
 
@@ -207,10 +208,14 @@ class SandboxManagerPlugin:
             if isinstance(item, str):
                 allowed.append(SandboxPath(path=item, source=source, action="allow"))
             elif isinstance(item, dict) and "path" in item:
+                access = item.get("access", "readwrite")
+                if access not in ("readonly", "readwrite"):
+                    access = "readwrite"
                 allowed.append(SandboxPath(
                     path=item["path"],
                     source=source,
                     action="allow",
+                    access=access,
                     added_at=item.get("added_at")
                 ))
 
@@ -269,7 +274,9 @@ class SandboxManagerPlugin:
         for entry in self._config.allowed_paths:
             # Skip if this path is denied at a higher precedence level
             if not self._is_path_denied_by_higher_precedence(entry.path, entry.source):
-                self._registry.authorize_external_path(entry.path, self.name)
+                self._registry.authorize_external_path(
+                    entry.path, self.name, access=entry.access
+                )
 
         # Register denied paths
         for entry in self._config.denied_paths:
@@ -418,7 +425,16 @@ class SandboxManagerPlugin:
         elif subcommand == "add":
             if not path:
                 return {"error": "Path is required for 'sandbox add'"}
-            return self._cmd_add(path)
+            # Parse optional access mode from the beginning of the path argument
+            # Syntax: sandbox add [readonly|readwrite] <path>
+            access = "readwrite"
+            parts = path.split(None, 1)  # split into at most 2 parts
+            if parts[0] in ("readonly", "readwrite"):
+                access = parts[0]
+                path = parts[1] if len(parts) > 1 else ""
+            if not path:
+                return {"error": "Path is required for 'sandbox add'"}
+            return self._cmd_add(path, access=access)
         elif subcommand == "remove":
             if not path:
                 return {"error": "Path is required for 'sandbox remove'"}
@@ -437,15 +453,16 @@ class SandboxManagerPlugin:
             ("can access for file operations and command execution.", ""),
             ("", ""),
             ("USAGE", "bold"),
-            ("    sandbox [subcommand] [path]", ""),
+            ("    sandbox [subcommand] [access] [path]", ""),
             ("", ""),
             ("SUBCOMMANDS", "bold"),
             ("    list              Show all effective sandbox paths from all config levels", "dim"),
             ("                      Displays path, action (allow/deny), source, and timestamp", "dim"),
             ("                      (this is the default when no subcommand is given)", "dim"),
             ("", ""),
-            ("    add <path>        Allow a path for the current session", "dim"),
+            ("    add [access] <path>  Allow a path for the current session", "dim"),
             ("                      Path is added to session-level allowlist", "dim"),
+            ("                      access: readonly or readwrite (default: readwrite)", "dim"),
             ("                      Takes precedence over workspace/global denials", "dim"),
             ("", ""),
             ("    remove <path>     Block a path for the current session", "dim"),
@@ -457,10 +474,12 @@ class SandboxManagerPlugin:
             ("EXAMPLES", "bold"),
             ("    sandbox                   List all sandbox paths", "dim"),
             ("    sandbox list              Same as above", "dim"),
-            ("    sandbox add /tmp/scratch  Allow access to /tmp/scratch", "dim"),
-            ("    sandbox add ~/projects    Allow access to home projects", "dim"),
-            ("    sandbox remove /etc       Block access to /etc", "dim"),
-            ("    sandbox remove ~/.ssh     Block access to SSH keys", "dim"),
+            ("    sandbox add /tmp/scratch              Allow readwrite access to /tmp/scratch", "dim"),
+            ("    sandbox add ~/projects                Allow readwrite access to home projects", "dim"),
+            ("    sandbox add readonly /docs            Allow read-only access to /docs", "dim"),
+            ("    sandbox add readwrite ~/data          Allow full access to ~/data", "dim"),
+            ("    sandbox remove /etc                   Block access to /etc", "dim"),
+            ("    sandbox remove ~/.ssh                 Block access to SSH keys", "dim"),
             ("", ""),
             ("CONFIGURATION HIERARCHY", "bold"),
             ("    Sandbox paths are configured at three levels (later overrides earlier):", ""),
@@ -476,9 +495,17 @@ class SandboxManagerPlugin:
             ("", ""),
             ("CONFIGURATION FILE FORMAT", "bold"),
             ('    {', "dim"),
-            ('      "allowed_paths": ["/path/to/allow", "~/another/path"],', "dim"),
+            ('      "allowed_paths": [', "dim"),
+            ('        "/path/to/allow",', "dim"),
+            ('        {"path": "~/docs", "access": "readonly"},', "dim"),
+            ('        {"path": "~/projects", "access": "readwrite"}', "dim"),
+            ('      ],', "dim"),
             ('      "denied_paths": ["/sensitive/path"]', "dim"),
             ('    }', "dim"),
+            ("", ""),
+            ("ACCESS MODES", "bold"),
+            ("    readonly     Read-only access (readFile, glob, grep allowed)", "dim"),
+            ("    readwrite    Full access including writes (default)", "dim"),
             ("", ""),
             ("PATH FORMATS", "bold"),
             ("    /absolute/path          Absolute path", "dim"),
@@ -510,24 +537,27 @@ class SandboxManagerPlugin:
         effective_paths = []
 
         # Collect all paths with their effective status
-        all_paths = {}  # path -> (action, source, added_at)
+        all_paths = {}  # path -> (action, source, access, added_at)
 
         # Process in precedence order (global -> workspace -> session)
         # Later entries override earlier ones
         for entry in self._config.allowed_paths:
-            all_paths[entry.path] = ("allow", entry.source, entry.added_at)
+            all_paths[entry.path] = ("allow", entry.source, entry.access, entry.added_at)
 
         for entry in self._config.denied_paths:
-            all_paths[entry.path] = ("deny", entry.source, entry.added_at)
+            all_paths[entry.path] = ("deny", entry.source, None, entry.added_at)
 
         # Build output
-        for path, (action, source, added_at) in sorted(all_paths.items()):
-            effective_paths.append({
+        for path, (action, source, access, added_at) in sorted(all_paths.items()):
+            entry_dict = {
                 "path": path,
                 "action": action,
                 "source": source,
                 "added_at": added_at,
-            })
+            }
+            if access:
+                entry_dict["access"] = access
+            effective_paths.append(entry_dict)
 
         return {
             "effective_paths": effective_paths,
@@ -538,8 +568,13 @@ class SandboxManagerPlugin:
             }
         }
 
-    def _cmd_add(self, path: str) -> Dict[str, Any]:
-        """Execute 'sandbox add <path>' command."""
+    def _cmd_add(self, path: str, access: str = "readwrite") -> Dict[str, Any]:
+        """Execute 'sandbox add <path>' command.
+
+        Args:
+            path: Path to allow.
+            access: Access mode - "readonly" or "readwrite" (default: "readwrite").
+        """
         if not self._workspace_path:
             return {"error": "No workspace configured"}
 
@@ -553,18 +588,26 @@ class SandboxManagerPlugin:
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
-            path = os.path.abspath(path)
+            # Resolve relative to client workspace, not server CWD
+            path = os.path.normpath(os.path.join(self._workspace_path, path))
 
         # Load current session config
         session_config = self._load_session_config()
 
-        # Check if already in allowed_paths
-        existing_paths = [
-            p["path"] if isinstance(p, dict) else p
-            for p in session_config.get("allowed_paths", [])
-        ]
-        if path in existing_paths:
-            return {"status": "already_allowed", "path": path}
+        # Check if already in allowed_paths (with same or broader access)
+        for item in session_config.get("allowed_paths", []):
+            existing_path = item["path"] if isinstance(item, dict) else item
+            if existing_path == path:
+                existing_access = item.get("access", "readwrite") if isinstance(item, dict) else "readwrite"
+                if existing_access == access:
+                    return {"status": "already_allowed", "path": path, "access": access}
+                # Update access mode for existing entry
+                if isinstance(item, dict):
+                    item["access"] = access
+                    if not self._save_session_config(session_config):
+                        return {"error": "Failed to save session config"}
+                    self._load_all_configs()
+                    return {"status": "updated", "path": path, "access": access, "source": "session"}
 
         # Remove from denied_paths if present
         session_config["denied_paths"] = [
@@ -575,6 +618,7 @@ class SandboxManagerPlugin:
         # Add to allowed_paths
         session_config.setdefault("allowed_paths", []).append({
             "path": path,
+            "access": access,
             "added_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         })
 
@@ -585,7 +629,7 @@ class SandboxManagerPlugin:
         # Reload and sync
         self._load_all_configs()
 
-        return {"status": "added", "path": path, "source": "session"}
+        return {"status": "added", "path": path, "access": access, "source": "session"}
 
     def _cmd_remove(self, path: str) -> Dict[str, Any]:
         """Execute 'sandbox remove <path>' command.
@@ -607,7 +651,8 @@ class SandboxManagerPlugin:
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
-            path = os.path.abspath(path)
+            # Resolve relative to client workspace, not server CWD
+            path = os.path.normpath(os.path.join(self._workspace_path, path))
 
         # Load current session config
         session_config = self._load_session_config()
