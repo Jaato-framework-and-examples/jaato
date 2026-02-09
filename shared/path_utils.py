@@ -17,6 +17,9 @@ This module provides:
 
 Reference: https://www.msys2.org/docs/python/
            https://www.msys2.org/docs/filesystem-paths/
+
+Pattern guide: docs/path-boundary-pattern.md
+Design principle: docs/design-philosophy.md #12
 """
 
 import functools
