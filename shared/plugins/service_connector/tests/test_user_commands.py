@@ -147,8 +147,22 @@ class TestGetCommandCompletions:
         assert values == ["GET"]
 
     def test_endpoints_all_methods(self, plugin_with_services):
+        """Methods come from the service's actual endpoints (dynamic)."""
         completions = plugin_with_services.get_command_completions(
             "services", ["endpoints", "petstore", ""]
+        )
+        values = [c.value for c in completions]
+        # petstore fixture has GET, POST, DELETE endpoints
+        assert set(values) == {"GET", "POST", "DELETE"}
+
+    def test_endpoints_methods_fallback(self, plugin):
+        """Unknown service falls back to common HTTP methods."""
+        plugin._discovered_services["empty"] = DiscoveredService(
+            config=ServiceConfig(name="empty", base_url="https://example.com"),
+            endpoints=[],
+        )
+        completions = plugin.get_command_completions(
+            "services", ["endpoints", "empty", ""]
         )
         values = [c.value for c in completions]
         assert set(values) == {"GET", "POST", "PUT", "DELETE", "PATCH"}
@@ -445,3 +459,38 @@ class TestServiceNamesMerge:
         names = plugin_with_services._get_all_service_names()
         # Should not have duplicates
         assert names.count("petstore") == 1
+
+
+class TestGetServiceMetadata:
+    """Test get_service_metadata for completion caching."""
+
+    def test_empty_when_no_services(self, plugin):
+        metadata = plugin.get_service_metadata()
+        assert metadata == []
+
+    def test_returns_service_names_and_methods(self, plugin_with_services):
+        metadata = plugin_with_services.get_service_metadata()
+        names = [s["name"] for s in metadata]
+        assert "petstore" in names
+        assert "github" in names
+
+        # petstore has GET, POST, DELETE
+        petstore = next(s for s in metadata if s["name"] == "petstore")
+        assert set(petstore["methods"]) == {"GET", "POST", "DELETE"}
+
+        # github has only GET
+        github = next(s for s in metadata if s["name"] == "github")
+        assert github["methods"] == ["GET"]
+
+    def test_merges_memory_and_disk(self, plugin_with_services):
+        # Save a disk-only service
+        plugin_with_services._schema_store.save_discovered_service(
+            "stripe",
+            ServiceConfig(name="stripe", base_url="https://api.stripe.com"),
+            [EndpointSchema(method="POST", path="/charges", summary="Create charge")],
+        )
+        metadata = plugin_with_services.get_service_metadata()
+        names = [s["name"] for s in metadata]
+        assert "stripe" in names
+        stripe = next(s for s in metadata if s["name"] == "stripe")
+        assert stripe["methods"] == ["POST"]
