@@ -100,6 +100,7 @@ from .events import (
     MidTurnInterruptEvent,
     MemoryListEvent,
     SandboxPathsEvent,
+    ServiceListEvent,
     serialize_event,
     deserialize_event,
 )
@@ -2283,10 +2284,16 @@ class JaatoServer:
             if command.lower() == "sandbox":
                 self.emit(SandboxPathsEvent(paths=self._get_sandbox_paths()))
 
+            # After services commands, push updated service list for completion cache
+            if command.lower() == "services":
+                svc_plugin = self._find_plugin_for_command("services")
+                if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
+                    self.emit(ServiceListEvent(services=svc_plugin.get_service_metadata()))
+
             # Handle HelpLines result - emit HelpTextEvent for pager display
             if isinstance(result, HelpLines):
                 self.emit(HelpTextEvent(lines=result.lines))
-                return {"result": "help displayed"}
+                return {"_pager": True}
 
             # Handle model change
             if command.lower() == "model" and isinstance(result, dict):

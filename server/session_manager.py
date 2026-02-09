@@ -1470,6 +1470,13 @@ class SessionManager:
         if session.server:
             sandbox_paths_data = session.server._get_sandbox_paths()
 
+        # Get service metadata from the session's server for completion cache
+        services_data = []
+        if session.server:
+            svc_plugin = session.server._find_plugin_for_command("services")
+            if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
+                services_data = svc_plugin.get_service_metadata()
+
         return SessionInfoEvent(
             session_id=session.session_id,
             session_name=session.name,
@@ -1481,6 +1488,7 @@ class SessionManager:
             user_inputs=session.user_inputs,  # Command history for prompt restoration
             memories=memories_data,
             sandbox_paths=sandbox_paths_data,
+            services=services_data,
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:
@@ -1681,7 +1689,10 @@ class SessionManager:
             result = server.execute_command(event.command, event.args)
             # Format result properly
             if isinstance(result, dict):
-                if "error" in result:
+                if "_pager" in result:
+                    # HelpLines result already emitted via HelpTextEvent, skip
+                    pass
+                elif "error" in result:
                     # Error result
                     self._emit_to_client(client_id, SystemMessageEvent(
                         message=result["error"],

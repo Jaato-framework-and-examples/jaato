@@ -3514,6 +3514,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionDescriptionUpdatedEvent,
         MemoryListEvent,
         SandboxPathsEvent,
+        ServiceListEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
@@ -3635,6 +3636,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     available_tools: list = []  # Tools from server for completion
     available_models: list = []  # Models from server for completion
     available_memories: list = []  # Memories from server for completion
+    available_services: list = []  # Services from server for completion
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -3681,12 +3683,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     except ImportError:
         pass  # Prompt library not available
 
-    # Set up command completion provider for model and memory commands
-    # Note: memory subcommands (list, remove, edit, help) are already provided
+    # Set up command completion provider for model, memory, and services commands
+    # Note: subcommands (list, remove, edit, show, etc.) are already provided
     # by CommandCompleter via CommandListEvent. This provider only handles
-    # argument-level completions (memory IDs) that CommandCompleter can't provide.
+    # argument-level completions (memory IDs, service names, HTTP methods)
+    # that CommandCompleter can't provide.
     def command_completion_provider(command: str, args: list) -> list:
-        """Provide completions for model and memory argument-level completions."""
+        """Provide completions for dynamic argument-level completions."""
         if command == "model":
             return [(model, "") for model in available_models]
         elif command in ("memory remove", "memory edit"):
@@ -3697,11 +3700,41 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 for m in available_memories
                 if m["id"].lower().startswith(partial)
             ]
+        elif command in ("services show", "services endpoints", "services auth", "services remove"):
+            if not args or (len(args) == 1 and args[0]):
+                # First arg: service name completion
+                partial = args[0].lower() if args else ""
+                return [
+                    (s["name"], "Service")
+                    for s in available_services
+                    if s["name"].lower().startswith(partial)
+                ]
+            elif command == "services endpoints" and len(args) >= 2:
+                # Second arg for endpoints: HTTP method completion
+                service_name = args[0] if len(args) >= 1 else ""
+                partial = args[-1].upper() if len(args) >= 2 and args[-1] else ""
+                # Find methods for this service
+                methods = []
+                for s in available_services:
+                    if s["name"] == service_name:
+                        methods = s.get("methods", [])
+                        break
+                if not methods:
+                    # Fallback to common HTTP methods
+                    methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+                return [
+                    (m, "HTTP method")
+                    for m in methods
+                    if m.upper().startswith(partial)
+                ]
         return []
 
     input_handler.set_command_completion_provider(
         command_completion_provider,
-        {"model", "memory remove", "memory edit"}  # Commands that need argument completion
+        {
+            "model", "memory remove", "memory edit",
+            "services show", "services endpoints", "services auth", "services remove",
+        }
     )
 
     # Set up sandbox path provider for @@ completion (server mode)
@@ -4367,6 +4400,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Refresh sandbox paths for @@ completion cache
                 _update_sandbox_paths(event.paths)
 
+            elif isinstance(event, ServiceListEvent):
+                # Store services for completion cache
+                nonlocal available_services
+                available_services = event.services
+
             elif isinstance(event, SessionInfoEvent):
                 # Store state snapshot for local use (completion, display)
                 # Note: available_sessions already declared nonlocal in SessionListEvent handler
@@ -4381,6 +4419,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_memories = event.memories
                 if event.sandbox_paths:
                     _update_sandbox_paths(event.sandbox_paths)
+                if event.services:
+                    available_services = event.services
 
                 # Track session ID for recovery reattachment
                 if event.session_id:

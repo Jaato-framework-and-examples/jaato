@@ -417,14 +417,16 @@ class JaatoWSServer:
                 event.command,
                 event.args
             )
-            # Send result as system message
-            await self._send_to_client(
-                client_id,
-                SystemMessageEvent(
-                    message=json.dumps(result),
-                    style="info",
+            # HelpLines results are already emitted via HelpTextEvent, skip
+            if not (isinstance(result, dict) and "_pager" in result):
+                # Send result as system message
+                await self._send_to_client(
+                    client_id,
+                    SystemMessageEvent(
+                        message=json.dumps(result),
+                        style="info",
+                    )
                 )
-            )
 
         # Workspace management requests
         elif isinstance(event, WorkspaceListRequest):

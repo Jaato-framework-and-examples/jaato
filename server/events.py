@@ -94,6 +94,9 @@ class EventType(str, Enum):
     # Sandbox management (Server -> Client)
     SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
 
+    # Service management (Server -> Client)
+    SERVICE_LIST = "service.list"  # Service list for completion cache
+
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
     STOP = "session.stop"
@@ -647,6 +650,18 @@ class SandboxPathsEvent(Event):
 
 
 @dataclass
+class ServiceListEvent(Event):
+    """List of discovered services - for completion cache.
+
+    Emitted after services commands to refresh the client's
+    completion list for service names and HTTP methods.
+    """
+    type: EventType = field(default=EventType.SERVICE_LIST)
+    services: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {name: str, methods: List[str]}
+
+
+@dataclass
 class SessionInfoEvent(Event):
     """Session state snapshot - sent on connect/attach with all data client needs.
 
@@ -677,6 +692,8 @@ class SessionInfoEvent(Event):
     # ^ [{id, description, tags}, ...] for memory command completions
     sandbox_paths: List[Dict[str, str]] = field(default_factory=list)
     # ^ [{path, description}, ...] for @@ sandbox completion
+    services: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ [{name, methods}, ...] for services command completions
 
 
 @dataclass
@@ -1032,6 +1049,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
+    EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,

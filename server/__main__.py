@@ -1127,9 +1127,13 @@ class JaatoDaemon:
                                             subcommands = plugin.get_command_completions(cmd.name, [])
                                             if subcommands:
                                                 # Skip second-level expansion for plugins with dynamic
-                                                # argument completions (e.g., memory IDs change at runtime
-                                                # and are refreshed via MemoryListEvent + PluginCommandCompleter)
-                                                has_dynamic_completions = hasattr(plugin, 'get_memory_metadata')
+                                                # argument completions (e.g., memory IDs and service names
+                                                # change at runtime and are refreshed via dedicated events
+                                                # + PluginCommandCompleter)
+                                                has_dynamic_completions = (
+                                                    hasattr(plugin, 'get_memory_metadata')
+                                                    or hasattr(plugin, 'get_service_metadata')
+                                                )
 
                                                 # Add expanded subcommands
                                                 for sub in subcommands:
