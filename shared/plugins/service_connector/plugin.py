@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..base import UserCommand
+from ..base import CommandCompletion, CommandParameter, HelpLines, UserCommand
 from ..model_provider.types import ToolSchema
 
 from .auth import AuthError, AuthManager
@@ -28,6 +28,7 @@ from .openapi_parser import (
 from .schema_store import SchemaStore
 from .types import (
     AuthConfig,
+    AuthType,
     DiscoveredService,
     EndpointSchema,
     ServiceConfig,
@@ -500,11 +501,376 @@ class ServiceConnectorPlugin:
             "save_schema",
             "import_bruno_collection",
             "configure_service_auth",
+            # User command (invoked by user directly)
+            "services",
         ]
 
     def get_user_commands(self) -> List[UserCommand]:
-        """Return user commands."""
+        """Return user commands for service administration."""
+        return [
+            UserCommand(
+                name='services',
+                description='Manage discovered web services (list, show, endpoints, auth, remove)',
+                share_with_model=False,
+                parameters=[
+                    CommandParameter(
+                        name='subcommand',
+                        description='Subcommand: list, show, endpoints, auth, remove, help',
+                        required=True,
+                    ),
+                    CommandParameter(
+                        name='rest',
+                        description='Arguments for the subcommand',
+                        required=False,
+                        capture_rest=True,
+                    ),
+                ],
+            ),
+        ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for services command arguments."""
+        if command != 'services':
+            return []
+
+        subcommands = [
+            CommandCompletion('list', 'List all known services'),
+            CommandCompletion('show', 'Show details for a service'),
+            CommandCompletion('endpoints', 'List endpoints for a service'),
+            CommandCompletion('auth', 'Show auth status for a service'),
+            CommandCompletion('remove', 'Remove a service'),
+            CommandCompletion('help', 'Show help'),
+        ]
+
+        if not args:
+            return subcommands
+
+        if len(args) == 1:
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        subcommand = args[0].lower()
+
+        # Level 2: service names for subcommands that take a service argument
+        if len(args) == 2 and subcommand in ('show', 'endpoints', 'auth', 'remove'):
+            partial = args[1].lower()
+            return self._get_service_completions(partial)
+
+        # Level 3: HTTP method filter for 'endpoints <service> <method>'
+        if len(args) == 3 and subcommand == 'endpoints':
+            partial = args[2].upper()
+            methods = [
+                CommandCompletion('GET', 'GET requests'),
+                CommandCompletion('POST', 'POST requests'),
+                CommandCompletion('PUT', 'PUT requests'),
+                CommandCompletion('DELETE', 'DELETE requests'),
+                CommandCompletion('PATCH', 'PATCH requests'),
+            ]
+            return [m for m in methods if m.value.startswith(partial)]
+
         return []
+
+    def _get_service_completions(self, partial: str) -> List[CommandCompletion]:
+        """Get service name completions from memory and filesystem."""
+        names = self._get_all_service_names()
+        return [
+            CommandCompletion(name, 'Service')
+            for name in names
+            if name.lower().startswith(partial)
+        ]
+
+    def _get_all_service_names(self) -> List[str]:
+        """Get all known service names from memory cache and filesystem."""
+        names = set(self._discovered_services.keys())
+        if self._schema_store:
+            names.update(self._schema_store.list_services())
+        return sorted(names)
+
+    def execute_user_command(self, command: str, args: Dict[str, Any]) -> Any:
+        """Execute a user command."""
+        if command != 'services':
+            return f"Unknown command: {command}"
+
+        subcommand = args.get('subcommand', '').lower()
+        rest = args.get('rest', '').strip()
+
+        if subcommand == 'list' or subcommand == '':
+            return self._cmd_list()
+        elif subcommand == 'show':
+            if not rest:
+                return "Usage: services show <service>"
+            return self._cmd_show(rest)
+        elif subcommand == 'endpoints':
+            parts = rest.split(None, 1)
+            if not parts:
+                return "Usage: services endpoints <service> [method]"
+            service_name = parts[0]
+            method_filter = parts[1].upper() if len(parts) > 1 else None
+            return self._cmd_endpoints(service_name, method_filter)
+        elif subcommand == 'auth':
+            if not rest:
+                return "Usage: services auth <service>"
+            return self._cmd_auth(rest)
+        elif subcommand == 'remove':
+            if not rest:
+                return "Usage: services remove <service>"
+            return self._cmd_remove(rest)
+        elif subcommand == 'help':
+            return self._cmd_help()
+        else:
+            return (
+                f"Unknown subcommand: {subcommand}\n"
+                "Use 'services help' for available commands."
+            )
+
+    # === User Command Handlers ===
+
+    def _cmd_list(self) -> Any:
+        """List all known services. Returns HelpLines for pager display."""
+        names = self._get_all_service_names()
+        if not names:
+            return HelpLines(lines=[
+                ("No services discovered.", "dim"),
+                ("", ""),
+                ("Use the discover_service tool or 'services help' for guidance.", ""),
+            ])
+
+        lines: List[tuple] = [("Known Services", "bold"), ("", "")]
+        for name in names:
+            discovered = self._get_service(name)
+            if discovered:
+                auth_type = discovered.config.auth.type.value
+                ep_count = discovered.endpoint_count
+                base_url = discovered.config.base_url
+                auth_label = f"auth={auth_type}" if auth_type != "none" else "no auth"
+                lines.append((f"  {name}", "bold"))
+                lines.append(
+                    (f"    {base_url}  |  {ep_count} endpoints  |  {auth_label}", "dim")
+                )
+            else:
+                lines.append((f"  {name}", "bold"))
+                lines.append(("    (config only)", "dim"))
+
+        lines.append(("", ""))
+        lines.append((f"{len(names)} service(s) total", "bold"))
+        return HelpLines(lines=lines)
+
+    def _cmd_show(self, service_name: str) -> Any:
+        """Show details of a specific service. Returns HelpLines for pager display."""
+        discovered = self._get_service(service_name)
+
+        # Fall back to manual config
+        config = None
+        if discovered:
+            config = discovered.config
+        elif self._schema_store:
+            config = self._schema_store.load_service_config(service_name)
+
+        if not config:
+            return f"Service not found: {service_name}"
+
+        lines: List[tuple] = [(f"Service: {config.name}", "bold"), ("", "")]
+
+        if config.title:
+            lines.append((f"  Title:       {config.title}", ""))
+        if config.version:
+            lines.append((f"  Version:     {config.version}", ""))
+        lines.append((f"  Base URL:    {config.base_url or '(not set)'}", ""))
+
+        if config.description:
+            desc = config.description
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            lines.append((f"  Description: {desc}", "dim"))
+
+        # Auth summary
+        auth = config.auth
+        lines.append((f"  Auth type:   {auth.type.value}", ""))
+
+        # Endpoint count
+        if discovered:
+            lines.append((f"  Endpoints:   {discovered.endpoint_count}", ""))
+
+        # Source
+        if discovered and discovered.source:
+            lines.append((f"  Source:      {discovered.source}", "dim"))
+
+        # Schema store path
+        if self._schema_store:
+            source_on_disk = self._schema_store.get_discovered_source(service_name)
+            if source_on_disk and (not discovered or source_on_disk != discovered.source):
+                lines.append((f"  Disk source: {source_on_disk}", "dim"))
+
+        return HelpLines(lines=lines)
+
+    def _cmd_endpoints(
+        self, service_name: str, method_filter: Optional[str] = None
+    ) -> Any:
+        """List endpoints for a service. Returns HelpLines for pager display."""
+        discovered = self._get_service(service_name)
+
+        endpoints: List[Dict[str, Any]] = []
+
+        if discovered:
+            for ep in discovered.endpoints:
+                if method_filter and ep.method != method_filter:
+                    continue
+                endpoints.append({
+                    "method": ep.method,
+                    "path": ep.path,
+                    "summary": ep.summary or "",
+                })
+        elif self._schema_store:
+            for _name, schema in self._schema_store.list_endpoint_schemas(service_name):
+                if method_filter and schema.method != method_filter:
+                    continue
+                endpoints.append({
+                    "method": schema.method,
+                    "path": schema.path,
+                    "summary": schema.summary or "",
+                })
+
+        if not endpoints and not discovered:
+            return f"Service not found: {service_name}"
+
+        if not endpoints:
+            filter_note = f" matching {method_filter}" if method_filter else ""
+            return f"No endpoints{filter_note} for service: {service_name}"
+
+        filter_note = f" (filtered: {method_filter})" if method_filter else ""
+        lines: List[tuple] = [
+            (f"Endpoints for {service_name}{filter_note}", "bold"),
+            ("", ""),
+        ]
+
+        for ep in endpoints:
+            method_str = f"  {ep['method']:7s} {ep['path']}"
+            if ep['summary']:
+                lines.append((method_str, ""))
+                lines.append((f"           {ep['summary']}", "dim"))
+            else:
+                lines.append((method_str, ""))
+
+        lines.append(("", ""))
+        lines.append((f"{len(endpoints)} endpoint(s)", "bold"))
+        return HelpLines(lines=lines)
+
+    def _cmd_auth(self, service_name: str) -> Any:
+        """Show auth configuration and credential status. Returns HelpLines for pager display."""
+        discovered = self._get_service(service_name)
+
+        config = None
+        if discovered:
+            config = discovered.config
+        elif self._schema_store:
+            config = self._schema_store.load_service_config(service_name)
+
+        if not config:
+            return f"Service not found: {service_name}"
+
+        auth = config.auth
+        lines: List[tuple] = [
+            (f"Auth for {service_name}", "bold"),
+            ("", ""),
+            (f"  Type: {auth.type.value}", ""),
+        ]
+
+        if auth.type == AuthType.NONE:
+            lines.append(("  No authentication configured.", "dim"))
+            return HelpLines(lines=lines)
+
+        if auth.type == AuthType.API_KEY:
+            loc = auth.key_location.value if auth.key_location else "header"
+            lines.append((f"  Location: {loc}", ""))
+            lines.append((f"  Key name: {auth.key_name or '(default)'}", ""))
+
+        if auth.type == AuthType.OAUTH2_CLIENT and auth.token_url:
+            lines.append((f"  Token URL: {auth.token_url}", ""))
+            if auth.scope:
+                lines.append((f"  Scope: {auth.scope}", ""))
+
+        # Credential check
+        if self._auth_manager:
+            cred = self._auth_manager.check_credentials(auth)
+            required = cred.get("env_vars_required", [])
+            present = set(cred.get("env_vars_present", []))
+            missing = set(cred.get("env_vars_missing", []))
+
+            if required:
+                lines.append(("", ""))
+                lines.append(("  Environment variables:", "bold"))
+                for var in required:
+                    if var in present:
+                        lines.append((f"    {var} = (set)", ""))
+                    else:
+                        lines.append((f"    {var} = (MISSING)", "bold"))
+
+                if missing:
+                    lines.append(("", ""))
+                    lines.append((
+                        f"  Warning: {len(missing)} required variable(s) not set.",
+                        "bold",
+                    ))
+
+        return HelpLines(lines=lines)
+
+    def _cmd_remove(self, service_name: str) -> str:
+        """Remove a service from memory and filesystem."""
+        removed_memory = service_name in self._discovered_services
+        if removed_memory:
+            del self._discovered_services[service_name]
+
+        removed_disk = False
+        if self._schema_store:
+            removed_disk = self._schema_store.delete_service(service_name)
+
+        if removed_memory or removed_disk:
+            parts = []
+            if removed_memory:
+                parts.append("memory")
+            if removed_disk:
+                parts.append("disk")
+            return f"Removed service '{service_name}' from {' and '.join(parts)}."
+
+        return f"Service not found: {service_name}"
+
+    def _cmd_help(self) -> HelpLines:
+        """Return formatted help for the services command."""
+        return HelpLines(lines=[
+            ("Services Command", "bold"),
+            ("", ""),
+            ("Manage discovered web services. View service details, check auth", ""),
+            ("status, browse endpoints, and clean up services.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    services [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list                          List all known services (default)", "dim"),
+            ("    show <service>                Show details for a service", "dim"),
+            ("    endpoints <service> [method]  List endpoints, optionally by HTTP method", "dim"),
+            ("    auth <service>                Show auth type and env var status", "dim"),
+            ("    remove <service>              Remove a service from memory and disk", "dim"),
+            ("    help                          Show this help", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    services                          List all services", "dim"),
+            ("    services show github               Show github service details", "dim"),
+            ("    services endpoints petstore GET    List GET endpoints for petstore", "dim"),
+            ("    services auth stripe               Check auth config and env vars", "dim"),
+            ("    services remove old-api            Remove a service", "dim"),
+            ("", ""),
+            ("NOTES", "bold"),
+            ("    Services are discovered by the model via the discover_service tool", ""),
+            ("    or imported from Bruno collections. This command lets you inspect", ""),
+            ("    and manage what the model currently knows about.", ""),
+            ("", ""),
+            ("    Auth credentials are never stored in files - only environment", ""),
+            ("    variable names are stored. Use 'services auth <name>' to check", ""),
+            ("    which variables are set.", ""),
+        ])
 
     # === Tool Executors ===
 
