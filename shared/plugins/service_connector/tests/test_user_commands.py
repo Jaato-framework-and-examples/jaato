@@ -82,6 +82,13 @@ class TestGetUserCommands:
         approved = plugin.get_auto_approved_tools()
         assert "services" in approved
 
+    def test_services_executor_registered(self, plugin):
+        executors = plugin.get_executors()
+        assert "services" in executors
+        # Executor should delegate to execute_user_command
+        result = executors["services"]({"subcommand": "help", "rest": ""})
+        assert isinstance(result, HelpLines)
+
 
 class TestGetCommandCompletions:
     """Tests for get_command_completions()."""
