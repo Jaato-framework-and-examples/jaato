@@ -49,6 +49,8 @@ dependencies = [
     "ipython-pygments-lexers>=1.0.0",
     "pexpect>=4.8.0; sys_platform != 'win32'",
     "wexpect>=4.0.0; sys_platform == 'win32'",
+    "pywin32>=220; sys_platform == 'win32'",  # wexpect undeclared dep
+    "psutil>=5.0.0; sys_platform == 'win32'",  # wexpect undeclared dep
     "setuptools; sys_platform == 'win32'",  # wexpect requires pkg_resources
     "pyte>=0.8.0",
 ]
