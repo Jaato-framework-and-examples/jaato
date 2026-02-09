@@ -21,7 +21,7 @@ Scan the folder `{{$1}}` recursively and generate reference JSON files for each 
      "name": "<Human Readable Name>",
      "description": "<Brief description extracted from the documentation>",
      "type": "local",
-     "path": "./<relative-path-to-folder>/",
+     "path": "/absolute/path/to/folder",
      "mode": "selectable",
      "tags": ["<tag1>", "<tag2>", ...],
      "fetchHint": "<Hint on which file to read first>"
@@ -37,7 +37,7 @@ Scan the folder `{{$1}}` recursively and generate reference JSON files for each 
      - For other patterns, convert hyphens to spaces and title-case
    - **description**: Read the main documentation file (MODULE.md, SKILL.md, etc.) and extract the first paragraph or summary
    - **type**: Always `"local"` for folder references
-   - **path**: Relative path from project root, starting with `./` (e.g., `./.jaato/docs/modules/mod-code-001.../`)
+   - **path**: Absolute filesystem path to the folder, normalized to POSIX forward slashes and WITHOUT a trailing slash (e.g., `/home/alice/project/.jaato/docs/modules/mod-code-001-circuit-breaker-java-resilience4j`)
    - **mode**: Default to `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
    - **tags**: Extract from:
      - Folder path components (e.g., `modules` → `module`, `skills` → `skill`)
@@ -59,7 +59,34 @@ Scan the folder `{{$1}}` recursively and generate reference JSON files for each 
    - Note any folders that were skipped and why
    - Provide a summary count
 
-## Example
+## Implementation note (computing the "path" value)
+
+- Compute an absolute filesystem path for each documentation folder (e.g., with path.resolve in Node.js or os.path.abspath in Python).
+- Normalize separators to POSIX forward slashes (`/`) on all platforms (replace backslashes).
+- Remove any trailing slash.
+- Optionally resolve symlinks (realpath) if you prefer canonicalized paths.
+
+Example approaches:
+
+Node.js:
+```javascript
+const path = require('path');
+const abs = path.resolve(folderPath).replace(/\\/g, '/').replace(/\/\/+$, '');
+```
+
+Python:
+```python
+import os
+abs_posix = os.path.abspath(folder_path).replace('\\', '/').rstrip('/')
+```
+
+Bash (POSIX):
+```bash
+abs=$(realpath "$folder" 2>/dev/null || python -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$folder")
+abs_posix=$(echo "$abs" | sed -e 's#\\#/#g' -e 's:/*$::')
+```
+
+## Example (updated)
 
 For a folder structure like:
 ```
@@ -76,7 +103,7 @@ For a folder structure like:
 ```
 
 Generate files:
-- `.jaato/references/mod-code-001-circuit-breaker-java-resilience4j.json`
+- `.jaato/references/mod-code-001-circuit-breaker-java-resilience4j.json` (with "path": "/home/alice/project/.jaato/docs/modules/mod-code-001-circuit-breaker-java-resilience4j")
 - `.jaato/references/mod-code-002-retry-java-resilience4j.json`
 - `.jaato/references/skill-001-circuit-breaker-java-resilience4j.json`
 

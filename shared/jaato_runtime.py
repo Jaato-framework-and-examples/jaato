@@ -143,6 +143,9 @@ class JaatoRuntime:
         self._system_instructions: Optional[str] = None
         self._auto_approved_tools: List[str] = []
 
+        # Formatter pipeline (optional, for collecting formatter instructions)
+        self._formatter_pipeline: Optional[Any] = None
+
         # Base system instructions (loaded from .jaato/system_instructions.md)
         self._base_system_instructions: Optional[str] = None
         self._load_base_system_instructions()
@@ -222,6 +225,20 @@ class JaatoRuntime:
     def telemetry(self) -> TelemetryPlugin:
         """Get the telemetry plugin."""
         return self._telemetry
+
+    def set_formatter_pipeline(self, pipeline: Any) -> None:
+        """Set the formatter pipeline for collecting formatter instructions.
+
+        When set, get_system_instructions() will include instructions from
+        output formatters that implement get_system_instructions(). This
+        allows formatters to inform the model about rendering capabilities
+        (e.g., mermaid diagram rendering) without being tool plugins.
+
+        Args:
+            pipeline: A FormatterPipeline instance (or any object with
+                     a get_system_instructions() method).
+        """
+        self._formatter_pipeline = pipeline
 
     @property
     def deferred_tools_enabled(self) -> bool:
@@ -903,14 +920,20 @@ class JaatoRuntime:
         if plugin_instructions:
             result_parts.append(plugin_instructions)
 
-        # 4. Framework-level task completion instruction (always included)
+        # 4. Formatter pipeline instructions (output rendering capabilities)
+        if self._formatter_pipeline and hasattr(self._formatter_pipeline, 'get_system_instructions'):
+            formatter_instructions = self._formatter_pipeline.get_system_instructions()
+            if formatter_instructions:
+                result_parts.append(formatter_instructions)
+
+        # 5. Framework-level task completion instruction (always included)
         result_parts.append(_TASK_COMPLETION_INSTRUCTION)
 
-        # 5. Parallel tool guidance (when parallel execution is enabled)
+        # 6. Parallel tool guidance (when parallel execution is enabled)
         if _is_parallel_tools_enabled():
             result_parts.append(_PARALLEL_TOOL_GUIDANCE)
 
-        # 6. Turn-end summary guidance (always included)
+        # 7. Turn-end summary guidance (always included)
         result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
         return "\n\n".join(result_parts)

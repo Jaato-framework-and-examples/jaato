@@ -152,3 +152,54 @@ class ConfigurableFormatter(FormatterPlugin, Protocol):
 #                 return True
 #             return False  # Skip this formatter - LSP not available
 #     """
+#
+# get_system_instructions() -> Optional[str]:
+#     """Return system instructions describing this formatter's capabilities.
+#
+#     Called by FormatterPipeline.get_system_instructions() during session
+#     configuration. Allows output formatters to inform the model about
+#     rendering capabilities it can take advantage of.
+#
+#     Unlike tool plugins (which always contribute instructions), formatter
+#     instructions are optional - most formatters silently transform output
+#     without the model needing to know. Only implement this when the model
+#     can actively benefit from knowing about the formatter (e.g., using
+#     mermaid diagrams because the pipeline renders them graphically).
+#
+#     Returns:
+#         System instruction string, or None if no instructions needed.
+#
+#     Example:
+#         def get_system_instructions(self) -> Optional[str]:
+#             return (
+#                 "The output pipeline renders ```mermaid code blocks as "
+#                 "graphical diagrams. Feel free to use mermaid syntax."
+#             )
+#     """
+#
+# get_turn_feedback() -> Optional[str]:
+#     """Return feedback from this turn for injection into the next user prompt.
+#
+#     Called by FormatterPipeline.collect_turn_feedback() after flush() at turn
+#     end. Allows formatters that detect issues (syntax errors, validation
+#     failures) to report them back to the model so it can self-correct on
+#     the next turn.
+#
+#     The returned text is prepended to the next user message as a <hidden>
+#     block — the model sees it, but the user doesn't (they already saw the
+#     diagnostic in the terminal output).
+#
+#     Implementations should return and clear any accumulated feedback
+#     (one-shot pattern: each call drains the feedback).
+#
+#     Returns:
+#         Feedback string, or None if no feedback to report.
+#
+#     Example:
+#         def get_turn_feedback(self) -> Optional[str]:
+#             if self._turn_feedback:
+#                 fb = self._turn_feedback
+#                 self._turn_feedback = None
+#                 return fb
+#             return None
+#     """

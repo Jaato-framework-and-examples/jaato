@@ -8,6 +8,7 @@ import sys
 import time
 import pytest
 
+from shared.terminal_caps import invalidate_cache as invalidate_terminal_cache
 from ..plugin import EnvironmentPlugin
 
 
@@ -253,6 +254,13 @@ class TestEnvironmentPluginShellInfo:
 class TestEnvironmentPluginTerminalInfo:
     """Tests for terminal information accuracy."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_terminal_cache(self):
+        """Terminal detection is cached process-wide; invalidate between tests."""
+        invalidate_terminal_cache()
+        yield
+        invalidate_terminal_cache()
+
     def test_terminal_term_from_env(self, monkeypatch):
         """Test that TERM is read from environment."""
         monkeypatch.setenv("TERM", "xterm-256color")
@@ -268,7 +276,11 @@ class TestEnvironmentPluginTerminalInfo:
         plugin = EnvironmentPlugin()
         result = json.loads(plugin._get_environment({"aspect": "terminal"}))
 
-        assert result["color_depth"] == "256"
+        # In non-interactive environments (CI/pipes), color_depth is "none"
+        if result["interactive"]:
+            assert result["color_depth"] == "256"
+        else:
+            assert result["color_depth"] == "none"
 
     def test_terminal_color_depth_truecolor(self, monkeypatch):
         """Test truecolor detection via COLORTERM."""
@@ -277,7 +289,11 @@ class TestEnvironmentPluginTerminalInfo:
         plugin = EnvironmentPlugin()
         result = json.loads(plugin._get_environment({"aspect": "terminal"}))
 
-        assert result["color_depth"] == "24bit"
+        # In non-interactive environments (CI/pipes), color_depth is "none"
+        if result["interactive"]:
+            assert result["color_depth"] == "24bit"
+        else:
+            assert result["color_depth"] == "none"
 
     def test_terminal_tmux_detection(self, monkeypatch):
         """Test tmux multiplexer detection."""
