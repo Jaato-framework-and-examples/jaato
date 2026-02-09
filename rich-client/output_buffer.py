@@ -518,16 +518,18 @@ class OutputBuffer:
                 # 1 (blank) + 1 (header) + content lines
                 return 2 + content_lines
         elif source == "thinking":
+            # Note: footer/header are only rendered for last/first thinking line in a
+            # block, but we count them for all lines to ensure the block fits on screen.
+            with self._measure_console.capture() as capture:
+                self._measure_console.print(rendered, end='')
+            output = capture.get()
+            content_lines = output.count('\n') + 1 if output else 1
             if is_turn_start:
-                # Blank line (1) + Model header (1) + thinking header (1) + content + footer (1)
-                # Note: footer is only rendered for last thinking line, but we count it
-                # for all thinking lines to ensure the last one fits on screen.
-                with self._measure_console.capture() as capture:
-                    self._measure_console.print(rendered, end='')
-                output = capture.get()
-                content_lines = output.count('\n') + 1 if output else 1
                 # 1 (blank) + 1 (Model header) + 1 (thinking header) + content + 1 (footer)
                 return 4 + content_lines
+            else:
+                # 1 (thinking header) + content + 1 (footer)
+                return 2 + content_lines
         elif source in ("user", "parent"):
             if is_turn_start:
                 # Blank line (1) + header line (1) + wrapped content lines
@@ -4507,6 +4509,10 @@ class OutputBuffer:
                 indent = "   "  # Left indent for the entire thinking block
                 border = "│ "
                 border_width = len(indent) + len(border)
+                # Check if this is the first thinking line in a consecutive group
+                is_first_thinking = (i == 0) or (items_to_show[i - 1].source != "thinking"
+                                                  if isinstance(items_to_show[i - 1], OutputLine)
+                                                  else True)
                 if line.is_turn_start:
                     # First render Model header (thinking is part of model turn)
                     header_prefix = "── Model "
@@ -4514,7 +4520,8 @@ class OutputBuffer:
                     output.append(header_prefix, style=self._style("model_header", "bold cyan"))
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
-                    # Then render thinking header: ┌─ Internal thinking ───────┐
+                if is_first_thinking:
+                    # Render thinking header (top border): ┌─ Internal thinking ───────┐
                     thinking_header = "┌─ Internal thinking "
                     box_width = wrap_width - len(indent)
                     remaining = max(0, box_width - len(thinking_header) - 1)
