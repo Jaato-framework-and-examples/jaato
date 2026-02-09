@@ -105,8 +105,62 @@ capture.initialize(config)
 ### PNG
 
 - Raster image
-- Requires `cairosvg` package for conversion
+- Requires `cairosvg` Python package **and** the native Cairo library
 - Better for sharing in tools that don't support SVG
+- If Cairo is not available, the plugin automatically falls back to SVG
+
+#### Installing Cairo for PNG support
+
+PNG conversion uses the pipeline: Rich SVG export → CairoSVG → PNG. CairoSVG is a Python wrapper around the [Cairo](https://cairographics.org/) 2D graphics library, which must be installed separately as a system dependency.
+
+**Linux (Debian/Ubuntu):**
+
+```bash
+sudo apt install libcairo2-dev
+pip install cairosvg
+```
+
+**Linux (Fedora/RHEL):**
+
+```bash
+sudo dnf install cairo-devel
+pip install cairosvg
+```
+
+**macOS:**
+
+```bash
+brew install cairo
+pip install cairosvg
+```
+
+**Windows:**
+
+Cairo does not ship as a standalone installer on Windows. Choose one of these options:
+
+1. **Conda (recommended)** — installs a prebuilt Cairo binary into your environment:
+
+   ```
+   conda install cairo
+   pip install cairosvg
+   ```
+
+2. **GTK3 runtime** — the [GTK for Windows](https://github.com/niclas-niclasen/gtk-3-runtime-build/releases) runtime bundle includes `libcairo-2.dll`. After installing, ensure the GTK `bin/` directory is on your `PATH` so Python can find the DLL.
+
+3. **MSYS2** — install Cairo via the MSYS2 package manager:
+
+   ```
+   pacman -S mingw-w64-x86_64-cairo
+   pip install cairosvg
+   ```
+   Ensure the MSYS2 `mingw64/bin` directory is on your `PATH`.
+
+> **Troubleshooting on Windows:** If you see an error like:
+> ```
+> no library called "cairo-2" was found
+> cannot load library 'libcairo-2.dll': error 0x7e
+> ```
+> This means the `cairosvg` Python package is installed but the native Cairo DLL is not found on the system `PATH`. Install one of the native options above and ensure the directory containing `libcairo-2.dll` is on your `PATH` environment variable. The screenshot command will fall back to SVG format automatically when Cairo is unavailable.
 
 ### HTML
 

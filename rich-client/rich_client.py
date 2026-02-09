@@ -2222,11 +2222,13 @@ class RichClient:
             if new_format == CaptureFormat.PNG:
                 try:
                     import cairosvg  # noqa: F401
-                except ImportError:
-                    self._display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                except (ImportError, OSError):
+                    self._display.add_system_message("[Warning: cairosvg not available]", "yellow")
                     self._display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
                     self._display.add_system_message("  Install with: pip install cairosvg", "dim")
-                    self._display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                    self._display.add_system_message("  (also requires system Cairo library:", "dim")
+                    self._display.add_system_message("   Linux: apt install libcairo2-dev", "dim")
+                    self._display.add_system_message("   Windows: install GTK3 runtime or use conda install cairo)", "dim")
                     self._display.add_system_message("")
                     self._display.add_system_message("  Falling back to SVG format.", "dim")
                     new_format = CaptureFormat.SVG
@@ -3193,11 +3195,13 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         if new_format == CaptureFormat.PNG:
             try:
                 import cairosvg  # noqa: F401
-            except ImportError:
-                display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+            except (ImportError, OSError):
+                display.add_system_message("[Warning: cairosvg not available]", "yellow")
                 display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
                 display.add_system_message("  Install with: pip install cairosvg", "dim")
-                display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                display.add_system_message("  (also requires system Cairo library:", "dim")
+                display.add_system_message("   Linux: apt install libcairo2-dev", "dim")
+                display.add_system_message("   Windows: install GTK3 runtime or use conda install cairo)", "dim")
                 display.add_system_message("")
                 display.add_system_message("  Falling back to SVG format.", "dim")
                 new_format = CaptureFormat.SVG
