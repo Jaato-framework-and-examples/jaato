@@ -813,7 +813,29 @@ class SubagentPlugin:
             "  # ... does work, updates steps ...\n"
             "  completePlan(summary='Found 5 key findings...')  # Triggers event to parent\n\n"
             "This enables observable, traceable multi-agent workflows where both agents "
-            "maintain plans and coordinate through the shared TODO event system."
+            "maintain plans and coordinate through the shared TODO event system.\n\n"
+            "SPAWN ECONOMY - AVOID UNNECESSARY SPAWNS:\n"
+            "Every spawn_subagent call creates a new worker with its own session, context window, "
+            "and resource overhead. Before spawning, ask yourself:\n\n"
+            "1. Is there already an idle subagent that can handle this? → Use send_to_subagent\n"
+            "2. Is this a follow-up to work a subagent already did? → Use send_to_subagent\n"
+            "3. Is this a clarification or short message? → Use send_to_subagent (NEVER spawn for this)\n"
+            "4. Does this require a genuinely independent worker? → Only then use spawn_subagent\n\n"
+            "ANTI-PATTERNS (do NOT do these):\n"
+            "- Spawning a new subagent to send a clarification response to an existing one\n"
+            "- Spawning a second implementer for fixes when the first one is idle and can continue\n"
+            "- Spawning per-step: one subagent for scaffold, another for tests, another for fixes\n"
+            "- Spawning to ask a subagent a question (use send_to_subagent instead)\n\n"
+            "CORRECT PATTERNS:\n"
+            "- Spawn ONE implementer for a plan's lifecycle, send follow-up tasks via send_to_subagent\n"
+            "- Spawn multiple subagents ONLY for genuinely parallel, independent work streams\n"
+            "- Spawn a new subagent ONLY when the task requires a different profile or isolated toolset\n"
+            "- After a subagent completes and goes IDLE, reuse it with send_to_subagent for related work\n\n"
+            "DECISION CHECKLIST before calling spawn_subagent:\n"
+            "- Is this task independent and parallelizable with current work? → spawn\n"
+            "- Is it a small clarification, fix, or follow-up? → send_to_subagent to existing agent\n"
+            "- Does it require a unique profile or different external tooling? → spawn\n"
+            "- Could the same idle subagent handle this with additional instructions? → send_to_subagent"
         )
 
         if not self._config or not self._config.profiles:
@@ -1621,9 +1643,21 @@ class SubagentPlugin:
             if isinstance(context, str):
                 context_str = context
             elif isinstance(context, dict):
+                # Validate context.files shape: must be dict {path: content}, not a list
+                files_val = context.get('files')
+                if files_val is not None and isinstance(files_val, list):
+                    return SubagentResult(
+                        success=False,
+                        response='',
+                        error=(
+                            "context.files must be a dict mapping file paths to content "
+                            "(e.g., {\"src/auth.py\": \"<content>\"}), not a list. "
+                            "Fix the shape and retry."
+                        )
+                    ).to_dict()
                 # Structured context with files/findings/notes
                 context_str = self._format_shared_context(
-                    files=context.get('files'),
+                    files=files_val,
                     findings=context.get('findings'),
                     notes=context.get('notes')
                 )
