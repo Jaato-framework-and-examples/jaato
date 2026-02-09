@@ -150,12 +150,23 @@ def _parse_parameter_v3(param: Dict[str, Any]) -> Parameter:
 
     Returns:
         Parsed Parameter.
+
+    Raises:
+        OpenAPIParseError: If parameter location is not supported.
     """
     schema = param.get("schema", {})
+    location = param.get("in", "query")
+    try:
+        parsed_location = ParameterLocation(location)
+    except ValueError:
+        raise OpenAPIParseError(
+            f"Parameter '{param.get('name', '?')}' has unsupported location "
+            f"'{location}'. Supported: path, query, header."
+        )
 
     return Parameter(
         name=param["name"],
-        location=ParameterLocation(param.get("in", "query")),
+        location=parsed_location,
         param_type=schema.get("type", "string"),
         required=param.get("required", False),
         default=schema.get("default"),
@@ -172,10 +183,22 @@ def _parse_parameter_v2(param: Dict[str, Any]) -> Parameter:
 
     Returns:
         Parsed Parameter.
+
+    Raises:
+        OpenAPIParseError: If parameter location is not supported.
     """
+    location = param.get("in", "query")
+    try:
+        parsed_location = ParameterLocation(location)
+    except ValueError:
+        raise OpenAPIParseError(
+            f"Parameter '{param.get('name', '?')}' has unsupported location "
+            f"'{location}'. Supported: path, query, header."
+        )
+
     return Parameter(
         name=param["name"],
-        location=ParameterLocation(param.get("in", "query")),
+        location=parsed_location,
         param_type=param.get("type", "string"),
         required=param.get("required", False),
         default=param.get("default"),
@@ -401,6 +424,48 @@ def _get_base_url_v2(spec: Dict[str, Any]) -> str:
     return ""
 
 
+def _build_form_data_body(form_data_params: List[Dict[str, Any]]) -> RequestBody:
+    """Build a RequestBody from Swagger 2.x formData parameters.
+
+    Args:
+        form_data_params: List of parameter objects with "in": "formData".
+
+    Returns:
+        RequestBody with schema built from the individual parameters.
+    """
+    has_file = any(p.get("type") == "file" for p in form_data_params)
+    content_type = (
+        "multipart/form-data" if has_file
+        else "application/x-www-form-urlencoded"
+    )
+
+    properties = {}
+    required_fields = []
+    for p in form_data_params:
+        prop: Dict[str, Any] = {}
+        if "type" in p and p["type"] != "file":
+            prop["type"] = p["type"]
+        if "description" in p:
+            prop["description"] = p["description"]
+        if "enum" in p:
+            prop["enum"] = p["enum"]
+        if "default" in p:
+            prop["default"] = p["default"]
+        properties[p["name"]] = prop
+        if p.get("required", False):
+            required_fields.append(p["name"])
+
+    schema: Dict[str, Any] = {"type": "object", "properties": properties}
+    if required_fields:
+        schema["required"] = required_fields
+
+    return RequestBody(
+        content_type=content_type,
+        required=bool(required_fields),
+        schema=schema,
+    )
+
+
 def parse_openapi_spec(
     spec: Dict[str, Any],
     alias: str,
@@ -496,21 +561,29 @@ def parse_openapi_spec(
             # Parse parameters
             parameters = []
             request_body = None
+            form_data_params = []
 
             for param in all_parameters:
+                param_in = param.get("in")
                 # In Swagger 2.x, body parameter becomes request body
-                if param.get("in") == "body":
+                if param_in == "body":
                     schema = _extract_json_schema(param.get("schema", {}))
                     request_body = RequestBody(
                         content_type="application/json",
                         required=param.get("required", False),
                         schema=schema,
                     )
+                elif param_in == "formData":
+                    form_data_params.append(param)
                 else:
                     if is_v3:
                         parameters.append(_parse_parameter_v3(param))
                     else:
                         parameters.append(_parse_parameter_v2(param))
+
+            # Convert formData params to RequestBody (body param takes precedence)
+            if form_data_params and request_body is None:
+                request_body = _build_form_data_body(form_data_params)
 
             # OpenAPI 3.x request body
             if is_v3 and "requestBody" in operation:

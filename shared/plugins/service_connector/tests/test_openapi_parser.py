@@ -344,3 +344,178 @@ class TestOpenAPIParser:
         assert len(result.endpoints) == 3
         methods = {e.method for e in result.endpoints}
         assert methods == {"GET", "POST", "DELETE"}
+
+    def test_parse_swagger_2_formdata_urlencoded(self):
+        """Test that formData params become a url-encoded RequestBody."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "parameters": [
+                            {
+                                "name": "name",
+                                "in": "formData",
+                                "type": "string",
+                                "required": True,
+                                "description": "Item name",
+                            },
+                            {
+                                "name": "status",
+                                "in": "formData",
+                                "type": "string",
+                                "enum": ["available", "sold"],
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "form-api")
+        endpoint = result.endpoints[0]
+
+        assert endpoint.request_body is not None
+        assert endpoint.request_body.content_type == "application/x-www-form-urlencoded"
+        assert endpoint.request_body.required is True
+        schema = endpoint.request_body.schema
+        assert schema["type"] == "object"
+        assert "name" in schema["properties"]
+        assert "status" in schema["properties"]
+        assert schema["properties"]["name"]["description"] == "Item name"
+        assert schema["properties"]["status"]["enum"] == ["available", "sold"]
+        assert schema["required"] == ["name"]
+        # formData params should NOT appear as regular parameters
+        assert len(endpoint.parameters) == 0
+
+    def test_parse_swagger_2_formdata_multipart_for_file(self):
+        """Test that formData with file type uses multipart/form-data."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "parameters": [
+                            {
+                                "name": "file",
+                                "in": "formData",
+                                "type": "file",
+                                "required": True,
+                            },
+                            {
+                                "name": "description",
+                                "in": "formData",
+                                "type": "string",
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "file-api")
+        endpoint = result.endpoints[0]
+
+        assert endpoint.request_body is not None
+        assert endpoint.request_body.content_type == "multipart/form-data"
+
+    def test_parse_swagger_2_body_wins_over_formdata(self):
+        """Test that body param takes precedence over formData (spec violation)."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/mixed": {
+                    "post": {
+                        "parameters": [
+                            {
+                                "name": "body",
+                                "in": "body",
+                                "required": True,
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"id": {"type": "integer"}},
+                                },
+                            },
+                            {
+                                "name": "extra",
+                                "in": "formData",
+                                "type": "string",
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "mixed-api")
+        endpoint = result.endpoints[0]
+
+        # body wins — request_body should be JSON from the body param
+        assert endpoint.request_body is not None
+        assert endpoint.request_body.content_type == "application/json"
+
+    def test_unknown_parameter_location_raises_parse_error(self):
+        """Test that unknown parameter location raises OpenAPIParseError."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "token",
+                                "in": "cookie",
+                                "type": "string",
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        with pytest.raises(OpenAPIParseError) as exc_info:
+            parse_openapi_spec(spec, "bad-param")
+
+        assert "token" in str(exc_info.value)
+        assert "cookie" in str(exc_info.value)
+        assert "Supported: path, query, header" in str(exc_info.value)
+
+    def test_unknown_parameter_location_v3_raises_parse_error(self):
+        """Test that unknown parameter location in v3 raises OpenAPIParseError."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "paths": {
+                "/items": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "token",
+                                "in": "banana",
+                                "schema": {"type": "string"},
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        with pytest.raises(OpenAPIParseError) as exc_info:
+            parse_openapi_spec(spec, "bad-param-v3")
+
+        assert "token" in str(exc_info.value)
+        assert "banana" in str(exc_info.value)
+        assert "Supported: path, query, header" in str(exc_info.value)
