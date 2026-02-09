@@ -8,7 +8,10 @@ Backend priority:
     1. Kitty graphics protocol (kitty, ghostty)
     2. iTerm2 inline image protocol (iTerm2, WezTerm, mintty)
     3. Sixel bitmap protocol (foot, mlterm)
-    4. rich-pixels Unicode half-block fallback (everywhere)
+
+When no image protocol is available, select_backend() returns None
+and the caller falls back to showing truncated mermaid source with
+a hint to the rendered PNG artifact path.
 """
 
 import os
@@ -33,29 +36,28 @@ class GraphicsBackend(Protocol):
             max_width: Maximum width in terminal columns.
 
         Returns:
-            String containing terminal escape sequences or Unicode art
-            that renders the image when printed.
+            String containing terminal escape sequences that
+            renders the image when printed.
         """
         ...
 
 
-def select_backend(max_width: int = 80) -> GraphicsBackend:
+def select_backend(max_width: int = 80) -> Optional[GraphicsBackend]:
     """Select the best available graphics backend.
 
     Checks JAATO_MERMAID_BACKEND env var first, then falls back to
     auto-detection via terminal_caps.
 
     Returns:
-        A GraphicsBackend instance ready to render images.
+        A GraphicsBackend instance, or None when no image protocol is
+        available (caller should fall back to source display).
     """
     # User override
     override = os.environ.get("JAATO_MERMAID_BACKEND", "").lower()
     if override == "off":
-        # "off" means don't render diagrams at all - caller handles this
-        from .rich_pixels import RichPixelsBackend
-        return RichPixelsBackend(max_width)
+        return None
 
-    if override in ("kitty", "iterm", "sixel", "ascii"):
+    if override in ("kitty", "iterm", "sixel"):
         return _create_backend(override, max_width)
 
     # Auto-detect from terminal capabilities
@@ -65,12 +67,11 @@ def select_backend(max_width: int = 80) -> GraphicsBackend:
     if graphics:
         return _create_backend(graphics, max_width)
 
-    # Universal fallback
-    from .rich_pixels import RichPixelsBackend
-    return RichPixelsBackend(max_width)
+    # No image protocol available
+    return None
 
 
-def _create_backend(protocol: str, max_width: int) -> GraphicsBackend:
+def _create_backend(protocol: str, max_width: int) -> Optional[GraphicsBackend]:
     """Create a backend instance for the given protocol."""
     if protocol == "kitty":
         from .kitty import KittyBackend
@@ -81,6 +82,4 @@ def _create_backend(protocol: str, max_width: int) -> GraphicsBackend:
     elif protocol == "sixel":
         from .sixel import SixelBackend
         return SixelBackend(max_width)
-    else:
-        from .rich_pixels import RichPixelsBackend
-        return RichPixelsBackend(max_width)
+    return None
