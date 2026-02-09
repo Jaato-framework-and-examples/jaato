@@ -69,8 +69,8 @@ docs/jaato-logo.svg
 
 Or for the HTML docs:
 ```
-docs/docs/assets/images/jaato-logo.png
-docs/docs/assets/images/jaato-logo.svg
+docs/web/assets/images/jaato-logo.png
+docs/web/assets/images/jaato-logo.svg
 ```
 
 ---
@@ -259,13 +259,13 @@ A 3D rendered icon showing mathematical operation symbols (+, ×, =) arranged in
 
 Store generated icons in:
 ```
-docs/docs/assets/images/plugins/
+docs/web/assets/images/plugins/
 ```
 
 ### Recommended File Naming Convention
 
 ```
-docs/docs/assets/images/plugins/
+docs/web/assets/images/plugins/
 ├── plugin-cli.png
 ├── plugin-cli.svg
 ├── plugin-mcp.png
@@ -312,15 +312,15 @@ docs/docs/assets/images/plugins/
 
 **README.md:** Add icons inline with plugin descriptions in the Available Plugins section
 ```markdown
-| ![cli](docs/docs/assets/images/plugins/plugin-cli.png) | **cli** | Execute shell commands... |
+| ![cli](docs/web/assets/images/plugins/plugin-cli.png) | **cli** | Execute shell commands... |
 ```
 
 **HTML Docs:** Reference from plugin pages:
 ```html
 <img src="../../assets/images/plugins/plugin-cli.png" alt="CLI Plugin" width="48">
 ```
-- `docs/docs/api-reference/plugins/*.html`
-- `docs/docs/guides/tool-plugins.html`
+- `docs/web/api-reference/plugins/*.html`
+- `docs/web/guides/tool-plugins.html`
 - Plugin cards on the main index page
 
 **Individual Plugin Dirs (optional):** Symlink or copy `icon.png` to each plugin's directory for local reference
