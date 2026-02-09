@@ -568,13 +568,8 @@ class ServiceConnectorPlugin:
         # Level 3: HTTP method filter for 'endpoints <service> <method>'
         if len(args) == 3 and subcommand == 'endpoints':
             partial = args[2].upper()
-            methods = [
-                CommandCompletion('GET', 'GET requests'),
-                CommandCompletion('POST', 'POST requests'),
-                CommandCompletion('PUT', 'PUT requests'),
-                CommandCompletion('DELETE', 'DELETE requests'),
-                CommandCompletion('PATCH', 'PATCH requests'),
-            ]
+            service_name = args[1]
+            methods = self._get_service_methods(service_name)
             return [m for m in methods if m.value.startswith(partial)]
 
         return []
@@ -588,12 +583,51 @@ class ServiceConnectorPlugin:
             if name.lower().startswith(partial)
         ]
 
+    def _get_methods_for_service(self, service_name: str) -> List[str]:
+        """Get sorted list of HTTP methods used in a service's endpoints."""
+        methods: set = set()
+        # _get_service checks memory first, then loads from disk
+        discovered = self._get_service(service_name)
+        if discovered:
+            for ep in discovered.endpoints:
+                methods.add(ep.method)
+        # Also check per-endpoint schema files
+        if self._schema_store:
+            for _ep_name, schema in self._schema_store.list_endpoint_schemas(service_name):
+                methods.add(schema.method)
+        return sorted(methods)
+
+    def _get_service_methods(self, service_name: str) -> List[CommandCompletion]:
+        """Get HTTP method completions for a service's endpoints."""
+        methods = self._get_methods_for_service(service_name)
+        if methods:
+            return [CommandCompletion(m, f'{m} requests') for m in methods]
+        # Fallback to common methods if service has no endpoints yet
+        return [
+            CommandCompletion('GET', 'GET requests'),
+            CommandCompletion('POST', 'POST requests'),
+            CommandCompletion('PUT', 'PUT requests'),
+            CommandCompletion('DELETE', 'DELETE requests'),
+            CommandCompletion('PATCH', 'PATCH requests'),
+        ]
+
     def _get_all_service_names(self) -> List[str]:
         """Get all known service names from memory cache and filesystem."""
         names = set(self._discovered_services.keys())
         if self._schema_store:
             names.update(self._schema_store.list_services())
         return sorted(names)
+
+    def get_service_metadata(self) -> List[Dict[str, Any]]:
+        """Return lightweight service metadata for completion caches.
+
+        Returns:
+            List of dicts with name and methods for each service.
+        """
+        return [
+            {"name": name, "methods": self._get_methods_for_service(name)}
+            for name in self._get_all_service_names()
+        ]
 
     def execute_user_command(self, command: str, args: Dict[str, Any]) -> Any:
         """Execute a user command."""
