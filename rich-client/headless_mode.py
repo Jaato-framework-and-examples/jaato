@@ -60,6 +60,7 @@ async def run_headless_mode(
     # Configure logging - redirect to JAATO_TRACE_LOG if set
     trace_log_path = os.environ.get("JAATO_TRACE_LOG")
     if trace_log_path:
+        os.makedirs(os.path.dirname(os.path.abspath(trace_log_path)), exist_ok=True)
         file_handler = logging.FileHandler(trace_log_path)
         file_handler.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

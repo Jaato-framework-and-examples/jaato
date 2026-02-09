@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 
+from shared.path_utils import is_msys2_environment, normalize_path, get_display_separator
+
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
 
@@ -140,7 +142,7 @@ class EnvironmentPlugin:
             result["arch"] = self._get_arch_info()
 
         if aspect in ("cwd", "all"):
-            result["cwd"] = os.getcwd()
+            result["cwd"] = normalize_path(os.getcwd())
 
         if aspect in ("terminal", "all"):
             result["terminal"] = self._get_terminal_info()
@@ -178,6 +180,13 @@ class EnvironmentPlugin:
         elif system == "Windows":
             info["friendly_name"] = "Windows"
 
+        # Detect MSYS2/Git Bash environment on Windows
+        if is_msys2_environment():
+            msystem = os.environ.get('MSYSTEM', '')
+            info["msys2"] = True
+            info["msystem"] = msystem
+            info["friendly_name"] = f"Windows (MSYS2/{msystem})"
+
         return info
 
     def _get_shell_info(self) -> Dict[str, Any]:
@@ -193,16 +202,28 @@ class EnvironmentPlugin:
             "default": None,
             "current": None,
             "path_separator": os.pathsep,
-            "dir_separator": os.sep,
+            "dir_separator": get_display_separator(),
         }
 
         if system == "Windows":
-            # Windows: check for PowerShell vs cmd
+            # Windows: check for MSYS2/Git Bash, PowerShell, or cmd
             info["default"] = "cmd"
 
+            # Detect MSYS2/Git Bash first (takes priority on Windows)
+            if is_msys2_environment():
+                msystem = os.environ.get('MSYSTEM', 'MSYS')
+                shell_env = os.environ.get('SHELL', '')
+                shell_name = os.path.basename(shell_env) if shell_env else 'bash'
+                info["default"] = shell_name
+                info["current"] = shell_name
+                info["msys2"] = True
+                info["msystem"] = msystem
+                # Under MSYS2, paths should use forward slashes
+                info["dir_separator"] = "/"
+                info["path_separator"] = ":"
             # Detect actual shell by checking PowerShell-specific env vars
             # PSModulePath is set by PowerShell but not cmd
-            if os.environ.get("PSModulePath"):
+            elif os.environ.get("PSModulePath"):
                 # Distinguish PowerShell Core (pwsh) from Windows PowerShell
                 ps_version = os.environ.get("PSVersionTable", "")
                 if "Core" in ps_version or shutil.which("pwsh"):

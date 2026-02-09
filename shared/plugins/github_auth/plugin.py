@@ -42,6 +42,36 @@ class GitHubAuthPlugin:
         """Return the plugin name."""
         return "github_auth"
 
+    @property
+    def provider_name(self) -> str:
+        """Return the provider name this auth plugin serves."""
+        return "github_models"
+
+    @property
+    def provider_display_name(self) -> str:
+        """Return human-readable provider name."""
+        return "GitHub Models"
+
+    def get_default_models(self) -> List[Dict[str, str]]:
+        """Return default models available for this provider."""
+        return [
+            {"name": "github/gpt-4o", "description": "GPT-4o — fast and capable"},
+            {"name": "github/gpt-4o-mini", "description": "GPT-4o mini — lightweight"},
+            {"name": "github/o3-mini", "description": "O3 mini — reasoning model"},
+        ]
+
+    def verify_credentials(self) -> bool:
+        """Check if valid credentials exist after authentication."""
+        try:
+            from ..model_provider.github_models.oauth import load_tokens
+            from ..model_provider.github_models.env import resolve_token
+            tokens = load_tokens()
+            if tokens and tokens.access_token:
+                return True
+            return bool(resolve_token())
+        except Exception:
+            return False
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin."""
         pass

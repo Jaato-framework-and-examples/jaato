@@ -220,6 +220,7 @@ class ActiveToolCall:
     # Continuation grouping (e.g., interactive shell sessions)
     continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
     show_output: bool = True  # Whether to render output_lines in the main panel (popup unaffected)
+    show_popup: bool = True  # Whether to track/update the tool output popup
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -976,7 +977,8 @@ class OutputBuffer:
                             call_id: Optional[str] = None,
                             backgrounded: bool = False,
                             continuation_id: Optional[str] = None,
-                            show_output: Optional[bool] = None) -> None:
+                            show_output: Optional[bool] = None,
+                            show_popup: Optional[bool] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         When backgrounded=True, the tool is marked completed for tree purposes
@@ -997,6 +999,9 @@ class OutputBuffer:
             continuation_id: Session ID for continuation grouping (popup stays open).
             show_output: Whether to render output_lines in the main panel.
                 None means keep current value. The popup is unaffected.
+            show_popup: Whether to track/update the tool output popup.
+                None means keep current value. False prevents this tool from
+                becoming the tracked popup tool.
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
@@ -1026,10 +1031,13 @@ class OutputBuffer:
                         tool.error_message = error_message
                         if show_output is not None:
                             tool.show_output = show_output
-                        if backgrounded and call_id:
+                        if show_popup is not None:
+                            tool.show_popup = show_popup
+                        if backgrounded and call_id and tool.show_popup:
                             self._popup_tools[call_id] = tool
-                        # Continuation grouping
-                        self._apply_continuation(tool, call_id, continuation_id)
+                        # Continuation grouping (skip popup tracking if show_popup=False)
+                        if tool.show_popup:
+                            self._apply_continuation(tool, call_id, continuation_id)
                         return
             elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
@@ -4496,8 +4504,9 @@ class OutputBuffer:
                 # Extended thinking output - render with header/footer and indentation
                 # This is the model's internal reasoning before generating response
                 # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+                indent = "   "  # Left indent for the entire thinking block
                 border = "│ "
-                border_width = len(border)
+                border_width = len(indent) + len(border)
                 if line.is_turn_start:
                     # First render Model header (thinking is part of model turn)
                     header_prefix = "── Model "
@@ -4507,7 +4516,9 @@ class OutputBuffer:
                     output.append("\n")
                     # Then render thinking header: ┌─ Internal thinking ───────┐
                     thinking_header = "┌─ Internal thinking "
-                    remaining = max(0, wrap_width - len(thinking_header) - 1)
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - len(thinking_header) - 1)
+                    output.append(indent)
                     output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
                     output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
@@ -4517,6 +4528,7 @@ class OutputBuffer:
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
+                    output.append(indent)
                     output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
                     output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
                 # Track that we're in thinking mode for footer rendering
@@ -4529,7 +4541,9 @@ class OutputBuffer:
                 if is_last_thinking:
                     # Render footer: └─────────────────────────────────────────┘
                     output.append("\n")
-                    remaining = max(0, wrap_width - 2)  # -2 for └ and ┘
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - 2)  # -2 for └ and ┘
+                    output.append(indent)
                     output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
                     output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))

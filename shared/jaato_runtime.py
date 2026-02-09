@@ -18,6 +18,7 @@ from .plugins.telemetry import TelemetryPlugin, create_plugin as create_telemetr
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
     from .plugins.permission import PermissionPlugin
+    from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
 
 # Framework-level instruction appended to all system prompts and tool results
@@ -133,6 +134,7 @@ class JaatoRuntime:
         # Shared resources
         self._registry: Optional['PluginRegistry'] = None
         self._permission_plugin: Optional['PermissionPlugin'] = None
+        self._reliability_plugin: Optional['ReliabilityPlugin'] = None
         self._ledger: Optional[TokenLedger] = None
 
         # Tool configuration cache (built from registry)
@@ -208,6 +210,11 @@ class JaatoRuntime:
     def permission_plugin(self) -> Optional['PermissionPlugin']:
         """Get the permission plugin."""
         return self._permission_plugin
+
+    @property
+    def reliability_plugin(self) -> Optional['ReliabilityPlugin']:
+        """Get the reliability plugin."""
+        return self._reliability_plugin
 
     @property
     def ledger(self) -> Optional[TokenLedger]:
@@ -372,25 +379,35 @@ class JaatoRuntime:
         self,
         registry: 'PluginRegistry',
         permission_plugin: Optional['PermissionPlugin'] = None,
-        ledger: Optional[TokenLedger] = None
+        ledger: Optional[TokenLedger] = None,
+        reliability_plugin: Optional['ReliabilityPlugin'] = None,
     ) -> None:
         """Configure plugins for the runtime.
 
-        Sets up the shared plugin registry, permission plugin, and ledger
-        that will be available to all sessions.
+        Sets up the shared plugin registry, permission plugin, reliability plugin,
+        and ledger that will be available to all sessions.
 
         Args:
             registry: PluginRegistry with exposed plugins.
             permission_plugin: Optional permission plugin for access control.
             ledger: Optional token ledger for accounting.
+            reliability_plugin: Optional reliability plugin for failure tracking.
         """
         self._registry = registry
         self._permission_plugin = permission_plugin
+        self._reliability_plugin = reliability_plugin
         self._ledger = ledger
 
         # Give permission plugin access to registry for plugin lookups
         if permission_plugin:
             permission_plugin.set_registry(registry)
+
+        # Configure reliability plugin
+        if reliability_plugin:
+            reliability_plugin.set_registry(registry)
+            # Connect telemetry if enabled
+            if self._telemetry and self._telemetry.enabled:
+                reliability_plugin.set_telemetry(self._telemetry)
 
         # Cache tool configuration from registry
         self._cache_tool_configuration()
@@ -429,12 +446,24 @@ class JaatoRuntime:
                 if schema.name not in existing_names:
                     self._all_tool_schemas.append(schema)
 
+        # Add reliability plugin schemas if available (but avoid duplicates)
+        if self._reliability_plugin:
+            existing_names = {s.name for s in self._all_tool_schemas}
+            for schema in self._reliability_plugin.get_tool_schemas():
+                if schema.name not in existing_names:
+                    self._all_tool_schemas.append(schema)
+
         # Get enabled executors (respects disabled tools set)
         self._all_executors = dict(self._registry.get_enabled_executors())
 
         # Add permission plugin executors (dict update handles duplicates)
         if self._permission_plugin:
             for name, fn in self._permission_plugin.get_executors().items():
+                self._all_executors[name] = fn
+
+        # Add reliability plugin executors
+        if self._reliability_plugin:
+            for name, fn in self._reliability_plugin.get_executors().items():
                 self._all_executors[name] = fn
 
         # Build system instructions
@@ -452,6 +481,10 @@ class JaatoRuntime:
             perm_instructions = self._permission_plugin.get_system_instructions()
             if perm_instructions:
                 parts.append(perm_instructions)
+        if self._reliability_plugin:
+            reliability_instructions = self._reliability_plugin.get_system_instructions()
+            if reliability_instructions:
+                parts.append(reliability_instructions)
         self._system_instructions = "\n\n".join(parts) if parts else None
 
         # Get auto-approved tools from plugins
@@ -461,6 +494,11 @@ class JaatoRuntime:
         # User commands are invoked directly by the user, not the model
         builtin_user_commands = ["model"]
         self._auto_approved_tools.extend(builtin_user_commands)
+
+        # Add reliability plugin's auto-approved tools
+        if self._reliability_plugin:
+            reliability_auto_approved = self._reliability_plugin.get_auto_approved_tools()
+            self._auto_approved_tools.extend(reliability_auto_approved)
 
         if self._permission_plugin and self._auto_approved_tools:
             self._permission_plugin.add_whitelist_tools(self._auto_approved_tools)

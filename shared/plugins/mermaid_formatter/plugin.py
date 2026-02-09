@@ -243,14 +243,6 @@ class MermaidFormatterPlugin:
                 # No image protocol — show truncated source + artifact path
                 return self._fallback_source_with_hint(source, artifact_path)
 
-            rendered = backend.render(result.png, max_width=render_width)
-
-            # Add artifact path reference
-            if artifact_path:
-                rendered += f"    \x1b[2m[saved: {artifact_path}]\x1b[0m\n"
-
-            # Prefix each non-empty rendered line so the output buffer
-            # skips wrapping (preserves pixel-aligned graphics output)
             lines = rendered.split('\n')
             rendered = '\n'.join(
                 PRERENDERED_LINE_PREFIX + line if line.strip() else line
@@ -338,6 +330,7 @@ class MermaidFormatterPlugin:
         if artifact_path:
             block += f"\n    \x1b[2m[saved: {artifact_path}]\x1b[0m\n"
         return block
+
 
     def _fallback_code_block(self, source: str) -> str:
         """Show the source as a passthrough code block.

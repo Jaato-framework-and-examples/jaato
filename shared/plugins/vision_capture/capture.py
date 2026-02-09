@@ -169,9 +169,10 @@ class VisionCapture:
             # Remove intermediate SVG
             os.remove(svg_path)
             return png_path
-        except ImportError:
-            # cairosvg not available, fall back to SVG
-            # Rename .png back to .svg
+        except (ImportError, OSError):
+            # cairosvg not available or native Cairo library not found.
+            # On Windows, cairocffi raises OSError when libcairo DLL is missing.
+            # Fall back to SVG.
             actual_path = svg_path
             return actual_path
 

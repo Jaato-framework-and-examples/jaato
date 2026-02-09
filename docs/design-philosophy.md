@@ -291,6 +291,44 @@ Unlike pure conversation branching, waypoints capture:
 
 ---
 
+## 12. Path Normalization at Boundaries, Not Internally
+
+**Principle**: Convert paths between shell format and Python format only at entry/exit boundaries; never normalize paths that stay internal to Python.
+
+### The Problem
+
+When native Windows Python runs inside MSYS2 or Git Bash, there's a format mismatch:
+- Python produces `C:\Users\foo` (Windows native)
+- The shell expects `/c/Users/foo` (Unix-style with mount-point drive letters)
+
+### Three Boundary Layers
+
+| Layer | Direction | Function | When |
+|-------|-----------|----------|------|
+| **Input** | Shell → Python | `msys2_to_windows_path()` | Path arrives from user/model |
+| **Comparison** | Python ↔ Python | `normalize_for_comparison()` | Comparing two paths as strings |
+| **Output** | Python → Shell | `normalize_result_path()` | Path appears in tool results |
+
+### Why Boundaries Only?
+
+1. **Python's internal APIs all expect native format** — `open()`, `Path()`, `os.path.*` all use Windows APIs on Windows. Converting paths internally would break them.
+2. **Safe to call unconditionally** — All three functions are no-ops on platforms where they don't apply (Linux, macOS, standard Windows).
+3. **Roundtrip safe** — Input converts `/c/foo` → `C:/foo`, output converts it back. The model can pass either format and it always resolves correctly.
+
+### New Component Checklist
+
+When adding a new plugin or component that handles file paths:
+1. Call `msys2_to_windows_path()` on path parameters before any `Path()` or `os.path` call
+2. Use `normalize_for_comparison()` for any path string comparison (prefix, equality)
+3. Wrap paths in tool result dicts with `normalize_result_path()`
+4. Do **not** normalize paths that stay inside Python
+
+**Full pattern documentation**: [docs/path-boundary-pattern.md](path-boundary-pattern.md)
+
+**Implementation**: `shared/path_utils.py`
+
+---
+
 ## Future Additions
 
 Document new design decisions here as they emerge. Each entry should include:
