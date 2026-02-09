@@ -39,6 +39,7 @@ from .find_replace import (
     FindReplaceResult,
     generate_find_replace_preview,
 )
+from shared.path_utils import normalize_result_path
 from shared.trace import trace as _trace_write
 
 
@@ -903,7 +904,7 @@ will show you a preview and require approval before execution. Backups are autom
                     "image_data": data,
                     "mime_type": mime_type,
                     "display_name": file_path.name,
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "size": len(data),
                     "type": "image",
                 }
@@ -944,7 +945,7 @@ will show you a preview and require approval before execution. Backups are autom
                 actual_end = min(start_idx + len(selected_lines), total_lines)
 
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "content": chunk_content,
                     "size": len(chunk_content),
                     "lines": len(selected_lines),
@@ -956,7 +957,7 @@ will show you a preview and require approval before execution. Backups are autom
             else:
                 # No chunking - return entire file
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "content": content,
                     "size": len(content),
                     "lines": total_lines
@@ -995,12 +996,12 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.write_text(new_content)
             result = {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "size": len(new_content),
                 "lines": len(new_content.splitlines())
             }
             if backup_path:
-                result["backup"] = str(backup_path)
+                result["backup"] = normalize_result_path(str(backup_path))
             return result
         except OSError as e:
             return {"error": f"Failed to write file: {e}"}
@@ -1029,7 +1030,7 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.write_text(content)
             return {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "size": len(content),
                 "lines": len(content.splitlines())
             }
@@ -1065,11 +1066,11 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.unlink()
             result = {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "deleted": True
             }
             if backup_path:
-                result["backup"] = str(backup_path)
+                result["backup"] = normalize_result_path(str(backup_path))
             return result
         except OSError as e:
             return {"error": f"Failed to delete file: {e}"}
@@ -1128,19 +1129,19 @@ will show you a preview and require approval before execution. Backups are autom
 
             result = {
                 "success": True,
-                "source": source_path,
-                "destination": destination_path
+                "source": normalize_result_path(source_path),
+                "destination": normalize_result_path(destination_path)
             }
             if backup_path:
-                result["source_backup"] = str(backup_path)
+                result["source_backup"] = normalize_result_path(str(backup_path))
             if dest_backup_path:
-                result["destination_backup"] = str(dest_backup_path)
+                result["destination_backup"] = normalize_result_path(str(dest_backup_path))
             return result
         except OSError as e:
             return {
                 "error": f"Failed to move file: {e}",
-                "source": source_path,
-                "destination": destination_path
+                "source": normalize_result_path(source_path),
+                "destination": normalize_result_path(destination_path)
             }
 
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1167,8 +1168,8 @@ will show you a preview and require approval before execution. Backups are autom
         if self._backup_manager.restore_from_backup(file_path):
             return {
                 "success": True,
-                "path": path,
-                "restored_from": str(backup_path) if backup_path else "unknown",
+                "path": normalize_result_path(path),
+                "restored_from": normalize_result_path(str(backup_path)) if backup_path else "unknown",
                 "message": f"File restored from backup"
             }
         else:
@@ -1279,8 +1280,8 @@ will show you a preview and require approval before execution. Backups are autom
         if self._backup_manager.restore_from_backup(file_path, backup_path):
             return {
                 "success": True,
-                "path": path,
-                "restored_from": str(backup_path),
+                "path": normalize_result_path(path),
+                "restored_from": normalize_result_path(str(backup_path)),
                 "message": "File restored from backup"
             }
         else:
@@ -1302,16 +1303,16 @@ will show you a preview and require approval before execution. Backups are autom
 
             if not backups:
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "backups": [],
                     "message": f"No backups found for {path}"
                 }
 
             return {
-                "path": path,
+                "path": normalize_result_path(path),
                 "backups": [
                     {
-                        "backup_path": str(b),
+                        "backup_path": normalize_result_path(str(b)),
                         "timestamp": b.stat().st_mtime,
                         "size": b.stat().st_size
                     }

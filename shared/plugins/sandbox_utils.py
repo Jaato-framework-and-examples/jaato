@@ -32,6 +32,8 @@ import os
 import tempfile
 from typing import Optional, Tuple
 
+from shared.path_utils import normalize_for_comparison
+
 
 # The special configuration directory that gets contained symlink escape
 JAATO_CONFIG_DIR = ".jaato"
@@ -57,10 +59,14 @@ def is_jaato_path(path: str, workspace_root: str) -> bool:
     """
     # Check the workspace-relative .jaato path
     jaato_dir = os.path.join(workspace_root, JAATO_CONFIG_DIR)
-    jaato_prefix = jaato_dir + os.sep
+    # Use normalized comparison to handle mixed separators (e.g., MSYS2 on Windows
+    # where os.path.join uses backslashes but paths may have forward slashes)
+    norm_path = normalize_for_comparison(path)
+    norm_jaato_dir = normalize_for_comparison(jaato_dir)
+    norm_jaato_prefix = norm_jaato_dir + '/'
 
     # Direct check for absolute paths
-    if path == jaato_dir or path.startswith(jaato_prefix):
+    if norm_path == norm_jaato_dir or norm_path.startswith(norm_jaato_prefix):
         return True
 
     # Also check if the path CONTAINS .jaato as a component
@@ -141,7 +147,8 @@ def has_nested_symlink(path: str, jaato_boundary: str, workspace_root: str) -> b
         return True
 
     # Walk from jaato_boundary through each component
-    parts = rel_from_jaato.split(os.sep)
+    # Split on both separators for MSYS2/Windows compatibility
+    parts = rel_from_jaato.replace('\\', '/').split('/')
     current = jaato_boundary
 
     for part in parts:
@@ -182,8 +189,10 @@ def is_path_within_jaato_boundary(
     real_path = os.path.realpath(path)
 
     # Check if resolved path is within .jaato boundary
-    boundary_prefix = jaato_boundary.rstrip(os.sep) + os.sep
-    if not (real_path == jaato_boundary or real_path.startswith(boundary_prefix)):
+    # Use normalized comparison to handle mixed separators (MSYS2/Windows)
+    norm_real = normalize_for_comparison(real_path)
+    norm_boundary = normalize_for_comparison(jaato_boundary).rstrip('/') + '/'
+    if not (norm_real == normalize_for_comparison(jaato_boundary) or norm_real.startswith(norm_boundary)):
         # Path escapes .jaato boundary (e.g., .jaato/../secret.txt)
         return False
 
@@ -203,10 +212,10 @@ def is_under_temp_path(path: str) -> bool:
     Returns:
         True if path is under /tmp or system temp directory.
     """
-    normalized = os.path.normpath(path)
+    normalized = normalize_for_comparison(os.path.normpath(path))
     for temp_path in SYSTEM_TEMP_PATHS:
-        temp_normalized = os.path.normpath(temp_path)
-        if normalized == temp_normalized or normalized.startswith(temp_normalized + os.sep):
+        temp_normalized = normalize_for_comparison(os.path.normpath(temp_path))
+        if normalized == temp_normalized or normalized.startswith(temp_normalized + '/'):
             return True
     return False
 
@@ -274,9 +283,11 @@ def check_path_with_jaato_containment(
         return is_path_within_jaato_boundary(abs_path, workspace_root, jaato_boundary)
 
     # Standard workspace check - resolve symlinks
+    # Use normalized comparison to handle mixed separators (MSYS2/Windows)
     real_path = os.path.realpath(abs_path)
-    workspace_prefix = workspace_root.rstrip(os.sep) + os.sep
-    if real_path == workspace_root or real_path.startswith(workspace_prefix):
+    norm_real = normalize_for_comparison(real_path)
+    norm_workspace = normalize_for_comparison(workspace_root).rstrip('/') + '/'
+    if norm_real == normalize_for_comparison(workspace_root) or norm_real.startswith(norm_workspace):
         return True
 
     # Check if authorized via plugin registry (for external paths)

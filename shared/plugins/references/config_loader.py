@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from shared.path_utils import normalize_path
 from .models import ReferenceSource, SourceType, InjectionMode
 
 logger = logging.getLogger(__name__)
@@ -111,11 +112,12 @@ def discover_references(
                         # Regular relative path - resolve against reference file's directory
                         absolute_path = (file_path.parent / source_path).resolve()
                 # Convert to project-root-relative path
+                # Normalize separators for MSYS2 compatibility (forward slashes)
                 try:
-                    source.resolved_path = os.path.relpath(absolute_path, project_root)
+                    source.resolved_path = normalize_path(os.path.relpath(absolute_path, project_root))
                 except ValueError:
                     # On Windows, relpath fails for paths on different drives
-                    source.resolved_path = str(absolute_path)
+                    source.resolved_path = normalize_path(str(absolute_path))
 
             sources.append(source)
             logger.debug("Discovered reference '%s' from %s", source.id, file_path)
@@ -222,14 +224,15 @@ def resolve_source_paths(
                 absolute_path = (base / source_path).resolve()
 
         # Make relative to CWD if requested
+        # Normalize separators for MSYS2 compatibility (forward slashes)
         if cwd:
             try:
-                resolved = os.path.relpath(absolute_path, cwd)
+                resolved = normalize_path(os.path.relpath(absolute_path, cwd))
             except ValueError:
                 # On Windows, relpath fails for paths on different drives
-                resolved = str(absolute_path)
+                resolved = normalize_path(str(absolute_path))
         else:
-            resolved = str(absolute_path)
+            resolved = normalize_path(str(absolute_path))
 
         source.resolved_path = resolved
         logger.debug(
