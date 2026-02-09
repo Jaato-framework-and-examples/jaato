@@ -128,7 +128,7 @@ class TestMultiFileExecutor:
                 return p
             return workspace / path
 
-        def is_path_allowed(path: str) -> bool:
+        def is_path_allowed(path: str, mode: str = "read") -> bool:
             resolved = Path(path) if Path(path).is_absolute() else workspace / path
             try:
                 resolved.relative_to(workspace)
@@ -410,7 +410,7 @@ class TestFindReplaceExecutor:
                 return p
             return workspace / path
 
-        def is_path_allowed(path: str) -> bool:
+        def is_path_allowed(path: str, mode: str = "read") -> bool:
             return True
 
         return FindReplaceExecutor(

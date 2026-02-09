@@ -122,8 +122,9 @@ class PluginRegistry:
         self._disabled_tools: Set[str] = set()  # Individual tools disabled by user
         self._output_callback: Optional[OutputCallback] = None
         self._terminal_width: int = 80
-        # Authorized external paths: path -> source plugin name
-        self._authorized_external_paths: Dict[str, str] = {}
+        # Authorized external paths: path -> (source plugin name, access mode)
+        # access mode is "readonly" or "readwrite"
+        self._authorized_external_paths: Dict[str, tuple] = {}
         # Denied external paths: path -> source plugin name (takes precedence over authorized)
         self._denied_external_paths: Dict[str, str] = {}
         # Core tools: framework-provided tools not from plugins
@@ -1111,7 +1112,12 @@ class PluginRegistry:
 
     # ==================== External Path Authorization ====================
 
-    def authorize_external_path(self, path: str, source_plugin: str) -> None:
+    def authorize_external_path(
+        self,
+        path: str,
+        source_plugin: str,
+        access: str = "readwrite"
+    ) -> None:
         """Authorize an external path for model access.
 
         Plugins (like references) can use this to allow the model to access
@@ -1120,23 +1126,34 @@ class PluginRegistry:
         Args:
             path: Absolute path to authorize (will be normalized).
             source_plugin: Name of the plugin granting authorization.
+            access: Access mode - "readonly" for read-only, "readwrite" for
+                   full access (default: "readwrite").
         """
+        if access not in ("readonly", "readwrite"):
+            raise ValueError(f"Invalid access mode: {access!r}. Must be 'readonly' or 'readwrite'.")
         # Normalize to absolute path
         normalized = os.path.realpath(os.path.abspath(path))
-        self._authorized_external_paths[normalized] = source_plugin
-        _trace(f"authorize_external_path: {normalized} (from {source_plugin})")
+        self._authorized_external_paths[normalized] = (source_plugin, access)
+        _trace(f"authorize_external_path: {normalized} (from {source_plugin}, access={access})")
 
-    def authorize_external_paths(self, paths: List[str], source_plugin: str) -> None:
+    def authorize_external_paths(
+        self,
+        paths: List[str],
+        source_plugin: str,
+        access: str = "readwrite"
+    ) -> None:
         """Authorize multiple external paths for model access.
 
         Args:
             paths: List of absolute paths to authorize.
             source_plugin: Name of the plugin granting authorization.
+            access: Access mode - "readonly" for read-only, "readwrite" for
+                   full access (default: "readwrite").
         """
         for path in paths:
-            self.authorize_external_path(path, source_plugin)
+            self.authorize_external_path(path, source_plugin, access=access)
 
-    def is_path_authorized(self, path: str) -> bool:
+    def is_path_authorized(self, path: str, mode: str = "read") -> bool:
         """Check if a path is authorized for model access.
 
         This checks both exact path matches and parent directory matches
@@ -1144,9 +1161,14 @@ class PluginRegistry:
 
         Args:
             path: Path to check (will be normalized).
+            mode: Required access mode - "read" or "write" (default: "read").
+                 A path authorized as "readwrite" satisfies both "read" and
+                 "write" mode checks. A path authorized as "readonly" only
+                 satisfies "read" mode checks.
 
         Returns:
-            True if the path or a parent directory is authorized.
+            True if the path or a parent directory is authorized with
+            sufficient access.
         """
         if not self._authorized_external_paths:
             return False
@@ -1154,16 +1176,24 @@ class PluginRegistry:
         # Normalize the path
         normalized = os.path.realpath(os.path.abspath(path))
 
+        def _access_sufficient(entry_access: str) -> bool:
+            """Check if the authorized access level is sufficient."""
+            if mode == "read":
+                return True  # Both "readonly" and "readwrite" allow reads
+            # mode == "write": only "readwrite" allows writes
+            return entry_access == "readwrite"
+
         # Check exact match
         if normalized in self._authorized_external_paths:
-            return True
+            _source, entry_access = self._authorized_external_paths[normalized]
+            return _access_sufficient(entry_access)
 
         # Check if any authorized path is a parent directory
-        for authorized_path in self._authorized_external_paths:
+        for authorized_path, (_, entry_access) in self._authorized_external_paths.items():
             # Check if normalized path is under an authorized directory
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
-                return True
+                return _access_sufficient(entry_access)
 
         return False
 
@@ -1183,13 +1213,41 @@ class PluginRegistry:
 
         # Check exact match
         if normalized in self._authorized_external_paths:
-            return self._authorized_external_paths[normalized]
+            source, _access = self._authorized_external_paths[normalized]
+            return source
 
         # Check parent directories
-        for authorized_path, source in self._authorized_external_paths.items():
+        for authorized_path, (source, _access) in self._authorized_external_paths.items():
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
                 return source
+
+        return None
+
+    def get_path_access_mode(self, path: str) -> Optional[str]:
+        """Get the access mode for an authorized path.
+
+        Args:
+            path: Path to check (will be normalized).
+
+        Returns:
+            Access mode ("readonly" or "readwrite"), or None if not authorized.
+        """
+        if not self._authorized_external_paths:
+            return None
+
+        normalized = os.path.realpath(os.path.abspath(path))
+
+        # Check exact match
+        if normalized in self._authorized_external_paths:
+            _source, access = self._authorized_external_paths[normalized]
+            return access
+
+        # Check parent directories
+        for authorized_path, (_source, access) in self._authorized_external_paths.items():
+            auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
+            if normalized.startswith(auth_with_sep):
+                return access
 
         return None
 
@@ -1211,7 +1269,7 @@ class PluginRegistry:
 
         # Clear only paths from the specified plugin
         to_remove = [
-            path for path, source in self._authorized_external_paths.items()
+            path for path, (source, _access) in self._authorized_external_paths.items()
             if source == source_plugin
         ]
         for path in to_remove:
@@ -1225,8 +1283,23 @@ class PluginRegistry:
 
         Returns:
             Dict mapping normalized paths to the source plugin that authorized them.
+
+        Note:
+            For backward compatibility this returns source plugin names as values.
+            Use list_authorized_paths_detailed() to get access mode info.
         """
-        return dict(self._authorized_external_paths)
+        return {path: source for path, (source, _access) in self._authorized_external_paths.items()}
+
+    def list_authorized_paths_detailed(self) -> Dict[str, Dict[str, str]]:
+        """List all authorized external paths with access mode details.
+
+        Returns:
+            Dict mapping normalized paths to {"source": plugin_name, "access": mode}.
+        """
+        return {
+            path: {"source": source, "access": access}
+            for path, (source, access) in self._authorized_external_paths.items()
+        }
 
     # ==================== External Path Denial ====================
 

@@ -215,7 +215,8 @@ def check_path_with_jaato_containment(
     path: str,
     workspace_root: str,
     plugin_registry=None,
-    allow_tmp: bool = True
+    allow_tmp: bool = True,
+    mode: str = "read"
 ) -> bool:
     """Check if a path is allowed, with special .jaato containment handling.
 
@@ -223,7 +224,7 @@ def check_path_with_jaato_containment(
     1. Denied paths (checked first, takes precedence over all other rules)
     2. Standard workspace sandboxing (paths must be within workspace)
     3. Special .jaato handling (symlink allowed, but contained)
-    4. Plugin registry authorization (for external paths)
+    4. Plugin registry authorization (for external paths, respects access mode)
     5. System temp directories (/tmp) when allow_tmp=True
 
     Args:
@@ -232,6 +233,9 @@ def check_path_with_jaato_containment(
         plugin_registry: Optional PluginRegistry for external path authorization
                         and denial checking.
         allow_tmp: Whether to allow /tmp/** access (default: True).
+        mode: Access mode being requested - "read" or "write" (default: "read").
+             This is used when checking authorized external paths to respect
+             their access level (e.g., a "readonly" path blocks write access).
 
     Returns:
         True if path is allowed, False otherwise.
@@ -276,7 +280,9 @@ def check_path_with_jaato_containment(
         return True
 
     # Check if authorized via plugin registry (for external paths)
-    if plugin_registry and plugin_registry.is_path_authorized(real_path):
-        return True
+    # Pass the mode so that "readonly" paths block write access
+    if plugin_registry and hasattr(plugin_registry, 'is_path_authorized'):
+        if plugin_registry.is_path_authorized(real_path, mode=mode):
+            return True
 
     return False

@@ -191,7 +191,7 @@ class FindReplaceExecutor:
         self,
         workspace_root: Optional[Path],
         resolve_path_fn: Callable[[str], Path],
-        is_path_allowed_fn: Callable[[str], bool],
+        is_path_allowed_fn: Callable,
         backup_fn: Optional[Callable[[Path], Optional[Path]]] = None,
         trace_fn: Optional[Callable[[str], None]] = None
     ):
@@ -200,7 +200,8 @@ class FindReplaceExecutor:
         Args:
             workspace_root: Root directory for file searches
             resolve_path_fn: Function to resolve relative paths
-            is_path_allowed_fn: Function to check sandbox permissions
+            is_path_allowed_fn: Function to check sandbox permissions.
+                Signature: (path: str, mode: str = "read") -> bool
             backup_fn: Optional function to create backups before changes
             trace_fn: Optional function for debug tracing
         """
@@ -268,8 +269,8 @@ class FindReplaceExecutor:
             if not path.is_file():
                 continue
 
-            # Check if file is allowed by sandbox
-            if not self._is_path_allowed(str(path)):
+            # Check if file is allowed by sandbox (write mode for find-replace)
+            if not self._is_path_allowed(str(path), mode="write"):
                 continue
 
             # Check if file should be ignored
