@@ -4319,11 +4319,72 @@ class OutputBuffer:
             wrap_width = max(20, wrap_width - 6)
 
         # Define wrap_text helper before the loops
+        def _wrap_paragraph_by_display_width(paragraph: str, available: int) -> List[str]:
+            """Wrap a single paragraph using display width instead of len().
+
+            Uses _display_width() to correctly handle wide characters (CJK),
+            East Asian Ambiguous characters (box-drawing), and zero-width chars.
+            Falls back to textwrap for pure-ASCII text where len() == display width.
+            """
+            # Fast path: pure ASCII text where len() == display width
+            if paragraph.isascii():
+                return textwrap.wrap(paragraph, width=available, break_long_words=True, break_on_hyphens=False)
+
+            # Display-width-aware wrapping for text with wide/ambiguous characters
+            words = paragraph.split(' ')
+            lines: List[str] = []
+            current_parts: List[str] = []
+            current_width = 0
+
+            for word in words:
+                word_width = _display_width(word)
+                # Break words wider than available width
+                if word_width > available:
+                    # Flush current line
+                    if current_parts:
+                        lines.append(' '.join(current_parts))
+                        current_parts = []
+                        current_width = 0
+                    # Break long word character by character
+                    chunk = ''
+                    chunk_width = 0
+                    for char in word:
+                        cw = _display_width(char)
+                        if chunk_width + cw > available and chunk:
+                            lines.append(chunk)
+                            chunk = char
+                            chunk_width = cw
+                        else:
+                            chunk += char
+                            chunk_width += cw
+                    if chunk:
+                        current_parts = [chunk]
+                        current_width = chunk_width
+                    continue
+
+                if current_parts:
+                    # +1 for the space between words
+                    if current_width + 1 + word_width <= available:
+                        current_parts.append(word)
+                        current_width += 1 + word_width
+                    else:
+                        lines.append(' '.join(current_parts))
+                        current_parts = [word]
+                        current_width = word_width
+                else:
+                    current_parts = [word]
+                    current_width = word_width
+
+            if current_parts:
+                lines.append(' '.join(current_parts))
+            return lines if lines else ['']
+
         def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
             """Wrap text to console width, accounting for prefix.
 
             Handles multi-line text by splitting on newlines first,
-            then wrapping each line individually.
+            then wrapping each line individually.  Uses _display_width()
+            for correct handling of wide/ambiguous-width characters.
             """
             available = max(20, wrap_width - prefix_width)
 
@@ -4336,11 +4397,10 @@ class OutputBuffer:
                 if not paragraph.strip():
                     # Preserve empty lines (paragraph breaks)
                     result.append('')
-                elif len(paragraph) <= available:
+                elif _display_width(paragraph) <= available:
                     result.append(paragraph)
                 else:
-                    # Use textwrap for clean word-based wrapping
-                    wrapped = textwrap.wrap(paragraph, width=available, break_long_words=True, break_on_hyphens=False)
+                    wrapped = _wrap_paragraph_by_display_width(paragraph, available)
                     result.extend(wrapped)
             return result if result else ['']
 
@@ -4384,7 +4444,9 @@ class OutputBuffer:
                     # "parent" source means message from parent agent to this subagent
                     user_label = "Parent" if line.source == "parent" else "User"
                     header_prefix = f"── {user_label} "
-                    remaining = max(0, wrap_width - len(header_prefix))
+                    prefix_dw = _display_width(header_prefix)
+                    dash_dw = _display_width("─") or 1
+                    remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
                     output.append(header_prefix, style=self._style("user_header", "bold green"))
                     output.append("─" * remaining, style=self._style("user_header_separator", "dim green"))
                     output.append("\n")
@@ -4417,7 +4479,9 @@ class OutputBuffer:
                     # Render header line: ── Model ─────────────────
                     # Note: blank line for visual separation is added at inter-item level above
                     header_prefix = "── Model "
-                    remaining = max(0, wrap_width - len(header_prefix))
+                    prefix_dw = _display_width(header_prefix)
+                    dash_dw = _display_width("─") or 1
+                    remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
                     output.append(header_prefix, style=self._style("model_header", "bold cyan"))
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
@@ -4506,9 +4570,17 @@ class OutputBuffer:
                 # Extended thinking output - render with header/footer and indentation
                 # This is the model's internal reasoning before generating response
                 # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+                # NOTE: Box-drawing chars have East Asian Ambiguous width, so we use
+                # _display_width() throughout to handle terminals where they render as 2 columns.
                 indent = "   "  # Left indent for the entire thinking block
                 border = "│ "
-                border_width = len(indent) + len(border)
+                indent_dw = _display_width(indent)
+                border_dw = _display_width(border)
+                border_width = indent_dw + border_dw
+                dash_dw = _display_width("─") or 1
+                # Extra 1-char right margin compensates for italic font rendering in
+                # terminals that slant glyphs rightward, clipping the last character.
+                italic_margin = 1
                 # Check if this is the first thinking line in a consecutive group
                 is_first_thinking = (i == 0) or (items_to_show[i - 1].source != "thinking"
                                                   if isinstance(items_to_show[i - 1], OutputLine)
@@ -4516,22 +4588,25 @@ class OutputBuffer:
                 if line.is_turn_start:
                     # First render Model header (thinking is part of model turn)
                     header_prefix = "── Model "
-                    remaining = max(0, wrap_width - len(header_prefix))
+                    prefix_dw = _display_width(header_prefix)
+                    remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
                     output.append(header_prefix, style=self._style("model_header", "bold cyan"))
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
                 if is_first_thinking:
                     # Render thinking header (top border): ┌─ Internal thinking ───────┐
                     thinking_header = "┌─ Internal thinking "
-                    box_width = wrap_width - len(indent)
-                    remaining = max(0, box_width - len(thinking_header) - 1)
+                    box_display_width = wrap_width - indent_dw
+                    header_dw = _display_width(thinking_header)
+                    closing_dw = _display_width("┐")
+                    remaining = max(0, (box_display_width - header_dw - closing_dw) // dash_dw)
                     output.append(indent)
                     output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
                     output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
                     output.append("\n")
                 # Render thinking content with border (aligned with box)
-                wrapped = wrap_text(line.text, border_width)
+                wrapped = wrap_text(line.text, border_width + italic_margin)
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
@@ -4548,8 +4623,10 @@ class OutputBuffer:
                 if is_last_thinking:
                     # Render footer: └─────────────────────────────────────────┘
                     output.append("\n")
-                    box_width = wrap_width - len(indent)
-                    remaining = max(0, box_width - 2)  # -2 for └ and ┘
+                    box_display_width = wrap_width - indent_dw
+                    opening_dw = _display_width("└")
+                    closing_dw = _display_width("┘")
+                    remaining = max(0, (box_display_width - opening_dw - closing_dw) // dash_dw)
                     output.append(indent)
                     output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
@@ -4589,7 +4666,9 @@ class OutputBuffer:
                 # Show model header if this is a new turn
                 if self._last_turn_source != "model":
                     header_prefix = "── Model "
-                    remaining = max(0, wrap_width - len(header_prefix))
+                    prefix_dw = _display_width(header_prefix)
+                    dash_dw = _display_width("─") or 1
+                    remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
                     output.append(header_prefix, style=self._style("model_header", "bold cyan"))
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
