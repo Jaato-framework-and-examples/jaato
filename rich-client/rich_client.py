@@ -3806,6 +3806,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
         ipc_trace("Event handler starting")
         event_count = 0
+        # Periodic yielding: when the IPC StreamReader has buffered data,
+        # readexactly() returns immediately without suspending, which means
+        # the event loop never yields to prompt_toolkit for keyboard handling.
+        # We track time and force a yield every ~16ms to keep the UI responsive.
+        last_yield_time = asyncio.get_event_loop().time()
+        YIELD_INTERVAL = 0.016  # ~60fps, yield every 16ms
+
         async for event in client.events():
             event_count += 1
             ipc_trace(f"<- [{event_count}] {type(event).__name__}")
@@ -4601,6 +4608,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         lines.append(("", ""))
 
                     display.show_lines(lines)
+
+            # Periodically yield to the event loop to keep the UI responsive.
+            # When the IPC StreamReader has buffered data, readexactly() returns
+            # immediately without suspending, starving prompt_toolkit of CPU time.
+            now = asyncio.get_event_loop().time()
+            if now - last_yield_time >= YIELD_INTERVAL:
+                await asyncio.sleep(0)
+                last_yield_time = asyncio.get_event_loop().time()
 
     async def handle_input():
         """Handle user input from the queue."""
