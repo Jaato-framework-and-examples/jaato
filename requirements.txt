@@ -13,6 +13,7 @@ reportlab
 ddgs>=7.0.0  # provides web search via DuckDuckGo
 pyyaml
 pexpect>=4.8.0  # PTY-based interactive shell sessions
+pyte>=0.8.0  # Terminal emulator for processing tool output control sequences
 azure-ai-inference>=1.0.0b7  # GitHub Models API via Azure AI Inference SDK
 websockets>=12.0  # WebSocket server for headless mode
 anthropic>=0.40.0  # Anthropic Claude API

@@ -47,6 +47,8 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "ipython-pygments-lexers>=1.0.0",
+    "pexpect>=4.8.0",
+    "pyte>=0.8.0",
 ]
 
 [project.optional-dependencies]
