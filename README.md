@@ -47,53 +47,53 @@ jaato includes **20 built-in plugins** organized into categories for tool orches
 #### Tool Execution
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-cli.png" width="32"> | **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
-| <img src="docs/docs/assets/images/plugins/plugin-mcp.png" width="32"> | **mcp** | Connect to Model Context Protocol servers for external tool integrations |
-| <img src="docs/docs/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
-| <img src="docs/docs/assets/images/plugins/plugin-environment.png" width="32"> | **environment** | Query execution environment (OS, shell, architecture) for platform-appropriate commands |
+| <img src="docs/web/assets/images/plugins/plugin-cli.png" width="32"> | **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
+| <img src="docs/web/assets/images/plugins/plugin-mcp.png" width="32"> | **mcp** | Connect to Model Context Protocol servers for external tool integrations |
+| <img src="docs/web/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
+| <img src="docs/web/assets/images/plugins/plugin-environment.png" width="32"> | **environment** | Query execution environment (OS, shell, architecture) for platform-appropriate commands |
 
 #### File & Content Management
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-file-edit.png" width="32"> | **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
-| <img src="docs/docs/assets/images/plugins/plugin-references.png" width="32"> | **references** | Inject documentation sources into model context (auto or user-selected) |
-| <img src="docs/docs/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
-| <img src="docs/docs/assets/images/plugins/plugin-slash-command.png" width="32"> | **slash_command** | Process /commands with template variable substitution |
+| <img src="docs/web/assets/images/plugins/plugin-file-edit.png" width="32"> | **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
+| <img src="docs/web/assets/images/plugins/plugin-references.png" width="32"> | **references** | Inject documentation sources into model context (auto or user-selected) |
+| <img src="docs/web/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
+| <img src="docs/web/assets/images/plugins/plugin-slash-command.png" width="32"> | **slash_command** | Process /commands with template variable substitution |
 
 #### Memory & State
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-memory.png" width="32"> | **memory** | Model self-curated persistent knowledge across sessions |
-| <img src="docs/docs/assets/images/plugins/plugin-session.png" width="32"> | **session** | Save and resume conversations across restarts |
-| <img src="docs/docs/assets/images/plugins/plugin-todo.png" width="32"> | **todo** | Plan registration with progress tracking and workflow enforcement |
+| <img src="docs/web/assets/images/plugins/plugin-memory.png" width="32"> | **memory** | Model self-curated persistent knowledge across sessions |
+| <img src="docs/web/assets/images/plugins/plugin-session.png" width="32"> | **session** | Save and resume conversations across restarts |
+| <img src="docs/web/assets/images/plugins/plugin-todo.png" width="32"> | **todo** | Plan registration with progress tracking and workflow enforcement |
 
 #### User Interaction
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-permission.png" width="32"> | **permission** | Control tool execution with policies, blacklists, and interactive approval |
-| <img src="docs/docs/assets/images/plugins/plugin-clarification.png" width="32"> | **clarification** | Request user input with single/multiple choice and free text responses |
+| <img src="docs/web/assets/images/plugins/plugin-permission.png" width="32"> | **permission** | Control tool execution with policies, blacklists, and interactive approval |
+| <img src="docs/web/assets/images/plugins/plugin-clarification.png" width="32"> | **clarification** | Request user input with single/multiple choice and free text responses |
 
 #### Context Management (GC)
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-gc-truncate.png" width="32"> | **gc_truncate** | Simple turn-based garbage collection via truncation |
-| <img src="docs/docs/assets/images/plugins/plugin-gc-summarize.png" width="32"> | **gc_summarize** | Compression-based GC via summarization |
-| <img src="docs/docs/assets/images/plugins/plugin-gc-hybrid.png" width="32"> | **gc_hybrid** | Generational approach combining truncation and summarization |
+| <img src="docs/web/assets/images/plugins/plugin-gc-truncate.png" width="32"> | **gc_truncate** | Simple turn-based garbage collection via truncation |
+| <img src="docs/web/assets/images/plugins/plugin-gc-summarize.png" width="32"> | **gc_summarize** | Compression-based GC via summarization |
+| <img src="docs/web/assets/images/plugins/plugin-gc-hybrid.png" width="32"> | **gc_hybrid** | Generational approach combining truncation and summarization |
 
 #### Specialized Capabilities
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-web-search.png" width="32"> | **web_search** | DuckDuckGo web search integration for current information |
-| <img src="docs/docs/assets/images/plugins/plugin-subagent.png" width="32"> | **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
-| <img src="docs/docs/assets/images/plugins/plugin-calculator.png" width="32"> | **calculator** | Mathematical calculation tools with configurable precision |
+| <img src="docs/web/assets/images/plugins/plugin-web-search.png" width="32"> | **web_search** | DuckDuckGo web search integration for current information |
+| <img src="docs/web/assets/images/plugins/plugin-subagent.png" width="32"> | **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
+| <img src="docs/web/assets/images/plugins/plugin-calculator.png" width="32"> | **calculator** | Mathematical calculation tools with configurable precision |
 
 #### Infrastructure
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/docs/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
-| <img src="docs/docs/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
+| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
+| <img src="docs/web/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 
-📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/docs/api-reference/plugins/index.html)**
+📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/web/api-reference/plugins/index.html)**
 
 For plugin development, see [shared/plugins/README.md](shared/plugins/README.md). For plugin icon design guidelines, see [docs/plugin-icons.md](docs/plugin-icons.md).
 
@@ -117,7 +117,7 @@ pip install ".[dev]"          # pytest and dev tools
 pip install ".[all]"          # all optional dependencies
 ```
 
-📖 **[Installation guides →](https://apanoia.github.io/jaato/docs/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors
+📖 **[Installation guides →](https://apanoia.github.io/jaato/web/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors
 
 ### Configuration
 
@@ -127,7 +127,7 @@ jaato uses environment variables and configuration files for setup:
 2. **Configure environment** - Copy `.env.example` to `.env` and edit with your credentials
 3. **Optional: Add MCP servers** - Configure in `.mcp.json` for external tool integrations
 
-📖 **[Provider setup guides →](https://apanoia.github.io/jaato/docs/api-reference/providers/index.html)** | **[GCP/Vertex AI setup →](docs/gcp-setup.md)** | **[Environment variables →](#environment-variables)**
+📖 **[Provider setup guides →](https://apanoia.github.io/jaato/web/api-reference/providers/index.html)** | **[GCP/Vertex AI setup →](docs/gcp-setup.md)** | **[Environment variables →](#environment-variables)**
 
 ## Usage
 
@@ -440,11 +440,11 @@ jaato/
 
 ## Documentation
 
-📚 **[Full API Documentation →](https://apanoia.github.io/jaato/docs/index.html)** - Complete reference with examples
+📚 **[Full API Documentation →](https://apanoia.github.io/jaato/web/index.html)** - Complete reference with examples
 
 **Guides:**
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up your GCP project
-- [Plugin Reference](https://apanoia.github.io/jaato/docs/api-reference/plugins/index.html) - All built-in plugins with configuration options
+- [Plugin Reference](https://apanoia.github.io/jaato/web/api-reference/plugins/index.html) - All built-in plugins with configuration options
 - [Plugin Development](shared/plugins/README.md) - Creating custom tool plugins
 - [ModLog Training](modlog-training-set-test/README.md) - COBOL training data generation
 - [Sequence Diagrams](sequence-diagram-generator/README.md) - Trace visualization

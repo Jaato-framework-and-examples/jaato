@@ -90,15 +90,18 @@ def _get_content_width(line: str) -> int:
     return _display_width(content)
 
 
-def _trim_line_to_width(line: str, target_width: int) -> str:
+def _trim_line_to_width(line: str, target_width: int, truncation_indicator: str = "") -> str:
     """Trim a line to target_width, preserving ANSI codes and styling.
 
     This removes trailing background padding while keeping the actual content
-    and its styling intact.
+    and its styling intact. If truncation_indicator is provided and the line's
+    content exceeds target_width, the indicator is appended after truncation.
 
     Args:
         line: The line to trim (may contain ANSI codes).
         target_width: The width to trim to.
+        truncation_indicator: Character(s) to append when content is truncated
+            (e.g. "▸"). Empty string means no indicator.
 
     Returns:
         The line trimmed to target_width, as an ANSI string.
@@ -117,12 +120,15 @@ def _trim_line_to_width(line: str, target_width: int) -> str:
     if target_width <= 0:
         return ""
 
-    # Find the character index that corresponds to target_width display columns
+    indicator_width = _display_width(truncation_indicator) if truncation_indicator else 0
+    trim_target = target_width - indicator_width if truncation_indicator else target_width
+
+    # Find the character index that corresponds to trim_target display columns
     current_width = 0
     char_count = 0
     for char in plain:
         char_width = _display_width(char)
-        if current_width + char_width > target_width:
+        if current_width + char_width > trim_target:
             break
         current_width += char_width
         char_count += 1
@@ -132,6 +138,9 @@ def _trim_line_to_width(line: str, target_width: int) -> str:
         result = text[:char_count]
     else:
         result = Text()
+
+    if truncation_indicator:
+        result.append(truncation_indicator, style="dim")
 
     # Convert back to ANSI string
     # Use a large width to prevent any wrapping during conversion
@@ -371,10 +380,24 @@ class CodeBlockFormatterPlugin:
             # This ensures background styling only extends to the widest content line
             natural_width = max((_get_content_width(line) for line in lines), default=0)
 
-            # Trim each line to the natural width, then add indent
+            # Calculate maximum allowed width based on terminal width minus indent
+            indent_width = _display_width(indent)
+            max_allowed_width = self._console_width - indent_width
+
+            # Cap natural width to terminal width so background padding
+            # never extends beyond the visible area
+            trim_width = min(natural_width, max_allowed_width) if max_allowed_width > 0 else natural_width
+
+            # Trim each line to the capped width, then add indent
             trimmed_lines = []
             for line in lines:
-                trimmed = _trim_line_to_width(line, natural_width)
+                content_width = _get_content_width(line)
+                if max_allowed_width > 0 and content_width > max_allowed_width:
+                    # Line content exceeds terminal width: truncate with indicator
+                    trimmed = _trim_line_to_width(line, max_allowed_width, truncation_indicator="▸")
+                else:
+                    # Line fits: trim trailing background padding to capped width
+                    trimmed = _trim_line_to_width(line, trim_width)
                 trimmed_lines.append(indent + trimmed)
 
             # Ensure ANSI reset at end to prevent styling from bleeding into subsequent text

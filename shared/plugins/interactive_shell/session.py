@@ -28,16 +28,39 @@ _EOF = None
 _BACKEND_ERROR: Optional[str] = None
 
 if IS_WINDOWS:
+    # wexpect has a bare `import pkg_resources` at module level (no
+    # try/except guard).  On Python 3.12+ pkg_resources is only available
+    # when setuptools is installed, and even then it may be missing in
+    # stripped-down venvs.  Inject a minimal stub into sys.modules so the
+    # import succeeds — wexpect only uses it for version detection and
+    # already has its own fallback for that.
+    try:
+        import pkg_resources  # noqa: F401 — test if it's available
+    except ImportError:
+        import types as _types
+        _stub = _types.ModuleType("pkg_resources")
+        _stub.require = lambda *a, **kw: (_ for _ in ()).throw(  # type: ignore[attr-defined]
+            Exception("pkg_resources stub")
+        )
+        sys.modules["pkg_resources"] = _stub
+
     try:
         import wexpect
         _spawn = wexpect.spawn
         _TIMEOUT = wexpect.TIMEOUT
         _EOF = wexpect.EOF
-    except ImportError:
-        _BACKEND_ERROR = (
-            "wexpect is required for interactive shell sessions on Windows. "
-            "Install it with: pip install wexpect"
-        )
+    except ImportError as _exc:
+        if "pkg_resources" in str(_exc):
+            _BACKEND_ERROR = (
+                "wexpect failed to import because pkg_resources is missing. "
+                "On Python 3.12+ pkg_resources is no longer bundled by default. "
+                "Install it with: pip install setuptools wexpect"
+            )
+        else:
+            _BACKEND_ERROR = (
+                "wexpect is required for interactive shell sessions on Windows. "
+                "Install it with: pip install wexpect"
+            )
 else:
     import pexpect
     _spawn = pexpect.spawn
@@ -362,11 +385,37 @@ class ShellSession:
         chunks: list[str],
         total_bytes: int,
     ) -> str:
-        """wexpect path: read_nonblocking is instant, so we poll manually."""
+        """wexpect path: SpawnPipe.read_nonblocking blocks (win32file.ReadFile),
+        so we must peek the pipe before reading to avoid hanging forever."""
         last_data_time = time.time()
+
+        # SpawnPipe stores the Win32 pipe handle as self.pipe.  We use
+        # PeekNamedPipe to check data availability before calling the
+        # blocking read_nonblocking.  SpawnSocket has a built-in 0.2 s
+        # socket timeout instead, so no peek is needed there.
+        _peek = None
+        pipe_handle = getattr(self._process, 'pipe', None)
+        if pipe_handle is not None:
+            try:
+                import win32pipe as _win32pipe
+                _peek = lambda: _win32pipe.PeekNamedPipe(pipe_handle, 0)[1]
+            except ImportError:
+                pass
 
         while time.time() < deadline:
             try:
+                # When we have a pipe handle, peek first to avoid blocking.
+                if _peek is not None:
+                    try:
+                        available = _peek()
+                    except Exception:
+                        break  # pipe broken → treat as EOF
+                    if available == 0:
+                        if time.time() - last_data_time >= idle_timeout:
+                            break
+                        time.sleep(self._POLL_INTERVAL)
+                        continue
+
                 chunk = self._process.read_nonblocking(size=4096)
                 if chunk:
                     # Ensure we always have str (wexpect may return bytes

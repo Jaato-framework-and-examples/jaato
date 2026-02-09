@@ -3,6 +3,7 @@
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from jaato import ToolSchema
 from datetime import datetime, timezone
+from shared.terminal_caps import detect as detect_terminal_caps
 import json
 import os
 import platform
@@ -10,6 +11,8 @@ import shutil
 import sys
 import threading
 import time
+
+from shared.path_utils import is_msys2_environment, normalize_path, get_display_separator
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -139,7 +142,7 @@ class EnvironmentPlugin:
             result["arch"] = self._get_arch_info()
 
         if aspect in ("cwd", "all"):
-            result["cwd"] = os.getcwd()
+            result["cwd"] = normalize_path(os.getcwd())
 
         if aspect in ("terminal", "all"):
             result["terminal"] = self._get_terminal_info()
@@ -177,6 +180,13 @@ class EnvironmentPlugin:
         elif system == "Windows":
             info["friendly_name"] = "Windows"
 
+        # Detect MSYS2/Git Bash environment on Windows
+        if is_msys2_environment():
+            msystem = os.environ.get('MSYSTEM', '')
+            info["msys2"] = True
+            info["msystem"] = msystem
+            info["friendly_name"] = f"Windows (MSYS2/{msystem})"
+
         return info
 
     def _get_shell_info(self) -> Dict[str, Any]:
@@ -192,16 +202,28 @@ class EnvironmentPlugin:
             "default": None,
             "current": None,
             "path_separator": os.pathsep,
-            "dir_separator": os.sep,
+            "dir_separator": get_display_separator(),
         }
 
         if system == "Windows":
-            # Windows: check for PowerShell vs cmd
+            # Windows: check for MSYS2/Git Bash, PowerShell, or cmd
             info["default"] = "cmd"
 
+            # Detect MSYS2/Git Bash first (takes priority on Windows)
+            if is_msys2_environment():
+                msystem = os.environ.get('MSYSTEM', 'MSYS')
+                shell_env = os.environ.get('SHELL', '')
+                shell_name = os.path.basename(shell_env) if shell_env else 'bash'
+                info["default"] = shell_name
+                info["current"] = shell_name
+                info["msys2"] = True
+                info["msystem"] = msystem
+                # Under MSYS2, paths should use forward slashes
+                info["dir_separator"] = "/"
+                info["path_separator"] = ":"
             # Detect actual shell by checking PowerShell-specific env vars
             # PSModulePath is set by PowerShell but not cmd
-            if os.environ.get("PSModulePath"):
+            elif os.environ.get("PSModulePath"):
                 # Distinguish PowerShell Core (pwsh) from Windows PowerShell
                 ps_version = os.environ.get("PSVersionTable", "")
                 if "Core" in ps_version or shutil.which("pwsh"):
@@ -310,58 +332,12 @@ class EnvironmentPlugin:
     def _get_terminal_info(self) -> Dict[str, Any]:
         """Get terminal emulation and capability information.
 
-        Detects whether stdout is connected to a real terminal (TTY) to
-        distinguish interactive sessions from headless contexts where
-        output goes to a file or pipe.
+        Delegates to shared.terminal_caps for detection logic, which
+        caches results process-wide. This allows other plugins (e.g.,
+        mermaid_formatter) to access the same data without triggering
+        a model tool call.
         """
-        # Detect if stdout is connected to a TTY
-        is_interactive = sys.stdout.isatty()
-
-        info: Dict[str, Any] = {
-            "interactive": is_interactive,
-            "term": os.environ.get("TERM"),
-            "term_program": os.environ.get("TERM_PROGRAM"),
-            "colorterm": os.environ.get("COLORTERM"),
-        }
-
-        # Detect terminal multiplexers
-        multiplexer = None
-        if os.environ.get("TMUX"):
-            multiplexer = "tmux"
-        elif os.environ.get("STY"):
-            multiplexer = "screen"
-        elif "screen" in (info["term"] or ""):
-            multiplexer = "screen"
-        info["multiplexer"] = multiplexer
-
-        # Detect color capability
-        # When not interactive (headless/file output), colors are meaningless
-        if not is_interactive:
-            info["color_depth"] = "none"
-        else:
-            term = (info["term"] or "").lower()
-            colorterm = (info["colorterm"] or "").lower()
-            if colorterm in ("truecolor", "24bit") or "truecolor" in colorterm:
-                info["color_depth"] = "24bit"
-            elif "256color" in term or "256" in colorterm:
-                info["color_depth"] = "256"
-            elif term and term != "dumb":
-                info["color_depth"] = "basic"
-            else:
-                info["color_depth"] = "none"
-
-        # Detect if running in common terminal emulators
-        term_program = info["term_program"] or ""
-        if term_program:
-            info["emulator"] = term_program
-        elif "xterm" in (info["term"] or "").lower():
-            info["emulator"] = "xterm-compatible"
-        elif "linux" in (info["term"] or "").lower():
-            info["emulator"] = "linux-console"
-        else:
-            info["emulator"] = None
-
-        return info
+        return detect_terminal_caps()
 
     def _get_context_info(self) -> Dict[str, Any]:
         """Get context window usage and GC threshold information.

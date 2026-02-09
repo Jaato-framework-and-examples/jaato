@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Add Lunr.js script tag to all HTML files in docs/docs/
+Add Lunr.js script tag to all HTML files in docs/web/
 
 This script adds the Lunr.js CDN script tag before the docs.js script tag
 in all HTML documentation files.
@@ -53,7 +53,7 @@ def add_lunr_script(file_path):
 def main():
     """Main entry point."""
     script_dir = Path(__file__).parent
-    docs_root = script_dir / 'docs'
+    docs_root = script_dir / 'web'
 
     if not docs_root.exists():
         print(f"Error: Directory {docs_root} does not exist")

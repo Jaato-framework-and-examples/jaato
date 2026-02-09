@@ -284,37 +284,37 @@
 
     console.log('[getBasePath] pathname:', path);
 
-    // Find the /docs/ directory in the path - this is our base
-    var docsIndex = path.indexOf('/docs/');
+    // Find the /web/ directory in the path - this is our base
+    var docsIndex = path.indexOf('/web/');
     if (docsIndex === -1) {
       // Fallback: not in expected structure
-      console.warn('[getBasePath] /docs/ not found in path, using root');
+      console.warn('[getBasePath] /web/ not found in path, using root');
       return './';
     }
 
-    // Get the path after /docs/
-    var pathAfterDocs = path.substring(docsIndex + 6); // +6 for '/docs/'
+    // Get the path after /web/
+    var pathAfterDocs = path.substring(docsIndex + 5); // +5 for '/web/'
 
     console.log('[getBasePath] pathAfterDocs:', pathAfterDocs);
 
-    // Remove filename to get directory path after /docs/
+    // Remove filename to get directory path after /web/
     var lastSlash = pathAfterDocs.lastIndexOf('/');
     var dirAfterDocs = lastSlash > 0 ? pathAfterDocs.substring(0, lastSlash) : '';
 
     console.log('[getBasePath] dirAfterDocs:', dirAfterDocs);
 
-    // Count depth (number of directory levels after /docs/)
+    // Count depth (number of directory levels after /web/)
     var depth = dirAfterDocs === '' ? 0 : (dirAfterDocs.match(/\//g) || []).length + 1;
 
     console.log('[getBasePath] depth:', depth);
 
-    // If at root of /docs/, no traversal needed
+    // If at root of /web/, no traversal needed
     if (depth === 0) {
       console.log('[getBasePath] returning: ./');
       return './';
     }
 
-    // Build relative path to go up to /docs/ root
+    // Build relative path to go up to /web/ root
     var base = '';
     for (var i = 0; i < depth; i++) {
       base += '../';

@@ -39,6 +39,7 @@ from .find_replace import (
     FindReplaceResult,
     generate_find_replace_preview,
 )
+from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.trace import trace as _trace_write
 
 
@@ -197,7 +198,7 @@ class FileEditPlugin:
             self._workspace_root = None
         self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
 
-    def _is_path_allowed(self, path: str) -> bool:
+    def _is_path_allowed(self, path: str, mode: str = "read") -> bool:
         """Check if a path is allowed for access.
 
         A path is allowed if:
@@ -205,10 +206,13 @@ class FileEditPlugin:
         2. The path is within the workspace_root
         3. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        4. The path is authorized via the plugin registry
+        4. The path is authorized via the plugin registry (respecting access mode)
 
         Args:
             path: Path to check.
+            mode: Access mode - "read" or "write" (default: "read").
+                 Used to check if externally authorized paths have sufficient
+                 access (e.g., "readonly" paths block write operations).
 
         Returns:
             True if access is allowed, False otherwise.
@@ -225,11 +229,12 @@ class FileEditPlugin:
         allowed = check_path_with_jaato_containment(
             abs_path,
             self._workspace_root,
-            self._plugin_registry
+            self._plugin_registry,
+            mode=mode
         )
 
         if not allowed:
-            self._trace(f"_is_path_allowed: {path} blocked (outside sandbox)")
+            self._trace(f"_is_path_allowed: {path} blocked (outside sandbox, mode={mode})")
         return allowed
 
     def _resolve_path(self, path: str) -> Path:
@@ -239,13 +244,18 @@ class FileEditPlugin:
         'customer-domain-api/pom.xml', it resolves to the client's workspace
         directory rather than the server's current working directory.
 
+        Under MSYS2, also converts /c/Users/... paths to C:/Users/... so
+        that Python can resolve them via Windows APIs.
+
         Args:
-            path: Path string (absolute or relative).
+            path: Path string (absolute or relative, Windows or MSYS2 format).
 
         Returns:
             Resolved Path object. Relative paths are resolved against
             workspace_root if configured, otherwise against CWD.
         """
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
         p = Path(path)
         if p.is_absolute():
             return p
@@ -864,8 +874,8 @@ will show you a preview and require approval before execution. Backups are autom
         # Resolve path first, then check if allowed
         file_path = self._resolve_path(path)
 
-        # Check if resolved path is allowed (within workspace or authorized)
-        if not self._is_path_allowed(str(file_path)):
+        # Check if resolved path is allowed (within workspace or authorized for reading)
+        if not self._is_path_allowed(str(file_path), mode="read"):
             return {"error": f"File not found: {path}"}
 
         if not file_path.exists():
@@ -899,7 +909,7 @@ will show you a preview and require approval before execution. Backups are autom
                     "image_data": data,
                     "mime_type": mime_type,
                     "display_name": file_path.name,
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "size": len(data),
                     "type": "image",
                 }
@@ -940,7 +950,7 @@ will show you a preview and require approval before execution. Backups are autom
                 actual_end = min(start_idx + len(selected_lines), total_lines)
 
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "content": chunk_content,
                     "size": len(chunk_content),
                     "lines": len(selected_lines),
@@ -952,7 +962,7 @@ will show you a preview and require approval before execution. Backups are autom
             else:
                 # No chunking - return entire file
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "content": content,
                     "size": len(content),
                     "lines": total_lines
@@ -971,6 +981,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if not file_path.exists():
             return {"error": f"File not found: {path}. Use writeNewFile for new files."}
 
@@ -986,12 +1001,12 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.write_text(new_content)
             result = {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "size": len(new_content),
                 "lines": len(new_content.splitlines())
             }
             if backup_path:
-                result["backup"] = str(backup_path)
+                result["backup"] = normalize_result_path(str(backup_path))
             return result
         except OSError as e:
             return {"error": f"Failed to write file: {e}"}
@@ -1006,6 +1021,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if file_path.exists():
             return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
 
@@ -1015,7 +1035,7 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.write_text(content)
             return {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "size": len(content),
                 "lines": len(content.splitlines())
             }
@@ -1031,6 +1051,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
 
@@ -1046,11 +1071,11 @@ will show you a preview and require approval before execution. Backups are autom
             file_path.unlink()
             result = {
                 "success": True,
-                "path": path,
+                "path": normalize_result_path(path),
                 "deleted": True
             }
             if backup_path:
-                result["backup"] = str(backup_path)
+                result["backup"] = normalize_result_path(str(backup_path))
             return result
         except OSError as e:
             return {"error": f"Failed to delete file: {e}"}
@@ -1070,6 +1095,12 @@ will show you a preview and require approval before execution. Backups are autom
 
         source = self._resolve_path(source_path)
         destination = self._resolve_path(destination_path)
+
+        # Check if both paths are allowed for writing (move = write on both ends)
+        if not self._is_path_allowed(str(source), mode="write"):
+            return {"error": f"File not found: {source_path}", "source": source_path}
+        if not self._is_path_allowed(str(destination), mode="write"):
+            return {"error": f"File not found: {destination_path}", "source": source_path}
 
         if not source.exists():
             return {"error": "Source file does not exist", "source": source_path}
@@ -1103,19 +1134,19 @@ will show you a preview and require approval before execution. Backups are autom
 
             result = {
                 "success": True,
-                "source": source_path,
-                "destination": destination_path
+                "source": normalize_result_path(source_path),
+                "destination": normalize_result_path(destination_path)
             }
             if backup_path:
-                result["source_backup"] = str(backup_path)
+                result["source_backup"] = normalize_result_path(str(backup_path))
             if dest_backup_path:
-                result["destination_backup"] = str(dest_backup_path)
+                result["destination_backup"] = normalize_result_path(str(dest_backup_path))
             return result
         except OSError as e:
             return {
                 "error": f"Failed to move file: {e}",
-                "source": source_path,
-                "destination": destination_path
+                "source": normalize_result_path(source_path),
+                "destination": normalize_result_path(destination_path)
             }
 
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1142,8 +1173,8 @@ will show you a preview and require approval before execution. Backups are autom
         if self._backup_manager.restore_from_backup(file_path):
             return {
                 "success": True,
-                "path": path,
-                "restored_from": str(backup_path) if backup_path else "unknown",
+                "path": normalize_result_path(path),
+                "restored_from": normalize_result_path(str(backup_path)) if backup_path else "unknown",
                 "message": f"File restored from backup"
             }
         else:
@@ -1254,8 +1285,8 @@ will show you a preview and require approval before execution. Backups are autom
         if self._backup_manager.restore_from_backup(file_path, backup_path):
             return {
                 "success": True,
-                "path": path,
-                "restored_from": str(backup_path),
+                "path": normalize_result_path(path),
+                "restored_from": normalize_result_path(str(backup_path)),
                 "message": "File restored from backup"
             }
         else:
@@ -1277,16 +1308,16 @@ will show you a preview and require approval before execution. Backups are autom
 
             if not backups:
                 return {
-                    "path": path,
+                    "path": normalize_result_path(path),
                     "backups": [],
                     "message": f"No backups found for {path}"
                 }
 
             return {
-                "path": path,
+                "path": normalize_result_path(path),
                 "backups": [
                     {
-                        "backup_path": str(b),
+                        "backup_path": normalize_result_path(str(b)),
                         "timestamp": b.stat().st_mtime,
                         "size": b.stat().st_size
                     }

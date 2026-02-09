@@ -24,6 +24,7 @@ from ..background.mixin import BackgroundCapableMixin
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .config_loader import (
     FilesystemQueryConfig,
@@ -158,13 +159,18 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path, making relative paths relative to workspace_root.
 
+        Under MSYS2, also converts /c/Users/... paths to C:/Users/... so
+        that Python can resolve them via Windows APIs.
+
         Args:
-            path: Path string (absolute or relative).
+            path: Path string (absolute or relative, Windows or MSYS2 format).
 
         Returns:
             Resolved Path object. Relative paths are resolved against
             workspace_root if configured, otherwise against CWD.
         """
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
         p = Path(path)
         if p.is_absolute():
             return p
@@ -173,13 +179,16 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         return p
 
     def _is_path_allowed(self, path: str) -> bool:
-        """Check if a path is allowed for access.
+        """Check if a path is allowed for read access.
 
         A path is allowed if:
         1. The path is within the workspace_root (or CWD if not configured)
         2. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        3. The path is authorized via the plugin registry
+        3. The path is authorized via the plugin registry (read or readwrite)
+
+        This plugin is read-only, so it always checks with mode="read".
+        Both "readonly" and "readwrite" authorized paths allow read access.
 
         Args:
             path: Path to check.
@@ -196,11 +205,13 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         abs_path = str(resolved.absolute())
 
         # Use shared sandbox utility with .jaato containment support and /tmp access
+        # Always mode="read" since this plugin is read-only
         allowed = check_path_with_jaato_containment(
             abs_path,
             workspace,
             self._plugin_registry,
-            allow_tmp=getattr(self, '_allow_tmp', True)
+            allow_tmp=getattr(self, '_allow_tmp', True),
+            mode="read"
         )
 
         if not allowed:
@@ -471,11 +482,14 @@ Tips:
                     continue  # Keep counting but don't add more
 
                 # Get file info
+                # Normalize paths for MSYS2 compatibility (forward slashes)
+                norm_rel = normalize_result_path(rel_path)
+                norm_abs = normalize_result_path(str(match))
                 try:
                     stat_info = match.stat()
                     file_info = {
-                        "path": rel_path,
-                        "absolute_path": str(match),
+                        "path": norm_rel,
+                        "absolute_path": norm_abs,
                         "size": stat_info.st_size,
                         "modified": datetime.fromtimestamp(
                             stat_info.st_mtime
@@ -486,8 +500,8 @@ Tips:
                     logger.debug("Could not stat file %s: %s", match, e)
                     # Still include the path even if we can't get stats
                     files.append({
-                        "path": rel_path,
-                        "absolute_path": str(match),
+                        "path": norm_rel,
+                        "absolute_path": norm_abs,
                         "size": None,
                         "modified": None,
                         "error": str(e),
@@ -504,7 +518,7 @@ Tips:
                 "total": total_found,
                 "returned": len(files),
                 "truncated": truncated,
-                "root": str(root_path),
+                "root": normalize_result_path(str(root_path)),
                 "pattern": pattern,
             }
 
@@ -656,8 +670,8 @@ Tips:
                             rel_path = file_path.name
 
                         matches.append({
-                            "file": rel_path,
-                            "absolute_path": str(file_path),
+                            "file": normalize_result_path(rel_path),
+                            "absolute_path": normalize_result_path(str(file_path)),
                             "line": line_num,
                             "column": match_obj.start() + 1,
                             "text": line.rstrip(),
@@ -677,7 +691,7 @@ Tips:
             "files_searched": files_searched,
             "truncated": truncated,
             "pattern": pattern,
-            "path": str(search_path),
+            "path": normalize_result_path(str(search_path)),
             "file_glob": file_glob,
         }
 
@@ -853,14 +867,15 @@ Tips:
                             rel_path = file_path.name
 
                         # Format match for streaming
-                        match_text = f"{rel_path}:{line_num}: {line.strip()}"
+                        norm_rel_path = normalize_result_path(rel_path)
+                        match_text = f"{norm_rel_path}:{line_num}: {line.strip()}"
 
                         chunk = StreamChunk(
                             content=match_text,
                             chunk_type="match",
                             sequence=match_count,
                             metadata={
-                                "file": rel_path,
+                                "file": norm_rel_path,
                                 "line": line_num,
                                 "column": match_obj.start() + 1,
                                 "match": match_obj.group(),
@@ -969,22 +984,25 @@ Tips:
                 file_count += 1
 
                 # Get file info
+                # Normalize paths for MSYS2 compatibility (forward slashes)
+                norm_rel = normalize_result_path(rel_path)
+                norm_abs = normalize_result_path(str(match))
                 try:
                     stat_info = match.stat()
                     size_str = self._format_size(stat_info.st_size)
                     modified = datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M")
-                    content = f"{rel_path} ({size_str}, {modified})"
+                    content = f"{norm_rel} ({size_str}, {modified})"
                     metadata = {
-                        "path": rel_path,
-                        "absolute_path": str(match),
+                        "path": norm_rel,
+                        "absolute_path": norm_abs,
                         "size": stat_info.st_size,
                         "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
                     }
                 except (OSError, PermissionError):
-                    content = rel_path
+                    content = norm_rel
                     metadata = {
-                        "path": rel_path,
-                        "absolute_path": str(match),
+                        "path": norm_rel,
+                        "absolute_path": norm_abs,
                     }
 
                 chunk = StreamChunk(
@@ -1019,7 +1037,7 @@ Tips:
                 "total_found": total_found,
                 "returned": file_count,
                 "truncated": truncated,
-                "root": str(root_path),
+                "root": normalize_result_path(str(root_path)),
                 "pattern": pattern,
             }
         )
