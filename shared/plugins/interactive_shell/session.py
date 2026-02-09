@@ -28,6 +28,22 @@ _EOF = None
 _BACKEND_ERROR: Optional[str] = None
 
 if IS_WINDOWS:
+    # wexpect has a bare `import pkg_resources` at module level (no
+    # try/except guard).  On Python 3.12+ pkg_resources is only available
+    # when setuptools is installed, and even then it may be missing in
+    # stripped-down venvs.  Inject a minimal stub into sys.modules so the
+    # import succeeds — wexpect only uses it for version detection and
+    # already has its own fallback for that.
+    try:
+        import pkg_resources  # noqa: F401 — test if it's available
+    except ImportError:
+        import types as _types
+        _stub = _types.ModuleType("pkg_resources")
+        _stub.require = lambda *a, **kw: (_ for _ in ()).throw(  # type: ignore[attr-defined]
+            Exception("pkg_resources stub")
+        )
+        sys.modules["pkg_resources"] = _stub
+
     try:
         import wexpect
         _spawn = wexpect.spawn
