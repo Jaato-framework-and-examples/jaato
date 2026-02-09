@@ -410,7 +410,16 @@ class SandboxManagerPlugin:
                 return [s for s in subcommands if s.value.startswith(partial)]
             return subcommands
 
-        # For add/remove, could provide path completions in the future
+        # Second argument for "add": access mode
+        if len(args) == 2 and args[0] == "add":
+            access_modes = [
+                CommandCompletion("readonly", "Read-only access (readFile, glob, grep)"),
+                CommandCompletion("readwrite", "Full access including writes"),
+            ]
+            partial = args[1].lower()
+            return [m for m in access_modes if m.value.startswith(partial)]
+
+        # For add (after access mode) and remove, could provide path completions in the future
         return []
 
     def _execute_sandbox_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -424,16 +433,16 @@ class SandboxManagerPlugin:
             return self._cmd_list()
         elif subcommand == "add":
             if not path:
-                return {"error": "Path is required for 'sandbox add'"}
-            # Parse optional access mode from the beginning of the path argument
-            # Syntax: sandbox add [readonly|readwrite] <path>
-            access = "readwrite"
+                return {"error": "Usage: sandbox add <readonly|readwrite> <path>"}
+            # Parse mandatory access mode from the beginning of the path argument
+            # Syntax: sandbox add <readonly|readwrite> <path>
             parts = path.split(None, 1)  # split into at most 2 parts
-            if parts[0] in ("readonly", "readwrite"):
-                access = parts[0]
-                path = parts[1] if len(parts) > 1 else ""
+            if parts[0] not in ("readonly", "readwrite"):
+                return {"error": "Usage: sandbox add <readonly|readwrite> <path>"}
+            access = parts[0]
+            path = parts[1] if len(parts) > 1 else ""
             if not path:
-                return {"error": "Path is required for 'sandbox add'"}
+                return {"error": "Usage: sandbox add <readonly|readwrite> <path>"}
             return self._cmd_add(path, access=access)
         elif subcommand == "remove":
             if not path:
@@ -453,14 +462,15 @@ class SandboxManagerPlugin:
             ("can access for file operations and command execution.", ""),
             ("", ""),
             ("USAGE", "bold"),
-            ("    sandbox [subcommand] [access] [path]", ""),
+            ("    sandbox [subcommand] [access path]", ""),
             ("", ""),
             ("SUBCOMMANDS", "bold"),
             ("    list              Show all effective sandbox paths from all config levels", "dim"),
             ("                      Displays path, action (allow/deny), source, and timestamp", "dim"),
             ("                      (this is the default when no subcommand is given)", "dim"),
             ("", ""),
-            ("    add [access] <path>  Allow a path for the current session", "dim"),
+            ("    add <access> <path>  Allow a path for the current session", "dim"),
+            ("                      access: readonly or readwrite", "dim"),
             ("                      Path is added to session-level allowlist", "dim"),
             ("                      access: readonly or readwrite (default: readwrite)", "dim"),
             ("                      Takes precedence over workspace/global denials", "dim"),
@@ -474,8 +484,8 @@ class SandboxManagerPlugin:
             ("EXAMPLES", "bold"),
             ("    sandbox                   List all sandbox paths", "dim"),
             ("    sandbox list              Same as above", "dim"),
-            ("    sandbox add /tmp/scratch              Allow readwrite access to /tmp/scratch", "dim"),
-            ("    sandbox add ~/projects                Allow readwrite access to home projects", "dim"),
+            ("    sandbox add readwrite /tmp/scratch    Allow readwrite access to /tmp/scratch", "dim"),
+            ("    sandbox add readwrite ~/projects      Allow readwrite access to home projects", "dim"),
             ("    sandbox add readonly /docs            Allow read-only access to /docs", "dim"),
             ("    sandbox add readwrite ~/data          Allow full access to ~/data", "dim"),
             ("    sandbox remove /etc                   Block access to /etc", "dim"),
