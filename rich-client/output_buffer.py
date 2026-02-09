@@ -61,6 +61,28 @@ if TYPE_CHECKING:
 _ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;?]*[A-Za-z~]')
 
 
+def _truncate_to_display_width(text: str, width: int) -> str:
+    """Truncate text to fit within a target display width.
+
+    Iterates character-by-character using _display_width() so that
+    wide characters (CJK, emoji) are properly accounted for.
+
+    Args:
+        text: The string to truncate.
+        width: Maximum display width.
+
+    Returns:
+        The truncated string (may be shorter than *width* characters).
+    """
+    current = 0
+    for i, char in enumerate(text):
+        cw = _display_width(char)
+        if current + cw > width:
+            return text[:i]
+        current += cw
+    return text
+
+
 def _visible_len(text: str) -> int:
     """Calculate visible length of text, ignoring ANSI escape codes."""
     return len(_ANSI_ESCAPE_PATTERN.sub('', text))
@@ -2907,8 +2929,12 @@ class OutputBuffer:
             if preserve_ansi:
                 output.append_text(self._truncate_line_to_width(line, target_width, max_line_width))
             else:
-                if len(line) > max_line_width:
-                    display_line = line[:max_line_width - 3] + "..."
+                # -1 italic margin: compensates for terminal italic font slant
+                effective_width = max_line_width - 1
+                if _display_width(line) > effective_width:
+                    # Truncate by display width, not character count
+                    truncated = _truncate_to_display_width(line, effective_width - 3)
+                    display_line = truncated + "..."
                 else:
                     display_line = line
                 output.append(display_line, style=self._style(style or "tool_output", "#87D7D7 italic"))
@@ -3474,8 +3500,11 @@ class OutputBuffer:
                 if preserve_ansi:
                     output.append_text(self._truncate_line_to_width(line, target_width, max_width))
                 else:
-                    if len(line) > max_width:
-                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    # -1 italic margin: tool_output theme style is italic
+                    effective_width = max_width - 1
+                    if _display_width(line) > effective_width:
+                        truncated = _truncate_to_display_width(line, effective_width - 3)
+                        output.append(truncated + "...", style=self._style("tool_output", "dim"))
                     else:
                         output.append(line, style=self._style("tool_output", "dim"))
 
@@ -3491,8 +3520,11 @@ class OutputBuffer:
                 if preserve_ansi:
                     output.append_text(self._truncate_line_to_width(line, target_width, max_width))
                 else:
-                    if len(line) > max_width:
-                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    # -1 italic margin: tool_output theme style is italic
+                    effective_width = max_width - 1
+                    if _display_width(line) > effective_width:
+                        truncated = _truncate_to_display_width(line, effective_width - 3)
+                        output.append(truncated + "...", style=self._style("tool_output", "dim"))
                     else:
                         output.append(line, style=self._style("tool_output", "dim"))
         else:
@@ -3503,8 +3535,11 @@ class OutputBuffer:
                 if preserve_ansi:
                     output.append_text(self._truncate_line_to_width(line, target_width, max_width))
                 else:
-                    if len(line) > max_width:
-                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    # -1 italic margin: tool_output theme style is italic
+                    effective_width = max_width - 1
+                    if _display_width(line) > effective_width:
+                        truncated = _truncate_to_display_width(line, effective_width - 3)
+                        output.append(truncated + "...", style=self._style("tool_output", "dim"))
                     else:
                         output.append(line, style=self._style("tool_output", "dim"))
 
