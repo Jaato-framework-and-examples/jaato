@@ -1,19 +1,40 @@
-"""Shell session wrapper around pexpect with idle-based output detection.
+"""Shell session wrapper around pexpect/wexpect with idle-based output detection.
 
 Instead of requiring the caller to specify expect patterns, this module
 uses idle detection: it reads until the process stops producing output
 for a configurable period. This lets the calling model read whatever
 appeared and make its own decisions about what to send next.
+
+On Unix/macOS this uses pexpect (PTY-based). On Windows this uses wexpect,
+which provides a similar API backed by Windows console and named pipes.
 """
 
 import os
+import sys
 import time
 import threading
 from typing import Optional, Dict, Any
 
-import pexpect
-
 from .ansi import strip_ansi
+
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    try:
+        import wexpect
+        _spawn = wexpect.spawn
+        _TIMEOUT = wexpect.TIMEOUT
+        _EOF = wexpect.EOF
+    except ImportError:
+        raise ImportError(
+            "wexpect is required for interactive shell sessions on Windows. "
+            "Install it with: pip install wexpect"
+        )
+else:
+    import pexpect
+    _spawn = pexpect.spawn
+    _TIMEOUT = pexpect.TIMEOUT
+    _EOF = pexpect.EOF
 
 
 # Default PTY dimensions
@@ -35,12 +56,18 @@ DEFAULT_MAX_LIFETIME = 600  # 10 minutes
 
 
 class ShellSession:
-    """Wraps a single pexpect-spawned process with idle-based I/O.
+    """Wraps a single pexpect/wexpect-spawned process with idle-based I/O.
 
     The key insight: instead of expect(pattern), we use read_until_idle()
     which returns all output the process produced until it goes quiet.
     The model then reads that output and decides what to do.
+
+    On Unix, uses pexpect with real PTY sessions.
+    On Windows, uses wexpect with Windows console pipes.
     """
+
+    # Polling interval for wexpect's non-blocking reads (seconds).
+    _POLL_INTERVAL = 0.05
 
     def __init__(
         self,
@@ -77,14 +104,25 @@ class ShellSession:
         if env:
             spawn_env.update(env)
 
-        self._process = pexpect.spawn(
-            command,
-            encoding='utf-8',
-            timeout=max_wait,
-            dimensions=(rows, cols),
-            env=spawn_env,
-            cwd=cwd,
-        )
+        if IS_WINDOWS:
+            # wexpect uses codepage instead of encoding, and doesn't
+            # support the dimensions parameter.  codepage=65001 → UTF-8.
+            self._process = _spawn(
+                command,
+                timeout=max_wait,
+                env=spawn_env,
+                cwd=cwd,
+                codepage=65001,
+            )
+        else:
+            self._process = _spawn(
+                command,
+                encoding='utf-8',
+                timeout=max_wait,
+                dimensions=(rows, cols),
+                env=spawn_env,
+                cwd=cwd,
+            )
 
         # Lock for thread-safe access to the process
         self._lock = threading.Lock()
@@ -197,7 +235,8 @@ class ShellSession:
     def close(self) -> Dict[str, Any]:
         """Gracefully terminate the session.
 
-        Sends EOF, waits briefly, then escalates to SIGTERM and SIGKILL.
+        On Unix: sends EOF, waits, then escalates to SIGTERM and SIGKILL.
+        On Windows: sends EOF, waits, then calls terminate().
 
         Returns:
             Dict with exit_status and final_output.
@@ -211,24 +250,25 @@ class ShellSession:
                     self._process.sendeof()
                     # Read any final output
                     final_output = self._read_until_idle(idle_timeout=1.0)
-                except (pexpect.EOF, OSError):
+                except (_EOF, OSError):
                     pass
 
             if self._process.isalive():
                 try:
-                    self._process.terminate(force=False)  # SIGTERM
+                    self._process.terminate(force=False)
                     self._process.wait()
                 except Exception:
                     pass
 
             if self._process.isalive():
                 try:
-                    self._process.terminate(force=True)  # SIGKILL
+                    self._process.terminate(force=True)
                 except Exception:
                     pass
 
         exit_status = self._process.exitstatus
-        signal_status = self._process.signalstatus
+        # signalstatus is Unix-only (not available in wexpect)
+        signal_status = getattr(self._process, 'signalstatus', None)
 
         return {
             'exit_status': exit_status if exit_status is not None else signal_status,
@@ -245,6 +285,11 @@ class ShellSession:
         Uses adaptive idle detection: reads in short bursts and considers
         output "settled" when no new data arrives for idle_timeout seconds.
 
+        On Unix (pexpect), ``read_nonblocking(size, timeout)`` handles the
+        idle wait internally.  On Windows (wexpect), ``read_nonblocking``
+        is truly non-blocking (no *timeout* parameter), so we poll with
+        a short sleep and track the idle interval ourselves.
+
         Args:
             idle_timeout: Seconds of silence before output is considered settled.
                 Defaults to self.idle_timeout.
@@ -258,9 +303,26 @@ class ShellSession:
         idle_timeout = idle_timeout if idle_timeout is not None else self.idle_timeout
         max_wait = max_wait if max_wait is not None else self.max_wait
         deadline = time.time() + max_wait
-        chunks = []
+        chunks: list[str] = []
         total_bytes = 0
 
+        if IS_WINDOWS:
+            return self._read_until_idle_windows(
+                idle_timeout, deadline, chunks, total_bytes,
+            )
+        else:
+            return self._read_until_idle_unix(
+                idle_timeout, deadline, chunks, total_bytes,
+            )
+
+    def _read_until_idle_unix(
+        self,
+        idle_timeout: float,
+        deadline: float,
+        chunks: list[str],
+        total_bytes: int,
+    ) -> str:
+        """pexpect path: read_nonblocking handles the idle wait internally."""
         while time.time() < deadline:
             try:
                 chunk = self._process.read_nonblocking(
@@ -273,11 +335,49 @@ class ShellSession:
                     # Safety: cap buffer to prevent runaway accumulation
                     if total_bytes > DEFAULT_MAX_BUFFER:
                         break
-            except pexpect.TIMEOUT:
+            except _TIMEOUT:
                 # No data for idle_timeout — output has settled
                 break
-            except pexpect.EOF:
+            except _EOF:
                 # Process exited
+                break
+
+        return ''.join(chunks)
+
+    def _read_until_idle_windows(
+        self,
+        idle_timeout: float,
+        deadline: float,
+        chunks: list[str],
+        total_bytes: int,
+    ) -> str:
+        """wexpect path: read_nonblocking is instant, so we poll manually."""
+        last_data_time = time.time()
+
+        while time.time() < deadline:
+            try:
+                chunk = self._process.read_nonblocking(size=4096)
+                if chunk:
+                    # Ensure we always have str (wexpect may return bytes
+                    # depending on version/codepage configuration)
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode('utf-8', errors='replace')
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    last_data_time = time.time()
+                    if total_bytes > DEFAULT_MAX_BUFFER:
+                        break
+                else:
+                    # Empty read — check idle elapsed
+                    if time.time() - last_data_time >= idle_timeout:
+                        break
+                    time.sleep(self._POLL_INTERVAL)
+            except _TIMEOUT:
+                # No data available right now — check idle elapsed
+                if time.time() - last_data_time >= idle_timeout:
+                    break
+                time.sleep(self._POLL_INTERVAL)
+            except _EOF:
                 break
 
         return ''.join(chunks)
