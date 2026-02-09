@@ -378,11 +378,37 @@ class ShellSession:
         chunks: list[str],
         total_bytes: int,
     ) -> str:
-        """wexpect path: read_nonblocking is instant, so we poll manually."""
+        """wexpect path: SpawnPipe.read_nonblocking blocks (win32file.ReadFile),
+        so we must peek the pipe before reading to avoid hanging forever."""
         last_data_time = time.time()
+
+        # SpawnPipe stores the Win32 pipe handle as self.pipe.  We use
+        # PeekNamedPipe to check data availability before calling the
+        # blocking read_nonblocking.  SpawnSocket has a built-in 0.2 s
+        # socket timeout instead, so no peek is needed there.
+        _peek = None
+        pipe_handle = getattr(self._process, 'pipe', None)
+        if pipe_handle is not None:
+            try:
+                import win32pipe as _win32pipe
+                _peek = lambda: _win32pipe.PeekNamedPipe(pipe_handle, 0)[1]
+            except ImportError:
+                pass
 
         while time.time() < deadline:
             try:
+                # When we have a pipe handle, peek first to avoid blocking.
+                if _peek is not None:
+                    try:
+                        available = _peek()
+                    except Exception:
+                        break  # pipe broken → treat as EOF
+                    if available == 0:
+                        if time.time() - last_data_time >= idle_timeout:
+                            break
+                        time.sleep(self._POLL_INTERVAL)
+                        continue
+
                 chunk = self._process.read_nonblocking(size=4096)
                 if chunk:
                     # Ensure we always have str (wexpect may return bytes
