@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from shared.path_utils import normalize_for_comparison
+from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,9 @@ def resolve_path(path: str, cwd: str) -> Tuple[bool, str]:
         Tuple of (success, resolved_path_or_error)
     """
     try:
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
+
         # Expand ~ to home directory
         expanded = os.path.expanduser(path)
 

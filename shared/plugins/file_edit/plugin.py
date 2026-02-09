@@ -39,7 +39,7 @@ from .find_replace import (
     FindReplaceResult,
     generate_find_replace_preview,
 )
-from shared.path_utils import normalize_result_path
+from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.trace import trace as _trace_write
 
 
@@ -244,13 +244,18 @@ class FileEditPlugin:
         'customer-domain-api/pom.xml', it resolves to the client's workspace
         directory rather than the server's current working directory.
 
+        Under MSYS2, also converts /c/Users/... paths to C:/Users/... so
+        that Python can resolve them via Windows APIs.
+
         Args:
-            path: Path string (absolute or relative).
+            path: Path string (absolute or relative, Windows or MSYS2 format).
 
         Returns:
             Resolved Path object. Relative paths are resolved against
             workspace_root if configured, otherwise against CWD.
         """
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
         p = Path(path)
         if p.is_absolute():
             return p

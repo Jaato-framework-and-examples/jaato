@@ -4,16 +4,16 @@ When running native Windows Python (MinGW) under an MSYS2 or Git Bash shell,
 Python's path functions produce Windows-style paths (backslashes, drive letters)
 but the shell environment expects Unix-style paths (forward slashes).
 
+MSYS2 path mapping:
+    Windows:  C:\\Users\\foo\\project   or  C:/Users/foo/project
+    MSYS2:    /c/Users/foo/project
+
 This module provides:
 - MSYS2 environment detection
 - Path normalization for display and string comparison
-- Consistent path separator handling across platforms
-
-The normalization converts backslashes to forward slashes when running under
-MSYS2, which:
-- Makes paths copy-pasteable in the MSYS2 shell
-- Ensures string-based prefix matching works with mixed-separator paths
-- Keeps internal Python path operations working (Python handles both separators)
+- Drive letter conversion: C:/foo <-> /c/foo
+- Input normalization: /c/foo -> C:/foo (so Python can open MSYS2-style paths)
+- Output normalization: C:/foo -> /c/foo (for display in MSYS2 shell)
 
 Reference: https://www.msys2.org/docs/python/
            https://www.msys2.org/docs/filesystem-paths/
@@ -21,6 +21,7 @@ Reference: https://www.msys2.org/docs/python/
 
 import functools
 import os
+import re
 import sys
 from typing import Optional
 
@@ -58,33 +59,100 @@ def is_msys2_environment() -> bool:
     return False
 
 
-def normalize_path(path: str) -> str:
-    """Normalize path separators for the current environment.
+# Regex matching MSYS2-style drive paths: /c/... or /C/...
+# The drive letter must be followed by / or end of string to avoid false positives
+# like /config or /cache
+_MSYS2_DRIVE_RE = re.compile(r'^/([a-zA-Z])(?:/|$)')
 
-    Under MSYS2 on Windows, converts backslashes to forward slashes so that
-    paths are compatible with the Unix-like shell environment. On other
-    platforms, returns the path unchanged.
+# Regex matching Windows-style drive paths: C:/ or C:\
+_WINDOWS_DRIVE_RE = re.compile(r'^([a-zA-Z]):[\\/]')
+
+
+def msys2_to_windows_path(path: str) -> str:
+    """Convert an MSYS2-style path to a Windows path.
+
+    Converts /c/Users/foo -> C:/Users/foo so that Python's file operations
+    can find the file. Only converts paths that start with a single drive
+    letter (e.g., /c/, /d/) to avoid false positives on paths like /config/.
+
+    This should be applied to user-provided paths that may come from
+    the MSYS2 shell, so that Python (which uses Windows APIs) can resolve them.
+
+    Args:
+        path: Path string, possibly in MSYS2 format.
+
+    Returns:
+        Windows-style path if input was MSYS2 drive path, unchanged otherwise.
+    """
+    if not path:
+        return path
+
+    m = _MSYS2_DRIVE_RE.match(path)
+    if m:
+        drive = m.group(1).upper()
+        rest = path[2:]  # Everything after /c
+        return f"{drive}:{rest}" if rest else f"{drive}:/"
+
+    return path
+
+
+def windows_to_msys2_path(path: str) -> str:
+    """Convert a Windows-style path to MSYS2 format for display.
+
+    Converts C:/Users/foo -> /c/Users/foo and also replaces backslashes
+    with forward slashes. This makes paths copy-pasteable in the MSYS2 shell.
+
+    Args:
+        path: Path string, possibly with Windows drive letter.
+
+    Returns:
+        MSYS2-style path if input had a drive letter, unchanged otherwise.
+    """
+    if not path:
+        return path
+
+    # First normalize separators
+    path = path.replace('\\', '/')
+
+    m = _WINDOWS_DRIVE_RE.match(path)
+    if m:
+        drive = m.group(1).lower()
+        rest = path[2:]  # Everything after C:
+        return f"/{drive}{rest}"
+
+    return path
+
+
+def normalize_path(path: str) -> str:
+    """Normalize a Windows path for display under MSYS2.
+
+    Under MSYS2, performs two conversions:
+    1. Backslashes to forward slashes: C:\\foo -> C:/foo
+    2. Drive letter to MSYS2 mount: C:/foo -> /c/foo
+
+    On other platforms, returns the path unchanged.
 
     This is primarily for paths that will be:
     - Displayed to the user in tool output
-    - Used in string-based prefix matching/comparisons
     - Returned as part of structured tool results
 
-    Internal Python file operations (open, read, write, os.path, pathlib)
-    handle both separators on Windows, so normalization is only needed at
-    display/comparison boundaries.
+    The resulting /c/foo format is the native MSYS2 representation and can
+    be directly copy-pasted into the MSYS2 shell.
+
+    Note: For string comparison, use normalize_for_comparison() instead,
+    which only normalizes separators without drive letter conversion.
 
     Args:
         path: Path string to normalize.
 
     Returns:
-        Path with forward slashes under MSYS2, unchanged otherwise.
+        MSYS2-style path (/c/foo) under MSYS2, unchanged otherwise.
     """
     if not path:
         return path
 
     if is_msys2_environment():
-        return path.replace('\\', '/')
+        return windows_to_msys2_path(path)
 
     return path
 
@@ -151,8 +219,10 @@ def normalized_equals(path1: str, path2: str) -> bool:
 def normalize_result_path(path: str) -> str:
     """Normalize a path for inclusion in tool results.
 
-    Under MSYS2, converts to forward slashes so paths in tool responses
-    are usable in the shell. On other platforms, returns unchanged.
+    Under MSYS2, converts Windows paths to MSYS2 format:
+      C:\\Users\\foo\\file.py -> /c/Users/foo/file.py
+
+    On other platforms, returns unchanged.
 
     This should be applied to any path that appears in structured tool
     output (JSON results, error messages, etc.) that the model or user

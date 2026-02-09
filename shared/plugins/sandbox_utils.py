@@ -32,7 +32,7 @@ import os
 import tempfile
 from typing import Optional, Tuple
 
-from shared.path_utils import normalize_for_comparison
+from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 
 
 # The special configuration directory that gets contained symlink escape
@@ -252,6 +252,9 @@ def check_path_with_jaato_containment(
     if not workspace_root:
         # No sandboxing configured
         return True
+
+    # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+    path = msys2_to_windows_path(path)
 
     # Make path absolute
     abs_path = os.path.abspath(path)

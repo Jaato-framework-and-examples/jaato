@@ -8,6 +8,8 @@ import pytest
 
 from shared.path_utils import (
     is_msys2_environment,
+    msys2_to_windows_path,
+    windows_to_msys2_path,
     normalize_path,
     normalize_for_comparison,
     normalized_startswith,
@@ -103,12 +105,104 @@ class TestIsMsys2Environment:
 
 
 # ============================================================================
+# msys2_to_windows_path() tests
+# ============================================================================
+
+
+class TestMsys2ToWindowsPath:
+    """Tests for MSYS2 -> Windows drive letter conversion."""
+
+    def test_lowercase_drive(self):
+        assert msys2_to_windows_path("/c/Users/foo") == "C:/Users/foo"
+
+    def test_uppercase_drive(self):
+        assert msys2_to_windows_path("/C/Users/foo") == "C:/Users/foo"
+
+    def test_other_drives(self):
+        assert msys2_to_windows_path("/d/data/file.txt") == "D:/data/file.txt"
+        assert msys2_to_windows_path("/e/backup") == "E:/backup"
+
+    def test_drive_root(self):
+        assert msys2_to_windows_path("/c/") == "C:/"
+
+    def test_drive_only(self):
+        # /c with nothing after it
+        assert msys2_to_windows_path("/c") == "C:/"
+
+    def test_not_a_drive_path(self):
+        # /config/ or /cache/ should NOT be converted (multi-letter names)
+        assert msys2_to_windows_path("/config/foo") == "/config/foo"
+        assert msys2_to_windows_path("/cache/bar") == "/cache/bar"
+        assert msys2_to_windows_path("/home/user") == "/home/user"
+        assert msys2_to_windows_path("/tmp/test") == "/tmp/test"
+
+    def test_already_windows_path(self):
+        assert msys2_to_windows_path("C:/Users/foo") == "C:/Users/foo"
+        assert msys2_to_windows_path("C:\\Users\\foo") == "C:\\Users\\foo"
+
+    def test_relative_path(self):
+        assert msys2_to_windows_path("src/main/file.py") == "src/main/file.py"
+
+    def test_empty_path(self):
+        assert msys2_to_windows_path("") == ""
+
+    def test_preserves_trailing_separator(self):
+        assert msys2_to_windows_path("/c/Users/foo/") == "C:/Users/foo/"
+
+
+# ============================================================================
+# windows_to_msys2_path() tests
+# ============================================================================
+
+
+class TestWindowsToMsys2Path:
+    """Tests for Windows -> MSYS2 drive letter conversion."""
+
+    def test_uppercase_drive(self):
+        assert windows_to_msys2_path("C:/Users/foo") == "/c/Users/foo"
+
+    def test_lowercase_drive(self):
+        assert windows_to_msys2_path("c:/Users/foo") == "/c/Users/foo"
+
+    def test_backslash_drive(self):
+        assert windows_to_msys2_path("C:\\Users\\foo") == "/c/Users/foo"
+
+    def test_mixed_separators(self):
+        assert windows_to_msys2_path("D:\\data/file.txt") == "/d/data/file.txt"
+
+    def test_drive_root(self):
+        assert windows_to_msys2_path("C:/") == "/c/"
+        assert windows_to_msys2_path("C:\\") == "/c/"
+
+    def test_not_a_drive_path(self):
+        assert windows_to_msys2_path("/home/user") == "/home/user"
+        assert windows_to_msys2_path("relative/path") == "relative/path"
+
+    def test_already_msys2_path(self):
+        assert windows_to_msys2_path("/c/Users/foo") == "/c/Users/foo"
+
+    def test_empty_path(self):
+        assert windows_to_msys2_path("") == ""
+
+    def test_roundtrip(self):
+        """msys2_to_windows then windows_to_msys2 returns original."""
+        original = "/c/Users/foo/project/file.py"
+        assert windows_to_msys2_path(msys2_to_windows_path(original)) == original
+
+    def test_roundtrip_from_windows(self):
+        """windows_to_msys2 then msys2_to_windows returns original format."""
+        original = "C:/Users/foo/project/file.py"
+        result = msys2_to_windows_path(windows_to_msys2_path(original))
+        assert result == original
+
+
+# ============================================================================
 # normalize_path() tests
 # ============================================================================
 
 
 class TestNormalizePath:
-    """Tests for MSYS2-conditional path normalization."""
+    """Tests for MSYS2-conditional path normalization (including drive letter)."""
 
     def setup_method(self):
         is_msys2_environment.cache_clear()
@@ -117,8 +211,9 @@ class TestNormalizePath:
         is_msys2_environment.cache_clear()
 
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=True)
-    def test_backslash_to_forward_under_msys2(self, _mock):
-        assert normalize_path(r"C:\Users\foo\project\file.py") == "C:/Users/foo/project/file.py"
+    def test_windows_to_msys2_under_msys2(self, _mock):
+        """Under MSYS2, converts C:\\foo -> /c/foo."""
+        assert normalize_path(r"C:\Users\foo\project\file.py") == "/c/Users/foo/project/file.py"
 
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=True)
     def test_already_forward_unchanged_under_msys2(self, _mock):
@@ -126,7 +221,8 @@ class TestNormalizePath:
 
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=True)
     def test_mixed_separators_under_msys2(self, _mock):
-        assert normalize_path(r"C:\Users/foo\project/file.py") == "C:/Users/foo/project/file.py"
+        """Under MSYS2, mixed separators with drive letter -> /c/... format."""
+        assert normalize_path(r"C:\Users/foo\project/file.py") == "/c/Users/foo/project/file.py"
 
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=False)
     def test_unchanged_when_not_msys2(self, _mock):
@@ -236,6 +332,11 @@ class TestNormalizeResultPath:
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=True)
     def test_normalizes_under_msys2(self, _mock):
         assert normalize_result_path(r"src\main\file.py") == "src/main/file.py"
+
+    @mock.patch("shared.path_utils.is_msys2_environment", return_value=True)
+    def test_drive_letter_conversion_under_msys2(self, _mock):
+        """Tool results should show /c/... format under MSYS2."""
+        assert normalize_result_path(r"C:\Users\foo\file.py") == "/c/Users/foo/file.py"
 
     @mock.patch("shared.path_utils.is_msys2_environment", return_value=False)
     def test_unchanged_when_not_msys2(self, _mock):
