@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import CommandCompletion, CommandParameter, HelpLines, UserCommand
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import EditableContent, ToolSchema
 
 from .auth import AuthError, AuthManager
 from .bruno_import import BrunoParseError, parse_bruno_collection
@@ -264,6 +264,11 @@ class ServiceConnectorPlugin:
                 },
                 category="web",
                 discoverability="discoverable",
+                editable=EditableContent(
+                    parameters=["method", "path", "url", "query", "headers", "body"],
+                    format="json",
+                    template="# Edit the request below. Save and exit to continue.\n",
+                ),
             ),
             ToolSchema(
                 name="preview_request",
