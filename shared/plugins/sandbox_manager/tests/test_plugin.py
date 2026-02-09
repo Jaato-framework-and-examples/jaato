@@ -359,7 +359,7 @@ class TestUserCommands:
 
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/new/allowed/path"
+            "path": "readwrite /new/allowed/path"
         })
 
         assert result["status"] == "added"
@@ -381,14 +381,14 @@ class TestUserCommands:
         # Add first time
         result1 = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/test/path"
+            "path": "readwrite /test/path"
         })
         assert result1["status"] == "added"
 
         # Add second time
         result2 = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/test/path"
+            "path": "readwrite /test/path"
         })
         assert result2["status"] == "already_allowed"
 
@@ -441,7 +441,7 @@ class TestUserCommands:
         # Then allow (should remove from denied)
         plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/test/path"
+            "path": "readwrite /test/path"
         })
 
         # Check config
@@ -467,7 +467,7 @@ class TestUserCommands:
         # First add a path
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/session/added/path"
+            "path": "readwrite /session/added/path"
         })
         assert result["status"] == "added"
 
@@ -505,16 +505,29 @@ class TestUserCommands:
         assert "error" in result
         assert "Unknown subcommand" in result["error"]
 
-    def test_sandbox_add_requires_path(self, initialized_plugin):
-        """Test that sandbox add requires path argument."""
+    def test_sandbox_add_requires_access_and_path(self, initialized_plugin):
+        """Test that sandbox add requires access mode and path argument."""
         plugin, workspace = initialized_plugin
 
+        # No arguments at all
         result = plugin._execute_sandbox_command({
             "subcommand": "add"
         })
-
         assert "error" in result
-        assert "Path is required" in result["error"]
+
+        # Access mode without path
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readonly"
+        })
+        assert "error" in result
+
+        # Path without access mode
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "/some/path"
+        })
+        assert "error" in result
 
     def test_sandbox_remove_requires_path(self, initialized_plugin):
         """Test that sandbox remove requires path argument."""
@@ -656,7 +669,7 @@ class TestEdgeCases:
 
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/some/path"
+            "path": "readwrite /some/path"
         })
 
         assert "error" in result
@@ -670,7 +683,7 @@ class TestEdgeCases:
 
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "/some/path"
+            "path": "readwrite /some/path"
         })
 
         assert "error" in result
@@ -714,7 +727,7 @@ class TestEdgeCases:
 
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "relative/path"
+            "path": "readwrite relative/path"
         })
 
         # Path should be resolved relative to workspace, not process CWD
