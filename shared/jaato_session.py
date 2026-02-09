@@ -1164,6 +1164,25 @@ class JaatoSession:
                             gc_policy,
                             label=plugin_name,
                         )
+        # Formatter pipeline instructions (output rendering capabilities)
+        # Formatters are not tool plugins but contribute system instructions
+        # (e.g., mermaid rendering hints). Track per-formatter for drill-down.
+        formatter_pipeline = getattr(self._runtime, '_formatter_pipeline', None)
+        if formatter_pipeline and hasattr(formatter_pipeline, '_formatters'):
+            for formatter in formatter_pipeline._formatters:
+                if hasattr(formatter, 'get_system_instructions'):
+                    instr = formatter.get_system_instructions()
+                    if instr:
+                        tokens = self._count_tokens(instr)
+                        plugin_tokens += tokens
+                        self._instruction_budget.add_child(
+                            InstructionSource.PLUGIN,
+                            formatter.name,
+                            tokens,
+                            GCPolicy.PRESERVABLE,
+                            label=formatter.name,
+                        )
+
         self._instruction_budget.update_tokens(InstructionSource.PLUGIN, plugin_tokens)
 
         # ENRICHMENT: Enrichment pipeline additions

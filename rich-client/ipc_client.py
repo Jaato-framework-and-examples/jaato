@@ -381,8 +381,13 @@ class IPCClient:
         trace_log = get_env("JAATO_TRACE_LOG")
         provider_trace = get_env("PROVIDER_TRACE_LOG")
 
-        # Get terminal width for formatting
+        # Send the effective content width (terminal minus client chrome)
+        # so server-side formatters render to the actual available area.
+        # Panel borders: 4 chars (2 per side).  Debug line gutter: 6 chars.
         terminal_width, _ = shutil.get_terminal_size()
+        content_width = terminal_width - 4  # panel borders
+        if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
+            content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = os.getcwd()
@@ -399,7 +404,7 @@ class IPCClient:
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
-            terminal_width=terminal_width,
+            terminal_width=content_width,
             working_dir=working_dir,
             env_file=env_file_abs,
         ))

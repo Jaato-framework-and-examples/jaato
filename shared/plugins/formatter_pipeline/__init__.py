@@ -29,7 +29,7 @@ Example (batch):
 """
 
 from .protocol import FormatterPlugin, ConfigurableFormatter
-from .pipeline import FormatterPipeline, create_pipeline
+from .pipeline import FormatterPipeline, create_pipeline, PRERENDERED_LINE_PREFIX
 from .registry import FormatterRegistry, create_registry, create_default_pipeline
 
 __all__ = [
@@ -40,4 +40,5 @@ __all__ = [
     "FormatterRegistry",
     "create_registry",
     "create_default_pipeline",
+    "PRERENDERED_LINE_PREFIX",
 ]
