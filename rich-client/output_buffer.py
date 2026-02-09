@@ -4536,7 +4536,7 @@ class OutputBuffer:
                 # Check if this is the last thinking line in the visible items
                 # to render footer (look ahead to next item)
                 is_last_thinking = (i == len(items_to_show) - 1) or (
-                    i + 1 < len(items_to_show) and items_to_show[i + 1].source != "thinking"
+                    i + 1 < len(items_to_show) and getattr(items_to_show[i + 1], 'source', None) != "thinking"
                 )
                 if is_last_thinking:
                     # Render footer: └─────────────────────────────────────────┘
