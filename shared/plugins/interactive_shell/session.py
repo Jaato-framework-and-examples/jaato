@@ -33,11 +33,18 @@ if IS_WINDOWS:
         _spawn = wexpect.spawn
         _TIMEOUT = wexpect.TIMEOUT
         _EOF = wexpect.EOF
-    except ImportError:
-        _BACKEND_ERROR = (
-            "wexpect is required for interactive shell sessions on Windows. "
-            "Install it with: pip install wexpect"
-        )
+    except ImportError as _exc:
+        if "pkg_resources" in str(_exc):
+            _BACKEND_ERROR = (
+                "wexpect failed to import because pkg_resources is missing. "
+                "On Python 3.12+ pkg_resources is no longer bundled by default. "
+                "Install it with: pip install setuptools wexpect"
+            )
+        else:
+            _BACKEND_ERROR = (
+                "wexpect is required for interactive shell sessions on Windows. "
+                "Install it with: pip install wexpect"
+            )
 else:
     import pexpect
     _spawn = pexpect.spawn
