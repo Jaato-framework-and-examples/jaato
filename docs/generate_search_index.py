@@ -2,7 +2,7 @@
 """
 Generate a Lunr.js search index from HTML documentation files.
 
-This script scans all HTML files in docs/docs/, extracts their content
+This script scans all HTML files in docs/web/, extracts their content
 (title, headings, text), and generates a JSON index file that can be
 loaded by Lunr.js for client-side full-text search.
 
@@ -10,7 +10,7 @@ Usage:
     python docs/generate_search_index.py
 
 Output:
-    docs/docs/assets/js/search-index.json
+    docs/web/assets/js/search-index.json
 """
 
 import json
@@ -122,7 +122,7 @@ def process_html_file(file_path, docs_root):
     with open(file_path, 'r', encoding='utf-8') as f:
         html_content = f.read()
 
-    # Get relative path from docs/docs/
+    # Get relative path from docs/web/
     rel_path = os.path.relpath(file_path, docs_root)
 
     # Extract content
@@ -197,7 +197,7 @@ def main():
     """Main entry point."""
     # Determine paths
     script_dir = Path(__file__).parent
-    docs_root = script_dir / 'docs'
+    docs_root = script_dir / 'web'
     output_file = docs_root / 'assets' / 'js' / 'search-index.json'
 
     print("=" * 60)
