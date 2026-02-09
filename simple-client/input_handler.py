@@ -219,6 +219,11 @@ class InputHandler:
         if self._completer:
             self._completer.add_commands(commands)
 
+    def clear_plugin_commands(self) -> None:
+        """Clear all plugin-contributed commands."""
+        if self._completer:
+            self._completer.clear_plugin_commands()
+
     def set_session_provider(self, provider: Callable[[], List]) -> None:
         """Set the session ID provider for completion.
 
@@ -265,6 +270,18 @@ class InputHandler:
         """
         if self._completer:
             self._completer.set_permission_mode(enabled, options)
+
+    def set_sandbox_path_provider(
+        self, provider: Callable[[], List]
+    ) -> None:
+        """Set the sandbox path provider for @@sandbox completion.
+
+        Args:
+            provider: Callback returning list of (path, description) tuples
+                     for sandbox-allowed root paths.
+        """
+        if self._completer:
+            self._completer.set_sandbox_path_provider(provider)
 
     def set_available_themes(self, theme_names: List[str]) -> None:
         """Set available theme names for completion.

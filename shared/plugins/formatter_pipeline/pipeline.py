@@ -32,6 +32,12 @@ from datetime import datetime
 from .protocol import FormatterPlugin, ConfigurableFormatter
 from shared.trace import trace as _trace_write
 
+# Sentinel prefix for pre-rendered lines (e.g. mermaid diagram half-block art).
+# Lines with this prefix have already been rendered with precise ANSI positioning
+# and must NOT be re-wrapped by the output buffer — wrapping breaks pixel-aligned
+# half-block characters.  Null bytes never appear in normal model text output.
+PRERENDERED_LINE_PREFIX = "\x00\x01PRE\x00"
+
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
@@ -50,6 +56,7 @@ class FormatterPipeline:
         """Initialize an empty pipeline."""
         self._formatters: List[FormatterPlugin] = []
         self._console_width: int = 80
+        self._pending_feedback: Optional[str] = None
 
     def register(self, formatter: FormatterPlugin) -> None:
         """Register a formatter plugin.
@@ -101,6 +108,16 @@ class FormatterPipeline:
         for formatter in self._formatters:
             if isinstance(formatter, ConfigurableFormatter):
                 formatter.set_console_width(width)
+
+    def set_workspace_path(self, path: str) -> None:
+        """Propagate workspace path to formatters that accept it.
+
+        Formatters like mermaid_formatter use the workspace path to resolve
+        artifact directories (e.g. <workspace>/.jaato/vision/).
+        """
+        for formatter in self._formatters:
+            if hasattr(formatter, "set_workspace_path"):
+                formatter.set_workspace_path(path)
 
     def process_chunk(self, chunk: str) -> Iterator[str]:
         """Process a chunk through all formatters.
@@ -170,6 +187,60 @@ class FormatterPipeline:
         """Reset all formatters for a new turn."""
         for formatter in self._formatters:
             formatter.reset()
+
+    # ==================== Turn Feedback ====================
+
+    def collect_turn_feedback(self) -> Optional[str]:
+        """Collect turn feedback from registered formatters and store it.
+
+        Called after flush() at turn end. Iterates all formatters and collects
+        feedback from those that implement the optional get_turn_feedback()
+        method. Stores the result for retrieval via get_pending_feedback().
+
+        Returns:
+            Combined feedback string, or None if no formatter has feedback.
+        """
+        parts = []
+        for formatter in self._formatters:
+            if hasattr(formatter, "get_turn_feedback"):
+                feedback = formatter.get_turn_feedback()
+                if feedback:
+                    parts.append(feedback)
+        combined = "\n\n".join(parts) if parts else None
+        if combined:
+            self._pending_feedback = combined
+        return combined
+
+    def get_pending_feedback(self) -> Optional[str]:
+        """Return and clear any pending turn feedback.
+
+        Returns:
+            The feedback string stored by collect_turn_feedback(), or None.
+        """
+        feedback = self._pending_feedback
+        self._pending_feedback = None
+        return feedback
+
+    # ==================== System Instructions ====================
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Collect system instructions from registered formatters.
+
+        Iterates all formatters and collects instructions from those that
+        implement the optional get_system_instructions() method. This allows
+        output formatters to inform the model about rendering capabilities
+        it can take advantage of (e.g., mermaid diagram rendering).
+
+        Returns:
+            Combined instruction string, or None if no formatter contributes.
+        """
+        parts = []
+        for formatter in self._formatters:
+            if hasattr(formatter, "get_system_instructions"):
+                instr = formatter.get_system_instructions()
+                if instr:
+                    parts.append(instr)
+        return "\n\n".join(parts) if parts else None
 
     # ==================== Convenience Methods ====================
 

@@ -27,7 +27,7 @@ Usage:
 import os
 import re
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from shared.trace import trace as _trace_write
 
 
@@ -91,7 +91,6 @@ class CodeValidationFormatterPlugin:
         self._priority = DEFAULT_PRIORITY
         self._max_errors_per_block = 5
         self._max_warnings_per_block = 3
-        self._feedback_callback: Optional[Callable[[str], None]] = None
         self._accumulated_issues: List[Dict[str, Any]] = []
 
         # Streaming state
@@ -194,11 +193,6 @@ class CodeValidationFormatterPlugin:
             self._in_code_block = False
             self._code_block_lang = ""
 
-        # Trigger feedback callback if there are accumulated issues
-        if self._accumulated_issues and self._feedback_callback:
-            feedback = self._build_feedback_message()
-            self._feedback_callback(feedback)
-
     def reset(self) -> None:
         """Reset state for a new turn."""
         self._buffer = ""
@@ -255,10 +249,6 @@ class CodeValidationFormatterPlugin:
         self._lsp_plugin = lsp_plugin
         _trace(f"set_lsp_plugin: plugin set")
 
-    def set_feedback_callback(self, callback: Callable[[str], None]) -> None:
-        """Set callback for injecting feedback into conversation."""
-        self._feedback_callback = callback
-
     def get_accumulated_issues(self) -> List[Dict[str, Any]]:
         """Get accumulated validation issues from the last format_output call."""
         return self._accumulated_issues
@@ -266,6 +256,19 @@ class CodeValidationFormatterPlugin:
     def clear_accumulated_issues(self) -> None:
         """Clear accumulated validation issues."""
         self._accumulated_issues = []
+
+    def get_turn_feedback(self) -> Optional[str]:
+        """Return feedback about validation issues detected this turn.
+
+        Called by the pipeline after flush(). Returns feedback if there are
+        accumulated issues, then clears them so the model can self-correct
+        on the next turn.
+        """
+        if not self._accumulated_issues:
+            return None
+        feedback = self._build_feedback_message()
+        self._accumulated_issues = []
+        return feedback
 
     # ==================== Internal Methods ====================
 

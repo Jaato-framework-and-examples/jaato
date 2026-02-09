@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand, OutputCallback
+from .plugins.base import HelpLines, UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
 from .instruction_budget import (
@@ -940,6 +940,20 @@ class JaatoSession:
                 context=context
             )
 
+        # Set reliability plugin for tool failure tracking
+        if self._runtime.reliability_plugin:
+            self._executor.set_reliability_plugin(self._runtime.reliability_plugin)
+            # Set session context for pattern tracking
+            self._runtime.reliability_plugin.set_session_context(
+                session_id=self._session_id,
+            )
+            # Set model context
+            if self._model_name:
+                available = self._runtime.list_available_models(
+                    provider_name=self._provider_name_override
+                )
+                self._runtime.reliability_plugin.set_model_context(self._model_name, available)
+
         # Set this session as parent for subagent plugin (for cancellation propagation)
         if self._runtime.registry:
             subagent_plugin = self._runtime.registry.get_plugin("subagent")
@@ -967,6 +981,14 @@ class JaatoSession:
             self._user_commands = {}
             for cmd in self._runtime.registry.get_exposed_user_commands():
                 self._user_commands[cmd.name] = cmd
+
+        # Add reliability plugin user commands and executors
+        if self._runtime.reliability_plugin:
+            for cmd in self._runtime.reliability_plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+            # Register reliability command executor
+            for name, fn in self._runtime.reliability_plugin.get_executors().items():
+                self._executor.register(name, fn)
 
         # Register built-in model command
         self._register_model_command()
@@ -1142,6 +1164,25 @@ class JaatoSession:
                             gc_policy,
                             label=plugin_name,
                         )
+        # Formatter pipeline instructions (output rendering capabilities)
+        # Formatters are not tool plugins but contribute system instructions
+        # (e.g., mermaid rendering hints). Track per-formatter for drill-down.
+        formatter_pipeline = getattr(self._runtime, '_formatter_pipeline', None)
+        if formatter_pipeline and hasattr(formatter_pipeline, '_formatters'):
+            for formatter in formatter_pipeline._formatters:
+                if hasattr(formatter, 'get_system_instructions'):
+                    instr = formatter.get_system_instructions()
+                    if instr:
+                        tokens = self._count_tokens(instr)
+                        plugin_tokens += tokens
+                        self._instruction_budget.add_child(
+                            InstructionSource.PLUGIN,
+                            formatter.name,
+                            tokens,
+                            GCPolicy.PRESERVABLE,
+                            label=formatter.name,
+                        )
+
         self._instruction_budget.update_tokens(InstructionSource.PLUGIN, plugin_tokens)
 
         # ENRICHMENT: Enrichment pipeline additions
@@ -1341,6 +1382,22 @@ class JaatoSession:
         self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, conversation_tokens)
 
         # Emit budget update event
+        self._emit_instruction_budget_update()
+
+    def _update_thinking_budget(self, thinking_tokens: int) -> None:
+        """Update THINKING entry in instruction budget with cumulative thinking tokens."""
+        if not self._instruction_budget:
+            return
+
+        entry = self._instruction_budget.get_entry(InstructionSource.THINKING)
+        if entry:
+            entry.tokens += thinking_tokens
+        else:
+            self._instruction_budget.set_entry(
+                InstructionSource.THINKING,
+                tokens=thinking_tokens,
+                label="Thinking",
+            )
         self._emit_instruction_budget_update()
 
     def refresh_tools(self) -> None:
@@ -1576,6 +1633,13 @@ NOTES
 
             # Recreate session with existing history
             self._create_provider_session(history=history)
+
+            # Update reliability plugin with new model context
+            if self._runtime.reliability_plugin:
+                available = self._runtime.list_available_models(
+                    provider_name=self._provider_name_override
+                )
+                self._runtime.reliability_plugin.set_model_context(model_name, available)
 
             return {
                 "success": True,
@@ -1866,6 +1930,10 @@ NOTES
         # Increment turn counter
         self._turn_index += 1
 
+        # Notify reliability plugin of turn start
+        if self._runtime.reliability_plugin:
+            self._runtime.reliability_plugin.on_turn_start(self._turn_index)
+
         # Wrap entire turn with telemetry span
         with self._telemetry.turn_span(
             session_id=self._agent_id,
@@ -1916,6 +1984,10 @@ NOTES
 
             # Notify session plugin
             self._notify_session_turn_complete()
+
+            # Notify reliability plugin of turn end
+            if self._runtime.reliability_plugin:
+                self._runtime.reliability_plugin.on_turn_end()
 
             return response
 
@@ -2146,6 +2218,10 @@ NOTES
                         # Accumulate text for potential mid-turn interrupt preservation
                         accumulated_streaming_text.append(chunk)
 
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(chunk)
+
                         # Check for pending mid-turn prompts during streaming
                         # This allows user input to interrupt the current generation
                         if self._message_queue.has_parent_messages():
@@ -2220,8 +2296,10 @@ NOTES
             pending_calls = len([p for p in response.parts if p.function_call])
             self._emit_turn_progress(turn_data, pending_tool_calls=pending_calls)
 
-            # Emit thinking content if present (extended thinking from providers)
-            if on_output and response.thinking:
+            # Emit thinking content if present (non-streaming only).
+            # For streaming, the provider emits thinking via on_thinking callback
+            # before text starts, so we don't need to emit it again here.
+            if not use_streaming and on_output and response.thinking:
                 self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
                 on_output("thinking", response.thinking, "write")
 
@@ -2260,10 +2338,6 @@ NOTES
                             len(partial_text) if partial_text else 0,
                             user_prompt_preview
                         )
-
-                    # Notify UI via output that streaming was interrupted for mid-turn prompt
-                    if on_output:
-                        on_output("system", "[Processing your input...]", "write")
 
                     # Process the mid-turn prompt - this sends it to the model
                     # The partial response is preserved in provider history
@@ -2383,12 +2457,28 @@ NOTES
                                 tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
                             )
                             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                partial = get_all_text()
-                                cancel_msg = "[Generation cancelled]"
-                                if on_output and not cancellation_notified:
-                                    on_output("system", cancel_msg, "write")
-                                self._notify_model_of_cancellation(cancel_msg, partial)
-                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                                # Check if this was a mid-turn interrupt
+                                if self._mid_turn_interrupt:
+                                    self._trace("MID_TURN_INTERRUPT: Processing user prompt after interleaved tool result streaming")
+                                    self._mid_turn_interrupt = False
+                                    self._cancel_token = CancelToken()
+                                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                                        use_streaming, on_output, wrapped_usage_callback, turn_data
+                                    )
+                                    if mid_turn_response:
+                                        response = mid_turn_response
+                                    else:
+                                        partial = get_all_text()
+                                        if partial:
+                                            return partial
+                                        return ""
+                                else:
+                                    partial = get_all_text()
+                                    cancel_msg = "[Generation cancelled]"
+                                    if on_output and not cancellation_notified:
+                                        on_output("system", cancel_msg, "write")
+                                    self._notify_model_of_cancellation(cancel_msg, partial)
+                                    return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                             # Check for mid-turn prompts after interleaved tool execution
                             # Only inject if response doesn't have more function calls
@@ -2417,6 +2507,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                     elif part.function_call:
@@ -2439,12 +2532,41 @@ NOTES
                         tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
                     )
                     if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                        partial = get_all_text()
-                        cancel_msg = "[Generation cancelled]"
-                        if on_output and not cancellation_notified:
-                            on_output("system", cancel_msg, "write")
-                        self._notify_model_of_cancellation(cancel_msg, partial)
-                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                        # Check if this was a mid-turn interrupt (user prompt during tool result streaming)
+                        if self._mid_turn_interrupt:
+                            self._trace("MID_TURN_INTERRUPT: Processing user prompt after tool result streaming")
+                            self._mid_turn_interrupt = False
+                            self._cancel_token = CancelToken()
+
+                            if self._on_mid_turn_interrupt:
+                                pending_prompts = self._message_queue.peek_all()
+                                preview = ""
+                                for pm in pending_prompts:
+                                    if pm.source_type in (SourceType.USER, SourceType.PARENT, SourceType.SYSTEM):
+                                        preview = pm.text[:100] if pm.text else ""
+                                        break
+                                partial = get_all_text()
+                                self._on_mid_turn_interrupt(len(partial) if partial else 0, preview)
+
+                            mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                                use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            if mid_turn_response:
+                                response = mid_turn_response
+                                # Fall through to normal processing
+                            else:
+                                self._trace("MID_TURN_INTERRUPT: No prompt in queue after tool result streaming")
+                                partial = get_all_text()
+                                if partial:
+                                    return partial
+                                return ""
+                        else:
+                            partial = get_all_text()
+                            cancel_msg = "[Generation cancelled]"
+                            if on_output and not cancellation_notified:
+                                on_output("system", cancel_msg, "write")
+                            self._notify_model_of_cancellation(cancel_msg, partial)
+                            return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                     if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                         import sys
@@ -2526,6 +2648,9 @@ NOTES
                             on_output("model", part.text, "write")
                         # Forward to parent for visibility
                         self._forward_to_parent("MODEL_OUTPUT", part.text)
+                        # Notify reliability plugin of model text for pattern detection
+                        if self._runtime.reliability_plugin:
+                            self._runtime.reliability_plugin.on_model_text(part.text)
                     accumulated_text.append(part.text)
 
             # Final check for mid-turn prompts before completing the turn
@@ -2556,6 +2681,9 @@ NOTES
                                 on_output("model", part.text, "write")
                             # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            # Notify reliability plugin of model text for pattern detection
+                            if self._runtime.reliability_plugin:
+                                self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
 
                 # Check if the mid-turn response triggered more function calls
@@ -2982,12 +3110,14 @@ NOTES
                 fc_auto_bg = False
                 fc_continuation_id = None
                 fc_show_output = None
+                fc_show_popup = None
                 if isinstance(result.executor_result, tuple) and len(result.executor_result) == 2:
                     er = result.executor_result[1]
                     if isinstance(er, dict):
                         fc_auto_bg = er.get('auto_backgrounded', False)
                         fc_continuation_id = er.get('continuation_id')
                         fc_show_output = er.get('show_output')
+                        fc_show_popup = er.get('show_popup')
                 if self._ui_hooks:
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
@@ -2999,6 +3129,7 @@ NOTES
                         backgrounded=fc_auto_bg,
                         continuation_id=fc_continuation_id,
                         show_output=fc_show_output,
+                        show_popup=fc_show_popup,
                     )
 
         # Build results in original order
@@ -3199,6 +3330,7 @@ NOTES
             fc_auto_backgrounded = False
             fc_continuation_id = None
             fc_show_output = None
+            fc_show_popup = None
             if isinstance(executor_result, tuple) and len(executor_result) == 2:
                 fc_success = executor_result[0]
                 if not fc_success and isinstance(executor_result[1], dict):
@@ -3208,6 +3340,7 @@ NOTES
                     fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
                     fc_continuation_id = executor_result[1].get('continuation_id')
                     fc_show_output = executor_result[1].get('show_output')
+                    fc_show_popup = executor_result[1].get('show_popup')
 
             # Record telemetry
             fc_duration = (fc_end - fc_start).total_seconds()
@@ -3231,6 +3364,7 @@ NOTES
                 backgrounded=fc_auto_backgrounded,
                 continuation_id=fc_continuation_id,
                 show_output=fc_show_output,
+                show_popup=fc_show_popup,
             )
 
         return _ToolExecutionResult(
@@ -3381,6 +3515,52 @@ NOTES
                     attachments=last.attachments
                 )
             ]
+
+        # Check for queued mid-turn prompts to inject between tool executions.
+        # This ensures user prompts are processed during tool-calling chains,
+        # not just after the model finishes all tool calls.
+        # The prompt is appended to the last tool result to maintain the
+        # tool_use → tool_result protocol required by providers.
+        injected_prompts: List[str] = []
+        while True:
+            msg = self._message_queue.pop_first_parent_message()
+            if msg is None:
+                break
+            self._trace(
+                f"MID_TURN_PROMPT_PIGGYBACK: Injecting prompt from "
+                f"{msg.source_type.value}:{msg.source_id}: {msg.text[:100]}..."
+            )
+            # Notify callback for UI (removes from pending bar)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(msg.text)
+            # Emit the prompt as user output so UI shows it
+            if on_output:
+                source = "parent" if msg.source_type == SourceType.PARENT else "user"
+                on_output(source, msg.text, "write")
+            injected_prompts.append(msg.text)
+
+        if injected_prompts and tool_results:
+            combined_prompt = "\n\n".join(injected_prompts)
+            last = tool_results[-1]
+            result_text = str(last.result) if last.result is not None else ""
+            tool_results = tool_results[:-1] + [
+                ToolResult(
+                    call_id=last.call_id,
+                    name=last.name,
+                    result=(
+                        f"{result_text}\n\n"
+                        f"<user_message>{combined_prompt}</user_message>\n"
+                        f"The user has sent a new message during your tool execution. "
+                        f"Please address their input in your next response."
+                    ),
+                    is_error=last.is_error,
+                    attachments=last.attachments
+                )
+            ]
+            self._trace(
+                f"MID_TURN_PROMPT_PIGGYBACK: Injected {len(injected_prompts)} prompt(s) "
+                f"into last tool result"
+            )
 
         # Proactive rate limiting
         self._pacer.pace()
@@ -3784,6 +3964,14 @@ NOTES
                 first_chunk_after_tools = [False]  # Use list to allow mutation in closure
 
                 def streaming_callback(chunk: str) -> None:
+                    # Check for pending mid-turn prompts during tool result streaming
+                    # This mirrors the interrupt detection in the initial streaming callback
+                    if self._message_queue.has_parent_messages():
+                        self._trace("MID_TURN_INTERRUPT: Detected pending user prompt during tool result streaming")
+                        self._mid_turn_interrupt = True
+                        if self._cancel_token:
+                            self._cancel_token.cancel()
+
                     if on_output:
                         # First chunk after tool results starts a new block
                         mode = "append" if first_chunk_after_tools[0] else "write"
@@ -3821,8 +4009,10 @@ NOTES
                     provider=self._provider
                 )
 
-            # Emit thinking content if present (extended thinking from providers)
-            if on_output and response.thinking:
+            # Emit thinking content if present (non-streaming only).
+            # For streaming, the provider emits thinking via on_thinking callback
+            # before text starts, so we don't need to emit it again here.
+            if not use_streaming and on_output and response.thinking:
                 self._trace(f"SESSION_TOOL_RESULT_THINKING_OUTPUT len={len(response.thinking)}")
                 on_output("thinking", response.thinking, "write")
 
@@ -4129,6 +4319,11 @@ NOTES
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
 
+        # Accumulate thinking tokens (these are summed, not replaced)
+        if response.usage.thinking_tokens:
+            turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + response.usage.thinking_tokens
+            self._update_thinking_budget(response.usage.thinking_tokens)
+
     def _emit_turn_progress(self, turn_data: Dict[str, Any], pending_tool_calls: int) -> None:
         """Emit turn progress event with current token state.
 
@@ -4314,6 +4509,10 @@ NOTES
         result: Any
     ) -> None:
         """Inject a user command execution into conversation history."""
+        # HelpLines is display-only (rendered via pager, not serializable) — skip
+        if isinstance(result, HelpLines):
+            return
+
         current_history = self.get_history()
 
         user_message = Message(
@@ -4514,6 +4713,7 @@ NOTES
                     fc_auto_backgrounded = False
                     fc_continuation_id = None
                     fc_show_output = None
+                    fc_show_popup = None
                     if isinstance(executor_result, tuple) and len(executor_result) == 2:
                         fc_success = executor_result[0]
                         # Extract error message if tool failed
@@ -4524,6 +4724,7 @@ NOTES
                             fc_auto_backgrounded = executor_result[1].get('auto_backgrounded', False)
                             fc_continuation_id = executor_result[1].get('continuation_id')
                             fc_show_output = executor_result[1].get('show_output')
+                            fc_show_popup = executor_result[1].get('show_popup')
 
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
@@ -4538,6 +4739,7 @@ NOTES
                             backgrounded=fc_auto_backgrounded,
                             continuation_id=fc_continuation_id,
                             show_output=fc_show_output,
+                            show_popup=fc_show_popup,
                         )
 
                     turn_data['function_calls'].append({

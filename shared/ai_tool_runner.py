@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
     from shared.plugins.permission import PermissionPlugin
     from shared.plugins.background.protocol import BackgroundCapable
+    from shared.plugins.reliability import ReliabilityPlugin
 
 
 class ToolExecutor:
@@ -91,6 +92,10 @@ class ToolExecutor:
         # Set by the session before execute(), captured per-task after threshold.
         self._task_done_callback: Optional[Callable] = None
 
+        # Reliability plugin for tracking tool failures and adaptive trust
+        self._reliability_plugin: Optional['ReliabilityPlugin'] = None
+
+
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
 
@@ -118,6 +123,14 @@ class ToolExecutor:
         """
         self._permission_plugin = plugin
         self._permission_context = context or {}
+
+    def set_reliability_plugin(self, plugin: Optional['ReliabilityPlugin']) -> None:
+        """Set the reliability plugin for tracking tool failures.
+
+        Args:
+            plugin: ReliabilityPlugin instance, or None to disable reliability tracking.
+        """
+        self._reliability_plugin = plugin
 
     def set_registry(self, registry: Optional['PluginRegistry']) -> None:
         """Set the plugin registry for plugin lookups.
@@ -546,6 +559,20 @@ class ToolExecutor:
                     return False, {'error': str(exc), 'traceback': traceback.format_exc()}
             else:
                 return False, {'error': f'No executor registered for {name}'}
+        # Get plugin name for reliability tracking
+        plugin_name = ""
+        if self._registry:
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin:
+                plugin_name = getattr(plugin, 'name', '')
+
+        # Notify reliability plugin before execution
+        if self._reliability_plugin:
+            try:
+                self._reliability_plugin.on_tool_called(name, args)
+            except Exception as e:
+                logger.debug(f"Reliability plugin on_tool_called failed: {e}")
+
         try:
             if debug:
                 print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
@@ -565,12 +592,33 @@ class ToolExecutor:
             # Inject permission metadata if available and result is a dict
             if permission_meta and isinstance(result, dict):
                 result['_permission'] = permission_meta
+
+            # Notify reliability plugin of success
+            if self._reliability_plugin:
+                try:
+                    self._reliability_plugin.on_tool_result(
+                        name, args, True, result, call_id or "", plugin_name
+                    )
+                except Exception as e:
+                    logger.debug(f"Reliability plugin on_tool_result failed: {e}")
+
             return True, result
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
             if debug:
                 print(f"[ai_tool_runner] execute: {name} raised {exc}")
-            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+            error_result = {'error': str(exc), 'traceback': traceback.format_exc()}
+
+            # Notify reliability plugin of failure
+            if self._reliability_plugin:
+                try:
+                    self._reliability_plugin.on_tool_result(
+                        name, args, False, error_result, call_id or "", plugin_name
+                    )
+                except Exception as e:
+                    logger.debug(f"Reliability plugin on_tool_result failed: {e}")
+
+            return False, error_result
 
 
 def _generic_executor(name: str, args: Dict[str, Any], debug: bool = False) -> Tuple[bool, Any]:

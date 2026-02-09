@@ -472,6 +472,7 @@ class SandboxManagerPlugin:
             ("    add <access> <path>  Allow a path for the current session", "dim"),
             ("                      access: readonly or readwrite", "dim"),
             ("                      Path is added to session-level allowlist", "dim"),
+            ("                      access: readonly or readwrite (default: readwrite)", "dim"),
             ("                      Takes precedence over workspace/global denials", "dim"),
             ("", ""),
             ("    remove <path>     Block a path for the current session", "dim"),
@@ -597,7 +598,8 @@ class SandboxManagerPlugin:
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
-            path = os.path.abspath(path)
+            # Resolve relative to client workspace, not server CWD
+            path = os.path.normpath(os.path.join(self._workspace_path, path))
 
         # Load current session config
         session_config = self._load_session_config()
@@ -659,7 +661,8 @@ class SandboxManagerPlugin:
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
-            path = os.path.abspath(path)
+            # Resolve relative to client workspace, not server CWD
+            path = os.path.normpath(os.path.join(self._workspace_path, path))
 
         # Load current session config
         session_config = self._load_session_config()

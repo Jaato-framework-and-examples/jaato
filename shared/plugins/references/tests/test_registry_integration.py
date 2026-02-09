@@ -127,6 +127,7 @@ class TestRegistryReferencesExecutors:
 
         assert "selectReferences" not in executors
         assert "listReferences" not in executors
+        assert "references" not in executors
 
     def test_executor_available_after_expose(self):
         """Test that executor is available after expose."""
@@ -139,8 +140,10 @@ class TestRegistryReferencesExecutors:
 
         assert "selectReferences" in executors
         assert "listReferences" in executors
+        assert "references" in executors
         assert callable(executors["selectReferences"])
         assert callable(executors["listReferences"])
+        assert callable(executors["references"])
 
         registry.unexpose_tool("references")
 
@@ -156,6 +159,7 @@ class TestRegistryReferencesExecutors:
 
         assert "selectReferences" not in executors
         assert "listReferences" not in executors
+        assert "references" not in executors
 
 
 class TestRegistryReferencesAutoApproval:
@@ -170,9 +174,10 @@ class TestRegistryReferencesAutoApproval:
 
         auto_approved = registry.get_auto_approved_tools()
 
-        # Both tools are auto-approved (user-triggered selection flow)
+        # Model tools and user command are all auto-approved
         assert "selectReferences" in auto_approved
         assert "listReferences" in auto_approved
+        assert "references" in auto_approved
 
         registry.unexpose_tool("references")
 
@@ -201,7 +206,7 @@ class TestRegistryReferencesUserCommands:
     """Tests for references user commands via registry."""
 
     def test_user_commands_included(self):
-        """Test that references user commands are included after expose."""
+        """Test that references user command is included after expose."""
         registry = PluginRegistry()
         registry.discover()
 
@@ -210,8 +215,7 @@ class TestRegistryReferencesUserCommands:
         user_commands = registry.get_exposed_user_commands()
         command_names = [cmd.name for cmd in user_commands]
 
-        assert "listReferences" in command_names
-        assert "selectReferences" in command_names
+        assert "references" in command_names
 
         registry.unexpose_tool("references")
 
@@ -223,25 +227,20 @@ class TestRegistryReferencesUserCommands:
         user_commands = registry.get_exposed_user_commands()
         command_names = [cmd.name for cmd in user_commands]
 
-        assert "listReferences" not in command_names
-        assert "selectReferences" not in command_names
+        assert "references" not in command_names
 
     def test_user_commands_shared_with_model(self):
-        """Test that references user commands have share_with_model=True."""
+        """Test that references user command has share_with_model=True."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("references")
 
         user_commands = registry.get_exposed_user_commands()
-        list_cmd = next((cmd for cmd in user_commands if cmd.name == "listReferences"), None)
-        select_cmd = next((cmd for cmd in user_commands if cmd.name == "selectReferences"), None)
+        ref_cmd = next((cmd for cmd in user_commands if cmd.name == "references"), None)
 
-        assert list_cmd is not None
-        assert list_cmd.share_with_model is True
-
-        assert select_cmd is not None
-        assert select_cmd.share_with_model is True
+        assert ref_cmd is not None
+        assert ref_cmd.share_with_model is True
 
         registry.unexpose_tool("references")
 

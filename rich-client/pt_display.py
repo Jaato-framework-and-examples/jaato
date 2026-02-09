@@ -507,6 +507,11 @@ class PTDisplay:
         )
         self._output_line_fragments: Dict[int, List[Tuple[str, str]]] = {}
 
+        # Refresh throttling: avoid expensive _sync_output_display() on every event
+        self._last_sync_time: float = 0.0
+        self._sync_interval: float = 0.033  # ~30fps max refresh rate
+        self._sync_scheduled: bool = False
+
         # Input handling with optional completion
         self._input_handler = input_handler
         self._input_buffer = Buffer(
@@ -1524,10 +1529,11 @@ class PTDisplay:
                 self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-                buffer.set_permission_focus(
-                    self._permission_response_options,
-                    self._permission_focus_index
-                )
+                if buffer:
+                    buffer.set_permission_focus(
+                        self._permission_response_options,
+                        self._permission_focus_index
+                    )
                 self._app.invalidate()
             else:
                 # Normal mode: trigger tab completion
@@ -1546,10 +1552,11 @@ class PTDisplay:
                 self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-                buffer.set_permission_focus(
-                    self._permission_response_options,
-                    self._permission_focus_index
-                )
+                if buffer:
+                    buffer.set_permission_focus(
+                        self._permission_response_options,
+                        self._permission_focus_index
+                    )
                 self._app.invalidate()
             else:
                 # Normal mode: trigger previous completion
@@ -2239,14 +2246,35 @@ class PTDisplay:
         The output sync updates the plain text buffer and style fragments for the
         BufferControl-based output panel.
 
-        NOTE: We only call invalidate() - do NOT call renderer.render() directly
-        as this may be called from background threads and would cause race
-        conditions with the main event loop's rendering.
+        Uses throttling to avoid expensive _sync_output_display() calls during
+        rapid event bursts (e.g. streaming output). The sync is rate-limited to
+        ~30fps; intermediate refreshes just schedule a deferred sync.
         """
         if self._app and self._app.is_running:
-            # Sync output buffer and fragments for styled BufferControl
+            now = time.monotonic()
+            elapsed = now - self._last_sync_time
+            if elapsed >= self._sync_interval:
+                # Enough time has passed - sync immediately
+                self._sync_output_display()
+                self._last_sync_time = now
+                self._sync_scheduled = False
+            elif not self._sync_scheduled:
+                # Schedule a deferred sync to ensure we eventually render
+                self._sync_scheduled = True
+                remaining = self._sync_interval - elapsed
+                self._app.loop.call_later(remaining, self._deferred_sync)
+            # Always invalidate so prompt_toolkit knows to re-render
+            self._app.invalidate()
+
+    def _deferred_sync(self) -> None:
+        """Execute a deferred _sync_output_display() call.
+
+        Called by the event loop timer when a refresh was throttled.
+        """
+        if self._sync_scheduled and self._app and self._app.is_running:
             self._sync_output_display()
-            # Invalidate schedules a redraw in the main event loop
+            self._last_sync_time = time.monotonic()
+            self._sync_scheduled = False
             self._app.invalidate()
 
     def _schedule_refresh(self) -> None:
@@ -3140,10 +3168,11 @@ class PTDisplay:
             self._permission_focus_index = 0
         # Update output buffer with focus state for inline highlighting (use correct buffer)
         buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
-        buffer.set_permission_focus(
-            self._permission_response_options,
-            self._permission_focus_index
-        )
+        if buffer:
+            buffer.set_permission_focus(
+                self._permission_response_options,
+                self._permission_focus_index
+            )
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:

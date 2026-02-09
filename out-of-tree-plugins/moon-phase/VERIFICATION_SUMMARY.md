@@ -1,10 +1,10 @@
 # Documentation Verification Summary
 
 ## Task
-Verify that the jaato API documentation at https://apanoia.github.io/jaato/docs is sufficient for an external developer to build a plugin, specifically a "moon phase calculator" plugin.
+Verify that the jaato API documentation at https://apanoia.github.io/jaato/web is sufficient for an external developer to build a plugin, specifically a "moon phase calculator" plugin.
 
 ## Approach
-- Built the plugin using **only** the API documentation in `docs/docs/`
+- Built the plugin using **only** the API documentation in `docs/web/`
 - Did **not** read any source code from the jaato repository
 - Created an out-of-tree installable Python package following the documented patterns
 - Tested the plugin standalone

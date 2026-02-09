@@ -4,11 +4,10 @@ This provider uses Zhipu AI's Anthropic-compatible API to access GLM models,
 primarily targeting GLM Coding Plan subscribers.
 
 Available Models:
-- GLM-4.7: Latest model with native chain-of-thought reasoning (128K context)
-- GLM-4.7-Flash: Fast inference variant
-- GLM-4: General purpose model
-- GLM-4V: Vision-enabled multimodal model
-- GLM-4-Assistant: Optimized for agentic tasks
+- GLM-4.7: Latest flagship with native chain-of-thought reasoning (200K context)
+- GLM-4.7-Flash/Flashx: Fast inference variants (200K context)
+- GLM-4.6: Previous flagship, strong coding (200K context)
+- GLM-4.5/Air/Flash: Balanced and lightweight models (128K context)
 
 Requirements:
 - Zhipu AI API key from https://open.bigmodel.cn/
@@ -17,7 +16,7 @@ Requirements:
 Configuration:
     Environment variables:
         ZHIPUAI_API_KEY: API key (required)
-        ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic/v1)
+        ZHIPUAI_BASE_URL: API base URL (default: https://api.z.ai/api/anthropic)
         ZHIPUAI_MODEL: Default model name
         ZHIPUAI_CONTEXT_LENGTH: Override context length
 
@@ -64,6 +63,7 @@ from .env import (
 from .provider import (
     DEFAULT_CONTEXT_LIMIT,
     KNOWN_MODELS,
+    MODEL_CONTEXT_LIMITS,
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     ZhipuAIProvider,
@@ -80,6 +80,7 @@ __all__ = [
     # Constants
     "DEFAULT_CONTEXT_LIMIT",
     "KNOWN_MODELS",
+    "MODEL_CONTEXT_LIMITS",
     # Environment
     "resolve_api_key",
     "resolve_base_url",

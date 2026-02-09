@@ -56,6 +56,14 @@ class TodoPlugin:
         # This allows multiple agents to have their own active plans
         self._current_plan_ids: Dict[Optional[str], str] = {}
 
+        # Per-plan locks to ensure atomic read-modify-write cycles.
+        # Without this, parallel tool calls (e.g. addDependentStep + updateStep
+        # in the same batch) can race on FileStorage where get_plan returns
+        # independent deserialized copies — the last save_plan wins, silently
+        # discarding the other's changes.
+        self._plan_locks: Dict[str, threading.Lock] = {}
+        self._plan_locks_guard = threading.Lock()  # protects _plan_locks dict
+
         # Note: session is stored in thread-local storage via set_session()
         # This prevents subagent sessions from overwriting the parent's reference
 
@@ -126,6 +134,16 @@ class TodoPlugin:
                 return name
         # Fall back to legacy thread-local agent_name, then "main"
         return getattr(_thread_local, 'agent_name', None) or "main"
+
+    def _get_plan_lock(self, plan_id: str) -> threading.Lock:
+        """Get or create a per-plan lock for atomic read-modify-write cycles.
+
+        Thread-safe: uses a guard lock to protect the _plan_locks dict itself.
+        """
+        with self._plan_locks_guard:
+            if plan_id not in self._plan_locks:
+                self._plan_locks[plan_id] = threading.Lock()
+            return self._plan_locks[plan_id]
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the TODO plugin.
@@ -867,16 +885,20 @@ class TodoPlugin:
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
 
-        if plan.started:
-            return {"error": "Plan already started. Proceed with updateStep."}
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        # Mark plan as started (user approved)
-        plan.started = True
-        plan.started_at = datetime.utcnow().isoformat() + "Z"
+            if plan.started:
+                return {"error": "Plan already started. Proceed with updateStep."}
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
+            # Mark plan as started (user approved)
+            plan.started = True
+            plan.started_at = datetime.utcnow().isoformat() + "Z"
+
+            # Save to storage
+            if self._storage:
+                self._storage.save_plan(plan)
 
         # Publish plan_started event
         self._publish_event(TaskEventType.PLAN_STARTED, plan)
@@ -925,33 +947,37 @@ class TodoPlugin:
             self._trace(f"updateStep ERROR: No plan for agent={agent_name}, known_agents={known_agents}")
             return {"error": f"No active plan. Create a plan first with createPlan. (agent={agent_name})"}
 
-        if not plan.started:
-            return {"error": "Plan not started. Call startPlan first to get user approval."}
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        # Find step
-        step = plan.get_step_by_id(step_id)
-        if not step:
-            # Enhanced debugging: show what steps exist in the plan
-            existing_step_ids = [s.step_id for s in plan.steps]
-            self._trace(f"updateStep ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
-            return {"error": f"Step not found: {step_id}"}
+            if not plan.started:
+                return {"error": "Plan not started. Call startPlan first to get user approval."}
 
-        # Update step status
-        if new_status == StepStatus.IN_PROGRESS:
-            step.start()
-            plan.current_step = step.sequence
-        elif new_status == StepStatus.COMPLETED:
-            step.complete(result)
-        elif new_status == StepStatus.FAILED:
-            step.fail(error)
-        elif new_status == StepStatus.SKIPPED:
-            step.skip(result)
+            # Find step
+            step = plan.get_step_by_id(step_id)
+            if not step:
+                # Enhanced debugging: show what steps exist in the plan
+                existing_step_ids = [s.step_id for s in plan.steps]
+                self._trace(f"updateStep ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
+                return {"error": f"Step not found: {step_id}"}
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
+            # Update step status
+            if new_status == StepStatus.IN_PROGRESS:
+                step.start()
+                plan.current_step = step.sequence
+            elif new_status == StepStatus.COMPLETED:
+                step.complete(result)
+            elif new_status == StepStatus.FAILED:
+                step.fail(error)
+            elif new_status == StepStatus.SKIPPED:
+                step.skip(result)
 
-        # Report update
+            # Save to storage
+            if self._storage:
+                self._storage.save_plan(plan)
+
+        # Report update (outside lock — read-only on plan)
         if self._reporter:
             self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
@@ -1088,25 +1114,29 @@ class TodoPlugin:
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
 
-        # Guard: can only complete/fail a plan that was started
-        # Cancelling is allowed even if not started (user rejected the plan)
-        if not plan.started and status_str in ("completed", "failed"):
-            return {"error": f"Cannot mark plan as '{status_str}' - plan was never started. "
-                           f"Use 'cancelled' if the plan was rejected."}
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        # Update plan status
-        if status_str == "completed":
-            plan.complete_plan(summary)
-        elif status_str == "failed":
-            plan.fail_plan(summary)
-        else:
-            plan.cancel_plan(summary)
+            # Guard: can only complete/fail a plan that was started
+            # Cancelling is allowed even if not started (user rejected the plan)
+            if not plan.started and status_str in ("completed", "failed"):
+                return {"error": f"Cannot mark plan as '{status_str}' - plan was never started. "
+                               f"Use 'cancelled' if the plan was rejected."}
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
+            # Update plan status
+            if status_str == "completed":
+                plan.complete_plan(summary)
+            elif status_str == "failed":
+                plan.fail_plan(summary)
+            else:
+                plan.cancel_plan(summary)
 
-        # Report completion
+            # Save to storage
+            if self._storage:
+                self._storage.save_plan(plan)
+
+        # Report completion (outside lock — read-only on plan)
         if self._reporter:
             self._reporter.report_plan_completed(plan, agent_id=self._get_agent_name())
 
@@ -1149,17 +1179,21 @@ class TodoPlugin:
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
 
-        if not plan.started:
-            return {"error": "Plan not started. Call startPlan first to get user approval."}
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        # Add the step
-        new_step = plan.add_step(description, after_step_id)
+            if not plan.started:
+                return {"error": "Plan not started. Call startPlan first to get user approval."}
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
+            # Add the step
+            new_step = plan.add_step(description, after_step_id)
 
-        # Report the addition
+            # Save to storage
+            if self._storage:
+                self._storage.save_plan(plan)
+
+        # Report the addition (outside lock — read-only on plan)
         if self._reporter:
             self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
 
@@ -1244,22 +1278,26 @@ class TodoPlugin:
         if not plan:
             return None
 
-        step = plan.get_step_by_id(step_id)
-        if not step:
-            return None
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        if status == StepStatus.IN_PROGRESS:
-            step.start()
-            plan.current_step = step.sequence
-        elif status == StepStatus.COMPLETED:
-            step.complete(result)
-        elif status == StepStatus.FAILED:
-            step.fail(error)
-        elif status == StepStatus.SKIPPED:
-            step.skip(result)
+            step = plan.get_step_by_id(step_id)
+            if not step:
+                return None
 
-        if self._storage:
-            self._storage.save_plan(plan)
+            if status == StepStatus.IN_PROGRESS:
+                step.start()
+                plan.current_step = step.sequence
+            elif status == StepStatus.COMPLETED:
+                step.complete(result)
+            elif status == StepStatus.FAILED:
+                step.fail(error)
+            elif status == StepStatus.SKIPPED:
+                step.skip(result)
+
+            if self._storage:
+                self._storage.save_plan(plan)
 
         if self._reporter:
             self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
@@ -1484,30 +1522,42 @@ class TodoPlugin:
         if not depends_on_raw:
             return {"error": "depends_on is required and must not be empty"}
 
-        # Get current plan
-        plan = self._get_current_plan()
-        if not plan:
-            return {"error": "No active plan. Create a plan first with createPlan."}
-
-        if not plan.started:
-            return {"error": "Plan not started. Call startPlan first to get user approval."}
-
-        # Parse dependencies
+        # Parse dependencies (validation — no lock needed)
         depends_on = []
         for dep in depends_on_raw:
             if not dep.get("agent_id") or not dep.get("step_id"):
                 return {"error": "Each dependency must have agent_id and step_id"}
             depends_on.append(TaskRef.from_dict(dep))
 
-        # Add the step with dependencies
-        new_step = plan.add_step(
-            description=description,
-            after_step_id=after_step_id,
-            depends_on=depends_on,
-            provides=provides
-        )
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
 
-        # Register dependencies with the event bus
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
+
+            if not plan.started:
+                return {"error": "Plan not started. Call startPlan first to get user approval."}
+
+            # Add the step with dependencies
+            new_step = plan.add_step(
+                description=description,
+                after_step_id=after_step_id,
+                depends_on=depends_on,
+                provides=provides
+            )
+
+            # Save to storage BEFORE registering with event bus (Root Cause 3 fix).
+            # The plan must be persisted before the dependency waiter is visible,
+            # otherwise a concurrent step_completed could fire, pop the waiter,
+            # call _on_dependency_resolved, and fail to find the step in storage.
+            if self._storage:
+                self._storage.save_plan(plan)
+
+        # Register dependencies with the event bus (outside lock — event bus has
+        # its own lock, and the plan is already persisted)
         if self._event_bus:
             for dep in depends_on:
                 self._event_bus.register_dependency(
@@ -1517,11 +1567,7 @@ class TodoPlugin:
                     waiting_step_id=new_step.step_id
                 )
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
-
-        # Report the addition
+        # Report the addition (outside lock — read-only on plan)
         if self._reporter:
             self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
 
@@ -1568,22 +1614,26 @@ class TodoPlugin:
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
 
-        if not plan.started:
-            return {"error": "Plan not started. Call startPlan first to get user approval."}
+        with self._get_plan_lock(plan.plan_id):
+            # Re-read inside lock for FileStorage correctness
+            plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
-        # Find step
-        step = plan.get_step_by_id(step_id)
-        if not step:
-            return {"error": f"Step not found: {step_id}"}
+            if not plan.started:
+                return {"error": "Plan not started. Call startPlan first to get user approval."}
 
-        # Complete the step with output
-        step.complete(result=result, output=output)
+            # Find step
+            step = plan.get_step_by_id(step_id)
+            if not step:
+                return {"error": f"Step not found: {step_id}"}
 
-        # Save to storage
-        if self._storage:
-            self._storage.save_plan(plan)
+            # Complete the step with output
+            step.complete(result=result, output=output)
 
-        # Report update
+            # Save to storage
+            if self._storage:
+                self._storage.save_plan(plan)
+
+        # Report update (outside lock — read-only on plan)
         if self._reporter:
             self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
@@ -1741,6 +1791,10 @@ class TodoPlugin:
             waiting_plan_id: Plan containing the waiting step.
             waiting_step_id: Step that was blocked.
             completion_event: The step_completed event with output.
+
+        Raises:
+            RuntimeError: If the plan or step cannot be found, so the event
+                bus can retain the waiter for retry (Root Cause 2 fix).
         """
         self._trace(
             f"Dependency resolved: {waiting_agent}:{waiting_step_id} <- "
@@ -1749,17 +1803,9 @@ class TodoPlugin:
 
         # Get the waiting plan
         if not self._storage:
-            return
+            raise RuntimeError(f"No storage available to resolve dependency for {waiting_step_id}")
 
-        plan = self._storage.get_plan(waiting_plan_id)
-        if not plan:
-            return
-
-        step = plan.get_step_by_id(waiting_step_id)
-        if not step:
-            return
-
-        # Extract output from completion event
+        # Extract output from completion event (before lock — read-only)
         output = completion_event.payload.get("output")
         provides_name = completion_event.payload.get("provides")
 
@@ -1770,13 +1816,28 @@ class TodoPlugin:
             step_id=completion_event.source_step_id or ""
         )
 
-        # Resolve the dependency
-        is_unblocked = step.resolve_dependency(completed_ref, output, provides_name)
+        with self._get_plan_lock(waiting_plan_id):
+            plan = self._storage.get_plan(waiting_plan_id)
+            if not plan:
+                raise RuntimeError(
+                    f"Plan {waiting_plan_id} not found for dependency resolution "
+                    f"(step {waiting_step_id})"
+                )
 
-        # Save updated plan
-        self._storage.save_plan(plan)
+            step = plan.get_step_by_id(waiting_step_id)
+            if not step:
+                raise RuntimeError(
+                    f"Step {waiting_step_id} not found in plan {waiting_plan_id} "
+                    f"for dependency resolution"
+                )
 
-        # If unblocked, publish event
+            # Resolve the dependency
+            is_unblocked = step.resolve_dependency(completed_ref, output, provides_name)
+
+            # Save updated plan
+            self._storage.save_plan(plan)
+
+        # If unblocked, publish event (outside lock)
         if is_unblocked and self._event_bus:
             event = TaskEvent.create(
                 event_type=TaskEventType.STEP_UNBLOCKED,

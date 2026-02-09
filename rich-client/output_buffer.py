@@ -48,6 +48,7 @@ from rich.table import Table
 from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
+from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
 from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
@@ -219,6 +220,7 @@ class ActiveToolCall:
     # Continuation grouping (e.g., interactive shell sessions)
     continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
     show_output: bool = True  # Whether to render output_lines in the main panel (popup unaffected)
+    show_popup: bool = True  # Whether to track/update the tool output popup
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -484,6 +486,11 @@ class OutputBuffer:
         Returns:
             Number of display lines when rendered.
         """
+        # Fast path: prerendered content (mermaid diagrams) — just count newlines
+        if text.startswith(PRERENDERED_LINE_PREFIX):
+            clean = text[len(PRERENDERED_LINE_PREFIX):]
+            return clean.count('\n') + 1
+
         if not self._measure_console:
             self._measure_console = Console(width=self._console_width, force_terminal=True)
 
@@ -511,16 +518,18 @@ class OutputBuffer:
                 # 1 (blank) + 1 (header) + content lines
                 return 2 + content_lines
         elif source == "thinking":
+            # Note: footer/header are only rendered for last/first thinking line in a
+            # block, but we count them for all lines to ensure the block fits on screen.
+            with self._measure_console.capture() as capture:
+                self._measure_console.print(rendered, end='')
+            output = capture.get()
+            content_lines = output.count('\n') + 1 if output else 1
             if is_turn_start:
-                # Blank line (1) + Model header (1) + thinking header (1) + content + footer (1)
-                # Note: footer is only rendered for last thinking line, but we count it
-                # for all thinking lines to ensure the last one fits on screen.
-                with self._measure_console.capture() as capture:
-                    self._measure_console.print(rendered, end='')
-                output = capture.get()
-                content_lines = output.count('\n') + 1 if output else 1
                 # 1 (blank) + 1 (Model header) + 1 (thinking header) + content + 1 (footer)
                 return 4 + content_lines
+            else:
+                # 1 (thinking header) + content + 1 (footer)
+                return 2 + content_lines
         elif source in ("user", "parent"):
             if is_turn_start:
                 # Blank line (1) + header line (1) + wrapped content lines
@@ -547,6 +556,29 @@ class OutputBuffer:
         if not output:
             return 1
         return output.count('\n') + 1
+
+    @staticmethod
+    def _coalesce_prerendered_lines(lines: list) -> list:
+        """Merge consecutive PRERENDERED_LINE_PREFIX lines into single entries.
+
+        Rendered diagrams produce one line per pixel row. Keeping them as
+        separate OutputLines causes inter-item spacing gaps and O(N)
+        measurement overhead.  Coalescing into one entry with embedded
+        newlines fixes both issues.
+        """
+        result = []
+        buf = []
+        for line in lines:
+            if line.startswith(PRERENDERED_LINE_PREFIX):
+                buf.append(line[len(PRERENDERED_LINE_PREFIX):])
+            else:
+                if buf:
+                    result.append(PRERENDERED_LINE_PREFIX + '\n'.join(buf))
+                    buf = []
+                result.append(line)
+        if buf:
+            result.append(PRERENDERED_LINE_PREFIX + '\n'.join(buf))
+        return result
 
     def _add_line(self, source: str, text: str, style: str, is_turn_start: bool = False) -> None:
         """Add a line to the buffer with measured display lines.
@@ -715,6 +747,7 @@ class OutputBuffer:
                     full_text = self._formatter_pipeline.format(full_text)
 
             lines = full_text.split('\n')
+            lines = self._coalesce_prerendered_lines(lines)
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
                 self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
@@ -741,6 +774,7 @@ class OutputBuffer:
                 full_text = self._formatter_pipeline.format(full_text)
 
         lines_text = full_text.split('\n')
+        lines_text = self._coalesce_prerendered_lines(lines_text)
 
         result = []
         for i, line_text in enumerate(lines_text):
@@ -945,7 +979,8 @@ class OutputBuffer:
                             call_id: Optional[str] = None,
                             backgrounded: bool = False,
                             continuation_id: Optional[str] = None,
-                            show_output: Optional[bool] = None) -> None:
+                            show_output: Optional[bool] = None,
+                            show_popup: Optional[bool] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         When backgrounded=True, the tool is marked completed for tree purposes
@@ -966,6 +1001,9 @@ class OutputBuffer:
             continuation_id: Session ID for continuation grouping (popup stays open).
             show_output: Whether to render output_lines in the main panel.
                 None means keep current value. The popup is unaffected.
+            show_popup: Whether to track/update the tool output popup.
+                None means keep current value. False prevents this tool from
+                becoming the tracked popup tool.
         """
         _buffer_trace(
             f"mark_tool_completed: name={tool_name} success={success} "
@@ -995,10 +1033,13 @@ class OutputBuffer:
                         tool.error_message = error_message
                         if show_output is not None:
                             tool.show_output = show_output
-                        if backgrounded and call_id:
+                        if show_popup is not None:
+                            tool.show_popup = show_popup
+                        if backgrounded and call_id and tool.show_popup:
                             self._popup_tools[call_id] = tool
-                        # Continuation grouping
-                        self._apply_continuation(tool, call_id, continuation_id)
+                        # Continuation grouping (skip popup tracking if show_popup=False)
+                        if tool.show_popup:
+                            self._apply_continuation(tool, call_id, continuation_id)
                         return
             elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
@@ -3559,6 +3600,22 @@ class OutputBuffer:
 
         return result
 
+    def _render_prerendered(self, text: str, width: int) -> Text:
+        """Render pre-rendered content (mermaid pixel art), truncating rows that overflow.
+
+        Each pixel row is truncated individually with _truncate_line_to_width
+        so the art is cropped cleanly on the right instead of wrapping
+        chaotically when the terminal is narrower than the rendered width.
+        """
+        clean = text[len(PRERENDERED_LINE_PREFIX):]
+        rows = clean.split('\n')
+        result = Text()
+        for i, row in enumerate(rows):
+            if i > 0:
+                result.append("\n")
+            result.append_text(self._truncate_line_to_width(row, width, width))
+        return result
+
     def _render_table_to_text(self, table: Table, width: Optional[int] = None) -> Text:
         """Render a Rich Table to a Text object for appending to output.
 
@@ -4375,6 +4432,11 @@ class OutputBuffer:
                         cached = self._get_cached_line_content(line, wrap_width)
                         if cached is not None:
                             output.append_text(cached)
+                        elif line.text.startswith(PRERENDERED_LINE_PREFIX):
+                            # Pre-rendered content (mermaid diagrams) — truncate per row, don't wrap
+                            content = self._render_prerendered(line.text, wrap_width)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
                         elif has_ansi:
                             # Text contains ANSI codes from syntax highlighting - wrap to width
                             content = self._wrap_ansi_text(line.text, wrap_width)
@@ -4401,6 +4463,11 @@ class OutputBuffer:
                         cached = self._get_cached_line_content(line, wrap_width)
                         if cached is not None:
                             output.append_text(cached)
+                        elif line.text.startswith(PRERENDERED_LINE_PREFIX):
+                            # Pre-rendered content (mermaid diagrams) — truncate per row, don't wrap
+                            content = self._render_prerendered(line.text, wrap_width)
+                            self._cache_line_content(line, content, wrap_width)
+                            output.append_text(content)
                         elif has_ansi:
                             # Text contains ANSI codes from syntax highlighting - wrap to width
                             content = self._wrap_ansi_text(line.text, wrap_width)
@@ -4439,8 +4506,13 @@ class OutputBuffer:
                 # Extended thinking output - render with header/footer and indentation
                 # This is the model's internal reasoning before generating response
                 # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+                indent = "   "  # Left indent for the entire thinking block
                 border = "│ "
-                border_width = len(border)
+                border_width = len(indent) + len(border)
+                # Check if this is the first thinking line in a consecutive group
+                is_first_thinking = (i == 0) or (items_to_show[i - 1].source != "thinking"
+                                                  if isinstance(items_to_show[i - 1], OutputLine)
+                                                  else True)
                 if line.is_turn_start:
                     # First render Model header (thinking is part of model turn)
                     header_prefix = "── Model "
@@ -4448,9 +4520,12 @@ class OutputBuffer:
                     output.append(header_prefix, style=self._style("model_header", "bold cyan"))
                     output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
-                    # Then render thinking header: ┌─ Internal thinking ───────┐
+                if is_first_thinking:
+                    # Render thinking header (top border): ┌─ Internal thinking ───────┐
                     thinking_header = "┌─ Internal thinking "
-                    remaining = max(0, wrap_width - len(thinking_header) - 1)
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - len(thinking_header) - 1)
+                    output.append(indent)
                     output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
                     output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
@@ -4460,6 +4535,7 @@ class OutputBuffer:
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
+                    output.append(indent)
                     output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
                     output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
                 # Track that we're in thinking mode for footer rendering
@@ -4467,12 +4543,14 @@ class OutputBuffer:
                 # Check if this is the last thinking line in the visible items
                 # to render footer (look ahead to next item)
                 is_last_thinking = (i == len(items_to_show) - 1) or (
-                    i + 1 < len(items_to_show) and items_to_show[i + 1].source != "thinking"
+                    i + 1 < len(items_to_show) and getattr(items_to_show[i + 1], 'source', None) != "thinking"
                 )
                 if is_last_thinking:
                     # Render footer: └─────────────────────────────────────────┘
                     output.append("\n")
-                    remaining = max(0, wrap_width - 2)  # -2 for └ and ┘
+                    box_width = wrap_width - len(indent)
+                    remaining = max(0, box_width - 2)  # -2 for └ and ┘
+                    output.append(indent)
                     output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
                     output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
                     output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))

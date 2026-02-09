@@ -91,6 +91,9 @@ class EventType(str, Enum):
     # Memory management (Server -> Client)
     MEMORY_LIST = "memory.list"  # Memory list for completion cache and pager display
 
+    # Sandbox management (Server -> Client)
+    SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
+
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
     STOP = "session.stop"
@@ -99,6 +102,7 @@ class EventType(str, Enum):
 
     # Command list (Server -> Client)
     COMMAND_LIST = "command.list"
+    COMMAND_LIST_REFRESH = "command.list_refresh"
 
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
@@ -120,6 +124,10 @@ class EventType(str, Enum):
 
     # Session recovery (Server -> Client)
     INTERRUPTED_TURN_RECOVERED = "session.interrupted_turn_recovered"  # Turn recovered after reconnect
+
+    # Post-auth setup flow (Server <-> Client)
+    POST_AUTH_SETUP = "auth.setup"  # Server -> Client: offer session setup after auth
+    POST_AUTH_SETUP_RESPONSE = "auth.setup_response"  # Client -> Server: user's choices
 
     # Workspace management (Client <-> Server)
     WORKSPACE_LIST_REQUEST = "workspace.list"  # Client -> Server
@@ -233,6 +241,7 @@ class ToolCallEndEvent(Event):
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
     continuation_id: Optional[str] = None  # Session ID for continuation grouping (e.g., interactive shell)
     show_output: Optional[bool] = None  # Whether to render output_lines in the main panel (None = default True)
+    show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
 
 
 @dataclass
@@ -427,6 +436,35 @@ class WorkspaceMismatchResolvedEvent(Event):
 
 
 @dataclass
+class PostAuthSetupEvent(Event):
+    """Offer session setup after successful authentication.
+
+    Emitted by daemon after an auth command succeeds. The client renders a
+    multi-step wizard and sends back a single PostAuthSetupResponse.
+    """
+    type: EventType = field(default=EventType.POST_AUTH_SETUP)
+    request_id: str = ""
+    provider_name: str = ""        # e.g., "zhipuai"
+    provider_display_name: str = ""  # e.g., "Zhipu AI (Z.AI)"
+    available_models: List[Dict[str, str]] = field(default_factory=list)
+    # ^ [{name: "zhipuai/glm-4.7", description: "..."}, ...]
+    has_active_session: bool = False
+    current_provider: str = ""     # Only set if has_active_session
+    current_model: str = ""        # Only set if has_active_session
+    workspace_path: str = ""
+
+
+@dataclass
+class PostAuthSetupResponse(Event):
+    """User's response to post-auth session setup prompt."""
+    type: EventType = field(default=EventType.POST_AUTH_SETUP_RESPONSE)
+    request_id: str = ""
+    connect: bool = False          # Whether to create/switch session
+    model_name: str = ""           # Selected model (if connect=True)
+    persist_env: bool = False      # Whether to save provider/model to .env
+
+
+@dataclass
 class PlanStepData:
     """A single step in a plan."""
     content: str
@@ -597,6 +635,18 @@ class MemoryListEvent(Event):
 
 
 @dataclass
+class SandboxPathsEvent(Event):
+    """List of sandbox-allowed paths - for @@ completion cache.
+
+    Emitted after sandbox add/remove commands to refresh the client's
+    completion list for @@ (sandbox path) references.
+    """
+    type: EventType = field(default=EventType.SANDBOX_PATHS)
+    paths: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {path: str, description: str}
+
+
+@dataclass
 class SessionInfoEvent(Event):
     """Session state snapshot - sent on connect/attach with all data client needs.
 
@@ -625,6 +675,8 @@ class SessionInfoEvent(Event):
     # ^ Command history for prompt restoration on reconnect
     memories: List[Dict[str, Any]] = field(default_factory=list)
     # ^ [{id, description, tags}, ...] for memory command completions
+    sandbox_paths: List[Dict[str, str]] = field(default_factory=list)
+    # ^ [{path, description}, ...] for @@ sandbox completion
 
 
 @dataclass
@@ -775,6 +827,17 @@ class CommandListEvent(Event):
     type: EventType = field(default=EventType.COMMAND_LIST)
     commands: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {name, description, ?subcommands}
+
+
+@dataclass
+class CommandListRefreshEvent(Event):
+    """Signal that the command list should be refreshed.
+
+    Emitted by core.py after commands that change completion state
+    (e.g., references select/unselect). The IPC client handles this
+    by re-requesting the full command list from the daemon.
+    """
+    type: EventType = field(default=EventType.COMMAND_LIST_REFRESH)
 
 
 @dataclass
@@ -952,6 +1015,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_MISMATCH_REQUESTED.value: WorkspaceMismatchRequestedEvent,
     EventType.WORKSPACE_MISMATCH_RESOLVED.value: WorkspaceMismatchResolvedEvent,
     EventType.WORKSPACE_MISMATCH_RESPONSE.value: WorkspaceMismatchResponseRequest,
+    EventType.POST_AUTH_SETUP.value: PostAuthSetupEvent,
+    EventType.POST_AUTH_SETUP_RESPONSE.value: PostAuthSetupResponse,
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
@@ -966,6 +1031,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
+    EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
@@ -975,6 +1041,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
+    EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
     EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.HISTORY_REQUEST.value: HistoryRequest,

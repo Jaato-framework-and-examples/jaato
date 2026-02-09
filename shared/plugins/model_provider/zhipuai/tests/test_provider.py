@@ -8,10 +8,13 @@ from ..provider import (
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     DEFAULT_CONTEXT_LIMIT,
+    MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
+    THINKING_CAPABLE_MODELS,
 )
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 from ...base import ProviderConfig
+from ...types import ThinkingConfig
 
 
 class TestInitialization:
@@ -86,16 +89,23 @@ class TestInitialization:
         assert provider._enable_caching is False
 
     @patch('anthropic.Anthropic')
-    def test_thinking_disabled(self, mock_anthropic):
-        """Should have thinking disabled (may not be supported)."""
+    def test_thinking_default_disabled(self, mock_anthropic):
+        """Should have thinking disabled by default."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        assert provider._enable_thinking is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_enabled_via_config(self, mock_anthropic):
+        """Should allow enabling thinking via config."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(
             api_key="test-key",
             extra={"enable_thinking": True}
         ))
 
-        # Should still be disabled
-        assert provider._enable_thinking is False
+        assert provider._enable_thinking is True
 
     @patch('anthropic.Anthropic')
     def test_strips_trailing_slash_from_base_url(self, mock_anthropic):
@@ -153,7 +163,7 @@ class TestModelListing:
         provider.initialize(ProviderConfig(api_key="test-key"))
         models = provider.list_models(prefix="glm-4.7")
 
-        assert len(models) == 2
+        assert len(models) == 3  # glm-4.7, glm-4.7-flash, glm-4.7-flashx
         assert all(m.startswith("glm-4.7") for m in models)
 
 
@@ -162,7 +172,7 @@ class TestContextLimit:
 
     @patch('anthropic.Anthropic')
     def test_default_context_limit(self, mock_anthropic):
-        """Should return default context limit (128K for GLM-4.7)."""
+        """Should return fallback 128K when no model connected."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
 
@@ -170,51 +180,71 @@ class TestContextLimit:
         assert provider.get_context_limit() == 131072
 
     @patch('anthropic.Anthropic')
+    def test_model_specific_context_limit(self, mock_anthropic):
+        """Should return per-model context limit after connect."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        provider.connect("glm-4.7")
+        assert provider.get_context_limit() == 204800
+
+        provider.connect("glm-4.5")
+        assert provider.get_context_limit() == 131072
+
+    @patch('anthropic.Anthropic')
     def test_custom_context_limit(self, mock_anthropic):
-        """Should use custom context limit from config."""
+        """Should use custom context limit from config (overrides per-model)."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(
             api_key="test-key",
             extra={"context_length": 65536}
         ))
+        provider.connect("glm-4.7")
 
+        # Override takes precedence even though glm-4.7 is 200K
         assert provider.get_context_limit() == 65536
 
 
 class TestVerifyAuth:
-    """Tests for auth verification."""
+    """Tests for auth verification.
 
-    @patch('anthropic.Anthropic')
-    def test_verify_auth_success(self, mock_anthropic):
-        """Should return True when API key is valid."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock()
-        mock_anthropic.return_value = mock_client
+    verify_auth() must work BEFORE initialize() is called — it only checks
+    whether credentials are available, not whether the client can connect.
+    """
 
-        provider = ZhipuAIProvider()
-        provider.initialize(ProviderConfig(api_key="test-key"))
+    @patch.dict('os.environ', {'ZHIPUAI_API_KEY': 'env-key'})
+    def test_verify_auth_with_env_key(self):
+        """Should return True when API key is in environment."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is True
-        assert any("Connected" in m for m in messages)
+        assert any("Found" in m for m in messages)
 
-    @patch('anthropic.Anthropic')
-    def test_verify_auth_failure(self, mock_anthropic):
-        """Should return False when API key is invalid."""
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("401 Unauthorized")
-        mock_anthropic.return_value = mock_client
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value='stored-key')
+    def test_verify_auth_with_stored_key(self, mock_stored):
+        """Should return True when API key is stored."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
-        provider = ZhipuAIProvider()
-        provider.initialize(ProviderConfig(api_key="bad-key"))
+        messages = []
+        result = provider.verify_auth(on_message=messages.append)
+
+        assert result is True
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value=None)
+    def test_verify_auth_no_credentials(self, mock_stored):
+        """Should return False when no credentials are available."""
+        provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is False
-        assert any("Cannot connect" in m for m in messages)
+        assert any("No" in m for m in messages)
 
 
 class TestErrorHandling:
@@ -277,6 +307,108 @@ class TestLogin:
 
         assert any("ZHIPUAI_API_KEY" in m for m in messages)
         assert any("open.bigmodel.cn" in m for m in messages)
+
+
+class TestThinkingSupport:
+    """Tests for extended thinking / chain-of-thought support."""
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_capable_glm47(self, mock_anthropic):
+        """GLM-4.7 should be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7")
+
+        assert provider._is_thinking_capable() is True
+        assert provider.supports_thinking() is True
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_flash(self, mock_anthropic):
+        """GLM-4.7-flash should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-flash")
+
+        assert provider._is_thinking_capable() is False
+        assert provider.supports_thinking() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_glm4(self, mock_anthropic):
+        """GLM-4 should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4")
+
+        assert provider._is_thinking_capable() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_glm4v(self, mock_anthropic):
+        """GLM-4V should NOT be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4v")
+
+        assert provider._is_thinking_capable() is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_capable_dated_variant(self, mock_anthropic):
+        """Dated GLM-4.7 variants should be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-20250601")
+
+        assert provider._is_thinking_capable() is True
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_not_capable_no_model(self, mock_anthropic):
+        """Should return False when no model is connected."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        assert provider._is_thinking_capable() is False
+        assert provider.supports_thinking() is False
+
+    @patch('anthropic.Anthropic')
+    def test_set_thinking_config(self, mock_anthropic):
+        """Should accept ThinkingConfig to enable/disable thinking."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7")
+
+        # Enable thinking
+        provider.set_thinking_config(ThinkingConfig(enabled=True, budget=5000))
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 5000
+
+        # Disable thinking
+        provider.set_thinking_config(ThinkingConfig(enabled=False, budget=0))
+        assert provider._enable_thinking is False
+
+    @patch('anthropic.Anthropic')
+    def test_thinking_budget_from_config(self, mock_anthropic):
+        """Should use thinking budget from config."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            extra={"enable_thinking": True, "thinking_budget": 20000}
+        ))
+
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 20000
+
+    @patch('anthropic.Anthropic')
+    @patch.dict('os.environ', {
+        'ZHIPUAI_API_KEY': 'key',
+        'ZHIPUAI_ENABLE_THINKING': 'true',
+        'ZHIPUAI_THINKING_BUDGET': '15000',
+    })
+    def test_thinking_from_env(self, mock_anthropic):
+        """Should use thinking config from environment variables."""
+        provider = ZhipuAIProvider()
+        provider.initialize()
+
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 15000
 
 
 class TestCreateProvider:

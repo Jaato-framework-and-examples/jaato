@@ -99,6 +99,7 @@ from .events import (
     MidTurnPromptInjectedEvent,
     MidTurnInterruptEvent,
     MemoryListEvent,
+    SandboxPathsEvent,
     serialize_event,
     deserialize_event,
 )
@@ -138,6 +139,8 @@ class AgentState:
         # Per-agent formatter pipeline for output formatting
         # Initialized lazily via JaatoServer._get_agent_pipeline()
         self.formatter_pipeline: Optional[Any] = None
+        # Pending formatter feedback for auto-continuation
+        self.pending_formatter_feedback: Optional[str] = None
 
 
 class JaatoServer:
@@ -161,6 +164,7 @@ class JaatoServer:
         on_event: Optional[EventCallback] = None,
         workspace_path: Optional[str] = None,
         session_id: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
     ):
         """Initialize the server.
 
@@ -172,8 +176,11 @@ class JaatoServer:
                            If provided, the server will chdir to this path
                            when processing requests.
             session_id: Unique identifier for this session (used in logs).
+            env_overrides: Optional dict of env vars that take precedence over
+                          the .env file (e.g., from post-auth wizard).
         """
         self.env_file = env_file
+        self._env_overrides = env_overrides or {}
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
@@ -209,8 +216,6 @@ class JaatoServer:
         # Track which agent is currently executing a tool (for permission/clarification routing)
         self._current_tool_agent_id: str = "main"
 
-        # Queue for mid-turn prompts (messages sent while model is running)
-        self._mid_turn_prompt_queue: queue.Queue[str] = queue.Queue()
 
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
@@ -601,6 +606,10 @@ class JaatoServer:
         # Filter out None values and store as session env
         self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
 
+        # Apply overrides (e.g., provider/model from post-auth wizard)
+        if self._env_overrides:
+            self._session_env.update(self._env_overrides)
+
         def get_config(key: str) -> Optional[str]:
             """Get config value from session env, falling back to global env."""
             return self._session_env.get(key) or os.environ.get(key)
@@ -800,6 +809,13 @@ class JaatoServer:
         with self._with_session_env(), self._in_workspace():
             self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
+            # Wire formatter pipeline into runtime so output formatters can
+            # contribute system instructions (e.g., mermaid rendering hints)
+            if self._formatter_pipeline:
+                runtime = self._jaato.get_runtime()
+                if runtime:
+                    runtime.set_formatter_pipeline(self._formatter_pipeline)
+
             gc_result = load_gc_from_file()
         gc_threshold = None
         gc_strategy = None
@@ -859,14 +875,15 @@ class JaatoServer:
         # This must happen after _create_main_agent() so client has the agent registered
         if self._jaato:
             usage = self._jaato.get_context_usage()
+            context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
             self.emit(ContextUpdatedEvent(
                 agent_id="main",
                 total_tokens=usage.get('total_tokens', 0),
                 prompt_tokens=usage.get('prompt_tokens', 0),
                 output_tokens=usage.get('output_tokens', 0),
-                context_limit=usage.get('context_limit', 128000),
+                context_limit=context_limit,
                 percent_used=usage.get('percent_used', 0.0),
-                tokens_remaining=usage.get('tokens_remaining', 128000),
+                tokens_remaining=usage.get('tokens_remaining', context_limit),
                 turns=usage.get('turns', 0),
                 gc_threshold=gc_threshold,
                 gc_strategy=gc_strategy,
@@ -947,6 +964,10 @@ class JaatoServer:
         # Create pipeline from registry (formatters wire themselves)
         self._formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
 
+        # Propagate workspace path so formatters can resolve artifact dirs
+        if self._workspace_path:
+            self._formatter_pipeline.set_workspace_path(self._workspace_path)
+
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
     def _get_agent_pipeline(self, agent_id: str) -> Optional[Any]:
@@ -986,6 +1007,8 @@ class JaatoServer:
             if not config_loaded:
                 formatter_registry.use_defaults()
             agent.formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
+            if self._workspace_path:
+                agent.formatter_pipeline.set_workspace_path(self._workspace_path)
             self._trace(f"Created formatter pipeline for agent {agent_id}")
         return agent.formatter_pipeline
 
@@ -1165,6 +1188,13 @@ class JaatoServer:
                                 text=output,
                                 mode="append",
                             ))
+
+                    # Collect turn feedback from formatters for auto-continuation
+                    agent_pipeline.collect_turn_feedback()
+                    feedback = agent_pipeline.get_pending_feedback()
+                    if feedback and agent_id in server._agents:
+                        server._agents[agent_id].pending_formatter_feedback = feedback
+
                     # Reset pipeline for next turn
                     agent_pipeline.reset()
 
@@ -1301,7 +1331,7 @@ class JaatoServer:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
-                                 continuation_id=None, show_output=None):
+                                 continuation_id=None, show_output=None, show_popup=None):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -1312,6 +1342,7 @@ class JaatoServer:
                     backgrounded=backgrounded,
                     continuation_id=continuation_id,
                     show_output=show_output,
+                    show_popup=show_popup,
                 ))
 
             def on_tool_output(self, agent_id, call_id, chunk):
@@ -1981,6 +2012,29 @@ class JaatoServer:
                         on_gc_threshold=gc_threshold_callback,
                     )
 
+                    # Auto-continuation for formatter feedback
+                    # When formatters detect errors in model text output (syntax errors,
+                    # validation failures), the model needs to see the feedback eagerly —
+                    # not wait for the next user prompt. Loop here to inject feedback
+                    # as a hidden prompt and let the model self-correct.
+                    max_feedback_continuations = 2
+                    for _attempt in range(max_feedback_continuations):
+                        main_agent = server._agents.get("main")
+                        if not main_agent or not main_agent.pending_formatter_feedback:
+                            break
+                        feedback = main_agent.pending_formatter_feedback
+                        main_agent.pending_formatter_feedback = None
+                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
+                        feedback_prompt = (
+                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
+                        )
+                        server._jaato.send_message(
+                            feedback_prompt,
+                            on_output=output_callback,
+                            on_usage_update=usage_update_callback,
+                            on_gc_threshold=gc_threshold_callback,
+                        )
+
                     # Update context usage
                     if server._jaato:
                         usage = server._jaato.get_context_usage()
@@ -2090,43 +2144,6 @@ class JaatoServer:
 
         self._channel_input_queue.put(response)
 
-    def has_pending_mid_turn_prompt(self) -> bool:
-        """Check if there are pending mid-turn prompts.
-
-        Returns:
-            True if there are queued prompts.
-        """
-        return not self._mid_turn_prompt_queue.empty()
-
-    def get_pending_mid_turn_prompt(self) -> Optional[str]:
-        """Get the next pending mid-turn prompt if available.
-
-        Returns:
-            The prompt text, or None if no prompts are queued.
-        """
-        try:
-            prompt = self._mid_turn_prompt_queue.get_nowait()
-            # Emit event that the prompt is being injected
-            self.emit(MidTurnPromptInjectedEvent(text=prompt))
-            return prompt
-        except queue.Empty:
-            return None
-
-    def clear_mid_turn_prompts(self) -> int:
-        """Clear all pending mid-turn prompts.
-
-        Returns:
-            Number of prompts cleared.
-        """
-        count = 0
-        while not self._mid_turn_prompt_queue.empty():
-            try:
-                self._mid_turn_prompt_queue.get_nowait()
-                count += 1
-            except queue.Empty:
-                break
-        return count
-
     def _find_plugin_for_command(self, command: str) -> Any:
         """Find the plugin that provides a user command.
 
@@ -2160,6 +2177,43 @@ class JaatoServer:
                     return perm
 
         return None
+
+    def _get_sandbox_paths(self) -> list[dict[str, str]]:
+        """Build the list of sandbox-allowed paths for @@ completion.
+
+        Returns:
+            List of {path, description} dicts for the client's completion cache.
+        """
+        paths = []
+        if not self._jaato:
+            return paths
+
+        runtime = self._jaato.get_runtime()
+        registry = runtime.registry if runtime else None
+        if not registry:
+            return paths
+
+        # Workspace root
+        workspace = registry.get_workspace_path()
+        if workspace:
+            paths.append({"path": workspace, "description": "workspace"})
+
+        # Authorized external paths from sandbox manager / plugins
+        try:
+            import os
+            authorized = registry.list_authorized_paths()
+            for auth_path, source in authorized.items():
+                # Skip if same as workspace (already added)
+                if workspace and os.path.realpath(auth_path) == os.path.realpath(workspace):
+                    continue
+                paths.append({"path": auth_path, "description": f"allowed ({source})"})
+        except Exception:
+            pass
+
+        # System temp directory
+        paths.append({"path": "/tmp", "description": "system temp"})
+
+        return paths
 
     def stop(self) -> bool:
         """Stop current operation.
@@ -2196,20 +2250,27 @@ class JaatoServer:
         if command.lower() == "save":
             parsed_args["user_inputs"] = self._original_inputs.copy()
 
-        # Find and configure plugin output callback for real-time output
+        # Find and configure plugin output callback for real-time output.
+        # User commands run outside agent context, so we buffer _emit() output
+        # and send as a SystemMessageEvent (not AgentOutputEvent).
         plugin = self._find_plugin_for_command(command)
+        output_parts = []
         if plugin and hasattr(plugin, 'set_output_callback'):
-            # Create callback that emits events
             def output_callback(source: str, text: str, mode: str) -> None:
-                self.emit(AgentOutputEvent(
-                    text=text,
-                    source=source,
-                    mode=mode,
-                ))
+                output_parts.append(text)
             plugin.set_output_callback(output_callback)
 
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
+
+            # Send accumulated _emit() output as a single system message
+            if output_parts:
+                combined = "".join(output_parts).rstrip("\n")
+                if combined:
+                    self.emit(SystemMessageEvent(
+                        message=combined,
+                        style="info",
+                    ))
 
             # After memory commands, push updated memory list for completion cache
             # (must run before HelpLines early return so memory list/help also refresh)
@@ -2217,6 +2278,10 @@ class JaatoServer:
                 mem_plugin = self._find_plugin_for_command("memory")
                 if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
                     self.emit(MemoryListEvent(memories=mem_plugin.get_memory_metadata()))
+
+            # After sandbox commands, push updated sandbox paths for @@ completion cache
+            if command.lower() == "sandbox":
+                self.emit(SandboxPathsEvent(paths=self._get_sandbox_paths()))
 
             # Handle HelpLines result - emit HelpTextEvent for pager display
             if isinstance(result, HelpLines):
@@ -2467,14 +2532,15 @@ class JaatoServer:
                 # Emit initial context update so toolbar shows correct usage
                 if self._jaato:
                     usage = self._jaato.get_context_usage()
+                    context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
                     self.emit(ContextUpdatedEvent(
                         agent_id="main",
                         total_tokens=usage.get('total_tokens', 0),
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
-                        context_limit=usage.get('context_limit', 128000),
+                        context_limit=context_limit,
                         percent_used=usage.get('percent_used', 0.0),
-                        tokens_remaining=usage.get('tokens_remaining', 128000),
+                        tokens_remaining=usage.get('tokens_remaining', context_limit),
                         turns=usage.get('turns', 0),
                         gc_threshold=gc_threshold,
                         gc_strategy=gc_strategy,

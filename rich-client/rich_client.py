@@ -839,20 +839,6 @@ class RichClient:
         })
         self._trace(f"_setup_code_validation_formatter: code_validator created, name={code_validator.name}, priority={code_validator.priority}")
 
-        # Set up feedback callback for model self-correction
-        # When validation issues are found, inject them into the conversation
-        def on_validation_feedback(feedback: str) -> None:
-            """Inject validation feedback into the conversation."""
-            if self._display and feedback:
-                # Show feedback in output panel as a system message
-                self._display.add_system_message(
-                    f"[Code Validation] Issues detected in output code blocks",
-                    style="system_warning"
-                )
-                self._trace(f"Code validation feedback: {len(feedback)} chars")
-
-        code_validator.set_feedback_callback(on_validation_feedback)
-
         # Register with display's formatter pipeline
         self._display.register_formatter(code_validator)
 
@@ -980,7 +966,7 @@ class RichClient:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                   error_message=None, call_id=None, backgrounded=False,
-                                  continuation_id=None, show_output=None):
+                                  continuation_id=None, show_output=None, show_popup=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
                     buffer.mark_tool_completed(
@@ -988,6 +974,7 @@ class RichClient:
                         call_id=call_id, backgrounded=backgrounded,
                         continuation_id=continuation_id,
                         show_output=show_output,
+                        show_popup=show_popup,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     if display:
@@ -1245,6 +1232,9 @@ class RichClient:
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
 
+        # Set up sandbox path provider for @@ completion
+        self._setup_sandbox_path_provider()
+
         # Subscribe to prompt library changes for dynamic tool refresh
         self._setup_prompt_library_subscription()
 
@@ -1314,6 +1304,44 @@ class RichClient:
             completion_provider,
             commands_with_completions
         )
+
+    def _setup_sandbox_path_provider(self) -> None:
+        """Set up the sandbox path provider for @@ completion.
+
+        Provides the list of sandbox-allowed root paths by querying the
+        plugin registry for the workspace root and authorized external paths.
+        """
+        if not self.registry:
+            return
+
+        registry = self.registry
+
+        def get_sandbox_paths() -> list[tuple[str, str]]:
+            """Return list of (path, description) tuples for sandbox-allowed roots."""
+            paths = []
+
+            # Workspace root
+            workspace = registry.get_workspace_path()
+            if workspace:
+                paths.append((workspace, "workspace"))
+
+            # Authorized external paths from sandbox manager / plugins
+            try:
+                authorized = registry.list_authorized_paths()
+                for auth_path, source in authorized.items():
+                    # Skip if same as workspace (already added)
+                    if workspace and os.path.realpath(auth_path) == os.path.realpath(workspace):
+                        continue
+                    paths.append((auth_path, f"allowed ({source})"))
+            except Exception:
+                pass
+
+            # System temp directory
+            paths.append(("/tmp", "system temp"))
+
+            return paths
+
+        self._input_handler.set_sandbox_path_provider(get_sandbox_paths)
 
     def _setup_prompt_library_subscription(self) -> None:
         """Subscribe to prompt library changes for dynamic tool refresh.
@@ -1831,7 +1859,7 @@ class RichClient:
         )
         if self._input_handler.has_completion:
             self._display.add_system_message(
-                "Tab completion enabled. Use @file for files, %prompt for skills.",
+                "Tab completion enabled. Use @file for files, @@path for sandbox paths, %prompt for skills.",
                 style="system_info"
             )
         self._display.add_system_message(
@@ -2180,11 +2208,13 @@ class RichClient:
             if new_format == CaptureFormat.PNG:
                 try:
                     import cairosvg  # noqa: F401
-                except ImportError:
-                    self._display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                except (ImportError, OSError):
+                    self._display.add_system_message("[Warning: cairosvg not available]", "yellow")
                     self._display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
                     self._display.add_system_message("  Install with: pip install cairosvg", "dim")
-                    self._display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                    self._display.add_system_message("  (also requires system Cairo library:", "dim")
+                    self._display.add_system_message("   Linux: apt install libcairo2-dev", "dim")
+                    self._display.add_system_message("   Windows: install GTK3 runtime or use conda install cairo)", "dim")
                     self._display.add_system_message("")
                     self._display.add_system_message("  Falling back to SVG format.", "dim")
                     new_format = CaptureFormat.SVG
@@ -3151,11 +3181,13 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         if new_format == CaptureFormat.PNG:
             try:
                 import cairosvg  # noqa: F401
-            except ImportError:
-                display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+            except (ImportError, OSError):
+                display.add_system_message("[Warning: cairosvg not available]", "yellow")
                 display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
                 display.add_system_message("  Install with: pip install cairosvg", "dim")
-                display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                display.add_system_message("  (also requires system Cairo library:", "dim")
+                display.add_system_message("   Linux: apt install libcairo2-dev", "dim")
+                display.add_system_message("   Windows: install GTK3 runtime or use conda install cairo)", "dim")
                 display.add_system_message("")
                 display.add_system_message("  Falling back to SVG format.", "dim")
                 new_format = CaptureFormat.SVG
@@ -3481,11 +3513,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionInfoEvent,
         SessionDescriptionUpdatedEvent,
         MemoryListEvent,
+        SandboxPathsEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
+        PostAuthSetupEvent,
         MidTurnPromptQueuedEvent,
         MidTurnPromptInjectedEvent,
         MidTurnInterruptEvent,
@@ -3593,6 +3627,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_clarification_request: Optional[dict] = None
     pending_reference_selection_request: Optional[dict] = None
     pending_workspace_mismatch_request: Optional[dict] = None
+    pending_post_auth_setup: Optional[dict] = None
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
@@ -3669,6 +3704,25 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         {"model", "memory remove", "memory edit"}  # Commands that need argument completion
     )
 
+    # Set up sandbox path provider for @@ completion (server mode)
+    # Initial defaults; refreshed dynamically via SandboxPathsEvent and SessionInfoEvent
+    _server_sandbox_paths: list[tuple[str, str]] = []
+    if workspace_path:
+        _server_sandbox_paths.append((str(workspace_path), "workspace"))
+    _server_sandbox_paths.append(("/tmp", "system temp"))
+
+    def _update_sandbox_paths(paths_data: list[dict]) -> None:
+        """Update the mutable sandbox paths cache from event data."""
+        _server_sandbox_paths.clear()
+        for entry in paths_data:
+            _server_sandbox_paths.append((entry.get("path", ""), entry.get("description", "")))
+
+    def get_sandbox_paths_for_completion():
+        """Return sandbox-allowed root paths for @@ completion."""
+        return list(_server_sandbox_paths)
+
+    input_handler.set_sandbox_path_provider(get_sandbox_paths_for_completion)
+
     def on_input(text: str) -> None:
         """Callback when user submits input in PTDisplay."""
         try:
@@ -3736,12 +3790,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
-        nonlocal pending_workspace_mismatch_request
+        nonlocal pending_workspace_mismatch_request, pending_post_auth_setup
         nonlocal model_running, should_exit, is_reconnecting
         nonlocal init_shown_header, init_current_step
 
         ipc_trace("Event handler starting")
         event_count = 0
+        # Periodic yielding: when the IPC StreamReader has buffered data,
+        # readexactly() returns immediately without suspending, which means
+        # the event loop never yields to prompt_toolkit for keyboard handling.
+        # We track time and force a yield every ~16ms to keep the UI responsive.
+        last_yield_time = asyncio.get_event_loop().time()
+        YIELD_INTERVAL = 0.016  # ~60fps, yield every 16ms
+
         async for event in client.events():
             event_count += 1
             ipc_trace(f"<- [{event_count}] {type(event).__name__}")
@@ -3836,7 +3897,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
-                            "Tab completion enabled. Use @file for files, %prompt for skills.",
+                            "Tab completion enabled. Use @file for files, @@path for sandbox paths, %prompt for skills.",
                             style="system_info"
                         )
                     display.add_system_message(
@@ -4073,6 +4134,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         backgrounded=event.backgrounded,
                         continuation_id=event.continuation_id,
                         show_output=event.show_output,
+                        show_popup=event.show_popup,
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     display.refresh()
@@ -4084,6 +4146,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         event.duration_seconds, event.error_message, event.call_id,
                         continuation_id=event.continuation_id,
                         show_output=event.show_output,
+                        show_popup=event.show_popup,
                     )
 
             elif isinstance(event, ToolOutputEvent):
@@ -4227,12 +4290,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, MidTurnInterruptEvent):
                 # Streaming was interrupted to process user prompt
-                # Show a brief notification that the model is pivoting to user input
                 ipc_trace(f"  MidTurnInterruptEvent: partial={event.partial_response_chars} chars")
-                display.add_system_message(
-                    f"[Pivoting to your input...]",
-                    style="system_info"
-                )
 
             elif isinstance(event, SessionListEvent):
                 # Store sessions for completion AND display
@@ -4305,6 +4363,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 nonlocal available_memories
                 available_memories = event.memories
 
+            elif isinstance(event, SandboxPathsEvent):
+                # Refresh sandbox paths for @@ completion cache
+                _update_sandbox_paths(event.paths)
+
             elif isinstance(event, SessionInfoEvent):
                 # Store state snapshot for local use (completion, display)
                 # Note: available_sessions already declared nonlocal in SessionListEvent handler
@@ -4317,6 +4379,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_models = event.models
                 if event.memories:
                     available_memories = event.memories
+                if event.sandbox_paths:
+                    _update_sandbox_paths(event.sandbox_paths)
 
                 # Track session ID for recovery reattachment
                 if event.session_id:
@@ -4383,6 +4447,38 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
                 # Enable input mode for response
                 display.set_waiting_for_channel_input(True, event.response_options)
+
+            elif isinstance(event, PostAuthSetupEvent):
+                ipc_trace(f"  PostAuthSetupEvent: provider={event.provider_name}")
+                # Store the full event data for the multi-step wizard
+                pending_post_auth_setup = {
+                    "request_id": event.request_id,
+                    "provider_name": event.provider_name,
+                    "provider_display_name": event.provider_display_name,
+                    "models": event.available_models,
+                    "has_active_session": event.has_active_session,
+                    "current_provider": event.current_provider,
+                    "current_model": event.current_model,
+                    "workspace_path": event.workspace_path,
+                    "step": "connect",  # First step: ask to connect
+                }
+                # Render the first prompt
+                display.append_output("system", "", "write")
+                if event.has_active_session:
+                    display.append_output(
+                        "system",
+                        f"Switch to {event.provider_display_name}? "
+                        f"(currently: {event.current_provider}/{event.current_model}) [y/n]",
+                        "write",
+                    )
+                else:
+                    display.append_output(
+                        "system",
+                        f"Connect to {event.provider_display_name} now? [y/n]",
+                        "write",
+                    )
+                display.refresh()
+                display.set_waiting_for_channel_input(True)
 
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
@@ -4503,10 +4599,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                     display.show_lines(lines)
 
+            # Periodically yield to the event loop to keep the UI responsive.
+            # When the IPC StreamReader has buffered data, readexactly() returns
+            # immediately without suspending, starving prompt_toolkit of CPU time.
+            now = asyncio.get_event_loop().time()
+            if now - last_yield_time >= YIELD_INTERVAL:
+                await asyncio.sleep(0)
+                last_yield_time = asyncio.get_event_loop().time()
+
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
-        nonlocal pending_workspace_mismatch_request
+        nonlocal pending_workspace_mismatch_request, pending_post_auth_setup
         nonlocal model_running, should_exit
         pending_exit_confirmation = False
 
@@ -4607,6 +4711,97 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     pending_workspace_mismatch_request = None
                     display.set_waiting_for_channel_input(False)
                     continue
+
+                # Handle post-auth setup wizard (multi-step)
+                if pending_post_auth_setup:
+                    step = pending_post_auth_setup.get("step", "")
+                    answer = text.lower().strip()
+
+                    if step == "connect":
+                        if answer in ("y", "yes"):
+                            # Show model selection
+                            models = pending_post_auth_setup["models"]
+                            display.append_output("system", "", "write")
+                            display.append_output("system", "Select a model:", "write")
+                            for i, m in enumerate(models, 1):
+                                desc = m.get("description", "")
+                                display.append_output(
+                                    "system",
+                                    f"  [{i}] {m['name']}"
+                                    + (f" — {desc}" if desc else ""),
+                                    "write",
+                                )
+                            display.refresh()
+                            pending_post_auth_setup["step"] = "model"
+                            display.set_waiting_for_channel_input(True)
+                        else:
+                            # User declined — send empty response
+                            await client.respond_to_post_auth_setup(
+                                request_id=pending_post_auth_setup["request_id"],
+                                connect=False,
+                            )
+                            pending_post_auth_setup = None
+                            display.set_waiting_for_channel_input(False)
+                        continue
+
+                    elif step == "model":
+                        models = pending_post_auth_setup["models"]
+                        selected_model = ""
+                        # Accept number or name
+                        if answer.isdigit():
+                            idx = int(answer) - 1
+                            if 0 <= idx < len(models):
+                                selected_model = models[idx]["name"]
+                        else:
+                            # Try matching by name
+                            for m in models:
+                                if answer in m["name"].lower():
+                                    selected_model = m["name"]
+                                    break
+
+                        if not selected_model:
+                            display.append_output("system", f"Invalid selection. Enter 1-{len(models)} or model name.", "write")
+                            display.refresh()
+                            display.set_waiting_for_channel_input(True)
+                            continue
+
+                        pending_post_auth_setup["selected_model"] = selected_model
+
+                        # Ask about .env persistence
+                        workspace = pending_post_auth_setup.get("workspace_path", "")
+                        if workspace:
+                            display.append_output("system", "", "write")
+                            display.append_output(
+                                "system",
+                                f"Save provider/model to {workspace}/.env? [y/n]",
+                                "write",
+                            )
+                            display.refresh()
+                            pending_post_auth_setup["step"] = "persist"
+                            display.set_waiting_for_channel_input(True)
+                        else:
+                            # No workspace — send response without persist
+                            await client.respond_to_post_auth_setup(
+                                request_id=pending_post_auth_setup["request_id"],
+                                connect=True,
+                                model_name=selected_model,
+                                persist_env=False,
+                            )
+                            pending_post_auth_setup = None
+                            display.set_waiting_for_channel_input(False)
+                        continue
+
+                    elif step == "persist":
+                        persist = answer in ("y", "yes")
+                        await client.respond_to_post_auth_setup(
+                            request_id=pending_post_auth_setup["request_id"],
+                            connect=True,
+                            model_name=pending_post_auth_setup["selected_model"],
+                            persist_env=persist,
+                        )
+                        pending_post_auth_setup = None
+                        display.set_waiting_for_channel_input(False)
+                        continue
 
                 # Handle clarification response
                 if pending_clarification_request:
