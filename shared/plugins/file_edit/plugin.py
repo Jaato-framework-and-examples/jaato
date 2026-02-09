@@ -197,7 +197,7 @@ class FileEditPlugin:
             self._workspace_root = None
         self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
 
-    def _is_path_allowed(self, path: str) -> bool:
+    def _is_path_allowed(self, path: str, mode: str = "read") -> bool:
         """Check if a path is allowed for access.
 
         A path is allowed if:
@@ -205,10 +205,13 @@ class FileEditPlugin:
         2. The path is within the workspace_root
         3. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        4. The path is authorized via the plugin registry
+        4. The path is authorized via the plugin registry (respecting access mode)
 
         Args:
             path: Path to check.
+            mode: Access mode - "read" or "write" (default: "read").
+                 Used to check if externally authorized paths have sufficient
+                 access (e.g., "readonly" paths block write operations).
 
         Returns:
             True if access is allowed, False otherwise.
@@ -225,11 +228,12 @@ class FileEditPlugin:
         allowed = check_path_with_jaato_containment(
             abs_path,
             self._workspace_root,
-            self._plugin_registry
+            self._plugin_registry,
+            mode=mode
         )
 
         if not allowed:
-            self._trace(f"_is_path_allowed: {path} blocked (outside sandbox)")
+            self._trace(f"_is_path_allowed: {path} blocked (outside sandbox, mode={mode})")
         return allowed
 
     def _resolve_path(self, path: str) -> Path:
@@ -864,8 +868,8 @@ will show you a preview and require approval before execution. Backups are autom
         # Resolve path first, then check if allowed
         file_path = self._resolve_path(path)
 
-        # Check if resolved path is allowed (within workspace or authorized)
-        if not self._is_path_allowed(str(file_path)):
+        # Check if resolved path is allowed (within workspace or authorized for reading)
+        if not self._is_path_allowed(str(file_path), mode="read"):
             return {"error": f"File not found: {path}"}
 
         if not file_path.exists():
@@ -971,6 +975,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if not file_path.exists():
             return {"error": f"File not found: {path}. Use writeNewFile for new files."}
 
@@ -1006,6 +1015,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if file_path.exists():
             return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
 
@@ -1031,6 +1045,11 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": "path is required"}
 
         file_path = self._resolve_path(path)
+
+        # Check if path is allowed for writing (enforces readonly restrictions)
+        if not self._is_path_allowed(str(file_path), mode="write"):
+            return {"error": f"File not found: {path}"}
+
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
 
@@ -1070,6 +1089,12 @@ will show you a preview and require approval before execution. Backups are autom
 
         source = self._resolve_path(source_path)
         destination = self._resolve_path(destination_path)
+
+        # Check if both paths are allowed for writing (move = write on both ends)
+        if not self._is_path_allowed(str(source), mode="write"):
+            return {"error": f"File not found: {source_path}", "source": source_path}
+        if not self._is_path_allowed(str(destination), mode="write"):
+            return {"error": f"File not found: {destination_path}", "source": source_path}
 
         if not source.exists():
             return {"error": "Source file does not exist", "source": source_path}

@@ -461,7 +461,7 @@ class TestPluginRegistryIntegration:
 
         # Mock registry that authorizes the external path
         class MockRegistry:
-            def is_path_authorized(self, path):
+            def is_path_authorized(self, path, mode="read"):
                 return path.startswith(str(external_docs))
 
         result = check_path_with_jaato_containment(
@@ -494,7 +494,7 @@ class TestPluginRegistryIntegration:
 
         # Mock registry that would authorize the path
         class MockRegistry:
-            def is_path_authorized(self, path):
+            def is_path_authorized(self, path, mode="read"):
                 return True  # Authorize everything
 
         # Path through nested symlink should still be blocked
@@ -507,3 +507,151 @@ class TestPluginRegistryIntegration:
         )
         # Should be blocked because of nested symlink, even though registry allows
         assert result is False
+
+
+class TestAccessMode:
+    """Tests for access mode (readonly/readwrite) support."""
+
+    def test_read_mode_allowed_on_readonly_path(self, tmp_path):
+        """Test that read access is allowed on a readonly authorized path."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external_docs = tmp_path / "docs"
+        external_docs.mkdir()
+        doc_file = external_docs / "guide.md"
+        doc_file.touch()
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                if not path.startswith(str(external_docs.resolve())):
+                    return False
+                # Only allow reads (simulates readonly)
+                return mode == "read"
+
+        # Disable /tmp allowance to test registry-based mode checking
+        result = check_path_with_jaato_containment(
+            str(doc_file),
+            str(workspace),
+            MockRegistry(),
+            allow_tmp=False,
+            mode="read"
+        )
+        assert result is True
+
+    def test_write_mode_blocked_on_readonly_path(self, tmp_path):
+        """Test that write access is blocked on a readonly authorized path."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external_docs = tmp_path / "docs"
+        external_docs.mkdir()
+        doc_file = external_docs / "guide.md"
+        doc_file.touch()
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                if not path.startswith(str(external_docs.resolve())):
+                    return False
+                # Only allow reads (simulates readonly)
+                return mode == "read"
+
+        # Disable /tmp allowance to test registry-based mode checking
+        result = check_path_with_jaato_containment(
+            str(doc_file),
+            str(workspace),
+            MockRegistry(),
+            allow_tmp=False,
+            mode="write"
+        )
+        assert result is False
+
+    def test_readwrite_mode_allows_both(self, tmp_path):
+        """Test that readwrite authorized paths allow both read and write."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        ext_file = external / "data.txt"
+        ext_file.touch()
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(str(external.resolve()))
+
+        # Disable /tmp allowance to test registry-based mode checking
+        for mode in ("read", "write"):
+            result = check_path_with_jaato_containment(
+                str(ext_file),
+                str(workspace),
+                MockRegistry(),
+                allow_tmp=False,
+                mode=mode
+            )
+            assert result is True, f"mode={mode} should be allowed"
+
+    def test_workspace_paths_ignore_mode(self, tmp_path):
+        """Test that workspace paths allow both read and write regardless of mode."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        src = workspace / "src"
+        src.mkdir()
+        main_py = src / "main.py"
+        main_py.touch()
+
+        # Workspace paths don't go through registry auth, so mode doesn't matter
+        for mode in ("read", "write"):
+            result = check_path_with_jaato_containment(
+                str(main_py),
+                str(workspace),
+                allow_tmp=False,
+                mode=mode
+            )
+            assert result is True, f"mode={mode} should be allowed for workspace paths"
+
+    def test_tmp_paths_ignore_mode(self, tmp_path):
+        """Test that /tmp paths allow both read and write regardless of mode."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        for mode in ("read", "write"):
+            result = check_path_with_jaato_containment(
+                "/tmp/some_file.txt",
+                str(workspace),
+                mode=mode
+            )
+            assert result is True, f"mode={mode} should be allowed for /tmp paths"
+
+    def test_mode_passed_to_registry(self, tmp_path):
+        """Test that the mode parameter is correctly passed to the registry."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        ext_file = external / "file.txt"
+        ext_file.touch()
+
+        received_modes = []
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                received_modes.append(mode)
+                return True
+
+        # Disable /tmp allowance to ensure registry check is reached
+        check_path_with_jaato_containment(
+            str(ext_file), str(workspace), MockRegistry(),
+            allow_tmp=False, mode="read"
+        )
+        check_path_with_jaato_containment(
+            str(ext_file), str(workspace), MockRegistry(),
+            allow_tmp=False, mode="write"
+        )
+
+        assert received_modes == ["read", "write"]
