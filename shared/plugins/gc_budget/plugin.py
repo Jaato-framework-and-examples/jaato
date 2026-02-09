@@ -82,6 +82,7 @@ class BudgetGCPlugin:
         self._initialized = False
         self._config: Dict[str, Any] = {}
         self._agent_name: Optional[str] = None
+        self._registry = None  # Set via set_plugin_registry()
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -120,6 +121,16 @@ class BudgetGCPlugin:
         self._trace("shutdown")
         self._config = {}
         self._initialized = False
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for looking up plugins.
+
+        Called automatically by the registry during plugin wiring.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._registry = registry
 
     def should_collect(
         self,
@@ -376,6 +387,42 @@ class BudgetGCPlugin:
 
         return new_history, result
 
+    def _get_effective_policy(
+        self,
+        entry: SourceEntry,
+        budget: InstructionBudget,
+    ) -> GCPolicy:
+        """Get the effective GC policy for an entry, evaluating CONDITIONAL if needed.
+
+        Args:
+            entry: The instruction budget entry to evaluate
+            budget: The full instruction budget for context
+
+        Returns:
+            The effective GC policy (LOCKED, EPHEMERAL, etc.)
+        """
+        if entry.gc_policy != GCPolicy.CONDITIONAL:
+            return entry.gc_policy
+
+        # CONDITIONAL policy - delegate to plugin for evaluation
+        tool_name = entry.metadata.get("tool_name") if entry.metadata else None
+        if not tool_name or not self._registry:
+            # Fallback: treat as ephemeral if we can't evaluate
+            return GCPolicy.EPHEMERAL
+
+        # Find which plugin owns this tool
+        plugin = self._registry.get_plugin_for_tool(tool_name)
+        if plugin and hasattr(plugin, 'evaluate_gc_policy'):
+            try:
+                return plugin.evaluate_gc_policy(entry, budget)
+            except Exception as e:
+                self._trace(f"evaluate_gc_policy failed for {tool_name}: {e}")
+                # Fallback on error
+                return GCPolicy.EPHEMERAL
+
+        # No evaluate_gc_policy method - treat as ephemeral
+        return GCPolicy.EPHEMERAL
+
     def _get_ephemeral_candidates(
         self,
         budget: InstructionBudget,
@@ -395,9 +442,10 @@ class BudgetGCPlugin:
             if source == InstructionSource.ENRICHMENT:
                 continue
 
-            # Check children for EPHEMERAL entries
+            # Check children for EPHEMERAL entries (including evaluated CONDITIONAL)
             for child_key, child in entry.children.items():
-                if child.gc_policy == GCPolicy.EPHEMERAL:
+                effective_policy = self._get_effective_policy(child, budget)
+                if effective_policy == GCPolicy.EPHEMERAL:
                     candidates.append((child_key, child))
 
         return candidates
@@ -473,9 +521,10 @@ class BudgetGCPlugin:
         candidates: List[Tuple[str, SourceEntry]] = []
 
         for source, entry in budget.entries.items():
-            # Check children for PRESERVABLE entries
+            # Check children for PRESERVABLE entries (including evaluated CONDITIONAL)
             for child_key, child in entry.children.items():
-                if child.gc_policy == GCPolicy.PRESERVABLE:
+                effective_policy = self._get_effective_policy(child, budget)
+                if effective_policy == GCPolicy.PRESERVABLE:
                     candidates.append((child_key, child))
 
         # Sort by creation time (oldest first)

@@ -112,6 +112,10 @@ class ReliabilityPlugin:
         # Telemetry integration
         self._telemetry = None  # Optional TelemetryPlugin
 
+        # Per-session tool success tracking (for GC policy decisions)
+        # Key: (session_id, tool_name) -> success_count
+        self._session_tool_successes: Dict[Tuple[str, str], int] = {}
+
     @property
     def name(self) -> str:
         return "reliability"
@@ -833,6 +837,12 @@ class ReliabilityPlugin:
         if is_failure:
             return self._handle_failure(state, failure_key, result, call_id, plugin_name)
         else:
+            # Track per-session success for GC policy evaluation
+            if self._session_id:
+                session_tool_key = (self._session_id, tool_name)
+                self._session_tool_successes[session_tool_key] = \
+                    self._session_tool_successes.get(session_tool_key, 0) + 1
+
             return self._handle_success(state)
 
     def _is_error_result(self, result: Any) -> bool:
@@ -1323,6 +1333,32 @@ class ReliabilityPlugin:
             state for state in self._tool_states.values()
             if state.state in (TrustState.ESCALATED, TrustState.BLOCKED, TrustState.RECOVERING)
         ]
+
+    def has_successful_execution(self, tool_name: str, session_id: str) -> bool:
+        """Check if a tool has been successfully executed in a given session.
+
+        Used by GC policy evaluation to determine if a discovered tool schema
+        should be locked (if used) or remain ephemeral (if not yet used).
+
+        Args:
+            tool_name: Name of the tool to check
+            session_id: Session ID to filter by
+
+        Returns:
+            True if the tool has at least one successful execution in this session
+        """
+        session_tool_key = (session_id, tool_name)
+        return self._session_tool_successes.get(session_tool_key, 0) > 0
+
+    def clear_session_data(self, session_id: str) -> None:
+        """Clear per-session tracking data for a given session.
+
+        Args:
+            session_id: Session ID to clear data for
+        """
+        keys_to_remove = [k for k in self._session_tool_successes if k[0] == session_id]
+        for key in keys_to_remove:
+            del self._session_tool_successes[key]
 
     def is_escalated(self, tool_name: str, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Check if a tool invocation is escalated.
