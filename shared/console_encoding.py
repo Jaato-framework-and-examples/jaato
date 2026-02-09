@@ -11,30 +11,16 @@ in a POSIX-like environment that may not respect Windows console encoding settin
 import os
 import sys
 
+from shared.path_utils import is_msys2_environment
+
 
 def _is_git_bash() -> bool:
     """Detect if running under Git Bash (mintty/MSYS2) on Windows.
 
-    Git Bash sets MSYSTEM to indicate the MSYS2 environment type:
-    - MINGW64: 64-bit MinGW
-    - MINGW32: 32-bit MinGW
-    - MSYS: MSYS2 environment
-
-    Additionally, mintty (Git Bash's terminal) sets TERM_PROGRAM.
+    Delegates to the shared is_msys2_environment() function which checks
+    MSYSTEM env var and TERM_PROGRAM for mintty.
     """
-    if sys.platform != 'win32':
-        return False
-
-    # MSYSTEM is set by Git Bash/MSYS2 environments
-    msystem = os.environ.get('MSYSTEM', '')
-    if msystem in ('MINGW64', 'MINGW32', 'MSYS', 'UCRT64', 'CLANG64', 'CLANGARM64'):
-        return True
-
-    # Also check for mintty terminal (Git Bash default terminal)
-    if os.environ.get('TERM_PROGRAM') == 'mintty':
-        return True
-
-    return False
+    return is_msys2_environment()
 
 
 def configure_utf8_output() -> None:

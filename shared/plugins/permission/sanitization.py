@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
+
 logger = logging.getLogger(__name__)
 
 
@@ -218,6 +220,9 @@ def resolve_path(path: str, cwd: str) -> Tuple[bool, str]:
         Tuple of (success, resolved_path_or_error)
     """
     try:
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
+
         # Expand ~ to home directory
         expanded = os.path.expanduser(path)
 
@@ -243,10 +248,11 @@ def _is_under_temp_path(path: str) -> bool:
     Returns:
         True if path is under /tmp or another system temp directory
     """
-    # Normalize the path for comparison
-    normalized = os.path.normpath(path)
+    # Normalize the path for comparison, handling mixed separators (MSYS2/Windows)
+    normalized = normalize_for_comparison(os.path.normpath(path))
     for temp_path in SYSTEM_TEMP_PATHS:
-        if normalized == temp_path or normalized.startswith(temp_path + os.sep):
+        temp_normalized = normalize_for_comparison(os.path.normpath(temp_path))
+        if normalized == temp_normalized or normalized.startswith(temp_normalized + '/'):
             return True
     return False
 
@@ -309,11 +315,14 @@ def check_path_scope(
                 effective_roots.append(temp_path)
 
     # Check if resolved path is within allowed roots
+    # Use normalized comparison to handle mixed separators (MSYS2/Windows)
     allowed = False
+    norm_resolved = normalize_for_comparison(resolved)
     for root in effective_roots:
         # Resolve the allowed root too
         _, resolved_root = resolve_path(root, cwd)
-        if resolved.startswith(resolved_root + os.sep) or resolved == resolved_root:
+        norm_root = normalize_for_comparison(resolved_root)
+        if norm_resolved.startswith(norm_root + '/') or norm_resolved == norm_root:
             allowed = True
             break
 

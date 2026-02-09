@@ -15,6 +15,7 @@ from ..background import BackgroundCapableMixin
 from ..model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.path_utils import msys2_to_windows_path
 from shared.trace import trace as _trace_write
 
 
@@ -738,6 +739,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             return True
 
         try:
+            # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+            path = msys2_to_windows_path(path)
+
             # Expand ~ to home directory
             expanded = os.path.expanduser(path)
 

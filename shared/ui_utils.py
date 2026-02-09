@@ -7,6 +7,8 @@ by both IPC mode (client-side) and direct mode (embedded) code.
 import os
 from typing import Any, Dict, List, Optional, Union
 
+from shared.path_utils import get_display_separator, normalize_path
+
 
 # =============================================================================
 # Path Ellipsization
@@ -53,12 +55,15 @@ def ellipsize_path(
     if not path or max_width <= 0:
         return path
 
+    # Normalize path for MSYS2 display (backslash -> forward slash)
+    path = normalize_path(path)
+
     # Fast path: no truncation needed
     if len(path) <= max_width:
         return path
 
-    # Normalize path separators for consistent handling
-    sep = os.sep
+    # Determine separator for this path
+    sep = get_display_separator()
     # Handle both Unix and Windows paths
     if "/" in path and "\\" not in path:
         sep = "/"
