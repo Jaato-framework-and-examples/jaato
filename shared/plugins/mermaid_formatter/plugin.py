@@ -239,6 +239,10 @@ class MermaidFormatterPlugin:
 
             # Select backend and render for terminal
             backend = select_backend(max_width=render_width)
+            if backend is None:
+                # No image protocol — show truncated source + artifact path
+                return self._fallback_source_with_hint(source, artifact_path)
+
             rendered = backend.render(result.png, max_width=render_width)
 
             # Add artifact path reference
@@ -246,7 +250,7 @@ class MermaidFormatterPlugin:
                 rendered += f"    \x1b[2m[saved: {artifact_path}]\x1b[0m\n"
 
             # Prefix each non-empty rendered line so the output buffer
-            # skips wrapping (preserves pixel-aligned half-block art)
+            # skips wrapping (preserves pixel-aligned graphics output)
             lines = rendered.split('\n')
             rendered = '\n'.join(
                 PRERENDERED_LINE_PREFIX + line if line.strip() else line
@@ -312,6 +316,28 @@ class MermaidFormatterPlugin:
             diag.append(f"{indent}{err_line}")
         diag.append("    \u2514\u2500")
         return block + "\n".join(diag) + "\n"
+
+    def _fallback_source_with_hint(self, source: str, artifact_path: Optional[str]) -> str:
+        """Show truncated mermaid source with a hint to the rendered PNG.
+
+        Used when rendering succeeded (PNG exists) but no terminal image
+        protocol is available to display it inline. Shows the beginning
+        of the diagram so the user can see the structure, truncated to
+        keep output bounded, plus a path to the saved PNG for external viewing.
+        """
+        MAX_LINES = 8
+        source_lines = source.splitlines()
+
+        if len(source_lines) > MAX_LINES:
+            head = "\n".join(source_lines[:MAX_LINES])
+            truncated = f"{head}\n  ... ({len(source_lines) - MAX_LINES} more lines)"
+        else:
+            truncated = source
+
+        block = f"```mermaid\n{truncated}\n```"
+        if artifact_path:
+            block += f"\n    \x1b[2m[saved: {artifact_path}]\x1b[0m\n"
+        return block
 
     def _fallback_code_block(self, source: str) -> str:
         """Show the source as a passthrough code block.

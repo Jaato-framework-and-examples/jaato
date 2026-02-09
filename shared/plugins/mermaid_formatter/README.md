@@ -8,7 +8,7 @@ The mermaid formatter plugin:
 - Detects ` ```mermaid ` code blocks in model output
 - Renders diagrams to PNG via mermaid-cli or kroki.io POST API
 - Displays inline using the best terminal graphics protocol
-- Falls back to Unicode half-block art when no native protocol is available
+- Falls back to truncated source display with artifact path when no image protocol is available
 - Saves PNG artifacts for model feedback via vision capture
 
 This is a **formatter pipeline plugin** (not a tool plugin) — it processes the model's output stream, not tool invocations.
@@ -42,16 +42,15 @@ The plugin auto-detects the best rendering backend from terminal capabilities:
 | `kitty` | Kitty graphics protocol | Kitty, Ghostty | `TERM_PROGRAM` |
 | `iterm` | iTerm2 inline images | iTerm2, WezTerm, Mintty | `TERM_PROGRAM` |
 | `sixel` | Sixel bitmap | foot, mlterm | `TERM` / `TERM_PROGRAM` |
-| `rich_pixels` | Unicode half-blocks (▀) | Everything else | Universal fallback |
 
-Detection is handled by `shared/terminal_caps.py`, which caches results process-wide. Multiplexers (tmux, screen) automatically fall back to `rich_pixels` since they strip graphics escape sequences.
+Detection is handled by `shared/terminal_caps.py`, which caches results process-wide. When no image protocol is available (e.g. multiplexers like tmux/screen that strip graphics escapes), the plugin falls back to showing truncated mermaid source with a path to the rendered PNG.
 
 ### Backend Selection Priority
 
 1. `JAATO_MERMAID_BACKEND` env var (explicit override)
 2. `JAATO_GRAPHICS_PROTOCOL` env var (global graphics override)
 3. Auto-detection from `TERM_PROGRAM` / `TERM`
-4. `rich_pixels` fallback (always works)
+4. `None` — caller falls back to truncated source + artifact path
 
 ## Mermaid Rendering
 
@@ -76,7 +75,7 @@ Diagrams are rendered to PNG using the first available strategy:
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `JAATO_KROKI_URL` | URL | `https://kroki.io` | Kroki endpoint (for self-hosted instances) |
-| `JAATO_MERMAID_BACKEND` | `kitty`, `iterm`, `sixel`, `ascii`, `off` | auto-detect | Force a specific graphics backend |
+| `JAATO_MERMAID_BACKEND` | `kitty`, `iterm`, `sixel`, `off` | auto-detect | Force a specific graphics backend |
 | `JAATO_MERMAID_THEME` | `default`, `dark`, `forest`, `neutral` | `default` | Mermaid diagram theme |
 | `JAATO_MERMAID_SCALE` | Integer | `2` | Rasterization scale factor |
 | `JAATO_GRAPHICS_PROTOCOL` | `kitty`, `iterm`, `sixel`, `none` | auto-detect | Global terminal graphics override |
@@ -123,8 +122,7 @@ shared/plugins/mermaid_formatter/
 │   ├── __init__.py       # Backend protocol + auto-selection
 │   ├── kitty.py          # Kitty graphics protocol
 │   ├── iterm.py          # iTerm2 inline image protocol
-│   ├── sixel.py          # Sixel bitmap encoding
-│   └── rich_pixels.py    # Unicode half-block fallback
+│   └── sixel.py          # Sixel bitmap encoding
 └── tests/
     ├── test_plugin.py    # Block detection + rendering tests
     ├── test_renderer.py  # mmdc / kroki rendering tests
@@ -146,10 +144,10 @@ MermaidFormatterPlugin.process_chunk()
     renderer.render(source) → PNG bytes
            │
            ▼
-    backends.select_backend() → KittyBackend / ITermBackend / SixelBackend / RichPixelsBackend
+    backends.select_backend() → KittyBackend / ITermBackend / SixelBackend / None
            │
            ▼
-    backend.render(png_data) → terminal escape sequences or Unicode art
+    backend.render(png_data) → terminal escape sequences  (or source fallback if None)
            │
            ▼
     Yields rendered output + saves PNG artifact
@@ -159,7 +157,7 @@ MermaidFormatterPlugin.process_chunk()
 
 ### Required
 
-- `Pillow>=10.0.0` — Image processing for all graphics backends
+- `Pillow>=10.0.0` — Image processing for sixel backend
 
 ### Optional
 
