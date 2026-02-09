@@ -115,7 +115,8 @@ class TaskEventBus:
         callback: Optional[Callable[[TaskEvent], None]] = None,
         action_type: str = "callback",
         action_target: Optional[str] = None,
-        expires_after: Optional[int] = None
+        expires_after: Optional[int] = None,
+        replay_history: bool = True
     ) -> str:
         """Subscribe to task events matching the filter.
 
@@ -131,6 +132,10 @@ class TaskEventBus:
             action_target: Target for the action (step_id for unblock_step, etc.)
             expires_after: Auto-remove subscription after N matches.
                           None means persistent until explicitly unsubscribed.
+            replay_history: If True (default), replay matching historical events
+                          to the new subscriber. This prevents race conditions
+                          where events are published before the subscription
+                          is created.
 
         Returns:
             Subscription ID for later unsubscription.
@@ -155,17 +160,51 @@ class TaskEventBus:
             expires_after=expires_after
         )
 
+        # Register subscription and snapshot history atomically.
+        # This ensures no events are lost between the history scan and
+        # subscription activation. Combined with the atomic lock in
+        # publish(), this guarantees exactly-once delivery: an event
+        # is either in the history snapshot (replayed) or delivered
+        # via the live subscription, never both and never neither.
+        events_to_replay: List[TaskEvent] = []
         with self._sub_lock:
             self._subscriptions[sub_id] = subscription
             if callback:
                 self._callbacks[sub_id] = callback
 
+            # Snapshot matching historical events for replay
+            if replay_history and callback:
+                events_to_replay = [
+                    e for e in self._event_history
+                    if filter.matches(e)
+                ]
+
         logger.debug(
-            "Subscription created: %s by %s for %s from %s",
+            "Subscription created: %s by %s for %s from %s (replay=%d events)",
             sub_id[:8], subscriber_agent,
             [e.value for e in filter.event_types] or "all",
-            filter.agent_id or "any"
+            filter.agent_id or "any",
+            len(events_to_replay)
         )
+
+        # Replay historical events outside the lock to avoid deadlocks.
+        # This is safe because publish() takes the lock atomically for
+        # both appending to history AND snapshotting subscriptions, so
+        # any event published after our lock section above will find
+        # this subscription and deliver normally (not duplicated).
+        for event in events_to_replay:
+            subscription.match_count += 1
+            try:
+                callback(event)
+            except Exception as e:
+                logger.exception(
+                    "Error replaying historical event to %s: %s",
+                    sub_id[:8], e
+                )
+            # Check expiration during replay
+            if expires_after and subscription.match_count >= expires_after:
+                self.unsubscribe(sub_id)
+                break
 
         return sub_id
 
@@ -195,18 +234,19 @@ class TaskEventBus:
         Returns:
             Number of subscribers notified.
         """
-        # Store in history
+        # Atomically store in history AND snapshot subscriptions.
+        # This single lock section is critical for correctness with
+        # subscribe(replay_history=True): it ensures that an event is
+        # either in the history when a new subscriber snapshots it, or
+        # the subscriber is in our snapshot here — never both, never neither.
         with self._sub_lock:
             self._event_history.append(event)
             if len(self._event_history) > self._max_history:
                 self._event_history = self._event_history[-self._max_history:]
+            subscriptions = list(self._subscriptions.items())
 
         notified = 0
         to_remove = []
-
-        # Get snapshot of subscriptions
-        with self._sub_lock:
-            subscriptions = list(self._subscriptions.items())
 
         for sub_id, sub in subscriptions:
             if sub.filter.matches(event):

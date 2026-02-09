@@ -1,9 +1,10 @@
 """Regression tests for plan locking and dependency resolution fixes.
 
-These tests cover three root causes from the addDependentStep visibility bug:
+These tests cover root causes from coordination bugs:
 1. Concurrent read-modify-write race condition (lost update)
 2. Event bus pop-before-resolve losing waiters on failure
 3. register_dependency firing before save_plan
+4. Late subscriber missing plan_created events (no history replay)
 """
 
 import threading
@@ -451,3 +452,225 @@ class TestAddDependentStepVisibility:
             assert status["progress"]["total"] == 7
             assert status["progress"]["blocked"] == 1
             assert status["progress"]["completed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Root Cause 4: Late subscriber misses plan_created events (no history replay)
+# ---------------------------------------------------------------------------
+
+class TestLateSubscriberReplay:
+    """Test that subscribing after events are published still delivers them.
+
+    This covers the race condition where a parent agent subscribes to
+    plan_created events AFTER subagents have already created their plans.
+    The event bus must replay matching historical events to late subscribers.
+    """
+
+    def setup_method(self):
+        TaskEventBus.reset()
+
+    def teardown_method(self):
+        TaskEventBus.reset()
+
+    def test_subscribe_after_publish_replays_history(self):
+        """Events published before subscribe() should be replayed to the callback."""
+        bus = TaskEventBus.get_instance()
+
+        # Subagent publishes plan_created BEFORE parent subscribes
+        plan = TodoPlan.create("Subagent Plan", ["step1", "step2"])
+        event = TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="subagent_1",
+            plan=plan,
+        )
+        bus.publish(event)
+
+        # Parent subscribes AFTER the event was published
+        received = []
+        bus.subscribe(
+            subscriber_agent="main",
+            filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
+            callback=lambda e: received.append(e),
+        )
+
+        # The historical event should have been replayed
+        assert len(received) == 1, (
+            f"Expected 1 replayed event, got {len(received)}"
+        )
+        assert received[0].source_agent == "subagent_1"
+        assert received[0].event_type == TaskEventType.PLAN_CREATED
+
+    def test_replay_respects_filter(self):
+        """Only events matching the filter should be replayed."""
+        bus = TaskEventBus.get_instance()
+
+        plan = TodoPlan.create("Plan", ["s1"])
+
+        # Publish two different event types
+        bus.publish(TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="sub1",
+            plan=plan,
+        ))
+        bus.publish(TaskEvent.create(
+            event_type=TaskEventType.STEP_COMPLETED,
+            agent_id="sub1",
+            plan=plan,
+        ))
+
+        # Subscribe only to plan_created
+        received = []
+        bus.subscribe(
+            subscriber_agent="main",
+            filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
+            callback=lambda e: received.append(e),
+        )
+
+        assert len(received) == 1
+        assert received[0].event_type == TaskEventType.PLAN_CREATED
+
+    def test_replay_respects_agent_filter(self):
+        """Only events from the specified agent should be replayed."""
+        bus = TaskEventBus.get_instance()
+
+        plan = TodoPlan.create("Plan", ["s1"])
+
+        bus.publish(TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="sub1",
+            plan=plan,
+        ))
+        bus.publish(TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="sub2",
+            plan=plan,
+        ))
+
+        # Subscribe only to events from sub1
+        received = []
+        bus.subscribe(
+            subscriber_agent="main",
+            filter=EventFilter(
+                agent_id="sub1",
+                event_types=[TaskEventType.PLAN_CREATED],
+            ),
+            callback=lambda e: received.append(e),
+        )
+
+        assert len(received) == 1
+        assert received[0].source_agent == "sub1"
+
+    def test_replay_disabled_skips_history(self):
+        """replay_history=False should not replay anything."""
+        bus = TaskEventBus.get_instance()
+
+        plan = TodoPlan.create("Plan", ["s1"])
+        bus.publish(TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="sub1",
+            plan=plan,
+        ))
+
+        received = []
+        bus.subscribe(
+            subscriber_agent="main",
+            filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
+            callback=lambda e: received.append(e),
+            replay_history=False,
+        )
+
+        assert len(received) == 0
+
+    def test_no_duplicate_delivery_concurrent(self):
+        """An event should be delivered exactly once, not both via replay and live.
+
+        This tests the critical invariant: the atomic lock in publish() ensures
+        that an event is either in the history snapshot (replayed by subscribe)
+        OR delivered via the live subscription, never both.
+        """
+        bus = TaskEventBus.get_instance()
+
+        plan = TodoPlan.create("Plan", ["s1"])
+        received = []
+        lock = threading.Lock()
+
+        def on_event(e):
+            with lock:
+                received.append(e)
+
+        # Run many concurrent publish + subscribe pairs to stress the locking
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def publisher():
+            try:
+                barrier.wait(timeout=5)
+                for i in range(20):
+                    bus.publish(TaskEvent.create(
+                        event_type=TaskEventType.PLAN_CREATED,
+                        agent_id=f"sub_{i}",
+                        plan=plan,
+                    ))
+            except Exception as e:
+                errors.append(f"publisher: {e}")
+
+        def subscriber():
+            try:
+                barrier.wait(timeout=5)
+                time.sleep(0.01)  # Let some events publish first
+                bus.subscribe(
+                    subscriber_agent="main",
+                    filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
+                    callback=on_event,
+                )
+            except Exception as e:
+                errors.append(f"subscriber: {e}")
+
+        t1 = threading.Thread(target=publisher)
+        t2 = threading.Thread(target=subscriber)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors, f"Thread errors: {errors}"
+
+        # All 20 events should be received exactly once
+        agent_ids = [e.source_agent for e in received]
+        unique_agents = set(agent_ids)
+        assert len(agent_ids) == len(unique_agents), (
+            f"Duplicate events detected! Got {len(agent_ids)} events "
+            f"but only {len(unique_agents)} unique agents. "
+            f"Duplicates: {[a for a in agent_ids if agent_ids.count(a) > 1]}"
+        )
+        assert len(received) == 20, (
+            f"Expected 20 events, got {len(received)}"
+        )
+
+    def test_replay_counts_toward_expires_after(self):
+        """Replayed events should count toward expires_after limit."""
+        bus = TaskEventBus.get_instance()
+
+        plan = TodoPlan.create("Plan", ["s1"])
+
+        # Publish 3 events before subscribing
+        for i in range(3):
+            bus.publish(TaskEvent.create(
+                event_type=TaskEventType.PLAN_CREATED,
+                agent_id=f"sub_{i}",
+                plan=plan,
+            ))
+
+        received = []
+        bus.subscribe(
+            subscriber_agent="main",
+            filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
+            callback=lambda e: received.append(e),
+            expires_after=2,  # Only want 2 events total
+        )
+
+        # Should only get 2 events (expired after that)
+        assert len(received) == 2
+
+        # Subscription should have been removed
+        assert len(bus.get_subscriptions("main")) == 0
