@@ -19,6 +19,14 @@ from .ansi import strip_ansi
 
 IS_WINDOWS = sys.platform == "win32"
 
+# Backend function/exception references.  On Windows these are populated
+# lazily so the module can be imported (and the plugin registered) even
+# when wexpect is not yet installed.
+_spawn = None
+_TIMEOUT = None
+_EOF = None
+_BACKEND_ERROR: Optional[str] = None
+
 if IS_WINDOWS:
     try:
         import wexpect
@@ -26,7 +34,7 @@ if IS_WINDOWS:
         _TIMEOUT = wexpect.TIMEOUT
         _EOF = wexpect.EOF
     except ImportError:
-        raise ImportError(
+        _BACKEND_ERROR = (
             "wexpect is required for interactive shell sessions on Windows. "
             "Install it with: pip install wexpect"
         )
@@ -81,6 +89,9 @@ class ShellSession:
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
     ):
+        if _spawn is None:
+            raise ImportError(_BACKEND_ERROR or "No PTY backend available")
+
         self.session_id = session_id
         self.command = command
         self.idle_timeout = idle_timeout
