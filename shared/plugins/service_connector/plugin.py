@@ -448,6 +448,8 @@ class ServiceConnectorPlugin:
             "list_schemas": self._execute_list_schemas,
             "import_bruno_collection": self._execute_import_bruno_collection,
             "configure_service_auth": self._execute_configure_service_auth,
+            # User command
+            "services": lambda args: self.execute_user_command("services", args),
         }
 
     def get_system_instructions(self) -> Optional[str]:
