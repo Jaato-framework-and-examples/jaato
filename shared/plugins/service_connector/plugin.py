@@ -627,13 +627,17 @@ class ServiceConnectorPlugin:
 
     # === User Command Handlers ===
 
-    def _cmd_list(self) -> str:
-        """List all known services."""
+    def _cmd_list(self) -> Any:
+        """List all known services. Returns HelpLines for pager display."""
         names = self._get_all_service_names()
         if not names:
-            return "No services discovered. Use discover_service tool or 'services help' for guidance."
+            return HelpLines(lines=[
+                ("No services discovered.", "dim"),
+                ("", ""),
+                ("Use the discover_service tool or 'services help' for guidance.", ""),
+            ])
 
-        lines = ["Known services:", ""]
+        lines: List[tuple] = [("Known Services", "bold"), ("", "")]
         for name in names:
             discovered = self._get_service(name)
             if discovered:
@@ -641,18 +645,20 @@ class ServiceConnectorPlugin:
                 ep_count = discovered.endpoint_count
                 base_url = discovered.config.base_url
                 auth_label = f"auth={auth_type}" if auth_type != "none" else "no auth"
+                lines.append((f"  {name}", "bold"))
                 lines.append(
-                    f"  {name:20s}  {base_url:40s}  {ep_count:>3d} endpoints  [{auth_label}]"
+                    (f"    {base_url}  |  {ep_count} endpoints  |  {auth_label}", "dim")
                 )
             else:
-                lines.append(f"  {name:20s}  (config only)")
+                lines.append((f"  {name}", "bold"))
+                lines.append(("    (config only)", "dim"))
 
-        lines.append("")
-        lines.append(f"{len(names)} service(s) total")
-        return '\n'.join(lines)
+        lines.append(("", ""))
+        lines.append((f"{len(names)} service(s) total", "bold"))
+        return HelpLines(lines=lines)
 
-    def _cmd_show(self, service_name: str) -> str:
-        """Show details of a specific service."""
+    def _cmd_show(self, service_name: str) -> Any:
+        """Show details of a specific service. Returns HelpLines for pager display."""
         discovered = self._get_service(service_name)
 
         # Fall back to manual config
@@ -665,44 +671,44 @@ class ServiceConnectorPlugin:
         if not config:
             return f"Service not found: {service_name}"
 
-        lines = [f"Service: {config.name}", ""]
+        lines: List[tuple] = [(f"Service: {config.name}", "bold"), ("", "")]
 
         if config.title:
-            lines.append(f"  Title:       {config.title}")
+            lines.append((f"  Title:       {config.title}", ""))
         if config.version:
-            lines.append(f"  Version:     {config.version}")
-        lines.append(f"  Base URL:    {config.base_url or '(not set)'}")
+            lines.append((f"  Version:     {config.version}", ""))
+        lines.append((f"  Base URL:    {config.base_url or '(not set)'}", ""))
 
         if config.description:
             desc = config.description
             if len(desc) > 120:
                 desc = desc[:117] + "..."
-            lines.append(f"  Description: {desc}")
+            lines.append((f"  Description: {desc}", "dim"))
 
         # Auth summary
         auth = config.auth
-        lines.append(f"  Auth type:   {auth.type.value}")
+        lines.append((f"  Auth type:   {auth.type.value}", ""))
 
         # Endpoint count
         if discovered:
-            lines.append(f"  Endpoints:   {discovered.endpoint_count}")
+            lines.append((f"  Endpoints:   {discovered.endpoint_count}", ""))
 
         # Source
         if discovered and discovered.source:
-            lines.append(f"  Source:      {discovered.source}")
+            lines.append((f"  Source:      {discovered.source}", "dim"))
 
         # Schema store path
         if self._schema_store:
             source_on_disk = self._schema_store.get_discovered_source(service_name)
             if source_on_disk and (not discovered or source_on_disk != discovered.source):
-                lines.append(f"  Disk source: {source_on_disk}")
+                lines.append((f"  Disk source: {source_on_disk}", "dim"))
 
-        return '\n'.join(lines)
+        return HelpLines(lines=lines)
 
     def _cmd_endpoints(
         self, service_name: str, method_filter: Optional[str] = None
-    ) -> str:
-        """List endpoints for a service, optionally filtered by HTTP method."""
+    ) -> Any:
+        """List endpoints for a service. Returns HelpLines for pager display."""
         discovered = self._get_service(service_name)
 
         endpoints: List[Dict[str, Any]] = []
@@ -734,18 +740,25 @@ class ServiceConnectorPlugin:
             return f"No endpoints{filter_note} for service: {service_name}"
 
         filter_note = f" (filtered: {method_filter})" if method_filter else ""
-        lines = [f"Endpoints for {service_name}{filter_note}:", ""]
+        lines: List[tuple] = [
+            (f"Endpoints for {service_name}{filter_note}", "bold"),
+            ("", ""),
+        ]
 
         for ep in endpoints:
-            summary = f"  {ep['summary']}" if ep['summary'] else ""
-            lines.append(f"  {ep['method']:7s} {ep['path']}{summary}")
+            method_str = f"  {ep['method']:7s} {ep['path']}"
+            if ep['summary']:
+                lines.append((method_str, ""))
+                lines.append((f"           {ep['summary']}", "dim"))
+            else:
+                lines.append((method_str, ""))
 
-        lines.append("")
-        lines.append(f"{len(endpoints)} endpoint(s)")
-        return '\n'.join(lines)
+        lines.append(("", ""))
+        lines.append((f"{len(endpoints)} endpoint(s)", "bold"))
+        return HelpLines(lines=lines)
 
-    def _cmd_auth(self, service_name: str) -> str:
-        """Show auth configuration and credential status for a service."""
+    def _cmd_auth(self, service_name: str) -> Any:
+        """Show auth configuration and credential status. Returns HelpLines for pager display."""
         discovered = self._get_service(service_name)
 
         config = None
@@ -758,22 +771,25 @@ class ServiceConnectorPlugin:
             return f"Service not found: {service_name}"
 
         auth = config.auth
-        lines = [f"Auth for {service_name}:", ""]
-        lines.append(f"  Type: {auth.type.value}")
+        lines: List[tuple] = [
+            (f"Auth for {service_name}", "bold"),
+            ("", ""),
+            (f"  Type: {auth.type.value}", ""),
+        ]
 
         if auth.type == AuthType.NONE:
-            lines.append("  No authentication configured.")
-            return '\n'.join(lines)
+            lines.append(("  No authentication configured.", "dim"))
+            return HelpLines(lines=lines)
 
         if auth.type == AuthType.API_KEY:
             loc = auth.key_location.value if auth.key_location else "header"
-            lines.append(f"  Location: {loc}")
-            lines.append(f"  Key name: {auth.key_name or '(default)'}")
+            lines.append((f"  Location: {loc}", ""))
+            lines.append((f"  Key name: {auth.key_name or '(default)'}", ""))
 
         if auth.type == AuthType.OAUTH2_CLIENT and auth.token_url:
-            lines.append(f"  Token URL: {auth.token_url}")
+            lines.append((f"  Token URL: {auth.token_url}", ""))
             if auth.scope:
-                lines.append(f"  Scope: {auth.scope}")
+                lines.append((f"  Scope: {auth.scope}", ""))
 
         # Credential check
         if self._auth_manager:
@@ -783,21 +799,22 @@ class ServiceConnectorPlugin:
             missing = set(cred.get("env_vars_missing", []))
 
             if required:
-                lines.append("")
-                lines.append("  Environment variables:")
+                lines.append(("", ""))
+                lines.append(("  Environment variables:", "bold"))
                 for var in required:
                     if var in present:
-                        lines.append(f"    {var} = (set)")
+                        lines.append((f"    {var} = (set)", ""))
                     else:
-                        lines.append(f"    {var} = (MISSING)")
+                        lines.append((f"    {var} = (MISSING)", "bold"))
 
                 if missing:
-                    lines.append("")
-                    lines.append(
-                        f"  Warning: {len(missing)} required variable(s) not set."
-                    )
+                    lines.append(("", ""))
+                    lines.append((
+                        f"  Warning: {len(missing)} required variable(s) not set.",
+                        "bold",
+                    ))
 
-        return '\n'.join(lines)
+        return HelpLines(lines=lines)
 
     def _cmd_remove(self, service_name: str) -> str:
         """Remove a service from memory and filesystem."""

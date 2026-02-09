@@ -16,6 +16,11 @@ from ..types import (
 from ...base import CommandCompletion, HelpLines
 
 
+def _helplines_text(result: HelpLines) -> str:
+    """Extract all text from a HelpLines result for assertion matching."""
+    return "\n".join(line[0] for line in result.lines)
+
+
 @pytest.fixture
 def plugin(tmp_path):
     """Create an initialized plugin with a temp workspace."""
@@ -181,7 +186,9 @@ class TestExecuteUserCommand:
 
     def test_default_is_list(self, plugin):
         result = plugin.execute_user_command("services", {"subcommand": "", "rest": ""})
-        assert "No services discovered" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "No services discovered" in text
 
 
 class TestCmdList:
@@ -189,23 +196,28 @@ class TestCmdList:
 
     def test_empty_list(self, plugin):
         result = plugin.execute_user_command("services", {"subcommand": "list", "rest": ""})
-        assert "No services discovered" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "No services discovered" in text
 
     def test_list_services(self, plugin_with_services):
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "list", "rest": ""}
         )
-        assert "petstore" in result
-        assert "github" in result
-        assert "2 service(s)" in result
-        assert "endpoints" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "petstore" in text
+        assert "github" in text
+        assert "2 service(s)" in text
+        assert "endpoints" in text
 
     def test_list_shows_auth_type(self, plugin_with_services):
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "list", "rest": ""}
         )
-        assert "auth=apiKey" in result
-        assert "auth=bearer" in result
+        text = _helplines_text(result)
+        assert "auth=apiKey" in text
+        assert "auth=bearer" in text
 
 
 class TestCmdShow:
@@ -225,13 +237,15 @@ class TestCmdShow:
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "show", "rest": "petstore"}
         )
-        assert "petstore" in result
-        assert "Petstore API" in result
-        assert "1.0.0" in result
-        assert "https://petstore.example.com/v1" in result
-        assert "apiKey" in result
-        assert "4" in result  # endpoint count
-        assert "openapi.json" in result  # source
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "petstore" in text
+        assert "Petstore API" in text
+        assert "1.0.0" in text
+        assert "https://petstore.example.com/v1" in text
+        assert "apiKey" in text
+        assert "4" in text  # endpoint count
+        assert "openapi.json" in text  # source
 
 
 class TestCmdEndpoints:
@@ -253,26 +267,31 @@ class TestCmdEndpoints:
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "endpoints", "rest": "petstore"}
         )
-        assert "GET" in result
-        assert "POST" in result
-        assert "DELETE" in result
-        assert "/pets" in result
-        assert "4 endpoint(s)" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "GET" in text
+        assert "POST" in text
+        assert "DELETE" in text
+        assert "/pets" in text
+        assert "4 endpoint(s)" in text
 
     def test_endpoints_filter_by_method(self, plugin_with_services):
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "endpoints", "rest": "petstore GET"}
         )
-        assert "GET" in result
-        assert "POST" not in result
-        assert "DELETE" not in result
-        assert "filtered: GET" in result
-        assert "2 endpoint(s)" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "GET" in text
+        assert "POST" not in text
+        assert "DELETE" not in text
+        assert "filtered: GET" in text
+        assert "2 endpoint(s)" in text
 
     def test_endpoints_filter_no_match(self, plugin_with_services):
         result = plugin_with_services.execute_user_command(
             "services", {"subcommand": "endpoints", "rest": "petstore PATCH"}
         )
+        # No match returns plain string (not HelpLines) since it's just an error
         assert "No endpoints" in result
 
 
@@ -296,9 +315,11 @@ class TestCmdAuth:
             result = plugin_with_services.execute_user_command(
                 "services", {"subcommand": "auth", "rest": "petstore"}
             )
-        assert "apiKey" in result
-        assert "PETSTORE_KEY" in result
-        assert "(set)" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "apiKey" in text
+        assert "PETSTORE_KEY" in text
+        assert "(set)" in text
 
     def test_auth_bearer_missing(self, plugin_with_services):
         # Ensure GITHUB_TOKEN is not set
@@ -308,9 +329,11 @@ class TestCmdAuth:
             result = plugin_with_services.execute_user_command(
                 "services", {"subcommand": "auth", "rest": "github"}
             )
-        assert "bearer" in result
-        assert "GITHUB_TOKEN" in result
-        assert "MISSING" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "bearer" in text
+        assert "GITHUB_TOKEN" in text
+        assert "MISSING" in text
 
     def test_auth_none(self, plugin):
         plugin._discovered_services["noauth"] = DiscoveredService(
@@ -323,8 +346,10 @@ class TestCmdAuth:
         result = plugin.execute_user_command(
             "services", {"subcommand": "auth", "rest": "noauth"}
         )
-        assert "none" in result
-        assert "No authentication configured" in result
+        assert isinstance(result, HelpLines)
+        text = _helplines_text(result)
+        assert "none" in text
+        assert "No authentication configured" in text
 
 
 class TestCmdRemove:
@@ -381,7 +406,7 @@ class TestCmdHelp:
         result = plugin.execute_user_command(
             "services", {"subcommand": "help", "rest": ""}
         )
-        text = "\n".join(line[0] for line in result.lines)
+        text = _helplines_text(result)
         assert "list" in text
         assert "show" in text
         assert "endpoints" in text
