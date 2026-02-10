@@ -57,24 +57,51 @@ def _resolve_ref(spec: Dict[str, Any], ref: str) -> Dict[str, Any]:
     return current
 
 
-def _resolve_all_refs(spec: Dict[str, Any], obj: Any) -> Any:
+def _resolve_all_refs(
+    spec: Dict[str, Any],
+    obj: Any,
+    warnings: Optional[List[str]] = None,
+) -> Any:
     """Recursively resolve all $ref in an object.
+
+    When *warnings* is provided, unresolvable references are replaced
+    with an empty dict and a warning message is appended instead of
+    raising ``OpenAPIParseError``.  This allows the parser to return
+    partial results for specs that contain broken references.
 
     Args:
         spec: The full OpenAPI spec for reference resolution.
         obj: Object to process.
+        warnings: If provided, collects warning strings for
+            unresolvable references instead of raising.
 
     Returns:
-        Object with all references resolved.
+        Object with all references resolved (or placeholders for
+        unresolvable ones when *warnings* is not None).
+
+    Raises:
+        OpenAPIParseError: If a reference cannot be resolved and
+            *warnings* is None (strict mode).
     """
     if isinstance(obj, dict):
         if "$ref" in obj:
-            resolved = _resolve_ref(spec, obj["$ref"])
+            try:
+                resolved = _resolve_ref(spec, obj["$ref"])
+            except OpenAPIParseError:
+                if warnings is not None:
+                    warnings.append(
+                        f"Unresolvable $ref: {obj['$ref']}"
+                    )
+                    return {}
+                raise
             # Recursively resolve refs in the resolved object
-            return _resolve_all_refs(spec, resolved)
-        return {k: _resolve_all_refs(spec, v) for k, v in obj.items()}
+            return _resolve_all_refs(spec, resolved, warnings)
+        return {
+            k: _resolve_all_refs(spec, v, warnings)
+            for k, v in obj.items()
+        }
     elif isinstance(obj, list):
-        return [_resolve_all_refs(spec, item) for item in obj]
+        return [_resolve_all_refs(spec, item, warnings) for item in obj]
     return obj
 
 
@@ -473,7 +500,12 @@ def parse_openapi_spec(
 ) -> DiscoveredService:
     """Parse an OpenAPI/Swagger specification.
 
-    Supports both OpenAPI 3.x and Swagger 2.x formats.
+    Supports both OpenAPI 3.x and Swagger 2.x formats.  The parser is
+    *tolerant*: when individual endpoints or parameters contain errors
+    (e.g. unresolvable ``$ref``, unsupported parameter locations) they
+    are skipped and a warning is recorded.  The caller still receives
+    all successfully parsed endpoints and can inspect the ``warnings``
+    list on the returned ``DiscoveredService``.
 
     Args:
         spec: Parsed OpenAPI/Swagger specification dict.
@@ -482,10 +514,17 @@ def parse_openapi_spec(
 
     Returns:
         DiscoveredService with parsed configuration and endpoints.
+        The ``warnings`` field contains human-readable descriptions of
+        any non-fatal issues encountered during parsing.
 
     Raises:
-        OpenAPIParseError: If the specification is invalid.
+        OpenAPIParseError: If the specification is fundamentally
+            invalid (e.g. unsupported version).  Errors scoped to a
+            single endpoint or parameter are captured as warnings
+            instead.
     """
+    warnings: List[str] = []
+
     # Detect version
     openapi_version = spec.get("openapi", "")
     swagger_version = spec.get("swagger", "")
@@ -536,7 +575,13 @@ def parse_openapi_spec(
     for path, path_item in paths.items():
         # Resolve any $ref at path level
         if "$ref" in path_item:
-            path_item = _resolve_ref(spec, path_item["$ref"])
+            try:
+                path_item = _resolve_ref(spec, path_item["$ref"])
+            except OpenAPIParseError as exc:
+                warnings.append(
+                    f"Skipped path {path}: {exc}"
+                )
+                continue
 
         # Get parameters defined at path level
         path_parameters = path_item.get("parameters", [])
@@ -551,59 +596,18 @@ def parse_openapi_spec(
             if operation.get("deprecated", False):
                 continue
 
-            # Combine path-level and operation-level parameters
-            op_parameters = operation.get("parameters", [])
-            all_parameters = path_parameters + op_parameters
+            op_label = f"{method.upper()} {path}"
 
-            # Resolve all references
-            all_parameters = _resolve_all_refs(spec, all_parameters)
-
-            # Parse parameters
-            parameters = []
-            request_body = None
-            form_data_params = []
-
-            for param in all_parameters:
-                param_in = param.get("in")
-                # In Swagger 2.x, body parameter becomes request body
-                if param_in == "body":
-                    schema = _extract_json_schema(param.get("schema", {}))
-                    request_body = RequestBody(
-                        content_type="application/json",
-                        required=param.get("required", False),
-                        schema=schema,
-                    )
-                elif param_in == "formData":
-                    form_data_params.append(param)
-                else:
-                    if is_v3:
-                        parameters.append(_parse_parameter_v3(param))
-                    else:
-                        parameters.append(_parse_parameter_v2(param))
-
-            # Convert formData params to RequestBody (body param takes precedence)
-            if form_data_params and request_body is None:
-                request_body = _build_form_data_body(form_data_params)
-
-            # OpenAPI 3.x request body
-            if is_v3 and "requestBody" in operation:
-                rb = _resolve_all_refs(spec, operation["requestBody"])
-                request_body = _parse_request_body_v3(rb)
-
-            # Parse responses
-            responses_raw = _resolve_all_refs(spec, operation.get("responses", {}))
-            responses = _parse_responses(responses_raw)
-
-            endpoint = EndpointSchema(
-                method=method.upper(),
-                path=path,
-                summary=operation.get("summary"),
-                description=operation.get("description"),
-                parameters=parameters,
-                request_body=request_body,
-                responses=responses,
-                tags=operation.get("tags", []),
-            )
+            try:
+                endpoint = _parse_single_endpoint(
+                    spec, path, method, operation, path_parameters,
+                    is_v3, warnings,
+                )
+            except (OpenAPIParseError, KeyError, TypeError, ValueError) as exc:
+                warnings.append(
+                    f"Skipped endpoint {op_label}: {exc}"
+                )
+                continue
 
             endpoints.append(endpoint)
 
@@ -612,6 +616,108 @@ def parse_openapi_spec(
         endpoints=endpoints,
         auth_schemes=auth_schemes,
         source=source,
+        warnings=warnings,
+    )
+
+
+def _parse_single_endpoint(
+    spec: Dict[str, Any],
+    path: str,
+    method: str,
+    operation: Dict[str, Any],
+    path_parameters: List[Dict[str, Any]],
+    is_v3: bool,
+    warnings: List[str],
+) -> EndpointSchema:
+    """Parse a single endpoint operation from the spec.
+
+    Parameters with unsupported locations or other non-fatal issues are
+    skipped and recorded in *warnings*.  Reference resolution errors
+    within parameters, request bodies, and responses are also handled
+    gracefully.
+
+    Args:
+        spec: The full OpenAPI/Swagger spec.
+        path: The URL path for this endpoint.
+        method: HTTP method (lowercase).
+        operation: The operation dict from the spec.
+        path_parameters: Parameters defined at the path level.
+        is_v3: True if OpenAPI 3.x, False if Swagger 2.x.
+        warnings: Mutable list to append warning messages to.
+
+    Returns:
+        Parsed EndpointSchema.
+
+    Raises:
+        OpenAPIParseError: If the endpoint cannot be parsed at all
+            (propagated to caller for skipping).
+    """
+    op_label = f"{method.upper()} {path}"
+
+    # Combine path-level and operation-level parameters
+    op_parameters = operation.get("parameters", [])
+    all_parameters = path_parameters + op_parameters
+
+    # Resolve all references (tolerant mode)
+    all_parameters = _resolve_all_refs(spec, all_parameters, warnings)
+
+    # Parse parameters
+    parameters = []
+    request_body = None
+    form_data_params = []
+
+    for param in all_parameters:
+        # Skip empty dicts produced by unresolvable $refs
+        if not param or not param.get("name"):
+            continue
+
+        param_in = param.get("in")
+        # In Swagger 2.x, body parameter becomes request body
+        if param_in == "body":
+            schema = _extract_json_schema(param.get("schema", {}))
+            request_body = RequestBody(
+                content_type="application/json",
+                required=param.get("required", False),
+                schema=schema,
+            )
+        elif param_in == "formData":
+            form_data_params.append(param)
+        else:
+            try:
+                if is_v3:
+                    parameters.append(_parse_parameter_v3(param))
+                else:
+                    parameters.append(_parse_parameter_v2(param))
+            except (OpenAPIParseError, KeyError, ValueError) as exc:
+                warnings.append(
+                    f"Skipped parameter '{param.get('name', '?')}' "
+                    f"on {op_label}: {exc}"
+                )
+
+    # Convert formData params to RequestBody (body param takes precedence)
+    if form_data_params and request_body is None:
+        request_body = _build_form_data_body(form_data_params)
+
+    # OpenAPI 3.x request body
+    if is_v3 and "requestBody" in operation:
+        rb = _resolve_all_refs(spec, operation["requestBody"], warnings)
+        request_body = _parse_request_body_v3(rb)
+
+    # Parse responses
+    responses_raw = _resolve_all_refs(
+        spec, operation.get("responses", {}), warnings,
+    )
+    responses = _parse_responses(responses_raw)
+
+    return EndpointSchema(
+        method=method.upper(),
+        path=path,
+        summary=operation.get("summary"),
+        description=operation.get("description"),
+        parameters=parameters,
+        request_body=request_body,
+        responses=responses,
+        tags=operation.get("tags", []),
     )
 
 
