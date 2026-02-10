@@ -11,6 +11,10 @@ User Commands:
     sandbox list   - Show all effective paths from all three levels
     sandbox add    - Grant temporary access for current session
     sandbox remove - Block a path for this session (even if globally allowed)
+
+Programmatic API (for cross-plugin use):
+    add_path_programmatic(path, access)    - Add a path (e.g., from references plugin)
+    remove_path_programmatic(path)         - Remove a previously added path
 """
 
 from .plugin import SandboxManagerPlugin, SandboxPath, SandboxConfig, create_plugin
