@@ -1,7 +1,8 @@
-"""Tests for transitive reference detection in the references plugin.
+"""Tests for transitive reference detection and tag-based enrichment.
 
 Tests the ability to automatically discover and inject references that are
-mentioned within pre-selected reference content.
+mentioned within pre-selected reference content, and the tag-based content
+enrichment hints that surface relevant unselected references.
 """
 
 import os
@@ -10,6 +11,7 @@ import pytest
 
 from ..plugin import ReferencesPlugin, create_plugin, MAX_TRANSITIVE_DEPTH
 from ..models import ReferenceSource, SourceType, InjectionMode
+from ...base import PromptEnrichmentResult
 
 
 class TestFindReferencedIds:
@@ -647,5 +649,240 @@ class TestInitializeWithTransitive:
         try:
             selected = plugin.get_selected_ids()
             assert len(selected) == 0
+        finally:
+            plugin.shutdown()
+
+
+def _make_plugin_with_selectable_tags(sources_config):
+    """Helper to create a plugin with selectable sources and tags for enrichment tests.
+
+    Sets up a plugin with the given source configs, none preselected, so that
+    _enrich_content() Pass 2 (tag matching) is exercised.
+
+    Args:
+        sources_config: List of dicts with id, name, tags, and optional description.
+
+    Returns:
+        Initialized ReferencesPlugin instance. Caller must call shutdown().
+    """
+    plugin = create_plugin()
+    sources = []
+    for cfg in sources_config:
+        sources.append({
+            "id": cfg["id"],
+            "name": cfg.get("name", cfg["id"]),
+            "description": cfg.get("description", "Test"),
+            "type": "inline",
+            "mode": "selectable",
+            "content": cfg.get("content", "placeholder"),
+            "tags": cfg["tags"],
+        })
+    plugin.initialize({"sources": sources})
+    return plugin
+
+
+class TestEnrichContentTagMatching:
+    """Tests for the tag-based hint matching in _enrich_content() Pass 2.
+
+    These tests verify that tags match as whole words with proper boundary
+    detection, and that the hint content includes the triggering tags.
+    """
+
+    def test_tag_matches_standalone_word(self):
+        """Tag matches when it appears as a standalone word."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            result = plugin._enrich_content("We need to use java for this project", "prompt")
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_tag_does_not_match_in_dotted_name(self):
+        """Tag should NOT match inside a dotted package/class name."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Import java.util.concurrent.TimeoutException from the SDK",
+                "prompt"
+            )
+            # "java" appears only as part of "java.util..." — should not match
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
+        finally:
+            plugin.shutdown()
+
+    def test_tag_does_not_match_in_file_extension(self):
+        """Tag should NOT match inside a file extension like '.java'."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Edit the file CircuitBreaker.java to add the retry logic",
+                "prompt"
+            )
+            # "java" appears only as ".java" extension — should not match
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
+        finally:
+            plugin.shutdown()
+
+    def test_tag_does_not_match_in_path(self):
+        """Tag should NOT match inside a file path segment."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "The binary is at /usr/lib/java/bin/javac",
+                "prompt"
+            )
+            # "java" appears only inside path segments — should not match
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
+        finally:
+            plugin.shutdown()
+
+    def test_tag_matches_case_insensitive(self):
+        """Tag matching is case-insensitive."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            result = plugin._enrich_content("JAVA is a programming language", "prompt")
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_tag_matches_with_punctuation_boundary(self):
+        """Tag matches when bounded by punctuation (not dots/slashes)."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            # Parentheses and commas are valid boundaries
+            result = plugin._enrich_content("languages (java, python) are supported", "prompt")
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_hint_shows_matched_tags(self):
+        """Hint content uses 'matched:' label and shows triggering tags."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Circuit Breaker", "tags": ["circuit", "resilience"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "We need a circuit pattern for fault tolerance",
+                "prompt"
+            )
+            assert "(matched: circuit)" in result.prompt
+        finally:
+            plugin.shutdown()
+
+    def test_multiple_tags_match_same_source(self):
+        """Multiple tags from the same source can match independently."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Resilience Guide", "tags": ["retry", "timeout"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Configure the retry and timeout policies",
+                "prompt"
+            )
+            matched_tags = result.metadata["tag_matched_references"]["ref-1"]
+            assert "retry" in matched_tags
+            assert "timeout" in matched_tags
+        finally:
+            plugin.shutdown()
+
+    def test_one_tag_matches_multiple_sources(self):
+        """A single tag match pulls in all sources sharing that tag."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Circuit Breaker", "tags": ["resilience"]},
+            {"id": "ref-2", "name": "Retry Policy", "tags": ["resilience"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "We need resilience patterns",
+                "prompt"
+            )
+            matched = result.metadata["tag_matched_references"]
+            assert "ref-1" in matched
+            assert "ref-2" in matched
+        finally:
+            plugin.shutdown()
+
+    def test_no_match_returns_original_content(self):
+        """Content without matching tags returns unchanged."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            original = "This content has nothing related at all"
+            result = plugin._enrich_content(original, "prompt")
+            assert result.prompt == original
+        finally:
+            plugin.shutdown()
+
+    def test_selected_sources_excluded_from_hints(self):
+        """Already-selected sources are not included in tag hints."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            # Simulate selection
+            plugin._selected_source_ids.append("ref-1")
+            result = plugin._enrich_content("We use java here", "prompt")
+            # ref-1 is selected, so it should not appear in hints
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
+        finally:
+            plugin.shutdown()
+
+    def test_multi_word_tag_matches(self):
+        """Multi-word tags (containing spaces) match correctly."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_dotted_tag_matches_standalone(self):
+        """A tag containing a dot matches when standalone."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Spring Boot", "tags": ["spring.boot"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "We use spring.boot for the application",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_dotted_tag_does_not_match_inside_longer_name(self):
+        """A dotted tag should not match inside a longer dotted name."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Spring Boot", "tags": ["spring.boot"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Import org.spring.boot.autoconfigure from the classpath",
+                "prompt"
+            )
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
         finally:
             plugin.shutdown()

@@ -298,20 +298,26 @@ class PluginRegistry:
                 else:
                     return f"expanded {len(refs)} references"
 
-        # References plugin pattern - tag-matched reference ID hints
+        # References plugin pattern - tag-matched reference ID hints.
+        # Always include the matched tags in the notification so the user
+        # can see which tags triggered the match and diagnose false positives.
         if "tag_matched_references" in metadata:
             matched = metadata["tag_matched_references"]  # {source_id: [tags]}
             if matched:
                 ids = list(matched.keys())
+                # Collect unique matched tags across all hinted sources
+                all_tags = sorted(set(t for tags in matched.values() for t in tags))
+                tag_summary = ", ".join(all_tags[:5])
+                if len(all_tags) > 5:
+                    tag_summary += f" +{len(all_tags) - 5}"
                 if len(ids) == 1:
-                    tags = ", ".join(matched[ids[0]])
-                    return f"hinted @{ids[0]} (tags: {tags})"
+                    return f"hinted @{ids[0]} (matched: {tag_summary})"
                 elif len(ids) <= 3:
                     ref_list = ", ".join(f"@{r}" for r in ids)
-                    return f"hinted {ref_list}"
+                    return f"hinted {ref_list} (matched: {tag_summary})"
                 else:
                     shown = ", ".join(f"@{r}" for r in ids[:3])
-                    return f"hinted {shown} +{len(ids) - 3} more"
+                    return f"hinted {shown} +{len(ids) - 3} more (matched: {tag_summary})"
 
         # Template extraction pattern
         if "extracted_templates" in metadata:

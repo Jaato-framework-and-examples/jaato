@@ -1423,13 +1423,16 @@ class ReferencesPlugin:
                     for tag in source.tags:
                         tag_to_sources.setdefault(tag, []).append(source)
 
-                # Case-insensitive word boundary match for each tag in content
+                # Case-insensitive word boundary match for each tag in content.
+                # The boundary character class includes '.' and '/' so that
+                # tags do not match inside dotted names (java.util, file.java)
+                # or path segments (/usr/lib/java/).
                 content_lower = content.lower()
                 matched_sources: Dict[str, List[str]] = {}  # source_id → [matched_tags]
                 for tag, sources in tag_to_sources.items():
-                    # Match tag as a whole word (not as substring of another word)
+                    # Match tag as a whole word (not inside dotted/path names)
                     tag_pattern = re.compile(
-                        r'(?<![a-zA-Z0-9_-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_-])'
+                        r'(?<![a-zA-Z0-9_./-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_./-])'
                     )
                     if tag_pattern.search(content_lower):
                         for source in sources:
@@ -1445,12 +1448,13 @@ class ReferencesPlugin:
                         f"{{{', '.join(f'{sid}: {tags}' for sid, tags in matched_sources.items())}}}"
                     )
 
-                    # Build lightweight hint block
+                    # Build lightweight hint block showing which tags
+                    # triggered the match for each source.
                     hint_lines = []
                     for source_id, tags in matched_sources.items():
                         source = next(s for s in self._sources if s.id == source_id)
                         hint_lines.append(
-                            f"- @{source_id}: {source.name} (tags: {', '.join(tags)})"
+                            f"- @{source_id}: {source.name} (matched: {', '.join(tags)})"
                         )
 
                     hint_block = (
