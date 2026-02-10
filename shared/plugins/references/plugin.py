@@ -3,10 +3,12 @@
 This plugin maintains a catalog of reference sources (documentation, specs,
 guides, etc.) and handles:
 - AUTO sources: Included in system instructions, model fetches them at startup
-- SELECTABLE sources: User chooses which to include via interactive selection
+- SELECTABLE sources: Model selects by ID or tags via selectReferences tool,
+  or user selects via the 'references select <id>' command
 
+The model uses selectReferences to directly select references and receive their
+resolved paths. Selected sources have their paths authorized in the sandbox.
 The model is responsible for fetching content using appropriate tools (CLI, MCP, etc.).
-This plugin only manages the catalog and user interaction.
 
 Enrichment Support:
 - Prompt enrichment: Detects @reference-id mentions in user prompts
@@ -47,10 +49,11 @@ class ReferencesPlugin:
 
     The plugin maintains a catalog of reference sources and:
     - AUTO sources: Included in system instructions for model to fetch
-    - SELECTABLE sources: User chooses via channel (console/webhook/file)
+    - SELECTABLE sources: Model selects directly via selectReferences tool
+      (by ID or tags), or user selects via 'references select <id>' command
 
-    The model uses existing tools (CLI, MCP, URL fetch) to retrieve content.
-    This plugin only provides metadata and handles user selection.
+    The model uses selectReferences to select and get resolved paths, then
+    uses existing tools (CLI, MCP, URL fetch) to retrieve content.
     """
 
     def __init__(self):
@@ -641,25 +644,29 @@ class ReferencesPlugin:
             ToolSchema(
                 name="selectReferences",
                 description=(
-                    "Trigger user selection of additional reference sources to incorporate. "
-                    "Call this tool directly - it will inform you if no sources are available. "
-                    "All parameters are optional."
+                    "Select one or more reference sources by ID or by tags and return "
+                    "their real resolved paths. A reference's path is only authorized "
+                    "for readonly access after you select it with this tool — until "
+                    "then the path is not accessible. Use listReferences first to "
+                    "discover available IDs and tags. At least one of 'ids' or "
+                    "'filter_tags' must be provided."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "context": {
-                            "type": "string",
+                        "ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
                             "description": (
-                                "Optional: explain why you need references to help user select."
+                                "List of reference source IDs to select. "
+                                "Use listReferences to discover available IDs."
                             )
                         },
                         "filter_tags": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Filter sources by tags. Only sources with at least "
-                                "one matching tag will be shown to the user."
+                                "Select all sources matching at least one of these tags."
                             )
                         }
                     },
@@ -710,14 +717,32 @@ class ReferencesPlugin:
         }
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute reference selection flow.
+        """Execute model-driven reference selection by ID or tags.
 
-        Presents available selectable sources to user via the configured channel,
-        then returns instructions for the model to fetch selected references.
+        The model selects references directly — no user interaction is involved.
+        Selected references have their paths authorized in the sandbox so the
+        model can read them, and their resolved real paths are returned.
+
+        Args:
+            args: Tool arguments with optional 'ids' (list of reference IDs)
+                and/or 'filter_tags' (list of tags to match).
+
+        Returns:
+            Dict with status, selected sources, and their resolved paths.
         """
-        context = args.get("context")
+        ids = args.get("ids", [])
         filter_tags = args.get("filter_tags", [])
-        self._trace(f"selectReferences: context={context!r}, filter_tags={filter_tags}")
+        self._trace(f"selectReferences: ids={ids}, filter_tags={filter_tags}")
+
+        # Must provide at least one selection criterion
+        if not ids and not filter_tags:
+            return {
+                "status": "error",
+                "message": (
+                    "At least one of 'ids' or 'filter_tags' must be provided. "
+                    "Use listReferences to discover available reference IDs and tags."
+                )
+            }
 
         # Early check: no sources configured at all
         if not self._sources:
@@ -726,105 +751,117 @@ class ReferencesPlugin:
                 "message": "No reference sources available."
             }
 
-        # Get selectable sources not yet selected
+        # Get sources not yet selected
         available = [
             s for s in self._sources
-            if s.mode == InjectionMode.SELECTABLE
-            and s.id not in self._selected_source_ids
+            if s.id not in self._selected_source_ids
         ]
 
-        # Apply tag filter
-        if filter_tags:
-            available = [
-                s for s in available
-                if any(tag in s.tags for tag in filter_tags)
-            ]
-
         if not available:
-            self._trace("selectReferences: no sources available for selection")
+            self._trace("selectReferences: all sources already selected")
             return {
-                "status": "no_sources",
-                "message": "No additional reference sources available for selection."
+                "status": "all_selected",
+                "message": "All reference sources are already selected."
             }
 
-        available_ids = [s.id for s in available]
-        self._trace(f"selectReferences: available={available_ids}")
+        # Collect sources matching the criteria
+        matched: List[ReferenceSource] = []
+        matched_ids_set: set = set()
 
-        # Build prompt lines for UI hooks
-        prompt_lines = []
-        if context:
-            prompt_lines.append(f"Context: {context}")
-            prompt_lines.append("")
-        prompt_lines.append(f"Available references: {len(available)}")
-        for i, source in enumerate(available, 1):
-            prompt_lines.append(f"  [{i}] {source.name}")
+        # Match by explicit IDs
+        if ids:
+            available_by_id = {s.id: s for s in available}
+            not_found = []
+            already_selected = []
+            for ref_id in ids:
+                if ref_id in available_by_id:
+                    if ref_id not in matched_ids_set:
+                        matched.append(available_by_id[ref_id])
+                        matched_ids_set.add(ref_id)
+                elif ref_id in self._selected_source_ids:
+                    already_selected.append(ref_id)
+                else:
+                    not_found.append(ref_id)
 
-        # Emit selection requested hook
-        if self._on_selection_requested:
-            self._on_selection_requested("selectReferences", prompt_lines)
+            if not_found:
+                self._trace(f"selectReferences: IDs not found: {not_found}")
+            if already_selected:
+                self._trace(f"selectReferences: IDs already selected: {already_selected}")
 
-        # Present to user via channel
-        selected_ids = self._channel.present_selection(available, context)
+        # Match by tags
+        if filter_tags:
+            for source in available:
+                if source.id not in matched_ids_set:
+                    if any(tag in source.tags for tag in filter_tags):
+                        matched.append(source)
+                        matched_ids_set.add(source.id)
 
-        # Emit selection resolved hook
+        if not matched:
+            self._trace("selectReferences: no sources matched criteria")
+            # Build informative message
+            parts = ["No unselected sources matched the criteria."]
+            if ids:
+                # Check which IDs were not found vs already selected
+                all_source_ids = {s.id for s in self._sources}
+                not_found = [i for i in ids if i not in all_source_ids]
+                already = [i for i in ids if i in self._selected_source_ids]
+                if not_found:
+                    parts.append(f"IDs not found in catalog: {not_found}")
+                if already:
+                    parts.append(f"IDs already selected: {already}")
+            return {
+                "status": "none_matched",
+                "message": " ".join(parts)
+            }
+
+        # Track selections and authorize paths
+        selected_sources = []
+        for source in matched:
+            self._selected_source_ids.append(source.id)
+            self._authorize_source_path(source)
+            selected_sources.append(source)
+
+        selected_ids = [s.id for s in selected_sources]
+        self._trace(f"selectReferences: selected={selected_ids}")
+
+        # Emit selection resolved hook for UI integration
         if self._on_selection_resolved:
             self._on_selection_resolved("selectReferences", selected_ids)
 
-        self._trace(f"selectReferences: selected={selected_ids}")
-
-        if not selected_ids:
-            self._channel.notify_result([
-                "",
-                "─" * 60,
-                "No reference sources selected.",
-                "─" * 60,
-            ])
-            return {
-                "status": "none_selected",
-                "message": "User did not select any reference sources."
+        # Build result with resolved paths for each source
+        source_results = []
+        for source in selected_sources:
+            entry: Dict[str, Any] = {
+                "id": source.id,
+                "name": source.name,
+                "description": source.description,
+                "type": source.type.value,
+                "tags": source.tags,
             }
+            # Include resolved path for LOCAL sources
+            if source.type == SourceType.LOCAL:
+                resolved = self._resolve_path_for_access(source)
+                entry["resolved_path"] = str(resolved) if resolved else source.path
+                entry["is_directory"] = resolved.is_dir() if resolved else False
+            elif source.type == SourceType.URL:
+                entry["url"] = source.url
+            elif source.type == SourceType.MCP:
+                entry["server"] = source.server
+                entry["tool"] = source.tool
+                if source.args:
+                    entry["args"] = source.args
+            elif source.type == SourceType.INLINE:
+                entry["content"] = source.content
 
-        # Track selections
-        self._selected_source_ids.extend(selected_ids)
+            if source.fetch_hint:
+                entry["fetch_hint"] = source.fetch_hint
 
-        # Build instructions for the model
-        selected_sources = [s for s in available if s.id in selected_ids]
-
-        # Authorize paths for newly selected sources
-        for source in selected_sources:
-            self._authorize_source_path(source)
-
-        instructions = []
-
-        for source in selected_sources:
-            instructions.append(source.to_instruction())
-
-        # Build formatted result for display
-        result_lines = [
-            "",
-            "=" * 60,
-            f"SELECTED {len(selected_sources)} REFERENCE(S)",
-            "=" * 60,
-            "",
-        ]
-        for source in selected_sources:
-            result_lines.append(f"  ✓ {source.name}")
-            result_lines.append(f"    {source.description}")
-            result_lines.append("")
-        result_lines.append("─" * 60)
-        result_lines.append("Instructions provided to model.")
-        result_lines.append("─" * 60)
-
-        self._channel.notify_result(result_lines)
+            source_results.append(entry)
 
         return {
             "status": "success",
             "selected_count": len(selected_sources),
-            "message": (
-                "The user has selected the following reference sources. "
-                "Fetch and incorporate their content as needed:"
-            ),
-            "sources": "\n\n".join(instructions)
+            "sources": source_results,
         }
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -870,20 +907,33 @@ class ReferencesPlugin:
         source_ids = [s.id for s in sources]
         self._trace(f"listReferences: returning {len(sources)} sources={source_ids}")
 
+        source_entries = []
+        for s in sources:
+            entry = {
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "type": s.type.value,
+                "mode": s.mode.value,
+                "tags": s.tags,
+                "selected": s.id in self._selected_source_ids,
+            }
+            # Include resolved path for LOCAL sources so model knows real paths
+            if s.type == SourceType.LOCAL:
+                resolved = self._resolve_path_for_access(s)
+                entry["resolved_path"] = str(resolved) if resolved else s.path
+                entry["is_directory"] = resolved.is_dir() if resolved else False
+            elif s.type == SourceType.URL:
+                entry["url"] = s.url
+            elif s.type == SourceType.MCP:
+                entry["server"] = s.server
+                entry["tool"] = s.tool
+            elif s.type == SourceType.INLINE:
+                entry["has_content"] = bool(s.content)
+            source_entries.append(entry)
+
         return {
-            "sources": [
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "description": s.description,
-                    "type": s.type.value,
-                    "mode": s.mode.value,
-                    "tags": s.tags,
-                    "selected": s.id in self._selected_source_ids,
-                    "access": self._get_access_summary(s),
-                }
-                for s in sources
-            ],
+            "sources": source_entries,
             "total": len(sources),
             "selected_count": sum(
                 1 for s in sources if s.id in self._selected_source_ids
@@ -1101,14 +1151,16 @@ class ReferencesPlugin:
                 "Additional reference sources are available for this session.",
             ]
             if "listReferences" not in self._exclude_tools:
-                parts.append("Use `listReferences` to see available sources and their tags.")
+                parts.append("Use `listReferences` to see available sources, their tags, and resolved paths.")
             parts.extend([
-                "Use `selectReferences` when you encounter topics matching these tags",
-                "to request user selection of relevant documentation.",
+                "Use `selectReferences` with specific IDs or tags to select sources and",
+                "get their resolved paths. IMPORTANT: A reference's real path is only",
+                "authorized for readonly access AFTER you select it — until then its path",
+                "is not accessible even if you know it from listReferences.",
                 "",
                 "When reporting sources from listReferences, always indicate selection status:",
-                "- 'available but unselected' for sources not yet selected by the user",
-                "- 'selected' for sources the user has chosen to include",
+                "- 'available but unselected' for sources not yet selected",
+                "- 'selected' for sources already included",
                 "",
                 "Available tags: " + ", ".join(
                     sorted(set(tag for s in selectable for tag in s.tags))
@@ -1142,9 +1194,10 @@ class ReferencesPlugin:
                 parts.extend([
                     "---",
                     "",
-                    "Additional reference sources are available on request.",
-                    "Use `selectReferences` when you encounter topics matching these tags:",
-                    ", ".join(sorted(set(tag for s in selectable for tag in s.tags))),
+                    "Additional reference sources are available.",
+                    "Use `selectReferences` with IDs or tags to select them — their paths",
+                    "become readonly-accessible only after selection.",
+                    "Available tags: " + ", ".join(sorted(set(tag for s in selectable for tag in s.tags))),
                 ])
 
         immediate_ids = [s.id for s in immediate_sources]
@@ -1402,7 +1455,7 @@ class ReferencesPlugin:
 
                     hint_block = (
                         "\n\n---\n"
-                        "**Reference sources available** — use `selectReferences` to include:\n\n" +
+                        "**Reference sources available** — use `selectReferences` with IDs or tags to select:\n\n" +
                         "\n".join(hint_lines) +
                         "\n---"
                     )

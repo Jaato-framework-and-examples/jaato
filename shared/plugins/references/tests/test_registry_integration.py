@@ -512,15 +512,61 @@ class TestReferencesSandboxIntegration:
         """Test that the model tool selectReferences also calls sandbox."""
         plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
 
-        # Mock the channel to return our source as selected
-        mock_channel = Mock()
-        mock_channel.present_selection = Mock(return_value=["api-spec"])
-        mock_channel.notify_result = Mock()
-        plugin._channel = mock_channel
-
-        result = plugin._execute_select({})
+        # Model selects directly by ID (no channel interaction)
+        result = plugin._execute_select({"ids": ["api-spec"]})
 
         assert result["status"] == "success"
+        assert result["selected_count"] == 1
+        assert result["sources"][0]["id"] == "api-spec"
+        assert result["sources"][0]["resolved_path"] == str(ref_file)
         mock_sandbox.add_path_programmatic.assert_called_once_with(
             str(ref_file), access="readonly"
         )
+
+    def test_select_by_tags_calls_sandbox(self, plugin_with_sandbox):
+        """Test that selecting by tags also calls sandbox."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+        # Add tags to the source for tag-based selection
+        source.tags = ["api", "spec"]
+
+        result = plugin._execute_select({"filter_tags": ["api"]})
+
+        assert result["status"] == "success"
+        assert result["selected_count"] == 1
+        assert result["sources"][0]["id"] == "api-spec"
+        mock_sandbox.add_path_programmatic.assert_called_once_with(
+            str(ref_file), access="readonly"
+        )
+
+    def test_select_returns_resolved_path(self, plugin_with_sandbox):
+        """Test that selectReferences returns the resolved real path."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+
+        result = plugin._execute_select({"ids": ["api-spec"]})
+
+        assert result["status"] == "success"
+        assert len(result["sources"]) == 1
+        assert result["sources"][0]["resolved_path"] == str(ref_file)
+        assert result["sources"][0]["is_directory"] is False
+
+    def test_select_requires_ids_or_tags(self, plugin_with_sandbox):
+        """Test that selectReferences requires ids or filter_tags."""
+        plugin, _, _, _, _ = plugin_with_sandbox
+
+        result = plugin._execute_select({})
+
+        assert result["status"] == "error"
+        assert "ids" in result["message"] or "filter_tags" in result["message"]
+
+    def test_select_already_selected_id(self, plugin_with_sandbox):
+        """Test selecting an already-selected reference."""
+        plugin, _, _, source, _ = plugin_with_sandbox
+
+        # First selection
+        plugin._execute_select({"ids": ["api-spec"]})
+
+        # Second selection of the same ID — all sources already selected
+        result = plugin._execute_select({"ids": ["api-spec"]})
+
+        assert result["status"] == "all_selected"
+        assert "already selected" in result["message"].lower()
