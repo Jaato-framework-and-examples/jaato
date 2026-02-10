@@ -312,10 +312,23 @@ class IPCClient:
                     timeout=timeout,
                 )
                 self._connected = True
-            except asyncio.TimeoutError:
-                raise ConnectionError(f"Connection timeout: {self.socket_path}")
-            except Exception as e:
-                raise ConnectionError(f"Connection failed: {e}")
+            except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e:
+                # Socket file exists but connection failed — likely a stale
+                # socket from a crashed server.  Try auto-starting.
+                if self.auto_start:
+                    if not await self._start_server():
+                        raise ConnectionError(f"Connection failed (auto-start failed): {e}")
+                    # Retry after server started
+                    try:
+                        self._reader, self._writer = await asyncio.wait_for(
+                            asyncio.open_unix_connection(self.socket_path),
+                            timeout=timeout,
+                        )
+                        self._connected = True
+                    except Exception as e2:
+                        raise ConnectionError(f"Connection failed after auto-start: {e2}")
+                else:
+                    raise ConnectionError(f"Connection failed: {e}")
 
         # Wait for connected event
         try:
@@ -410,24 +423,45 @@ class IPCClient:
         ))
 
     async def _start_server(self) -> bool:
-        """Auto-start the server.
+        """Auto-start the server daemon.
+
+        Checks if the server is already running (via PID file), and if not,
+        launches ``python -m server --daemon``.  The env file is NOT passed
+        as a CLI argument because the server is provider-agnostic — each
+        client sends its own env config via ``ClientConfigRequest`` after
+        connecting.
+
+        On Unix, if a stale socket file exists from a previous crash, it is
+        removed before starting the server so the new instance can bind.
 
         Returns:
-            True if server started successfully.
+            True if server started (or was already running) and the IPC
+            endpoint became available within the timeout.
         """
         # Check if server is already running
         pid = self._check_server_running()
         if pid:
-            # Server is running, just wait for socket
+            # Server is running, just wait for socket/pipe
             return await self._wait_for_socket()
 
+        # On Unix, clean up stale socket file left over from a crash.
+        # The server also does this on startup, but removing it here avoids
+        # a race where the old file tricks _wait_for_socket into returning
+        # too early.
+        if not self._is_windows_pipe():
+            socket_file = Path(self.socket_path)
+            if socket_file.exists():
+                try:
+                    socket_file.unlink()
+                except OSError:
+                    pass  # Best-effort; the server will also try to clean up
+
         # Start server as daemon
-        print(f"Starting Jaato server...")
+        print("Starting Jaato server...")
 
         cmd = [
             sys.executable, "-m", "server",
             "--ipc-socket", self.socket_path,
-            "--env-file", self.env_file,
             "--daemon",
         ]
 
@@ -437,7 +471,7 @@ class IPCClient:
             print(f"Failed to start server: {e}")
             return False
 
-        # Wait for socket to appear
+        # Wait for socket/pipe to appear
         return await self._wait_for_socket()
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
