@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import textwrap
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -177,10 +178,16 @@ class OutputLine:
 
 @dataclass
 class ToolBlock:
-    """A block of completed tools stored inline in the output buffer.
+    """A finalized block of completed tools stored inline in the output buffer.
 
-    This allows tool blocks to be rendered dynamically with expand/collapse
-    state while maintaining their position in the output flow.
+    Created by ``_finalize_completed_tools()`` when all active tools have
+    completed and either a new tool arrives or the model's turn ends.
+    The block holds deep-copied ``ActiveToolCall`` objects and is inserted
+    into ``_lines`` at the chronological placeholder position.
+
+    Rendered by ``_render_tool_block()`` with ``finalized=True`` — output is
+    capped at 70 % of visible height using standard beginning + ellipsis + end
+    truncation.
     """
     tools: List['ActiveToolCall']  # The tools in this block
     expanded: bool = True  # Whether the block is in expanded view
@@ -200,7 +207,24 @@ class ActiveToolsMarker:
 
 @dataclass
 class ActiveToolCall:
-    """Represents an actively executing or completed tool call."""
+    """Represents a tool call through its full lifecycle.
+
+    Lifecycle::
+
+        add_active_tool()            → in _active_tools, completed=False  (running)
+        mark_tool_completed()        → in _active_tools, completed=True   (completed)
+        _finalize_completed_tools()  → deep-copied into ToolBlock in _lines,
+                                       removed from _active_tools           (finalized)
+
+    **Completed** means execution finished but the tool still lives in
+    ``_active_tools`` and renders via ``_render_active_tools_inline()``.
+    A tool can stay completed-but-not-finalized while sibling tools are
+    still running or the model's turn hasn't ended.
+
+    **Finalized** means the tool has been moved into a ``ToolBlock`` in
+    ``_lines``. Rendering uses ``_render_tool_block()`` with
+    ``finalized=True``.
+    """
     name: str
     args_summary: str  # Truncated string representation of args (for tree display)
     args_full: Optional[str] = None  # Full untruncated args (for popup header)
@@ -245,6 +269,14 @@ class ActiveToolCall:
     show_popup: bool = True  # Whether to track/update the tool output popup
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
+    # Progressive escalation: inline preview → popup
+    # Output starts inline; after thresholds (line count + time), escalates to popup
+    escalation_state: str = "inline"  # "inline" (showing in panel) | "escalated" (popup took over)
+    escalation_line_threshold: int = 5  # Lines of output before escalation eligible
+    escalation_time_threshold: float = 3.0  # Seconds after first output before escalation eligible
+    first_output_time: Optional[float] = None  # monotonic timestamp of first output chunk
+    inline_frozen_lines: Optional[List[str]] = None  # Snapshot of first N lines at escalation time
+    popup_suppressed: bool = False  # User manually dismissed popup; don't re-escalate
 
 
 class OutputBuffer:
@@ -1140,6 +1172,18 @@ class OutputBuffer:
 
         # Reconstruct output_lines from emulator state
         tool.output_lines = emulator.get_lines()
+
+        # Progressive escalation: track first output time and check thresholds
+        if tool.first_output_time is None:
+            tool.first_output_time = time.monotonic()
+
+        if (tool.escalation_state == "inline"
+                and not tool.popup_suppressed
+                and tool.show_popup
+                and len(tool.output_lines) > tool.escalation_line_threshold
+                and (time.monotonic() - tool.first_output_time) >= tool.escalation_time_threshold):
+            tool.escalation_state = "escalated"
+            tool.inline_frozen_lines = tool.output_lines[:tool.escalation_line_threshold]
 
     def _find_output_tool(self, call_id: str) -> Optional[ActiveToolCall]:
         """Find the tool that should receive output for a given call_id.
@@ -2984,12 +3028,38 @@ class OutputBuffer:
         For notebook output (content with <nb-row> markers), renders as a 2-column
         table with labels (In[n]:, Out[n]:) on the left and content on the right.
 
+        When the tool has been escalated to the popup, shows the frozen first
+        few lines plus an ellipsis with line count (the popup has the full output).
+
         Args:
             finalized: If True, cap display lines like file output (70% of visible
                        height) instead of filling all available space.
         """
         continuation = "   " if is_last else "│  "
         prefix = "    "
+
+        # Escalated tools: show frozen preview lines + ellipsis (popup has the full output)
+        # Skip for completed/finalized tools — they should show standard truncated output
+        if (tool.escalation_state == "escalated" and not finalized
+                and not tool.completed and tool.inline_frozen_lines):
+            indent = f"{prefix}{continuation}     "
+            indent_width = len(indent)
+            max_width = max(20, self._console_width - indent_width)
+            natural_width = max((self._get_content_width(line) for line in tool.inline_frozen_lines), default=0)
+            target_width = min(natural_width, max_width)
+            for line in tool.inline_frozen_lines:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(self._truncate_line_to_width(line, target_width, max_width))
+            # Ellipsis with total line count
+            total = len(tool.output_lines) if tool.output_lines else 0
+            hidden = total - len(tool.inline_frozen_lines)
+            if hidden > 0:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append(f"... {hidden} more lines ...", style=self._style("muted", "dim italic"))
+            return
+
         content_lines = tool.output_lines
 
         # Check if content contains security warning markers

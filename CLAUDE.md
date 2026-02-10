@@ -465,6 +465,19 @@ Key attributes:
 - Turn: `session_id`, `agent_type`, `turn_index`, `streaming`, `cancelled`
 - Tool: `tool.name`, `tool.plugin_type`, `tool.success`, `tool.duration_seconds`
 
+## Coding Policies
+
+### Docstring Maintenance
+
+Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
+
+- **Lifecycle and state transitions** must be documented on the class that holds the state (e.g., which methods transition between states, what each state means, where the object lives at each stage).
+- **Non-obvious parameters** like `finalized`, `backgrounded`, or boolean flags that change rendering/behavior must explain *when* and *why* they are set.
+- **Relationships between classes** (e.g., `ActiveToolCall` living in `_active_tools` vs being deep-copied into a `ToolBlock`) must be documented on both sides.
+- **Rendering methods** must document what visual output they produce and under which conditions they are called.
+
+This is not optional cleanup — treat missing or inaccurate docstrings as a defect to fix alongside the feature work.
+
 ## Additional Documentation
 
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams

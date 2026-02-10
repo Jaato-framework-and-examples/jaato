@@ -89,12 +89,29 @@ class ToolOutputPopup:
             t for t in buffer.active_tools
             if (not t.completed or t.backgrounded or t.continuation_id)
             and t.output_lines and t.call_id and t.show_popup
+            and not t.popup_suppressed
         ]
         seen = {self._get_popup_key(t) for t in result}
         for key, tool in buffer.popup_tools.items():
             if key not in seen and (tool.backgrounded or tool.continuation_id) and tool.output_lines:
                 result.append(tool)
         return result
+
+    def _get_escalated_tools(self, buffer: "OutputBuffer") -> List["ActiveToolCall"]:
+        """Get list of tools that have escalated to popup display.
+
+        These are tools that crossed the line-count + time thresholds during
+        inline display and should now be shown in the popup.
+        """
+        return [
+            t for t in buffer.active_tools
+            if t.escalation_state == "escalated"
+            and not t.popup_suppressed
+            and t.show_popup
+            and t.output_lines
+            and t.call_id
+            and not t.completed
+        ]
 
     def _get_tracked_tool(self, buffer: "OutputBuffer") -> Optional["ActiveToolCall"]:
         """Get the tool currently being tracked, if still active.
@@ -163,13 +180,23 @@ class ToolOutputPopup:
                 return
 
         if not self._visible:
-            # Auto-popup: show when tools are expanded and a running/backgrounded tool has output
+            # Progressive escalation: show popup when a tool crosses
+            # the line-count + time thresholds (replaces immediate auto-popup)
+            escalated = self._get_escalated_tools(buffer)
+            if escalated:
+                self._visible = True
+                self._tracked_popup_key = self._get_popup_key(escalated[0])
+                self._scroll_offset = 0
+                return
+            # Legacy auto-popup: only for backgrounded/continuation tools
+            # (normal running tools use progressive escalation instead)
             if not buffer.tools_expanded:
                 return
             running = self._get_running_tools(buffer)
-            if running:
+            bg_or_cont = [t for t in running if t.backgrounded or t.continuation_id]
+            if bg_or_cont:
                 self._visible = True
-                self._tracked_popup_key = self._get_popup_key(running[0])
+                self._tracked_popup_key = self._get_popup_key(bg_or_cont[0])
                 self._scroll_offset = 0
                 return
 
@@ -228,8 +255,17 @@ class ToolOutputPopup:
         """Reset to auto-follow mode (scroll to bottom)."""
         self._scroll_offset = 0
 
-    def dismiss(self) -> None:
-        """Manually dismiss the popup."""
+    def dismiss(self, buffer: "OutputBuffer" = None) -> None:
+        """Manually dismiss the popup.
+
+        Args:
+            buffer: If provided, marks the tracked tool as popup_suppressed
+                to prevent re-escalation for this tool.
+        """
+        if buffer and self._tracked_popup_key:
+            tracked = self._get_tracked_tool(buffer)
+            if tracked:
+                tracked.popup_suppressed = True
         self._visible = False
         self._tracked_popup_key = None
         self._scroll_offset = 0
