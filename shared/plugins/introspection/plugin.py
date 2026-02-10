@@ -177,6 +177,48 @@ class IntrospectionPlugin:
         """
         self._accessed_tools.clear()
 
+    def evaluate_gc_policy(self, entry: 'SourceEntry', budget: 'InstructionBudget') -> 'GCPolicy':
+        """Evaluate GC policy for a discovered tool schema entry.
+
+        This method is called by the GC system to determine whether a tool schema
+        with CONDITIONAL policy should be kept (LOCKED) or removed (EPHEMERAL).
+
+        Logic:
+        - If the tool has been successfully executed at least once → LOCKED
+        - Otherwise → EPHEMERAL (can be GC'd and re-discovered if needed later)
+
+        Args:
+            entry: The instruction budget entry for the tool schema
+            budget: The full instruction budget (provides session_id)
+
+        Returns:
+            GCPolicy.LOCKED if tool has been used successfully, EPHEMERAL otherwise
+        """
+        from ..instruction_budget import GCPolicy
+
+        # Extract tool name from entry metadata
+        tool_name = entry.metadata.get("tool_name") if entry.metadata else None
+        if not tool_name:
+            return GCPolicy.EPHEMERAL
+
+        # Get session ID from budget
+        session_id = budget.session_id
+        if not session_id:
+            return GCPolicy.EPHEMERAL
+
+        # Query reliability plugin for usage statistics
+        if self._registry:
+            reliability = self._registry.get_plugin('reliability')
+            if reliability and hasattr(reliability, 'has_successful_execution'):
+                try:
+                    if reliability.has_successful_execution(tool_name, session_id):
+                        return GCPolicy.LOCKED
+                except Exception:
+                    # If query fails, default to ephemeral
+                    pass
+
+        return GCPolicy.EPHEMERAL
+
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the introspection plugin."""
         return (

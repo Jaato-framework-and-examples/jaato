@@ -1478,11 +1478,46 @@ class JaatoSession:
             current_tool_names.add(tool_name)
             activated.append(tool_name)
 
+            # Track activated tool schema in instruction budget with CONDITIONAL policy
+            if self._instruction_budget:
+                from .instruction_budget import GCPolicy
+                import json
+
+                try:
+                    # Estimate tokens for the tool schema
+                    schema_dict = {
+                        "name": schema.name,
+                        "description": schema.description,
+                        "parameters": schema.parameters,
+                    }
+                    schema_json = json.dumps(schema_dict, indent=2)
+                    schema_tokens = self._count_tokens(schema_json)
+
+                    # Add as child entry to PLUGIN source with CONDITIONAL policy
+                    child_key = f"discovered_tool:{tool_name}"
+                    self._instruction_budget.add_child(
+                        InstructionSource.PLUGIN,
+                        child_key,
+                        schema_tokens,
+                        GCPolicy.CONDITIONAL,  # Will be evaluated based on usage
+                        label=f"Discovered: {tool_name}",
+                        metadata={
+                            "tool_name": tool_name,
+                            "discoverability": getattr(schema, 'discoverability', 'discoverable'),
+                            "category": schema.category,
+                        }
+                    )
+                except Exception as e:
+                    # Don't fail activation if budget tracking fails
+                    logger.warning(f"Failed to track discovered tool {tool_name} in budget: {e}")
+
         # If we activated any tools, recreate the provider session
         if activated:
             self._trace(f"Activating discovered tools: {activated}")
             history = self.get_history()
             self._create_provider_session(history)
+            # Emit budget update to reflect newly tracked tool schemas
+            self._emit_instruction_budget_update()
 
         return activated
 
