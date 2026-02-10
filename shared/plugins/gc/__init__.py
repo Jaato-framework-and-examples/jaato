@@ -41,6 +41,7 @@ from .utils import (
     Turn,
     create_gc_notification_message,
     create_summary_message,
+    ensure_tool_call_integrity,
     estimate_message_tokens,
     estimate_history_tokens,
     estimate_turn_tokens,
@@ -230,5 +231,6 @@ __all__ = [
     "estimate_history_tokens",
     "create_summary_message",
     "create_gc_notification_message",
+    "ensure_tool_call_integrity",
     "get_preserved_indices",
 ]
