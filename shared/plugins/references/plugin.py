@@ -20,7 +20,7 @@ import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
@@ -73,6 +73,14 @@ class ReferencesPlugin:
         self._project_root: Optional[str] = None
         # Plugin registry for cross-plugin communication (e.g., authorizing external paths)
         self._plugin_registry = None
+        # Transitive reference metadata: maps each transitively discovered ID
+        # to the set of parent source IDs that referenced it.
+        # Populated during initialize() when transitive_injection is enabled.
+        self._transitive_parent_map: Dict[str, Set[str]] = {}
+        # One-time flag: when True, the next prompt enrichment call will emit
+        # a lightweight transitive-selection hint so the model and user are
+        # notified. Reset to False after the first emission.
+        self._transitive_notification_pending: bool = False
 
     @property
     def name(self) -> str:
@@ -347,18 +355,104 @@ class ReferencesPlugin:
 
         return found_ids
 
+    def _find_referenced_paths(
+        self,
+        content: str,
+        source_resolved_path: str,
+        path_to_ids: Dict[str, Set[str]]
+    ) -> Set[str]:
+        """Find reference IDs by resolving relative paths mentioned in content.
+
+        Extracts file paths from markdown links and relative path patterns,
+        resolves them against the source document's directory, and matches
+        against catalog source resolved_paths.
+
+        This complements _find_referenced_ids (which matches by catalog ID)
+        so that transitive detection works when documents reference each
+        other via relative paths rather than by catalog ID.
+
+        Args:
+            content: The document content to scan for path references.
+            source_resolved_path: Resolved path of the document being scanned,
+                relative to project root. Used as base for resolving relative
+                paths found in content.
+            path_to_ids: Mapping from normalized resolved_path to set of
+                source IDs that share that path.
+
+        Returns:
+            Set of catalog source IDs referenced by path.
+        """
+        if not source_resolved_path or not path_to_ids:
+            return set()
+
+        found_ids: Set[str] = set()
+
+        # Directory of the source document (for resolving relative paths)
+        source_dir = os.path.dirname(source_resolved_path)
+
+        # --- Extract paths from content ---
+        extracted_paths: Set[str] = set()
+
+        # Markdown links: [text](path) — skip URLs and anchors
+        for match in re.finditer(r'\[[^\]]*\]\(([^)]+)\)', content):
+            link = match.group(1).strip()
+            if link.startswith(('http://', 'https://', '#', 'mailto:')):
+                continue
+            # Strip anchor fragments: path.md#section → path.md
+            if '#' in link:
+                link = link.split('#')[0]
+            if link:
+                extracted_paths.add(link)
+
+        # Explicit relative paths: ./foo or ../foo (not inside longer words)
+        for match in re.finditer(r'(?:^|(?<=\s))(\.\./[\w./_-]+|\.\/[\w./_-]+)', content, re.MULTILINE):
+            extracted_paths.add(match.group(1))
+
+        if not extracted_paths:
+            return found_ids
+
+        # --- Resolve and match ---
+        for raw_path in extracted_paths:
+            # Resolve relative to source's directory
+            resolved = os.path.normpath(os.path.join(source_dir, raw_path))
+            resolved = resolved.replace('\\', '/')
+
+            # Try exact match
+            if resolved in path_to_ids:
+                found_ids.update(path_to_ids[resolved])
+                continue
+
+            # Try with/without trailing slash (directory sources)
+            alt = resolved.rstrip('/') if resolved.endswith('/') else resolved + '/'
+            if alt in path_to_ids:
+                found_ids.update(path_to_ids[alt])
+                continue
+
+        if found_ids:
+            self._trace(
+                f"transitive:   path matches: {sorted(found_ids)} "
+                f"(from {len(extracted_paths)} extracted paths)"
+            )
+
+        return found_ids
+
     def _resolve_transitive_references(
         self,
         initial_ids: List[str],
         catalog_by_id: Dict[str, ReferenceSource],
         max_depth: int = MAX_TRANSITIVE_DEPTH
-    ) -> List[str]:
+    ) -> Tuple[List[str], Dict[str, Set[str]]]:
         """Resolve transitive references from pre-selected sources.
 
         Starting from the initially selected reference IDs, reads their content
-        and finds mentions of other references in the catalog. Recursively
-        resolves those references until no new references are found or max
-        depth is reached.
+        and discovers mentions of other references via two strategies:
+        1. **ID matching**: Finds catalog IDs mentioned as whole words in content.
+        2. **Path matching**: Extracts relative paths (markdown links, ``./``
+           and ``../`` patterns), resolves them against the source's directory,
+           and matches against resolved_path of other LOCAL catalog sources.
+
+        Recursively resolves discovered references until no new references are
+        found or max depth is reached.
 
         Args:
             initial_ids: List of initially selected/pre-selected reference IDs.
@@ -366,11 +460,15 @@ class ReferencesPlugin:
             max_depth: Maximum recursion depth to prevent runaway resolution.
 
         Returns:
-            List of all resolved reference IDs (initial + transitively discovered),
-            in order of discovery (initial IDs first, then discovered ones).
+            Tuple of:
+            - List of all resolved reference IDs (initial + transitively discovered),
+              in order of discovery (initial IDs first, then discovered ones).
+            - Parent map: dict mapping each transitively discovered ID to the
+              set of parent source IDs that referenced it. Initial IDs are
+              not included in this map.
         """
         if not initial_ids:
-            return []
+            return [], {}
 
         self._trace(f"transitive: starting from {initial_ids}")
 
@@ -378,9 +476,20 @@ class ReferencesPlugin:
         resolved_ids: List[str] = list(initial_ids)
         resolved_set: Set[str] = set(initial_ids)
 
+        # Parent map: discovered_id → {parent_ids that referenced it}
+        parent_map: Dict[str, Set[str]] = {}
+
         # IDs to process in this iteration
         pending: Set[str] = set(initial_ids)
         catalog_ids = set(catalog_by_id.keys())
+
+        # Build resolved_path → source IDs mapping for path-based matching.
+        # Only LOCAL sources with a resolved_path participate.
+        path_to_ids: Dict[str, Set[str]] = {}
+        for sid, source in catalog_by_id.items():
+            if source.type == SourceType.LOCAL and source.resolved_path:
+                norm = os.path.normpath(source.resolved_path).replace('\\', '/')
+                path_to_ids.setdefault(norm, set()).add(sid)
 
         for depth in range(max_depth):
             if not pending:
@@ -402,10 +511,16 @@ class ReferencesPlugin:
 
                 self._trace(f"transitive:   '{ref_id}' -> {len(content)} chars")
 
-                # Find references mentioned in content
+                # Strategy 1: Find references by catalog ID mentioned in content
                 mentioned_ids = self._find_referenced_ids(content, catalog_ids)
 
-                # Filter to only newly discovered ones
+                # Strategy 2: Find references by resolving relative paths
+                if source.resolved_path and path_to_ids:
+                    mentioned_ids |= self._find_referenced_paths(
+                        content, source.resolved_path, path_to_ids
+                    )
+
+                # Filter to only newly discovered ones for BFS progression
                 new_mentions = mentioned_ids - resolved_set - {ref_id}
                 if new_mentions:
                     self._trace(f"transitive:   '{ref_id}' => {sorted(new_mentions)}")
@@ -413,6 +528,14 @@ class ReferencesPlugin:
                         newly_found.add(mentioned_id)
                         resolved_set.add(mentioned_id)
                         resolved_ids.append(mentioned_id)
+                        parent_map.setdefault(mentioned_id, set()).add(ref_id)
+
+                # Record parent relationships for IDs already resolved
+                # (discovered earlier by a sibling at the same BFS depth).
+                # This ensures multi-parent tracking is complete.
+                initial_set = set(initial_ids)
+                for mentioned_id in (mentioned_ids & resolved_set) - initial_set - {ref_id}:
+                    parent_map.setdefault(mentioned_id, set()).add(ref_id)
 
             # Next iteration processes newly found IDs
             pending = newly_found
@@ -430,7 +553,7 @@ class ReferencesPlugin:
         else:
             self._trace("transitive: no additional references found")
 
-        return resolved_ids
+        return resolved_ids, parent_map
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
@@ -569,10 +692,13 @@ class ReferencesPlugin:
                     full_catalog[source.id] = source
 
             # Resolve transitive references
-            all_resolved = self._resolve_transitive_references(
+            all_resolved, transitive_parent_map = self._resolve_transitive_references(
                 self._selected_source_ids,
                 full_catalog
             )
+            self._transitive_parent_map = transitive_parent_map
+            if transitive_parent_map:
+                self._transitive_notification_pending = True
 
             # Add newly discovered sources to self._sources and self._selected_source_ids
             current_source_ids = {s.id for s in self._sources}
@@ -629,6 +755,8 @@ class ReferencesPlugin:
         self._channel = None
         self._sources = []
         self._selected_source_ids = []
+        self._transitive_parent_map = {}
+        self._transitive_notification_pending = False
         self._initialized = False
 
         # Clear any authorized paths this plugin registered
@@ -1180,6 +1308,12 @@ class ReferencesPlugin:
 
         for source in immediate_sources:
             parts.append(source.to_instruction())
+            # Annotate transitively selected sources so the model knows why
+            # they were included and which parent source referenced them
+            if source.id in self._transitive_parent_map:
+                parents = self._transitive_parent_map[source.id]
+                parent_refs = ", ".join(f"@{p}" for p in sorted(parents))
+                parts.append(f"*(Transitively included — referenced by {parent_refs})*")
             parts.append("")
 
         # Mention remaining selectable sources (not pre-selected) if any
@@ -1423,13 +1557,16 @@ class ReferencesPlugin:
                     for tag in source.tags:
                         tag_to_sources.setdefault(tag, []).append(source)
 
-                # Case-insensitive word boundary match for each tag in content
+                # Case-insensitive word boundary match for each tag in content.
+                # The boundary character class includes '.' and '/' so that
+                # tags do not match inside dotted names (java.util, file.java)
+                # or path segments (/usr/lib/java/).
                 content_lower = content.lower()
                 matched_sources: Dict[str, List[str]] = {}  # source_id → [matched_tags]
                 for tag, sources in tag_to_sources.items():
-                    # Match tag as a whole word (not as substring of another word)
+                    # Match tag as a whole word (not inside dotted/path names)
                     tag_pattern = re.compile(
-                        r'(?<![a-zA-Z0-9_-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_-])'
+                        r'(?<![a-zA-Z0-9_./-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_./-])'
                     )
                     if tag_pattern.search(content_lower):
                         for source in sources:
@@ -1445,12 +1582,13 @@ class ReferencesPlugin:
                         f"{{{', '.join(f'{sid}: {tags}' for sid, tags in matched_sources.items())}}}"
                     )
 
-                    # Build lightweight hint block
+                    # Build lightweight hint block showing which tags
+                    # triggered the match for each source.
                     hint_lines = []
                     for source_id, tags in matched_sources.items():
                         source = next(s for s in self._sources if s.id == source_id)
                         hint_lines.append(
-                            f"- @{source_id}: {source.name} (tags: {', '.join(tags)})"
+                            f"- @{source_id}: {source.name} (matched: {', '.join(tags)})"
                         )
 
                     hint_block = (
@@ -1463,6 +1601,40 @@ class ReferencesPlugin:
                     all_metadata["tag_matched_references"] = {
                         sid: tags for sid, tags in matched_sources.items()
                     }
+
+        # --- Pass 3: one-time transitive selection hint ---
+        # On the first prompt enrichment after initialization, notify the model
+        # and user about references that were transitively selected from
+        # pre-selected sources.  Only fires for prompts (not tool results)
+        # because appending context to arbitrary tool output is confusing.
+        if (self._transitive_notification_pending
+                and source_type == "prompt"
+                and self._transitive_parent_map):
+            self._transitive_notification_pending = False
+
+            hint_lines = []
+            for tid, parents in self._transitive_parent_map.items():
+                parent_refs = ", ".join(f"@{p}" for p in sorted(parents))
+                source = next((s for s in self._sources if s.id == tid), None)
+                name = source.name if source else tid
+                hint_lines.append(f"- @{tid}: {name} (from {parent_refs})")
+
+            hint_block = (
+                "\n\n---\n"
+                "**Transitively selected references** — auto-included from pre-selected sources:\n\n" +
+                "\n".join(hint_lines) +
+                "\n---"
+            )
+            enriched_content = enriched_content + hint_block
+            all_metadata["transitive_references"] = {
+                tid: sorted(parents)
+                for tid, parents in self._transitive_parent_map.items()
+            }
+
+            self._trace(
+                f"enrich [{source_type}]: transitive hint emitted for "
+                f"{list(self._transitive_parent_map.keys())}"
+            )
 
         if all_metadata:
             return PromptEnrichmentResult(
