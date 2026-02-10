@@ -9,8 +9,16 @@ Key features:
    them to .jaato/templates/ for later use via renderTemplate tool.
 2. Tool result enrichment: Detects embedded templates in tool outputs
    (e.g., from cat, readFile) and extracts them similarly.
-3. Template rendering: Renders templates with variable substitution.
+3. Standalone template discovery: Detects .tpl/.tmpl files in directories
+   referenced by the references plugin and indexes them without copying.
+4. Template rendering: Renders templates with variable substitution.
    Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected).
+
+Template Index:
+All templates (embedded and standalone) are registered in a unified index
+that maps template names to their source paths. The model refers to templates
+by name only; the system resolves actual paths via the index. The index is
+persisted to .jaato/templates/index.json for inspectability.
 
 Template Syntax Support:
 - Jinja2: {{ variable }}, {% if %}, {% for %}, {{ var | filter }}
@@ -22,9 +30,11 @@ See docs/template-tool-design.md for the design specification.
 """
 
 import hashlib
+import json
 import os
 import re
 import tempfile
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -32,6 +42,33 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
 from shared.trace import trace as _trace_write
+
+
+# File extensions recognized as standalone template files
+TEMPLATE_FILE_EXTENSIONS = {'.tpl', '.tmpl'}
+
+
+@dataclass
+class TemplateIndexEntry:
+    """Entry in the unified template index.
+
+    Maps a template name to its actual location on disk, along with
+    metadata about syntax and required variables. Covers both embedded
+    templates (extracted to .jaato/templates/) and standalone templates
+    (left in their original location, not copied).
+
+    Attributes:
+        name: Template name used for lookup (e.g., "Entity.java.tpl").
+        source_path: Absolute path to the actual template file on disk.
+        syntax: Detected template syntax ("jinja2" or "mustache").
+        variables: Sorted list of variable names required by the template.
+        origin: How the template was discovered ("embedded" or "standalone").
+    """
+    name: str
+    source_path: str  # String for JSON serialization; resolved to Path at lookup
+    syntax: str
+    variables: List[str] = field(default_factory=list)
+    origin: str = "embedded"  # "embedded" or "standalone"
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -73,16 +110,25 @@ FRONTMATTER_ID_PATTERN = re.compile(r'^id:\s*(.+)$', re.MULTILINE)
 class TemplatePlugin:
     """Plugin for template-based file generation.
 
+    Maintains a unified template index that maps template names to their actual
+    locations on disk. Templates come from two sources:
+    - Standalone: .tpl/.tmpl files found in referenced directories (not copied)
+    - Embedded: Code blocks with template syntax extracted to .jaato/templates/
+
+    The model refers to templates by name only (e.g., "Entity.java.tpl"). The
+    system resolves actual paths via the index. The index is persisted to
+    .jaato/templates/index.json for inspectability.
+
     Tools provided:
     - renderTemplate: Render a template with variables and write to file
     - renderTemplateToFile: Same as renderTemplate with overwrite option
-    - listExtractedTemplates: List templates extracted in this session
+    - listExtractedTemplates: List all templates in the unified index
     - listTemplateVariables: List all variables required by a template
 
-    Prompt enrichment:
-    - Detects code blocks containing Jinja2 or Mustache template syntax
-    - Extracts them to .jaato/templates/ directory
-    - Annotates the prompt with the extracted template paths
+    Enrichment:
+    - System instruction enrichment: Extracts embedded templates from code blocks
+      and discovers standalone templates from referenced directories
+    - Tool result enrichment: Extracts embedded templates from tool outputs
 
     Supported template syntaxes (auto-detected):
 
@@ -107,6 +153,14 @@ class TemplatePlugin:
         self._templates_dir: Path = Path.cwd() / ".jaato" / "templates"
         # Track extracted templates in this session: hash -> path
         self._extracted_templates: Dict[str, Path] = {}
+        # Unified template index: name -> TemplateIndexEntry
+        # Covers both embedded (extracted to .jaato/templates/) and standalone
+        # templates (left in original location). The model refers to templates
+        # by name; the system resolves actual paths via this index.
+        self._template_index: Dict[str, TemplateIndexEntry] = {}
+        # Plugin registry for cross-plugin communication (e.g., querying
+        # the references plugin for selected directory sources).
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -132,10 +186,24 @@ class TemplatePlugin:
         self._initialized = True
         self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
 
+    def set_plugin_registry(self, registry) -> None:
+        """Receive the plugin registry for cross-plugin communication.
+
+        Called automatically during expose_tool() by the PluginRegistry.
+        Used to query the references plugin for selected directory sources
+        during standalone template discovery.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._trace("set_plugin_registry: wired with registry")
+
     def shutdown(self) -> None:
         """Shutdown the plugin."""
         self._initialized = False
         self._extracted_templates.clear()
+        self._template_index.clear()
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for template tools."""
@@ -150,18 +218,18 @@ class TemplatePlugin:
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}. "
                     "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
-                    "Provide either 'template' for inline content or 'template_path' for extracted templates."
+                    "Provide either 'template' for inline content or 'template_name' for a registered template."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "template": {
                             "type": "string",
-                            "description": "Inline template content. Mutually exclusive with template_path."
+                            "description": "Inline template content. Mutually exclusive with template_name."
                         },
-                        "template_path": {
+                        "template_name": {
                             "type": "string",
-                            "description": "Path to template file (supports relative paths with .. resolution). Mutually exclusive with template."
+                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl'). Resolved via the template index. Mutually exclusive with template."
                         },
                         "variables": {
                             "type": "object",
@@ -181,10 +249,10 @@ class TemplatePlugin:
             ToolSchema(
                 name="listExtractedTemplates",
                 description=(
-                    "**CHECK THIS BEFORE WRITING CODE**: List templates extracted from documentation "
-                    "in this session. If a template exists for your task, you MUST use renderTemplate "
-                    "instead of writing code manually. These templates were detected in code blocks "
-                    "with Jinja2 or Mustache syntax and extracted to .jaato/templates/."
+                    "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
+                    "session. If a template exists for your task, you MUST use renderTemplate "
+                    "instead of writing code manually. Shows both standalone templates (from "
+                    "referenced directories) and embedded templates (extracted from documentation)."
                 ),
                 parameters={
                     "type": "object",
@@ -201,7 +269,7 @@ class TemplatePlugin:
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}, {{ name | filter }}. "
                     "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
-                    "Provide either 'template' for inline content or 'template_path' for a template file."
+                    "Provide either 'template' for inline content or 'template_name' for a registered template."
                 ),
                 parameters={
                     "type": "object",
@@ -210,13 +278,13 @@ class TemplatePlugin:
                             "type": "string",
                             "description": "Path where rendered content will be written."
                         },
-                        "template_path": {
+                        "template_name": {
                             "type": "string",
-                            "description": "Path to template file (supports relative paths with .. resolution). Mutually exclusive with 'template'."
+                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl'). Resolved via the template index. Mutually exclusive with 'template'."
                         },
                         "template": {
                             "type": "string",
-                            "description": "Inline template string. Mutually exclusive with 'template_path'."
+                            "description": "Inline template string. Mutually exclusive with 'template_name'."
                         },
                         "variables": {
                             "type": "object",
@@ -243,12 +311,12 @@ class TemplatePlugin:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "template_path": {
+                        "template_name": {
                             "type": "string",
-                            "description": "Path to the template file (absolute or relative to workspace)"
+                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl')"
                         }
                     },
-                    "required": ["template_path"]
+                    "required": ["template_name"]
                 },
                 category="code",
                 discoverability="discoverable",
@@ -274,13 +342,13 @@ patterns. Manual coding when a template exists is NOT acceptable.
 
 ### IMPORTANT: Variable Names Are Provided Automatically
 
-When a template is detected and extracted, the system automatically injects an annotation
+When a template is detected, the system automatically injects an annotation
 showing the **exact variable names** required. Look for annotations like:
 
 ```
-[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: .jaato/templates/Entity.java.tpl
-  Syntax: jinja2
-  Required variables: [entity_name, fields, package]
+[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: Entity.java.tpl
+  Syntax: mustache
+  Required variables: [Entity, basePackage, entityFields]
   ...
 ```
 
@@ -289,22 +357,25 @@ invent variable names - use the ones shown in the annotation.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplateToFile(output_path, template_path, variables)** - PREFERRED tool for file generation
+**renderTemplateToFile(output_path, template_name, variables)** - PREFERRED tool for file generation
+  - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
+  - The system resolves the name to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
   - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
   - Returns: {"success": true, "output_path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
 
-**renderTemplate(template_path, variables, output_path)** - Alternative (same functionality)
+**renderTemplate(template_name, variables, output_path)** - Alternative (same functionality)
   - Also creates parent directories automatically
   - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
 
-**listExtractedTemplates()** - List templates extracted from documentation
-  - Shows all templates extracted in this session
+**listExtractedTemplates()** - List all available templates
+  - Shows all templates discovered in this session (embedded + standalone)
+  - Each entry shows: name, origin, syntax, variables, source path
   - Auto-approved (no permission required)
 
-**listTemplateVariables(template_path)** - Get required variables for a template (OPTIONAL)
+**listTemplateVariables(template_name)** - Get required variables for a template (OPTIONAL)
   - Use this if you need to re-check the variables for a template
   - Helpful if the original annotation is no longer visible in context
   - Auto-approved (no permission required)
@@ -327,8 +398,8 @@ renderTemplate: ...
 # Just call renderTemplateToFile for each file - directories are created automatically
 renderTemplateToFile(
     output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
-    template_path=".jaato/templates/Entity.java.tpl",
-    variables={"entity_name": "Customer", "package": "com.bank.customer.domain.model"}
+    template_name="Entity.java.tpl",
+    variables={"Entity": "Customer", "basePackage": "com.bank.customer"}
 )
 ```
 
@@ -368,10 +439,19 @@ If no suitable template exists for your task:
 
 This policy ensures consistent, maintainable code across all generated projects.
 
-### Templates Location
-Templates are stored in `.jaato/templates/`. When you read documentation files
-(like MODULE.md) containing embedded templates, they are automatically extracted
-to this directory. Watch for "[Template extracted: ...]" annotations.
+### Templates Discovery
+
+Templates come from two sources, unified under a single index:
+
+1. **Standalone templates**: .tpl/.tmpl files found in referenced directories
+   (e.g., knowledge module template folders). These stay in their original
+   location — not copied.
+
+2. **Embedded templates**: Code blocks with template syntax found in documentation
+   (MODULE.md, etc.). These are extracted to `.jaato/templates/`.
+
+Both types are registered in the index and can be referenced by name only.
+The index is persisted to `.jaato/templates/index.json` for inspection.
 
 ### Template Syntax (both supported, auto-detected)
 
@@ -423,20 +503,20 @@ Template rendering requires approval since it writes files."""
 
         output_path = arguments.get("output_path", "")
         template = arguments.get("template")
-        template_path = arguments.get("template_path")
+        template_name = arguments.get("template_name")
         variables = arguments.get("variables", {})
         overwrite = arguments.get("overwrite", False)
 
         # Build summary
         action = "Overwrite" if overwrite else "Create"
-        source = template_path if template_path else "(inline template)"
+        source = template_name if template_name else "(inline template)"
         summary = f"{action} file: {output_path} from {source}"
 
         # Build details showing the template and variables
         details_lines = []
 
-        if template_path:
-            details_lines.append(f"Template: {template_path}")
+        if template_name:
+            details_lines.append(f"Template: {template_name}")
         else:
             details_lines.append("Template: (inline)")
 
@@ -493,11 +573,16 @@ Template rendering requires approval since it writes files."""
         self,
         instructions: str
     ) -> SystemInstructionEnrichmentResult:
-        """Detect embedded templates in system instructions and extract them.
+        """Detect and index templates from system instructions and referenced directories.
 
-        Scans the system instructions for fenced code blocks containing Jinja2
-        template syntax ({{ }}, {% %}, {# #}). When found, extracts them to
-        .jaato/templates/ and annotates the instructions with the extracted paths.
+        Two discovery paths:
+        1. Embedded templates: Scans code blocks in instructions for Jinja2/Mustache
+           syntax, extracts them to .jaato/templates/.
+        2. Standalone templates: Queries the references plugin for selected LOCAL
+           directory sources, scans for .tpl/.tmpl files (left in original location).
+
+        Both types are registered in the unified template index and annotated in
+        the instructions so the model knows what templates are available.
 
         Args:
             instructions: Combined system instructions (includes MODULE.md content
@@ -513,26 +598,25 @@ Template rendering requires approval since it writes files."""
         # Find all code blocks in the instructions
         code_blocks = self._find_code_blocks(instructions)
 
-        if not code_blocks:
-            self._trace("  no code blocks found in instructions")
-            return SystemInstructionEnrichmentResult(instructions=instructions)
-
         # Filter to blocks that contain template syntax
-        template_blocks = [
-            (lang, content, start, end)
-            for lang, content, start, end in code_blocks
-            if self._is_template(content)
-        ]
+        template_blocks = []
+        if code_blocks:
+            template_blocks = [
+                (lang, content, start, end)
+                for lang, content, start, end in code_blocks
+                if self._is_template(content)
+            ]
 
-        if not template_blocks:
-            # Log each code block for debugging
-            for i, (lang, content, start, end) in enumerate(code_blocks):
-                preview = content[:80].replace('\n', '\\n') + ('...' if len(content) > 80 else '')
-                self._trace(f"  code block {i+1}: lang={lang!r}, {len(content)} chars: {preview}")
-            self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
-            return SystemInstructionEnrichmentResult(instructions=instructions)
+            if not template_blocks:
+                for i, (lang, content, start, end) in enumerate(code_blocks):
+                    preview = content[:80].replace('\n', '\\n') + ('...' if len(content) > 80 else '')
+                    self._trace(f"  code block {i+1}: lang={lang!r}, {len(content)} chars: {preview}")
+                self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
+        else:
+            self._trace("  no code blocks found in instructions")
 
-        self._trace(f"enrich_system_instructions: found {len(template_blocks)} template blocks")
+        if template_blocks:
+            self._trace(f"enrich_system_instructions: found {len(template_blocks)} template blocks")
 
         # Extract each template and collect annotations
         extracted: List[Tuple[str, Path, List[str]]] = []  # (content_hash, path, variables)
@@ -583,11 +667,56 @@ Template rendering requires approval since it writes files."""
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
                     f"  Call: renderTemplateToFile(\n"
-                    f"      template_path=\"{rel_path}\",\n"
+                    f"      template_name=\"{rel_path}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
                     f"  )"
                 )
+
+        # Register embedded templates in the unified index
+        for content_hash, template_path, variables in extracted:
+            index_name = template_path.name
+            if index_name not in self._template_index:
+                syntax = self._detect_template_syntax(
+                    template_path.read_text() if template_path.exists() else ""
+                )
+                self._template_index[index_name] = TemplateIndexEntry(
+                    name=index_name,
+                    source_path=str(template_path),
+                    syntax=syntax,
+                    variables=variables,
+                    origin="embedded",
+                )
+
+        # Discover standalone templates from referenced directories
+        standalone_entries = self._discover_from_references()
+        for entry in standalone_entries:
+            self._template_index[entry.name] = entry
+
+            # Build annotation for each standalone template
+            if entry.variables:
+                var_list = ", ".join(entry.variables)
+                var_dict_example = ", ".join(f'"{v}": <value>' for v in entry.variables[:3])
+                if len(entry.variables) > 3:
+                    var_dict_example += ", ..."
+            else:
+                var_list = "(none detected)"
+                var_dict_example = ""
+
+            annotations.append(
+                f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {entry.name}\n"
+                f"  Syntax: {entry.syntax}\n"
+                f"  Required variables: [{var_list}]\n"
+                f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                f"  Call: renderTemplateToFile(\n"
+                f"      template_name=\"{entry.name}\",\n"
+                f"      variables={{{var_dict_example}}},\n"
+                f"      output_path=\"<your-output-file>\"\n"
+                f"  )"
+            )
+
+        # Persist the unified index to disk
+        self._persist_index()
 
         if not annotations:
             return SystemInstructionEnrichmentResult(instructions=instructions)
@@ -600,12 +729,41 @@ Template rendering requires approval since it writes files."""
             instructions=enriched_instructions,
             metadata={
                 "extracted_count": len(extracted),
+                "standalone_count": len(standalone_entries),
                 "templates": [
                     {"hash": h, "path": str(p), "variables": v}
                     for h, p, v in extracted
+                ],
+                "standalone_templates": [
+                    {"name": e.name, "path": e.source_path, "variables": e.variables}
+                    for e in standalone_entries
                 ]
             }
         )
+
+    def _discover_from_references(self) -> List[TemplateIndexEntry]:
+        """Discover standalone templates from all referenced directories.
+
+        Queries the references plugin for selected LOCAL directory sources,
+        scans each for .tpl/.tmpl files, and returns new index entries
+        (skipping any already in the index).
+
+        Returns:
+            List of newly discovered TemplateIndexEntry instances.
+        """
+        directories = self._get_reference_directories()
+        if not directories:
+            return []
+
+        all_entries: List[TemplateIndexEntry] = []
+        for directory in directories:
+            entries = self._discover_standalone_templates(directory)
+            all_entries.extend(entries)
+
+        if all_entries:
+            self._trace(f"_discover_from_references: discovered {len(all_entries)} standalone templates")
+
+        return all_entries
 
     # ==================== Tool Result Enrichment ====================
 
@@ -720,7 +878,7 @@ Template rendering requires approval since it writes files."""
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
                     f"  Call: renderTemplateToFile(\n"
-                    f"      template_path=\"{rel_path}\",\n"
+                    f"      template_name=\"{rel_path}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
                     f"  )"
@@ -742,6 +900,171 @@ Template rendering requires approval since it writes files."""
                 ]
             }
         )
+
+    # ==================== Standalone Template Discovery ====================
+
+    def _discover_standalone_templates(self, directory: Path) -> List[TemplateIndexEntry]:
+        """Scan a directory for standalone template files (.tpl/.tmpl).
+
+        Discovers template files recursively, reads each to extract metadata
+        (syntax, variables), and returns index entries. Does NOT copy files —
+        entries point to the original location on disk.
+
+        Name collision handling: if two files have the same filename, the
+        immediate parent folder is prepended (e.g., "domain/Entity.java.tpl").
+        If still ambiguous, the full relative path from the scanned directory
+        is used.
+
+        Args:
+            directory: Absolute path to the directory to scan.
+
+        Returns:
+            List of TemplateIndexEntry for each discovered template file.
+        """
+        if not directory.is_dir():
+            self._trace(f"_discover_standalone: not a directory: {directory}")
+            return []
+
+        # Collect all template files with their relative paths
+        template_files: List[Tuple[Path, Path]] = []  # (absolute_path, relative_path)
+        try:
+            for item in sorted(directory.rglob("*")):
+                if item.is_file() and item.suffix in TEMPLATE_FILE_EXTENSIONS:
+                    rel = item.relative_to(directory)
+                    template_files.append((item, rel))
+        except (PermissionError, OSError) as e:
+            self._trace(f"_discover_standalone: scan error in {directory}: {e}")
+            return []
+
+        if not template_files:
+            self._trace(f"_discover_standalone: no template files found in {directory}")
+            return []
+
+        self._trace(f"_discover_standalone: found {len(template_files)} template files in {directory}")
+
+        # Detect name collisions among filenames
+        name_counts: Dict[str, int] = {}
+        for _, rel in template_files:
+            name = rel.name
+            name_counts[name] = name_counts.get(name, 0) + 1
+
+        # Build index entries
+        entries: List[TemplateIndexEntry] = []
+        for abs_path, rel_path in template_files:
+            filename = rel_path.name
+
+            # Determine the index name, handling collisions
+            if name_counts[filename] > 1:
+                # Prepend parent folder to disambiguate
+                parent_prefixed = str(rel_path.parent / filename) if rel_path.parent != Path('.') else filename
+                # If still not unique (unlikely), use full relative path
+                index_name = str(rel_path)
+            else:
+                index_name = filename
+
+            # Skip if already in index (e.g., from a previous directory scan)
+            if index_name in self._template_index:
+                self._trace(f"  skip already-indexed: {index_name}")
+                continue
+
+            # Read content and extract metadata
+            try:
+                content = abs_path.read_text()
+            except (IOError, OSError) as e:
+                self._trace(f"  error reading {abs_path}: {e}")
+                continue
+
+            syntax = self._detect_template_syntax(content)
+            variables = self._extract_variables(content)
+
+            entry = TemplateIndexEntry(
+                name=index_name,
+                source_path=str(abs_path),
+                syntax=syntax,
+                variables=variables,
+                origin="standalone",
+            )
+            entries.append(entry)
+            self._trace(f"  discovered: {index_name} ({syntax}, {len(variables)} vars)")
+
+        return entries
+
+    def _get_reference_directories(self) -> List[Path]:
+        """Query the references plugin for selected LOCAL directory sources.
+
+        Uses the plugin registry to access the references plugin and find
+        directories from selected reference sources. This enables standalone
+        template discovery without the references plugin needing any changes.
+
+        Returns:
+            List of absolute Paths to selected reference directories.
+        """
+        if not self._plugin_registry:
+            return []
+
+        try:
+            ref_plugin = self._plugin_registry.get_plugin("references")
+        except Exception:
+            return []
+
+        if ref_plugin is None:
+            return []
+
+        try:
+            selected_ids = set(ref_plugin.get_selected_ids())
+            sources = ref_plugin.get_sources()
+        except Exception as e:
+            self._trace(f"_get_reference_directories: error querying references: {e}")
+            return []
+
+        directories: List[Path] = []
+        for source in sources:
+            if source.id not in selected_ids:
+                continue
+            # Only LOCAL type sources with resolved paths
+            if source.type.value != "local":
+                continue
+            path_str = source.resolved_path or source.path
+            if not path_str:
+                continue
+            path = Path(path_str)
+            if path.is_dir():
+                directories.append(path)
+
+        if directories:
+            self._trace(f"_get_reference_directories: found {len(directories)} dirs")
+
+        return directories
+
+    def _persist_index(self) -> None:
+        """Write the template index to .jaato/templates/index.json.
+
+        Persists the in-memory index for inspectability and debugging.
+        The runtime uses the in-memory _template_index; this file is
+        informational only.
+        """
+        if not self._template_index:
+            return
+
+        try:
+            self._templates_dir.mkdir(parents=True, exist_ok=True)
+            index_path = self._templates_dir / "index.json"
+
+            index_data = {
+                "generated_at": datetime.now().isoformat(),
+                "template_count": len(self._template_index),
+                "templates": {
+                    name: asdict(entry)
+                    for name, entry in self._template_index.items()
+                }
+            }
+
+            index_path.write_text(json.dumps(index_data, indent=2))
+            self._trace(f"_persist_index: wrote {len(self._template_index)} entries to {index_path}")
+        except (IOError, OSError) as e:
+            self._trace(f"_persist_index: error writing index: {e}")
+
+    # ==================== Code Block Detection ====================
 
     def _find_code_blocks(self, text: str) -> List[Tuple[str, str, int, int]]:
         """Find all fenced code blocks in text.
@@ -1080,17 +1403,22 @@ Template rendering requires approval since it writes files."""
     # ==================== Path Resolution ====================
 
     def _resolve_template_path(self, template_path: str) -> Tuple[Optional[Path], List[str]]:
-        """Resolve template path, supporting multiple base locations.
+        """Resolve template path, supporting index lookup and multiple base locations.
 
         Tries paths in order:
-        1. Absolute path (if absolute)
-        2. Relative to current working directory
-        3. Relative to base_path (configured path)
-        4. Relative to .jaato/templates/
-        5. Resolved path (handles .. components)
+        1. Template index lookup by name (exact match on full name or filename)
+        2. Absolute path (if absolute)
+        3. Relative to current working directory
+        4. Relative to base_path (configured path)
+        5. Relative to .jaato/templates/
+        6. Resolved path (handles .. components)
+
+        The index lookup (step 1) enables the model to refer to templates by
+        name only (e.g., "Entity.java.tpl") regardless of where the file
+        actually lives on disk.
 
         Args:
-            template_path: Path to template (absolute or relative).
+            template_path: Path to template, or template name for index lookup.
 
         Returns:
             Tuple of (resolved_path, paths_tried).
@@ -1099,32 +1427,49 @@ Template rendering requires approval since it writes files."""
         path = Path(template_path)
         paths_tried = []
 
-        # If absolute, use as-is
+        # 1. Check template index by exact name
+        if template_path in self._template_index:
+            entry = self._template_index[template_path]
+            resolved = Path(entry.source_path)
+            paths_tried.append(f"index:{template_path} -> {entry.source_path}")
+            if resolved.exists():
+                return resolved, paths_tried
+
+        # 2. Check template index by filename (strip any path prefix)
+        filename = path.name
+        if filename != template_path and filename in self._template_index:
+            entry = self._template_index[filename]
+            resolved = Path(entry.source_path)
+            paths_tried.append(f"index:{filename} -> {entry.source_path}")
+            if resolved.exists():
+                return resolved, paths_tried
+
+        # 3. If absolute, use as-is
         if path.is_absolute():
             paths_tried.append(str(path))
             if path.exists():
                 return path, paths_tried
             return None, paths_tried
 
-        # Try relative to current working directory
+        # 4. Try relative to current working directory
         cwd_path = Path.cwd() / path
         paths_tried.append(str(cwd_path))
         if cwd_path.exists():
             return cwd_path, paths_tried
 
-        # Try relative to base_path (configured path)
+        # 5. Try relative to base_path (configured path)
         base_path = self._base_path / path
         paths_tried.append(str(base_path))
         if base_path.exists():
             return base_path, paths_tried
 
-        # Try relative to .jaato/templates/
+        # 6. Try relative to .jaato/templates/
         templates_path = self._templates_dir / path
         paths_tried.append(str(templates_path))
         if templates_path.exists():
             return templates_path, paths_tried
 
-        # Try resolving .. components explicitly
+        # 7. Try resolving .. components explicitly
         try:
             resolved = (Path.cwd() / path).resolve()
             if str(resolved) not in paths_tried:
@@ -1134,7 +1479,7 @@ Template rendering requires approval since it writes files."""
         except (OSError, ValueError):
             pass
 
-        # Try resolving from base_path
+        # 8. Try resolving from base_path
         try:
             resolved = (self._base_path / path).resolve()
             if str(resolved) not in paths_tried:
@@ -1154,7 +1499,7 @@ Template rendering requires approval since it writes files."""
         Supports both Jinja2 and Mustache template syntax (auto-detected).
         """
         template = args.get("template")
-        template_path_arg = args.get("template_path")
+        template_name_arg = args.get("template_name")
         variables = args.get("variables", {})
         output_path = args.get("output_path", "")
 
@@ -1162,19 +1507,19 @@ Template rendering requires approval since it writes files."""
         if not output_path:
             return {"error": "output_path is required"}
 
-        if not template and not template_path_arg:
-            return {"error": "Either 'template' or 'template_path' must be provided"}
+        if not template and not template_name_arg:
+            return {"error": "Either 'template' or 'template_name' must be provided"}
 
-        if template and template_path_arg:
-            return {"error": "Provide either 'template' or 'template_path', not both"}
+        if template and template_name_arg:
+            return {"error": "Provide either 'template' or 'template_name', not both"}
 
         # Get template content
         template_source = "inline"
-        if template_path_arg:
-            resolved_path, paths_tried = self._resolve_template_path(template_path_arg)
+        if template_name_arg:
+            resolved_path, paths_tried = self._resolve_template_path(template_name_arg)
             if resolved_path is None:
                 return {
-                    "error": f"Template file not found: {template_path_arg}",
+                    "error": f"Template not found: {template_name_arg}",
                     "paths_tried": paths_tried
                 }
             try:
@@ -1219,31 +1564,44 @@ Template rendering requires approval since it writes files."""
         }
 
     def _execute_list_extracted(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List templates extracted in this session."""
-        if not self._extracted_templates:
+        """List all templates available in this session.
+
+        Returns templates from the unified index, covering both embedded
+        templates (extracted from code blocks to .jaato/templates/) and
+        standalone templates (discovered in referenced directories, left
+        in their original location).
+
+        Each entry includes the template name (used for renderTemplateToFile),
+        its origin, syntax, required variables, and source path.
+        """
+        if not self._template_index:
             return {
                 "templates": [],
-                "message": "No templates have been extracted in this session."
+                "message": "No templates have been discovered in this session."
             }
 
         templates = []
-        for content_hash, path in self._extracted_templates.items():
+        for name, entry in self._template_index.items():
+            source_path = Path(entry.source_path)
+            exists = source_path.exists()
+
+            # Show relative path for display when inside base_path
             try:
-                rel_path = path.relative_to(self._base_path) if path.is_relative_to(self._base_path) else path
-                content = path.read_text() if path.exists() else "(file not found)"
-                variables = self._extract_variables(content) if path.exists() else []
-                templates.append({
-                    "path": str(rel_path),
-                    "hash": content_hash,
-                    "variables": variables,
-                    "exists": path.exists()
-                })
-            except Exception:
-                templates.append({
-                    "path": str(path),
-                    "hash": content_hash,
-                    "error": "Could not read template"
-                })
+                display_path = str(source_path.relative_to(self._base_path)) if source_path.is_relative_to(self._base_path) else str(source_path)
+            except ValueError:
+                display_path = str(source_path)
+
+            templates.append({
+                "name": name,
+                "origin": entry.origin,
+                "syntax": entry.syntax,
+                "variables": entry.variables,
+                "source_path": display_path,
+                "exists": exists,
+            })
+
+        # Sort: standalone first (they're the primary templates), then embedded
+        templates.sort(key=lambda t: (0 if t["origin"] == "standalone" else 1, t["name"]))
 
         return {
             "templates": templates,
@@ -1258,7 +1616,7 @@ Template rendering requires approval since it writes files."""
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
-        template_path_arg = args.get("template_path")
+        template_name_arg = args.get("template_name")
         variables = args.get("variables", {})
         overwrite = args.get("overwrite", False)
 
@@ -1266,25 +1624,25 @@ Template rendering requires approval since it writes files."""
         if not output_path:
             return {"error": "output_path is required"}
 
-        if not template and not template_path_arg:
+        if not template and not template_name_arg:
             return {
-                "error": "Exactly one of 'template' or 'template_path' must be provided"
+                "error": "Exactly one of 'template' or 'template_name' must be provided"
             }
 
-        if template and template_path_arg:
+        if template and template_name_arg:
             return {
-                "error": "Provide either 'template' or 'template_path', not both"
+                "error": "Provide either 'template' or 'template_name', not both"
             }
 
         # Determine template source
         template_source = "inline" if template else "file"
 
-        # Load template from file if template_path provided
-        if template_path_arg:
-            resolved_path, paths_tried = self._resolve_template_path(template_path_arg)
+        # Load template from file if template_name provided
+        if template_name_arg:
+            resolved_path, paths_tried = self._resolve_template_path(template_name_arg)
             if resolved_path is None:
                 return {
-                    "error": f"Template file not found: {template_path_arg}",
+                    "error": f"Template not found: {template_name_arg}",
                     "paths_tried": paths_tried
                 }
             try:
@@ -1294,7 +1652,7 @@ Template rendering requires approval since it writes files."""
                 return {
                     "error": f"Failed to read template: {e}",
                     "resolved_path": str(resolved_path),
-                    "template_path": template_path_arg
+                    "template_name": template_name_arg
                 }
 
         # Check if output path already exists
@@ -1312,9 +1670,9 @@ Template rendering requires approval since it writes files."""
         syntax = self._detect_template_syntax(template)
         rendered, error = self._render_template(template, variables)
         if error:
-            # Add template_path to error response if applicable
-            if template_path_arg:
-                error["template_path"] = template_path_arg
+            # Add template_name to error response if applicable
+            if template_name_arg:
+                error["template_name"] = template_name_arg
             return error
 
         # Create parent directories if needed
@@ -1359,21 +1717,21 @@ Template rendering requires approval since it writes files."""
         or regex for Mustache templates.
 
         Args:
-            args: Tool arguments containing 'template_path'.
+            args: Tool arguments containing 'template_name'.
 
         Returns:
             Dict with 'variables' list and 'syntax' type, or 'error' on failure.
         """
-        template_path = args.get("template_path", "")
+        template_name = args.get("template_name", "")
 
-        if not template_path:
-            return {"error": "template_path is required"}
+        if not template_name:
+            return {"error": "template_name is required"}
 
-        # Resolve the template path
-        resolved_path, paths_tried = self._resolve_template_path(template_path)
+        # Resolve the template name via index or filesystem
+        resolved_path, paths_tried = self._resolve_template_path(template_name)
         if not resolved_path or not resolved_path.exists():
             return {
-                "error": f"Template not found: {template_path}",
+                "error": f"Template not found: {template_name}",
                 "paths_tried": paths_tried
             }
 
@@ -1406,14 +1764,14 @@ Template rendering requires approval since it writes files."""
                 return {
                     "variables": sorted(list(variables)),
                     "syntax": "jinja2",
-                    "template_path": str(resolved_path),
+                    "template_name": template_name,
                     "count": len(variables)
                 }
             except Exception as e:
                 return {
                     "error": f"Failed to parse Jinja2 template: {e}",
                     "syntax": "jinja2",
-                    "template_path": str(resolved_path)
+                    "template_name": template_name
                 }
 
         elif syntax == "mustache":
@@ -1431,7 +1789,7 @@ Template rendering requires approval since it writes files."""
             return {
                 "variables": sorted(list(variables)),
                 "syntax": "mustache",
-                "template_path": str(resolved_path),
+                "template_name": template_name,
                 "count": len(variables)
             }
 
@@ -1439,7 +1797,7 @@ Template rendering requires approval since it writes files."""
             return {
                 "error": f"Unknown template syntax",
                 "syntax": syntax,
-                "template_path": str(resolved_path)
+                "template_name": template_name
             }
 
 
