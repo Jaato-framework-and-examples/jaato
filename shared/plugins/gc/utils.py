@@ -214,6 +214,162 @@ def create_gc_notification_message(message: str) -> Message:
     )
 
 
+def ensure_tool_call_integrity(
+    history: List[Message],
+    trace_fn=None,
+) -> List[Message]:
+    """Validate and repair tool_use/tool_result pairing after GC.
+
+    GC may remove individual messages from history, breaking the mandatory
+    pairing between MODEL messages with function_call parts (tool_use) and
+    TOOL/USER messages with function_response parts (tool_result). This
+    function removes orphaned messages to restore a valid history that
+    providers can accept.
+
+    Handles two cases:
+    1. Orphaned tool_results: A TOOL message references call_ids not present
+       in any preceding MODEL message's function_calls.
+    2. Unpaired tool_uses: A MODEL message has function_calls but no matching
+       tool_result follows before the next USER or MODEL message.
+
+    Args:
+        history: Conversation history (potentially with broken pairs).
+        trace_fn: Optional callable for trace logging, signature: (str) -> None.
+
+    Returns:
+        History with orphaned tool_use/tool_result messages removed.
+    """
+    if not history:
+        return history
+
+    def _trace(msg: str) -> None:
+        if trace_fn:
+            trace_fn(msg)
+
+    # --- Pass 1: Remove orphaned tool_result messages ---
+    # A tool_result is orphaned if its call_id doesn't appear in any preceding
+    # MODEL message's function_calls.
+    available_call_ids: set = set()
+    pass1_result: List[Message] = []
+    orphaned_tool_result_ids: set = set()
+
+    for msg in history:
+        if msg.role == Role.MODEL:
+            # Collect function_call IDs from this MODEL message
+            for p in msg.parts:
+                if p.function_call and p.function_call.id:
+                    available_call_ids.add(p.function_call.id)
+            pass1_result.append(msg)
+
+        elif msg.role == Role.TOOL or (
+            msg.role == Role.USER
+            and msg.parts
+            and any(p.function_response is not None for p in msg.parts)
+        ):
+            # This is a tool result message - check if its call_ids are valid
+            msg_call_ids = set()
+            for p in msg.parts:
+                if p.function_response and p.function_response.call_id:
+                    msg_call_ids.add(p.function_response.call_id)
+
+            valid_ids = msg_call_ids & available_call_ids
+            if not valid_ids and msg_call_ids:
+                # ALL call_ids in this message are orphaned - remove it
+                _trace(
+                    f"ensure_tool_call_integrity: removing orphaned tool_result "
+                    f"message (call_ids={msg_call_ids})"
+                )
+                orphaned_tool_result_ids.update(msg_call_ids)
+            else:
+                pass1_result.append(msg)
+                # Resolve matched call_ids (they now have results)
+                available_call_ids -= valid_ids
+        else:
+            pass1_result.append(msg)
+
+    # --- Pass 2: Remove MODEL messages with unresolved tool_calls ---
+    # A MODEL message with function_calls is unpaired if no matching
+    # tool_result follows before the next non-tool message or end of history.
+    # We scan forward and track pending tool_call_ids.
+    result: List[Message] = []
+    pending_tool_use_ids: set = set()
+    pending_model_idx: Optional[int] = None
+
+    for msg in pass1_result:
+        if msg.role == Role.MODEL:
+            has_tool_calls = any(
+                p.function_call is not None for p in msg.parts
+            )
+            if has_tool_calls:
+                # If there's a previous MODEL with unresolved tool_calls,
+                # that one is unpaired - remove it
+                if pending_tool_use_ids and pending_model_idx is not None:
+                    removed_msg = result[pending_model_idx]
+                    _trace(
+                        f"ensure_tool_call_integrity: removing unpaired tool_use "
+                        f"MODEL message (pending_ids={pending_tool_use_ids})"
+                    )
+                    result = result[:pending_model_idx] + result[pending_model_idx + 1:]
+
+                # Track this MODEL message and its tool_call IDs
+                pending_model_idx = len(result)
+                pending_tool_use_ids = set()
+                for p in msg.parts:
+                    if p.function_call and p.function_call.id:
+                        pending_tool_use_ids.add(p.function_call.id)
+
+            result.append(msg)
+
+        elif msg.role == Role.TOOL or (
+            msg.role == Role.USER
+            and msg.parts
+            and any(p.function_response is not None for p in msg.parts)
+        ):
+            # Resolve matching tool_call IDs
+            for p in msg.parts:
+                if p.function_response and p.function_response.call_id:
+                    pending_tool_use_ids.discard(p.function_response.call_id)
+
+            if not pending_tool_use_ids:
+                pending_model_idx = None
+
+            result.append(msg)
+
+        elif msg.role == Role.USER:
+            # User text message - any pending tool_calls are unpaired
+            if pending_tool_use_ids and pending_model_idx is not None:
+                _trace(
+                    f"ensure_tool_call_integrity: removing unpaired tool_use "
+                    f"MODEL message before USER message "
+                    f"(pending_ids={pending_tool_use_ids})"
+                )
+                result = result[:pending_model_idx] + result[pending_model_idx + 1:]
+                pending_tool_use_ids.clear()
+                pending_model_idx = None
+
+            result.append(msg)
+        else:
+            result.append(msg)
+
+    # Final check: if history ends with unpaired tool_calls, remove the MODEL msg
+    if pending_tool_use_ids and pending_model_idx is not None:
+        _trace(
+            f"ensure_tool_call_integrity: removing unpaired tool_use "
+            f"MODEL message at end of history "
+            f"(pending_ids={pending_tool_use_ids})"
+        )
+        result = result[:pending_model_idx] + result[pending_model_idx + 1:]
+
+    removed_count = len(history) - len(result)
+    if removed_count > 0:
+        _trace(
+            f"ensure_tool_call_integrity: removed {removed_count} message(s) "
+            f"to restore tool_call pairing"
+        )
+
+    return result
+
+
 def get_preserved_indices(
     total_turns: int,
     preserve_recent: int,

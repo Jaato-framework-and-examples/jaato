@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..model_provider.types import Message
+from ..model_provider.types import Message, Role
 
 from ..gc import (
     GCConfig,
@@ -335,6 +335,17 @@ class BudgetGCPlugin:
                     f"({entry_tokens} tokens)"
                 )
 
+        # Expand removal list to include paired tool_call entries.
+        # If GC removes a tool_result, also remove the MODEL with its tool_call
+        # (and vice versa) to prevent orphaned tool_use/tool_result messages.
+        if budget:
+            pair_map = self._build_tool_call_pair_map(history)
+            if pair_map:
+                removal_list, extra_tokens = self._expand_removal_pairs(
+                    removal_list, pair_map, budget,
+                )
+                tokens_freed += extra_tokens
+
         # Apply removals to history using message IDs
         new_history = self._apply_removals_to_history(history, removal_list)
         tokens_after = estimate_history_tokens(new_history)
@@ -530,6 +541,148 @@ class BudgetGCPlugin:
         # Sort by creation time (oldest first)
         candidates.sort(key=lambda e: e[1].created_at or 0)
         return candidates
+
+    def _build_tool_call_pair_map(
+        self,
+        history: List[Message],
+    ) -> Dict[str, set]:
+        """Build a mapping from message_id to paired message_ids via tool_call_ids.
+
+        For each tool_call_id, the MODEL message that issues it and the TOOL
+        message that responds to it form a pair. Removing one without the other
+        creates an orphan that providers reject.
+
+        Args:
+            history: Current conversation history.
+
+        Returns:
+            Dict mapping each message_id to the set of message_ids it is
+            paired with (not including itself).
+        """
+        # Step 1: Map tool_call_id → model message_id
+        call_id_to_model: Dict[str, str] = {}
+        for msg in history:
+            if msg.role == Role.MODEL:
+                for p in msg.parts:
+                    if p.function_call and p.function_call.id:
+                        call_id_to_model[p.function_call.id] = msg.message_id
+
+        # Step 2: Map tool_call_id → tool_result message_id
+        call_id_to_result: Dict[str, str] = {}
+        for msg in history:
+            is_tool_result = (
+                msg.role == Role.TOOL
+                or (
+                    msg.role == Role.USER
+                    and msg.parts
+                    and any(p.function_response is not None for p in msg.parts)
+                )
+            )
+            if is_tool_result:
+                for p in msg.parts:
+                    if p.function_response and p.function_response.call_id:
+                        call_id_to_result[p.function_response.call_id] = msg.message_id
+
+        # Step 3: Build bidirectional pair map
+        pair_map: Dict[str, set] = {}
+        for call_id in call_id_to_model:
+            model_mid = call_id_to_model[call_id]
+            result_mid = call_id_to_result.get(call_id)
+            if result_mid:
+                pair_map.setdefault(model_mid, set()).add(result_mid)
+                pair_map.setdefault(result_mid, set()).add(model_mid)
+
+        return pair_map
+
+    def _expand_removal_pairs(
+        self,
+        removal_list: List[GCRemovalItem],
+        pair_map: Dict[str, set],
+        budget: InstructionBudget,
+    ) -> Tuple[List[GCRemovalItem], int]:
+        """Expand removal list to include paired tool_call entries.
+
+        When a tool_result message is selected for removal, this method
+        ensures the MODEL message containing the corresponding tool_call(s)
+        is also removed, and vice versa. This prevents GC from creating
+        orphaned tool_use or tool_result messages.
+
+        Only expands to paired entries that exist in the budget (i.e., are
+        tracked and removable). Does not add duplicates.
+
+        Args:
+            removal_list: Current removal candidates.
+            pair_map: Mapping from message_id to paired message_ids.
+            budget: Instruction budget for looking up entries.
+
+        Returns:
+            Tuple of (expanded_removal_list, extra_tokens_freed).
+        """
+        # Collect message_ids already scheduled for removal
+        already_removing: set = set()
+        for item in removal_list:
+            if item.message_ids:
+                already_removing.update(item.message_ids)
+
+        # Find paired messages that need to be added
+        extra_items: List[GCRemovalItem] = []
+        extra_tokens = 0
+
+        for item in removal_list:
+            if not item.message_ids:
+                continue
+            for mid in item.message_ids:
+                paired_mids = pair_map.get(mid, set())
+                for paired_mid in paired_mids:
+                    if paired_mid in already_removing:
+                        continue
+
+                    # Find the budget entry for this paired message
+                    entry = self._find_entry_by_message_id(budget, paired_mid)
+                    if entry is None:
+                        continue
+
+                    child_key, source_entry = entry
+                    entry_tokens = source_entry.total_tokens()
+                    extra_items.append(GCRemovalItem(
+                        source=source_entry.source,
+                        child_key=child_key,
+                        tokens_freed=entry_tokens,
+                        reason="tool_call_pair",
+                        message_ids=source_entry.message_ids,
+                    ))
+                    extra_tokens += entry_tokens
+                    already_removing.add(paired_mid)
+                    self._trace(
+                        f"collect: pair expansion - also removing "
+                        f"'{source_entry.label}' ({entry_tokens} tokens) "
+                        f"to maintain tool_call pairing"
+                    )
+
+        return removal_list + extra_items, extra_tokens
+
+    def _find_entry_by_message_id(
+        self,
+        budget: InstructionBudget,
+        message_id: str,
+    ) -> Optional[Tuple[str, SourceEntry]]:
+        """Find a budget child entry by its message_id.
+
+        Searches all sources and their children for an entry whose
+        message_ids list contains the given message_id.
+
+        Args:
+            budget: The instruction budget to search.
+            message_id: The message_id to look for.
+
+        Returns:
+            Tuple of (child_key, entry) if found, None otherwise.
+        """
+        for source, entry in budget.entries.items():
+            for child_key, child in entry.children.items():
+                if message_id in child.message_ids:
+                    return child_key, child
+        return None
 
     def _apply_removals_to_history(
         self,

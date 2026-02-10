@@ -25,7 +25,7 @@ from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, i
 from .token_accounting import TokenLedger
 from .plugins.base import HelpLines, UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
-from .plugins.gc.utils import estimate_history_tokens
+from .plugins.gc.utils import ensure_tool_call_integrity, estimate_history_tokens
 from .instruction_budget import (
     InstructionBudget,
     InstructionSource,
@@ -2083,6 +2083,9 @@ NOTES
                     f"PROACTIVE_GC: Collected {result.items_collected} items, "
                     f"freed {result.tokens_freed} tokens"
                 )
+            new_history = ensure_tool_call_integrity(
+                new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
+            )
             self.reset_session(new_history)
             self._gc_history.append(result)
 
@@ -3733,6 +3736,10 @@ NOTES
                 f"CONTEXT_LIMIT_RECOVERY: GC collected {result.items_collected} items, "
                 f"freed {result.tokens_freed} tokens"
             )
+            new_history = ensure_tool_call_integrity(
+                new_history,
+                trace_fn=lambda m: self._trace(f"CONTEXT_LIMIT_RECOVERY: {m}"),
+            )
             self.reset_session(new_history)
             self._gc_history.append(result)
 
@@ -4898,6 +4905,9 @@ NOTES
                     f"MANUAL_GC: collected {result.items_collected} items, "
                     f"freed {result.tokens_freed} tokens"
                 )
+            new_history = ensure_tool_call_integrity(
+                new_history, trace_fn=lambda m: self._trace(f"MANUAL_GC: {m}"),
+            )
             self.reset_session(new_history)
             self._gc_history.append(result)
 
@@ -4943,6 +4953,9 @@ NOTES
                         f"GC_BEFORE_SEND: collected {result.items_collected} items, "
                         f"freed {result.tokens_freed} tokens"
                     )
+                new_history = ensure_tool_call_integrity(
+                    new_history, trace_fn=lambda m: self._trace(f"GC_BEFORE_SEND: {m}"),
+                )
                 self.reset_session(new_history)
                 self._gc_history.append(result)
 

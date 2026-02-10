@@ -11,7 +11,7 @@ from shared.instruction_budget import (
     SourceEntry,
     GCPolicy,
 )
-from jaato import Message, Part, Role
+from jaato import Message, Part, Role, FunctionCall, ToolResult
 
 
 def make_message(role: str, text: str, message_id: str = None) -> Message:
@@ -593,3 +593,362 @@ class TestRegressionContextLimitRecovery:
         for item in result.removal_list:
             if item.child_key and item.source == InstructionSource.CONVERSATION:
                 assert item.child_key.startswith("msg_")
+
+
+# --- Helpers for tool_call pair tests ---
+
+def make_model_with_tool_calls(call_ids, message_id=None):
+    """Create a MODEL message with function_call parts."""
+    parts = []
+    for cid in call_ids:
+        parts.append(Part(function_call=FunctionCall(
+            id=cid, name=f"tool_{cid}", args={},
+        )))
+    msg = Message(role=Role.MODEL, parts=parts)
+    if message_id:
+        msg.message_id = message_id
+    return msg
+
+
+def make_tool_result_msg(call_ids, message_id=None, result_text="ok"):
+    """Create a TOOL message with function_response parts."""
+    parts = []
+    for cid in call_ids:
+        parts.append(Part(function_response=ToolResult(
+            call_id=cid, name=f"tool_{cid}", result=result_text,
+        )))
+    msg = Message(role=Role.TOOL, parts=parts)
+    if message_id:
+        msg.message_id = message_id
+    return msg
+
+
+class TestToolCallPairMap:
+    """Tests for _build_tool_call_pair_map."""
+
+    def test_empty_history(self):
+        plugin = create_plugin()
+        plugin.initialize()
+        assert plugin._build_tool_call_pair_map([]) == {}
+
+    def test_no_tool_calls(self):
+        plugin = create_plugin()
+        plugin.initialize()
+        history = [
+            make_message("user", "Hello", message_id="u1"),
+            make_message("model", "Hi", message_id="m1"),
+        ]
+        assert plugin._build_tool_call_pair_map(history) == {}
+
+    def test_simple_pair(self):
+        plugin = create_plugin()
+        plugin.initialize()
+        history = [
+            make_message("user", "Search", message_id="u1"),
+            make_model_with_tool_calls(["call_1"], message_id="m1"),
+            make_tool_result_msg(["call_1"], message_id="t1"),
+            make_message("model", "Done", message_id="m2"),
+        ]
+        pair_map = plugin._build_tool_call_pair_map(history)
+        assert "m1" in pair_map
+        assert "t1" in pair_map["m1"]
+        assert "t1" in pair_map
+        assert "m1" in pair_map["t1"]
+
+    def test_multiple_calls_in_one_message(self):
+        """MODEL with multiple tool_calls pairs with multiple results."""
+        plugin = create_plugin()
+        plugin.initialize()
+        history = [
+            make_model_with_tool_calls(["A", "B"], message_id="m1"),
+            make_tool_result_msg(["A", "B"], message_id="t1"),
+        ]
+        pair_map = plugin._build_tool_call_pair_map(history)
+        assert "t1" in pair_map["m1"]
+        assert "m1" in pair_map["t1"]
+
+    def test_sequential_pairs(self):
+        """Two separate tool_call/result pairs."""
+        plugin = create_plugin()
+        plugin.initialize()
+        history = [
+            make_model_with_tool_calls(["A"], message_id="m1"),
+            make_tool_result_msg(["A"], message_id="t1"),
+            make_model_with_tool_calls(["B"], message_id="m2"),
+            make_tool_result_msg(["B"], message_id="t2"),
+        ]
+        pair_map = plugin._build_tool_call_pair_map(history)
+        assert pair_map["m1"] == {"t1"}
+        assert pair_map["t1"] == {"m1"}
+        assert pair_map["m2"] == {"t2"}
+        assert pair_map["t2"] == {"m2"}
+
+
+class TestExpandRemovalPairs:
+    """Tests for _expand_removal_pairs.
+
+    Verifies that when GC selects one side of a tool_call pair for removal,
+    the other side is automatically included.
+    """
+
+    def _setup_budget_with_tool_pair(self):
+        """Set up budget and history with a tool_call pair.
+
+        Returns (plugin, budget, history, pair_map) with:
+        - msg_0: user "Search" (LOCKED)
+        - msg_1: model with tool_call "call_X" (EPHEMERAL, 100 tokens)
+        - msg_2: tool result for "call_X" (EPHEMERAL, 5000 tokens)
+        - msg_3: model "Done" (PRESERVABLE, 50 tokens)
+        """
+        plugin = create_plugin()
+        plugin.initialize({"preserve_recent_turns": 1})
+
+        history = [
+            make_message("user", "Search", message_id="uid-0"),
+            make_model_with_tool_calls(["call_X"], message_id="uid-1"),
+            make_tool_result_msg(["call_X"], message_id="uid-2",
+                                 result_text="x" * 20000),  # Large result
+            make_message("model", "Done", message_id="uid-3"),
+        ]
+
+        budget = make_budget(100000)
+        budget.set_entry(InstructionSource.CONVERSATION, 0, GCPolicy.PARTIAL)
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_0", 50,
+            GCPolicy.LOCKED, label="turn_1 input (external)",
+            message_ids=["uid-0"],
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_1", 100,
+            GCPolicy.EPHEMERAL, label="turn_1 output (model)",
+            message_ids=["uid-1"],
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_2", 5000,
+            GCPolicy.EPHEMERAL, label="turn_1 input (tool = tool_call_X)",
+            message_ids=["uid-2"],
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_3", 50,
+            GCPolicy.PRESERVABLE, label="turn_1 turn_summary",
+            message_ids=["uid-3"],
+        )
+
+        pair_map = plugin._build_tool_call_pair_map(history)
+        return plugin, budget, history, pair_map
+
+    def test_removing_tool_result_also_removes_model(self):
+        """When GC removes a large tool_result, the paired MODEL
+        (with tool_calls) is also removed."""
+        plugin, budget, history, pair_map = self._setup_budget_with_tool_pair()
+
+        # Simulate: GC selected the large tool_result for removal
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_2",
+                tokens_freed=5000,
+                reason="ephemeral",
+                message_ids=["uid-2"],
+            ),
+        ]
+
+        expanded, extra_tokens = plugin._expand_removal_pairs(
+            removal_list, pair_map, budget,
+        )
+
+        # Should now include both the tool_result AND the model msg
+        assert len(expanded) == 2
+        removed_keys = {item.child_key for item in expanded}
+        assert "msg_2" in removed_keys  # tool_result
+        assert "msg_1" in removed_keys  # model with tool_call
+        assert extra_tokens == 100  # model message tokens
+
+    def test_removing_model_also_removes_tool_result(self):
+        """When GC removes a MODEL with tool_calls, the paired
+        tool_result is also removed."""
+        plugin, budget, history, pair_map = self._setup_budget_with_tool_pair()
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_1",
+                tokens_freed=100,
+                reason="ephemeral",
+                message_ids=["uid-1"],
+            ),
+        ]
+
+        expanded, extra_tokens = plugin._expand_removal_pairs(
+            removal_list, pair_map, budget,
+        )
+
+        assert len(expanded) == 2
+        removed_keys = {item.child_key for item in expanded}
+        assert "msg_1" in removed_keys
+        assert "msg_2" in removed_keys
+        assert extra_tokens == 5000
+
+    def test_both_already_in_removal_no_duplicates(self):
+        """If both sides are already in the removal list, no duplicates added."""
+        plugin, budget, history, pair_map = self._setup_budget_with_tool_pair()
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_1", tokens_freed=100,
+                reason="ephemeral", message_ids=["uid-1"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_2", tokens_freed=5000,
+                reason="ephemeral", message_ids=["uid-2"],
+            ),
+        ]
+
+        expanded, extra_tokens = plugin._expand_removal_pairs(
+            removal_list, pair_map, budget,
+        )
+
+        assert len(expanded) == 2  # No extras
+        assert extra_tokens == 0
+
+    def test_no_pairs_no_expansion(self):
+        """Non-tool messages are not expanded."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        budget = make_budget(10000)
+        budget.set_entry(InstructionSource.CONVERSATION, 0, GCPolicy.PARTIAL)
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_0", 100,
+            GCPolicy.EPHEMERAL, label="some entry",
+            message_ids=["uid-0"],
+        )
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_0", tokens_freed=100,
+                reason="ephemeral", message_ids=["uid-0"],
+            ),
+        ]
+
+        expanded, extra_tokens = plugin._expand_removal_pairs(
+            removal_list, {}, budget,  # Empty pair_map
+        )
+
+        assert len(expanded) == 1
+        assert extra_tokens == 0
+
+    def test_pair_expansion_reason_is_tool_call_pair(self):
+        """Expanded entries get reason='tool_call_pair'."""
+        plugin, budget, history, pair_map = self._setup_budget_with_tool_pair()
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="msg_2", tokens_freed=5000,
+                reason="ephemeral", message_ids=["uid-2"],
+            ),
+        ]
+
+        expanded, _ = plugin._expand_removal_pairs(
+            removal_list, pair_map, budget,
+        )
+
+        pair_items = [i for i in expanded if i.reason == "tool_call_pair"]
+        assert len(pair_items) == 1
+        assert pair_items[0].child_key == "msg_1"
+
+
+class TestEndToEndPairAwareGC:
+    """End-to-end tests verifying GC collect() produces valid history
+    with intact tool_call pairs."""
+
+    def test_gc_removes_tool_result_keeps_pairing(self):
+        """When GC needs to free tokens and selects a large tool_result,
+        the resulting history has no orphaned tool_use or tool_result."""
+        plugin = create_plugin()
+        plugin.initialize({"preserve_recent_turns": 1})
+
+        # History: user -> model(call_A) -> tool(A, large) -> model(text)
+        history = [
+            make_message("user", "Search", message_id="uid-0"),
+            make_model_with_tool_calls(["call_A"], message_id="uid-1"),
+            make_tool_result_msg(["call_A"], message_id="uid-2",
+                                 result_text="x" * 20000),
+            make_message("model", "Summary", message_id="uid-3"),
+        ]
+
+        budget = make_budget(10000)
+        budget.set_entry(InstructionSource.CONVERSATION, 0, GCPolicy.PARTIAL)
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_0", 50,
+            GCPolicy.LOCKED, label="turn_1 input",
+            message_ids=["uid-0"],
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_1", 100,
+            GCPolicy.EPHEMERAL, label="turn_1 output (model)",
+            message_ids=["uid-1"],
+            created_at=1.0,
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_2", 5000,
+            GCPolicy.EPHEMERAL, label="turn_1 input (tool = tool_call_A)",
+            message_ids=["uid-2"],
+            created_at=2.0,
+        )
+        budget.add_child(
+            InstructionSource.CONVERSATION, "msg_3", 50,
+            GCPolicy.PRESERVABLE, label="turn_1 turn_summary",
+            message_ids=["uid-3"],
+        )
+
+        config = GCConfig(target_percent=20.0)  # Aggressive to force removal
+        context = {"percent_used": 80.0}
+
+        new_history, result = plugin.collect(
+            history, context, config, GCTriggerReason.THRESHOLD, budget,
+        )
+
+        assert result.success
+
+        # Verify no orphaned tool_use or tool_result in resulting history
+        pending_call_ids = set()
+        for msg in new_history:
+            if msg.role == Role.MODEL:
+                for p in msg.parts:
+                    if p.function_call:
+                        pending_call_ids.add(p.function_call.id)
+            elif msg.role == Role.TOOL:
+                for p in msg.parts:
+                    if p.function_response:
+                        call_id = p.function_response.call_id
+                        assert call_id in pending_call_ids, (
+                            f"Orphaned tool_result: call_id={call_id} "
+                            f"not in pending={pending_call_ids}"
+                        )
+                        pending_call_ids.discard(call_id)
+
+        # No remaining unpaired tool_calls (unless at very end awaiting results)
+        # Since we only have completed turns, there should be none
+        model_with_fc = [
+            msg for msg in new_history
+            if msg.role == Role.MODEL
+            and any(p.function_call for p in msg.parts)
+        ]
+        for msg in model_with_fc:
+            fc_ids = {p.function_call.id for p in msg.parts if p.function_call}
+            # Each tool_call must have a matching result somewhere after it
+            msg_idx = new_history.index(msg)
+            remaining = new_history[msg_idx + 1:]
+            result_ids = set()
+            for r_msg in remaining:
+                for p in r_msg.parts:
+                    if p.function_response:
+                        result_ids.add(p.function_response.call_id)
+            assert fc_ids <= result_ids, (
+                f"Unpaired tool_use: {fc_ids - result_ids}"
+            )
