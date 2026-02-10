@@ -91,29 +91,112 @@ def _get_jaato_no_proxy_hosts() -> list:
     return [h.strip().lower() for h in value.split(",") if h.strip()]
 
 
-def should_bypass_proxy(url: str) -> bool:
-    """Check if a URL should bypass proxy based on JAATO_NO_PROXY.
+def _get_no_proxy_entries() -> list:
+    """Get list of entries from standard NO_PROXY/no_proxy env var.
 
-    Uses exact host matching (case-insensitive), unlike standard NO_PROXY
-    which does suffix matching.
+    Checks NO_PROXY first, then no_proxy (case-sensitive env var names).
+
+    Returns:
+        List of no-proxy entries (lowercase, stripped). Entries may be
+        hostnames, domain suffixes (with or without leading dot), '*',
+        or host:port pairs.
+    """
+    value = os.environ.get(ENV_NO_PROXY) or os.environ.get(ENV_NO_PROXY.lower(), "")
+    if not value:
+        return []
+    return [e.strip().lower() for e in value.split(",") if e.strip()]
+
+
+def _matches_no_proxy(host: str, port: Optional[int], no_proxy_entry: str) -> bool:
+    """Check if a host[:port] matches a single NO_PROXY entry.
+
+    Standard NO_PROXY matching rules:
+    - '*' matches everything
+    - 'hostname' matches that exact hostname
+    - '.domain.com' matches any subdomain of domain.com (suffix match)
+    - 'domain.com' also matches subdomains (suffix match without leading dot)
+    - 'host:port' matches only when both host and port match
+
+    Args:
+        host: Lowercase hostname from the URL.
+        port: Port from the URL, or None.
+        no_proxy_entry: Single lowercase entry from NO_PROXY.
+
+    Returns:
+        True if the host (and optionally port) matches the entry.
+    """
+    if no_proxy_entry == "*":
+        return True
+
+    # Split entry into host part and optional port
+    entry_host = no_proxy_entry
+    entry_port = None
+    if ":" in no_proxy_entry:
+        parts = no_proxy_entry.rsplit(":", 1)
+        try:
+            entry_port = int(parts[1])
+            entry_host = parts[0]
+        except ValueError:
+            pass  # Not a valid port, treat whole string as host
+
+    # Port mismatch means no match
+    if entry_port is not None and port != entry_port:
+        return False
+
+    # Exact match
+    if host == entry_host:
+        return True
+
+    # Suffix match: ".example.com" matches "foo.example.com"
+    if entry_host.startswith("."):
+        if host.endswith(entry_host):
+            return True
+        # Also match the bare domain: ".example.com" matches "example.com"
+        if host == entry_host[1:]:
+            return True
+        return False
+
+    # Without leading dot, standard behavior is also suffix matching:
+    # "example.com" matches "foo.example.com"
+    if host.endswith("." + entry_host):
+        return True
+
+    return False
+
+
+def should_bypass_proxy(url: str) -> bool:
+    """Check if a URL should bypass proxy based on NO_PROXY and JAATO_NO_PROXY.
+
+    Checks both:
+    - Standard NO_PROXY/no_proxy (suffix matching per convention)
+    - JAATO_NO_PROXY (exact host matching)
 
     Args:
         url: The URL to check.
 
     Returns:
-        True if the host matches exactly an entry in JAATO_NO_PROXY.
+        True if the host matches an entry in NO_PROXY or JAATO_NO_PROXY.
     """
-    no_proxy_hosts = _get_jaato_no_proxy_hosts()
-    if not no_proxy_hosts:
-        return False
-
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname
     if not host:
         return False
 
     host = host.lower()
-    return host in no_proxy_hosts
+    port = parsed.port
+
+    # Check JAATO_NO_PROXY (exact match)
+    jaato_no_proxy_hosts = _get_jaato_no_proxy_hosts()
+    if jaato_no_proxy_hosts and host in jaato_no_proxy_hosts:
+        return True
+
+    # Check standard NO_PROXY/no_proxy (suffix match)
+    no_proxy_entries = _get_no_proxy_entries()
+    for entry in no_proxy_entries:
+        if _matches_no_proxy(host, port, entry):
+            return True
+
+    return False
 
 
 # ============================================================
@@ -258,6 +341,11 @@ def get_requests_session() -> "requests.Session":
     1. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
     2. Standard proxy env vars (requests handles these automatically)
 
+    Note: The requests library checks NO_PROXY per-request even when
+    session-level proxies are set, so NO_PROXY is respected.
+    For per-request bypass with JAATO_NO_PROXY, use get_requests_kwargs(url)
+    or call should_bypass_proxy(url) and pass proxies={} to the request.
+
     Returns:
         Configured requests.Session.
     """
@@ -321,8 +409,13 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
     """Create an httpx Client with appropriate proxy configuration.
 
     Configures the client based on:
-    1. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
-    2. Standard proxy env vars
+    1. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers and sets
+       explicit proxy, which overrides httpx's env-based NO_PROXY handling
+    2. Standard proxy env vars (httpx handles these when no explicit proxy)
+
+    Note: When Kerberos is enabled, explicit proxy config is set, which
+    bypasses httpx's built-in NO_PROXY handling. For per-request bypass,
+    use get_httpx_kwargs(url) instead, which calls should_bypass_proxy().
 
     Args:
         **client_kwargs: Additional kwargs to pass to httpx.Client
@@ -384,6 +477,10 @@ def get_httpx_kwargs(url: str) -> Dict[str, Any]:
 
 def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
     """Create an httpx AsyncClient with appropriate proxy configuration.
+
+    Same caveats as get_httpx_client() regarding NO_PROXY: when Kerberos
+    is enabled, explicit proxy config overrides httpx's env-based NO_PROXY
+    handling. Use get_httpx_kwargs(url) for per-request bypass.
 
     Args:
         **client_kwargs: Additional kwargs to pass to httpx.AsyncClient
