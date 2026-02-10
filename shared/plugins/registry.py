@@ -319,6 +319,27 @@ class PluginRegistry:
                     shown = ", ".join(f"@{r}" for r in ids[:3])
                     return f"hinted {shown} +{len(ids) - 3} more (matched: {tag_summary})"
 
+        # References plugin pattern — transitively selected references.
+        # Shows which references were auto-included and which parent source
+        # triggered the inclusion.
+        if "transitive_references" in metadata:
+            transitive = metadata["transitive_references"]  # {id: [parent_ids]}
+            if transitive:
+                ids = list(transitive.keys())
+                # Collect unique parent IDs across all transitive sources
+                all_parents = sorted(set(p for parents in transitive.values() for p in parents))
+                parent_str = ", ".join(f"@{p}" for p in all_parents[:3])
+                if len(all_parents) > 3:
+                    parent_str += f" +{len(all_parents) - 3}"
+                if len(ids) == 1:
+                    return f"transitively included @{ids[0]} (from {parent_str})"
+                elif len(ids) <= 3:
+                    ref_list = ", ".join(f"@{r}" for r in ids)
+                    return f"transitively included {ref_list} (from {parent_str})"
+                else:
+                    shown = ", ".join(f"@{r}" for r in ids[:3])
+                    return f"transitively included {shown} +{len(ids) - 3} more (from {parent_str})"
+
         # Template extraction pattern
         if "extracted_templates" in metadata:
             templates = metadata["extracted_templates"]
