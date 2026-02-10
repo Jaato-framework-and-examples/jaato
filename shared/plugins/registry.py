@@ -286,7 +286,7 @@ class PluginRegistry:
             else:
                 return f"checked {file_str}, no issues found"
 
-        # References plugin pattern
+        # References plugin pattern — @mention expansion in prompts/tool results
         if "mentioned_references" in metadata:
             refs = metadata["mentioned_references"]
             if refs:
@@ -297,6 +297,21 @@ class PluginRegistry:
                     return f"expanded {ref_list}"
                 else:
                     return f"expanded {len(refs)} references"
+
+        # References plugin pattern - tag-matched reference ID hints
+        if "tag_matched_references" in metadata:
+            matched = metadata["tag_matched_references"]  # {source_id: [tags]}
+            if matched:
+                ids = list(matched.keys())
+                if len(ids) == 1:
+                    tags = ", ".join(matched[ids[0]])
+                    return f"hinted @{ids[0]} (tags: {tags})"
+                elif len(ids) <= 3:
+                    ref_list = ", ".join(f"@{r}" for r in ids)
+                    return f"hinted {ref_list}"
+                else:
+                    shown = ", ".join(f"@{r}" for r in ids[:3])
+                    return f"hinted {shown} +{len(ids) - 3} more"
 
         # Template extraction pattern
         if "extracted_templates" in metadata:

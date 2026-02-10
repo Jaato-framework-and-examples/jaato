@@ -1256,16 +1256,18 @@ class ReferencesPlugin:
         return True
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
-        """Detect @reference-id mentions in user prompts and expand them.
+        """Detect references in user prompts via @id mentions and tag matching.
 
-        Looks for @reference-id patterns in the prompt and adds the
-        reference instruction/content for mentioned sources.
+        Two detection passes (delegated to _enrich_content):
+        1. @reference-id patterns are expanded with full instructions.
+        2. Words matching unselected source tags trigger lightweight hints
+           so the model knows to call selectReferences.
 
         Args:
             prompt: The user's prompt text.
 
         Returns:
-            PromptEnrichmentResult with expanded references.
+            PromptEnrichmentResult with expanded/hinted references.
         """
         return self._enrich_content(prompt, "prompt")
 
@@ -1276,7 +1278,7 @@ class ReferencesPlugin:
         return 20
 
     def subscribes_to_tool_result_enrichment(self) -> bool:
-        """Subscribe to tool result enrichment for @reference detection."""
+        """Subscribe to tool result enrichment for reference detection."""
         return True
 
     def enrich_tool_result(
@@ -1284,14 +1286,19 @@ class ReferencesPlugin:
         tool_name: str,
         result: str
     ) -> ToolResultEnrichmentResult:
-        """Detect @reference-id mentions in tool results and expand them.
+        """Detect references in tool results via @id mentions and tag matching.
+
+        Two detection passes (delegated to _enrich_content):
+        1. @reference-id patterns are expanded with full instructions.
+        2. Words matching unselected source tags trigger lightweight hints
+           so the model knows to call selectReferences.
 
         Args:
             tool_name: Name of the tool that produced the result.
             result: The tool's output as a string.
 
         Returns:
-            ToolResultEnrichmentResult with expanded references.
+            ToolResultEnrichmentResult with expanded/hinted references.
         """
         enrichment = self._enrich_content(result, f"tool:{tool_name}")
         return ToolResultEnrichmentResult(
@@ -1302,7 +1309,11 @@ class ReferencesPlugin:
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.
 
-        Detects @reference-id patterns and expands them with reference content.
+        Two detection passes:
+        1. @reference-id patterns — expands with full reference instructions.
+        2. Tag word matching — scans content for words matching tags on
+           unselected selectable sources and appends lightweight reference ID
+           hints so the model knows to call selectReferences.
 
         Args:
             content: The content to enrich.
@@ -1314,49 +1325,96 @@ class ReferencesPlugin:
         if not self._sources:
             return PromptEnrichmentResult(prompt=content)
 
-        # Build set of reference IDs for matching
-        source_ids = {s.id for s in self._sources}
+        enriched_content = content
+        all_metadata: Dict[str, Any] = {}
 
-        # Find @reference mentions (e.g., @mod-code-015, @skill-001)
-        # Pattern: @ followed by reference ID (word chars and hyphens)
+        # --- Pass 1: @reference-id expansion ---
+        source_ids = {s.id for s in self._sources}
         at_reference_pattern = re.compile(r'@([\w-]+)')
         matches = at_reference_pattern.findall(content)
-
-        # Filter to actual reference IDs
         mentioned_ids = [m for m in matches if m in source_ids]
 
-        if not mentioned_ids:
-            return PromptEnrichmentResult(prompt=content)
+        if mentioned_ids:
+            self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
+            mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
 
-        self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
+            for source in mentioned_sources:
+                self._authorize_source_path(source)
 
-        # Get the sources for mentioned IDs
-        mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
+            instructions = [source.to_instruction() for source in mentioned_sources]
+            if instructions:
+                reference_block = (
+                    "\n\n---\n**Referenced Sources:**\n\n" +
+                    "\n\n".join(instructions) +
+                    "\n---"
+                )
+                enriched_content = enriched_content + reference_block
+                all_metadata["mentioned_references"] = mentioned_ids
+                all_metadata["source_type"] = source_type
 
-        # Authorize paths for mentioned sources so readFile can access them
-        for source in mentioned_sources:
-            self._authorize_source_path(source)
+        # --- Pass 2: tag-based reference ID hints ---
+        # Only consider unselected selectable sources (not AUTO, not already selected)
+        # and only if selectReferences is available
+        if "selectReferences" not in self._exclude_tools:
+            unselected = [
+                s for s in self._sources
+                if s.mode == InjectionMode.SELECTABLE
+                and s.id not in self._selected_source_ids
+                and s.tags
+            ]
 
-        # Build instruction block for each mentioned source
-        instructions = []
-        for source in mentioned_sources:
-            instructions.append(source.to_instruction())
+            if unselected:
+                # Build tag → sources mapping
+                tag_to_sources: Dict[str, List[ReferenceSource]] = {}
+                for source in unselected:
+                    for tag in source.tags:
+                        tag_to_sources.setdefault(tag, []).append(source)
 
-        # Append reference instructions to content
-        if instructions:
-            reference_block = (
-                "\n\n---\n**Referenced Sources:**\n\n" +
-                "\n\n".join(instructions) +
-                "\n---"
-            )
-            enriched_content = content + reference_block
+                # Case-insensitive word boundary match for each tag in content
+                content_lower = content.lower()
+                matched_sources: Dict[str, List[str]] = {}  # source_id → [matched_tags]
+                for tag, sources in tag_to_sources.items():
+                    # Match tag as a whole word (not as substring of another word)
+                    tag_pattern = re.compile(
+                        r'(?<![a-zA-Z0-9_-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_-])'
+                    )
+                    if tag_pattern.search(content_lower):
+                        for source in sources:
+                            matched_sources.setdefault(source.id, []).append(tag)
 
+                # Exclude sources already handled by @reference-id expansion
+                for mid in mentioned_ids:
+                    matched_sources.pop(mid, None)
+
+                if matched_sources:
+                    self._trace(
+                        f"enrich [{source_type}]: tag matches: "
+                        f"{{{', '.join(f'{sid}: {tags}' for sid, tags in matched_sources.items())}}}"
+                    )
+
+                    # Build lightweight hint block
+                    hint_lines = []
+                    for source_id, tags in matched_sources.items():
+                        source = next(s for s in self._sources if s.id == source_id)
+                        hint_lines.append(
+                            f"- @{source_id}: {source.name} (tags: {', '.join(tags)})"
+                        )
+
+                    hint_block = (
+                        "\n\n---\n"
+                        "**Reference sources available** — use `selectReferences` to include:\n\n" +
+                        "\n".join(hint_lines) +
+                        "\n---"
+                    )
+                    enriched_content = enriched_content + hint_block
+                    all_metadata["tag_matched_references"] = {
+                        sid: tags for sid, tags in matched_sources.items()
+                    }
+
+        if all_metadata:
             return PromptEnrichmentResult(
                 prompt=enriched_content,
-                metadata={
-                    "mentioned_references": mentioned_ids,
-                    "source_type": source_type
-                }
+                metadata=all_metadata
             )
 
         return PromptEnrichmentResult(prompt=content)
