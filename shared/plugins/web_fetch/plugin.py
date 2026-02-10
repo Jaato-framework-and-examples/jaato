@@ -140,6 +140,14 @@ class WebFetchPlugin:
                             "Only use after the user explicitly confirms they trust "
                             "the target host. Default: false."
                         )
+                    },
+                    "no_proxy": {
+                        "type": "boolean",
+                        "description": (
+                            "Bypass the configured HTTP proxy for this request. "
+                            "Only use after the user confirms the host should be "
+                            "reached directly. Default: false."
+                        )
                     }
                 },
                 "required": ["url"]
@@ -201,7 +209,12 @@ web_fetch(url="https://example.com", include_headers=true)
 **SSL certificate issues:**
 - If a request fails with `ssl_error: true`, ask the user if they trust the host
 - If the user confirms, retry with `insecure=true` to skip SSL verification
-- Never set `insecure=true` without explicit user confirmation"""
+- Never set `insecure=true` without explicit user confirmation
+
+**Proxy issues:**
+- If a request fails with `proxy_error: true`, ask the user if the host should be reached directly
+- If the user confirms, retry with `no_proxy=true` to bypass the proxy
+- Never set `no_proxy=true` without explicit user confirmation"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Web fetch is read-only and safe - auto-approve it."""
@@ -275,6 +288,7 @@ web_fetch(url="https://example.com", include_headers=true)
         url: str,
         custom_headers: Optional[Dict[str, str]] = None,
         verify_ssl: bool = True,
+        use_proxy: bool = True,
     ) -> tuple[str, str, Optional[str], Optional[Dict[str, Any]]]:
         """Fetch URL and return (content, final_url, error, metadata).
 
@@ -284,6 +298,8 @@ web_fetch(url="https://example.com", include_headers=true)
             verify_ssl: Whether to verify SSL certificates. Defaults to True.
                 Set to False only for explicitly user-trusted hosts with
                 certificate issues (e.g., weak key, self-signed).
+            use_proxy: Whether to use the configured proxy. Defaults to True.
+                Set to False for hosts that should be reached directly.
 
         Returns:
             Tuple of (content, final_url, error_message, metadata)
@@ -304,7 +320,7 @@ web_fetch(url="https://example.com", include_headers=true)
                 from shared.http import get_requests_kwargs
 
                 # Get proxy configuration
-                proxy_kwargs = get_requests_kwargs(url)
+                proxy_kwargs = get_requests_kwargs(url) if use_proxy else {"proxies": {}}
 
                 # Merge custom headers with proxy headers
                 request_headers = headers.copy()
@@ -351,7 +367,7 @@ web_fetch(url="https://example.com", include_headers=true)
         from shared.http import get_httpx_kwargs
 
         # Get proxy configuration for httpx
-        proxy_kwargs = get_httpx_kwargs(url)
+        proxy_kwargs = get_httpx_kwargs(url) if use_proxy else {"proxy": None}
 
         # Merge custom headers with proxy headers
         request_headers = headers.copy()
@@ -852,6 +868,20 @@ web_fetch(url="https://example.com", include_headers=true)
         )
         return any(indicator in error_msg for indicator in ssl_indicators)
 
+    @staticmethod
+    def _is_proxy_error(error_msg: str) -> bool:
+        """Check whether an error message indicates a proxy connectivity issue."""
+        proxy_indicators = (
+            "ProxyError",
+            "407 Proxy Authentication Required",
+            "Proxy Authentication Required",
+            "Tunnel connection failed",
+            "Cannot connect to proxy",
+            "proxy",
+        )
+        error_lower = error_msg.lower()
+        return any(indicator.lower() in error_lower for indicator in proxy_indicators)
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute web fetch.
 
@@ -866,6 +896,7 @@ web_fetch(url="https://example.com", include_headers=true)
                 - no_cache: Bypass cache and fetch fresh content
                 - include_headers: Include response headers in result
                 - insecure: Skip SSL certificate verification (default: false)
+                - no_proxy: Bypass configured HTTP proxy (default: false)
 
         Returns:
             Dict containing fetched content or error.
@@ -879,10 +910,11 @@ web_fetch(url="https://example.com", include_headers=true)
         no_cache = args.get('no_cache', False)
         include_headers = args.get('include_headers', False)
         insecure = bool(args.get('insecure', False))
+        no_proxy = bool(args.get('no_proxy', False))
 
         self._trace(
             f"web_fetch: url={url!r}, mode={mode}, selector={selector}, "
-            f"no_cache={no_cache}, insecure={insecure}"
+            f"no_cache={no_cache}, insecure={insecure}, no_proxy={no_proxy}"
         )
 
         # Validate URL
@@ -914,8 +946,9 @@ web_fetch(url="https://example.com", include_headers=true)
         else:
             # Fetch the URL
             verify_ssl = not insecure
+            use_proxy = not no_proxy
             html, final_url, error, fetch_metadata = self._fetch_url(
-                url, custom_headers, verify_ssl=verify_ssl
+                url, custom_headers, verify_ssl=verify_ssl, use_proxy=use_proxy
             )
             if error:
                 result: Dict[str, Any] = {'error': error, 'url': url}
@@ -925,6 +958,13 @@ web_fetch(url="https://example.com", include_headers=true)
                         "The SSL certificate for this URL could not be verified. "
                         "Ask the user whether they trust this host. If they confirm, "
                         "retry with insecure=true to skip SSL verification."
+                    )
+                elif self._is_proxy_error(error):
+                    result["proxy_error"] = True
+                    result["hint"] = (
+                        "The request failed due to a proxy error. Ask the user "
+                        "whether this host should be reached directly (bypassing "
+                        "the proxy). If they confirm, retry with no_proxy=true."
                     )
                 return result
 
