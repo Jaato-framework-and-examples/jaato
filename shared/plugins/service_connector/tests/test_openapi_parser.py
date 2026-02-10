@@ -654,3 +654,89 @@ class TestOpenAPIParser:
 
         assert len(result.endpoints) == 1
         assert result.warnings == []
+
+    def test_circular_ref_does_not_recurse_infinitely(self):
+        """Test that circular $ref is detected and skipped with a warning."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Circular API", "version": "1.0"},
+            "host": "api.example.com",
+            "definitions": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "children": {
+                            "type": "array",
+                            "items": {"$ref": "#/definitions/Node"},
+                        },
+                    },
+                },
+            },
+            "paths": {
+                "/nodes": {
+                    "get": {
+                        "summary": "List nodes",
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "schema": {
+                                    "$ref": "#/definitions/Node",
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "circular-api")
+
+        # Endpoint is still parsed despite circular ref
+        assert len(result.endpoints) == 1
+        assert result.endpoints[0].method == "GET"
+        assert result.endpoints[0].path == "/nodes"
+        # Circular ref produces a warning
+        assert any("Circular" in w and "Node" in w for w in result.warnings)
+
+    def test_mutually_circular_refs(self):
+        """Test that mutually circular definitions are handled."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Mutual Circular API", "version": "1.0"},
+            "host": "api.example.com",
+            "definitions": {
+                "Parent": {
+                    "type": "object",
+                    "properties": {
+                        "child": {"$ref": "#/definitions/Child"},
+                    },
+                },
+                "Child": {
+                    "type": "object",
+                    "properties": {
+                        "parent": {"$ref": "#/definitions/Parent"},
+                    },
+                },
+            },
+            "paths": {
+                "/parents": {
+                    "get": {
+                        "summary": "List parents",
+                        "parameters": [
+                            {
+                                "name": "body",
+                                "in": "body",
+                                "schema": {"$ref": "#/definitions/Parent"},
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "mutual-api")
+
+        assert len(result.endpoints) == 1
+        assert any("Circular" in w for w in result.warnings)
