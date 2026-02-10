@@ -205,7 +205,6 @@ SERVER_COMMAND_PREFIXES = {
     "tools", "session", "permissions", "model", "mcp", "save", "resume",
     "memory", "lsp", "todo", "waypoint", "background", "prompt-library",
     "clarification", "multimodal", "notebook", "references", "sandbox",
-    "services",
 }
 
 
