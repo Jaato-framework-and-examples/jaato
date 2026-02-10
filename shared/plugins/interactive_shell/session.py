@@ -5,8 +5,13 @@ uses idle detection: it reads until the process stops producing output
 for a configurable period. This lets the calling model read whatever
 appeared and make its own decisions about what to send next.
 
-On Unix/macOS this uses pexpect (PTY-based). On Windows this uses wexpect,
-which provides a similar API backed by Windows console and named pipes.
+Backend selection:
+- Unix/macOS: pexpect (PTY-based, full terminal emulation)
+- Windows + MSYS2: pexpect.PopenSpawn (subprocess pipes with timeout support)
+  because wexpect's Windows console APIs don't work reliably with
+  Cygwin-based MSYS2 executables (bash, etc.), causing hangs.
+  If pexpect is unavailable, falls back to wexpect.
+- Windows (native): wexpect (Windows console and named pipes)
 """
 
 import os
@@ -19,21 +24,47 @@ from .ansi import strip_ansi
 
 IS_WINDOWS = sys.platform == "win32"
 
+# Detect MSYS2 early — before choosing backend.
+# In MSYS2, wexpect (Windows console APIs) doesn't work reliably with
+# Cygwin-based executables (bash, python3, etc.), causing blocking reads
+# that never return.  We prefer pexpect's PopenSpawn instead.
+IS_MSYS2 = False
+if IS_WINDOWS:
+    try:
+        from shared.path_utils import is_msys2_environment
+        IS_MSYS2 = is_msys2_environment()
+    except ImportError:
+        IS_MSYS2 = False
+
 # Backend function/exception references.  On Windows these are populated
 # lazily so the module can be imported (and the plugin registered) even
-# when wexpect is not yet installed.
+# when wexpect/pexpect is not yet installed.
 _spawn = None
 _TIMEOUT = None
 _EOF = None
 _BACKEND_ERROR: Optional[str] = None
 
-if IS_WINDOWS:
-    # wexpect has a bare `import pkg_resources` at module level (no
-    # try/except guard).  On Python 3.12+ pkg_resources is only available
-    # when setuptools is installed, and even then it may be missing in
-    # stripped-down venvs.  Inject a minimal stub into sys.modules so the
-    # import succeeds — wexpect only uses it for version detection and
-    # already has its own fallback for that.
+# Which backend is in use: 'pexpect', 'popen_spawn', or 'wexpect'.
+# Used to select the correct spawn parameters, idle-detection path,
+# and process cleanup strategy.
+_BACKEND: Optional[str] = None
+
+
+def _try_import_wexpect() -> bool:
+    """Try to import wexpect, installing a pkg_resources stub if needed.
+
+    wexpect has a bare ``import pkg_resources`` at module level (no
+    try/except guard).  On Python 3.12+ pkg_resources is only available
+    when setuptools is installed.  We inject a minimal stub so the import
+    succeeds — wexpect only uses it for version detection and already
+    has its own fallback for that.
+
+    Returns:
+        True if wexpect was imported successfully and _spawn/_TIMEOUT/_EOF
+        were set.  False otherwise (with _BACKEND_ERROR set).
+    """
+    global _spawn, _TIMEOUT, _EOF, _BACKEND, _BACKEND_ERROR
+
     try:
         import pkg_resources  # noqa: F401 — test if it's available
     except ImportError:
@@ -49,6 +80,8 @@ if IS_WINDOWS:
         _spawn = wexpect.spawn
         _TIMEOUT = wexpect.TIMEOUT
         _EOF = wexpect.EOF
+        _BACKEND = 'wexpect'
+        return True
     except ImportError as _exc:
         if "pkg_resources" in str(_exc):
             _BACKEND_ERROR = (
@@ -61,11 +94,82 @@ if IS_WINDOWS:
                 "wexpect is required for interactive shell sessions on Windows. "
                 "Install it with: pip install wexpect"
             )
+        return False
+
+
+if IS_WINDOWS and IS_MSYS2:
+    # -----------------------------------------------------------------
+    # MSYS2 environment (Git Bash / MINGW64 / UCRT64 / etc.)
+    #
+    # wexpect spawns processes via Windows console APIs and communicates
+    # through named pipes.  Cygwin-based MSYS2 executables don't write
+    # to those pipes in the expected way, causing read_nonblocking() to
+    # block indefinitely.
+    #
+    # Strategy:
+    #  1. Try pexpect.spawn (requires the pty module — available in MSYS
+    #     Python but not in MINGW Python).
+    #  2. Fall back to pexpect.popen_spawn.PopenSpawn which uses
+    #     subprocess.Popen with stdin/stdout pipes and a background reader
+    #     thread for non-blocking I/O.  No PTY, but reliable timeout
+    #     behavior on all platforms.
+    #  3. Last resort: wexpect (may still hang with MSYS2 commands, but
+    #     at least the user gets a clear message).
+    # -----------------------------------------------------------------
+    _imported = False
+
+    # (1) Try pexpect.spawn — full PTY support (MSYS Python only)
+    if not _imported:
+        try:
+            import pty as _pty_check  # noqa: F401 — probe for pty availability
+            import pexpect
+            _spawn = pexpect.spawn
+            _TIMEOUT = pexpect.TIMEOUT
+            _EOF = pexpect.EOF
+            _BACKEND = 'pexpect'
+            _imported = True
+        except ImportError:
+            pass
+
+    # (2) Try pexpect.popen_spawn.PopenSpawn — subprocess pipes
+    if not _imported:
+        try:
+            import pexpect
+            from pexpect.popen_spawn import PopenSpawn as _PopenSpawn
+            _spawn = _PopenSpawn
+            _TIMEOUT = pexpect.TIMEOUT
+            _EOF = pexpect.EOF
+            _BACKEND = 'popen_spawn'
+            _imported = True
+        except ImportError:
+            pass
+
+    # (3) Last resort: wexpect
+    if not _imported:
+        if not _try_import_wexpect():
+            # _BACKEND_ERROR already set by _try_import_wexpect()
+            if not _BACKEND_ERROR:
+                _BACKEND_ERROR = (
+                    "No interactive shell backend available for MSYS2. "
+                    "Install pexpect (recommended): pip install pexpect  — or — "
+                    "wexpect: pip install wexpect"
+                )
+
+elif IS_WINDOWS:
+    # -----------------------------------------------------------------
+    # Regular Windows (not MSYS2) — use wexpect for console interaction.
+    # -----------------------------------------------------------------
+    _try_import_wexpect()
+
 else:
+    # -----------------------------------------------------------------
+    # Unix / macOS — use pexpect with full PTY support.
+    # -----------------------------------------------------------------
     import pexpect
     _spawn = pexpect.spawn
     _TIMEOUT = pexpect.TIMEOUT
     _EOF = pexpect.EOF
+    _BACKEND = 'pexpect'
 
 
 # Default PTY dimensions
@@ -93,8 +197,14 @@ class ShellSession:
     which returns all output the process produced until it goes quiet.
     The model then reads that output and decides what to do.
 
-    On Unix, uses pexpect with real PTY sessions.
-    On Windows, uses wexpect with Windows console pipes.
+    Backend selection (determined at module import time):
+    - pexpect: Full PTY support (Unix, macOS, MSYS Python with pty).
+    - popen_spawn: subprocess.Popen with piped I/O (MSYS2 with MINGW Python).
+      No real PTY — child isatty() returns False, no terminal dimensions —
+      but reliable timeout behavior via pexpect's background reader thread.
+    - wexpect: Windows console APIs and named pipes (native Windows).
+
+    The active backend is stored in the module-level ``_BACKEND`` variable.
     """
 
     # Polling interval for wexpect's non-blocking reads (seconds).
@@ -112,6 +222,23 @@ class ShellSession:
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
     ):
+        """Spawn an interactive process and prepare idle-based I/O.
+
+        Args:
+            command: Shell command to run (e.g. ``"python3"``, ``"bash --norc"``).
+            session_id: Unique identifier for this session.
+            rows: PTY height.  **Ignored by the ``popen_spawn`` backend** (MSYS2)
+                because ``PopenSpawn`` uses plain pipes with no terminal.
+            cols: PTY width.  Same caveat as *rows*.
+            idle_timeout: Seconds of silence before output is considered settled.
+            max_wait: Hard ceiling on any single read operation.
+            max_lifetime: Session lifetime ceiling (seconds).
+            env: Extra environment variables merged into ``os.environ``.
+            cwd: Working directory for the spawned process.
+
+        Raises:
+            ImportError: If no backend is available (``_spawn is None``).
+        """
         if _spawn is None:
             raise ImportError(_BACKEND_ERROR or "No PTY backend available")
 
@@ -138,7 +265,18 @@ class ShellSession:
         if env:
             spawn_env.update(env)
 
-        if IS_WINDOWS:
+        if _BACKEND == 'popen_spawn':
+            # PopenSpawn: subprocess.Popen with piped stdin/stdout.
+            # No PTY (no terminal dimensions, child isatty() returns False)
+            # but reliable timeout behavior on all platforms including MSYS2.
+            self._process = _spawn(
+                command,
+                encoding='utf-8',
+                timeout=max_wait,
+                env=spawn_env,
+                cwd=cwd,
+            )
+        elif _BACKEND == 'wexpect':
             # wexpect uses codepage instead of encoding, and doesn't
             # support the dimensions parameter.  codepage=65001 → UTF-8.
             self._process = _spawn(
@@ -149,6 +287,7 @@ class ShellSession:
                 codepage=65001,
             )
         else:
+            # pexpect with full PTY support (Unix or MSYS Python with pty).
             self._process = _spawn(
                 command,
                 encoding='utf-8',
@@ -269,8 +408,13 @@ class ShellSession:
     def close(self) -> Dict[str, Any]:
         """Gracefully terminate the session.
 
-        On Unix: sends EOF, waits, then escalates to SIGTERM and SIGKILL.
-        On Windows: sends EOF, waits, then calls terminate().
+        Escalation strategy (adapts to backend):
+        1. Send EOF and read remaining output.
+        2. Request graceful termination (SIGTERM / terminate(force=False)).
+        3. Force-kill if still alive (SIGKILL / terminate(force=True)).
+
+        PopenSpawn uses subprocess.Popen internally and lacks pexpect's
+        terminate(force=bool); we fall back to proc.terminate()/proc.kill().
 
         Returns:
             Dict with exit_status and final_output.
@@ -289,19 +433,32 @@ class ShellSession:
 
             if self._process.isalive():
                 try:
-                    self._process.terminate(force=False)
-                    self._process.wait()
+                    if hasattr(self._process, 'terminate'):
+                        # pexpect.spawn / wexpect.spawn
+                        self._process.terminate(force=False)
+                        self._process.wait()
+                    elif hasattr(self._process, 'proc'):
+                        # PopenSpawn: use the underlying subprocess.Popen
+                        self._process.proc.terminate()
+                        self._process.proc.wait(timeout=5)
                 except Exception:
                     pass
 
             if self._process.isalive():
                 try:
-                    self._process.terminate(force=True)
+                    if hasattr(self._process, 'terminate'):
+                        self._process.terminate(force=True)
+                    elif hasattr(self._process, 'proc'):
+                        self._process.proc.kill()
                 except Exception:
                     pass
 
         exit_status = self._process.exitstatus
-        # signalstatus is Unix-only (not available in wexpect)
+        # PopenSpawn may not set exitstatus until wait() is called;
+        # fall back to Popen.returncode.
+        if exit_status is None and hasattr(self._process, 'proc'):
+            exit_status = self._process.proc.returncode
+        # signalstatus is Unix-only (not available in wexpect or PopenSpawn)
         signal_status = getattr(self._process, 'signalstatus', None)
 
         return {
@@ -340,11 +497,16 @@ class ShellSession:
         chunks: list[str] = []
         total_bytes = 0
 
-        if IS_WINDOWS:
+        if _BACKEND == 'wexpect':
+            # wexpect's read_nonblocking is blocking (win32file.ReadFile);
+            # needs the special peek-before-read loop.
             return self._read_until_idle_windows(
                 idle_timeout, deadline, chunks, total_bytes,
             )
         else:
+            # Both pexpect.spawn and PopenSpawn support a timeout parameter
+            # in read_nonblocking (pexpect uses PTY poll, PopenSpawn uses a
+            # Queue with timeout), so the Unix-style loop works for both.
             return self._read_until_idle_unix(
                 idle_timeout, deadline, chunks, total_bytes,
             )

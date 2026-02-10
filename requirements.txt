@@ -12,8 +12,8 @@ rich>=13.0.0
 reportlab
 ddgs>=7.0.0  # provides web search via DuckDuckGo
 pyyaml
-pexpect>=4.8.0; sys_platform != "win32"  # PTY-based interactive shell sessions (Unix/macOS)
-wexpect>=4.0.0; sys_platform == "win32"  # Windows alternative to pexpect for interactive shells
+pexpect>=4.8.0  # Interactive shell sessions (PTY on Unix, PopenSpawn on MSYS2)
+wexpect>=4.0.0; sys_platform == "win32"  # Native Windows interactive shells (non-MSYS2)
 pywin32>=220; sys_platform == "win32"  # wexpect undeclared dependency (Windows APIs)
 psutil>=5.0.0; sys_platform == "win32"  # wexpect undeclared dependency (process management)
 setuptools; sys_platform == "win32"  # wexpect requires pkg_resources from setuptools
