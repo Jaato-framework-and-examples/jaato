@@ -956,3 +956,144 @@ class TestProgrammaticAPI:
         mock_registry.deauthorize_external_path.assert_called_once_with(
             "/docs/ref.md", "sandbox_manager"
         )
+
+    def test_pending_paths_survive_workspace_set(self, tmp_path):
+        """Test that paths added before workspace survive set_workspace_path.
+
+        Reproduces the timing bug where:
+        1. Another plugin calls add_path_programmatic() during initialization
+        2. sandbox_manager has no workspace yet -> fallback to registry auth
+        3. set_workspace_path() triggers _load_all_configs() -> _sync_to_registry()
+        4. _sync_to_registry() clears all in-memory registry paths
+        5. The originally added paths are now lost
+
+        The fix queues these paths and replays them after workspace is set.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.get_plugin = Mock(return_value=None)
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        # No workspace yet — simulates real initialization order
+
+        # Another plugin (e.g. references) adds a readonly path
+        result = plugin.add_path_programmatic("/docs/api-spec.md", access="readonly")
+        assert result is True
+
+        # Path should be queued
+        assert len(plugin._pending_programmatic_paths) == 1
+
+        # Now workspace becomes available (registry.set_workspace_path() is called)
+        mock_registry.reset_mock()
+        plugin.set_workspace_path(str(workspace))
+
+        # Pending list should be cleared
+        assert len(plugin._pending_programmatic_paths) == 0
+
+        # Path should be persisted in session config
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        allowed = config["allowed_paths"]
+        assert len(allowed) == 1
+        assert allowed[0]["access"] == "readonly"
+        assert "/docs/api-spec.md" in allowed[0]["path"]
+
+        # Path should also be registered in the registry with readonly access
+        auth_calls = [
+            call for call in mock_registry.authorize_external_path.call_args_list
+            if "/docs/api-spec.md" in str(call)
+        ]
+        assert len(auth_calls) >= 1
+        # Last call should have access="readonly"
+        last_call = auth_calls[-1]
+        assert last_call[1].get("access", last_call[0][2] if len(last_call[0]) > 2 else None) == "readonly" or \
+               "readonly" in str(last_call)
+
+    def test_pending_paths_no_duplicates_on_reload(self, tmp_path):
+        """Test that pending paths already in config are not duplicated."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session_dir = workspace / ".jaato" / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
+
+        # Pre-populate session config with the same path
+        config_path = session_dir / "sandbox.json"
+        config_path.write_text(json.dumps({
+            "allowed_paths": [{
+                "path": os.path.normpath(os.path.abspath("/docs/ref.md")),
+                "access": "readonly",
+                "added_at": "2024-01-01T00:00:00Z",
+            }],
+            "denied_paths": []
+        }))
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.get_plugin = Mock(return_value=None)
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        # No workspace yet
+
+        # Add path that already exists in session config (we don't know yet)
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+
+        # Set workspace — triggers replay
+        plugin.set_workspace_path(str(workspace))
+
+        # Should not duplicate the path
+        config = json.loads(config_path.read_text())
+        assert len(config["allowed_paths"]) == 1
+
+    def test_multiple_pending_paths_all_persisted(self, tmp_path):
+        """Test that multiple pending paths are all persisted on workspace set."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.get_plugin = Mock(return_value=None)
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+
+        # Add multiple paths before workspace
+        plugin.add_path_programmatic("/docs/api.md", access="readonly")
+        plugin.add_path_programmatic("/docs/guide.md", access="readonly")
+        plugin.add_path_programmatic("/tmp/scratch", access="readwrite")
+
+        assert len(plugin._pending_programmatic_paths) == 3
+
+        # Set workspace
+        plugin.set_workspace_path(str(workspace))
+
+        # All should be persisted
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        allowed = config["allowed_paths"]
+        assert len(allowed) == 3
+
+        paths_with_access = {(e["path"], e["access"]) for e in allowed}
+        norm = lambda p: os.path.normpath(os.path.abspath(p))
+        assert (norm("/docs/api.md"), "readonly") in paths_with_access
+        assert (norm("/docs/guide.md"), "readonly") in paths_with_access
+        assert (norm("/tmp/scratch"), "readwrite") in paths_with_access
+
+        # Pending list should be cleared
+        assert len(plugin._pending_programmatic_paths) == 0
