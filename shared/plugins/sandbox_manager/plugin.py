@@ -59,6 +59,15 @@ class SandboxManagerPlugin:
     This plugin provides user commands (not model tools) for managing
     which paths the model can access during a session. It integrates
     with the PluginRegistry's authorization and denial mechanisms.
+
+    Lifecycle & Pending Paths:
+        During plugin initialization, other plugins (e.g., references) may call
+        ``add_path_programmatic()`` before this plugin has a workspace or session
+        configured.  In that case the path is stored in ``_pending_programmatic_paths``
+        and temporarily registered in the registry.  When the workspace/session
+        later become available (via ``set_workspace_path`` / ``set_session_id``),
+        ``_replay_pending_paths()`` persists the pending entries to the session
+        config so they survive config reloads.
     """
 
     def __init__(self):
@@ -67,6 +76,9 @@ class SandboxManagerPlugin:
         self._session_id: Optional[str] = None
         self._config: Optional[SandboxConfig] = None
         self._initialized = False
+        # Paths added via add_path_programmatic() before workspace/session
+        # were available.  Each entry is (path, access).
+        self._pending_programmatic_paths: List[tuple] = []
 
     @property
     def name(self) -> str:
@@ -100,6 +112,7 @@ class SandboxManagerPlugin:
             self._registry.clear_authorized_paths(self.name)
             self._registry.clear_denied_paths(self.name)
         self._config = None
+        self._pending_programmatic_paths.clear()
         self._initialized = False
 
     def set_plugin_registry(self, registry) -> None:
@@ -261,6 +274,85 @@ class SandboxManagerPlugin:
         # Sync to registry
         self._sync_to_registry()
 
+        # Replay any paths that were added before workspace/session were ready
+        self._replay_pending_paths()
+
+    def _replay_pending_paths(self) -> None:
+        """Persist paths that were queued before workspace/session were available.
+
+        When ``add_path_programmatic()`` is called before the plugin has a
+        workspace or session, the path is stored in ``_pending_programmatic_paths``
+        and only registered in the in-memory registry.  Once the workspace and
+        session become available (i.e. ``_load_all_configs`` has run), this
+        method persists those paths to the session config so they survive
+        future config reloads.
+
+        Paths that already appear in the loaded config (e.g. from a previous
+        session) are skipped.  After successful persistence the pending list
+        is cleared.
+        """
+        if not self._pending_programmatic_paths:
+            return
+
+        if not self._workspace_path or not self._get_current_session_id():
+            # Still can't persist — re-register in registry so they aren't lost
+            # after the clear in _sync_to_registry().
+            for path, access in self._pending_programmatic_paths:
+                if self._registry:
+                    self._registry.authorize_external_path(path, self.name, access=access)
+            self._trace(f"_replay_pending_paths: still no workspace/session, "
+                       f"re-registered {len(self._pending_programmatic_paths)} paths in registry")
+            return
+
+        # We can now persist — load current session config and add pending paths
+        session_config = self._load_session_config()
+        existing_paths = set()
+        for item in session_config.get("allowed_paths", []):
+            existing_path = item["path"] if isinstance(item, dict) else item
+            existing_paths.add(existing_path)
+
+        added = 0
+        for path, access in self._pending_programmatic_paths:
+            if path not in existing_paths:
+                session_config.setdefault("allowed_paths", []).append({
+                    "path": path,
+                    "access": access,
+                    "added_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                })
+                added += 1
+
+        if added > 0:
+            if self._save_session_config(session_config):
+                self._trace(f"_replay_pending_paths: persisted {added} pending paths")
+                # Reload so the new paths are in self._config and synced to registry
+                self._config = SandboxConfig()
+                # Re-load all tiers (global, workspace, session)
+                global_path = self._get_global_config_path()
+                allowed, denied = self._load_config_file(global_path, "global")
+                self._config.allowed_paths.extend(allowed)
+                self._config.denied_paths.extend(denied)
+                workspace_path = self._get_workspace_config_path()
+                if workspace_path:
+                    allowed, denied = self._load_config_file(workspace_path, "workspace")
+                    self._config.allowed_paths.extend(allowed)
+                    self._config.denied_paths.extend(denied)
+                session_path = self._get_session_config_path()
+                if session_path:
+                    allowed, denied = self._load_config_file(session_path, "session")
+                    self._config.allowed_paths.extend(allowed)
+                    self._config.denied_paths.extend(denied)
+                self._sync_to_registry()
+            else:
+                # Persistence failed — at least keep them in registry
+                for path, access in self._pending_programmatic_paths:
+                    if self._registry:
+                        self._registry.authorize_external_path(path, self.name, access=access)
+                self._trace(f"_replay_pending_paths: persistence failed, re-registered in registry")
+        else:
+            self._trace(f"_replay_pending_paths: all {len(self._pending_programmatic_paths)} paths already in config")
+
+        self._pending_programmatic_paths.clear()
+
     def _sync_to_registry(self) -> None:
         """Sync current config to the plugin registry."""
         if not self._registry or not self._config:
@@ -375,11 +467,17 @@ class SandboxManagerPlugin:
         self._trace(f"add_path_programmatic: path={path}, access={access}")
 
         # If we can't persist (no workspace or session), fall back to direct
-        # registry authorization for immediate effect
+        # registry authorization for immediate effect and queue for later
+        # persistence.  When workspace/session become available,
+        # _replay_pending_paths() will persist these entries so they survive
+        # config reloads (which clear in-memory registry state).
         if not self._workspace_path or not self._get_current_session_id():
             if self._registry:
                 self._registry.authorize_external_path(path, self.name, access=access)
-                self._trace(f"add_path_programmatic: fallback to direct registry auth")
+                # Store so _replay_pending_paths() can persist later
+                if (path, access) not in self._pending_programmatic_paths:
+                    self._pending_programmatic_paths.append((path, access))
+                self._trace(f"add_path_programmatic: fallback to direct registry auth (queued for persistence)")
                 return True
             return False
 
