@@ -132,6 +132,14 @@ class WebFetchPlugin:
                     "include_headers": {
                         "type": "boolean",
                         "description": "Include response headers in the result (default: false)"
+                    },
+                    "insecure": {
+                        "type": "boolean",
+                        "description": (
+                            "Skip SSL certificate verification for this request. "
+                            "Only use after the user explicitly confirms they trust "
+                            "the target host. Default: false."
+                        )
                     }
                 },
                 "required": ["url"]
@@ -188,7 +196,12 @@ web_fetch(url="https://example.com", include_headers=true)
 - Results are cached briefly; use `no_cache=true` to bypass
 - Binary content (images, PDFs, etc.) returns metadata instead of garbled text
 - Use `headers` parameter for authentication (Bearer tokens, API keys, etc.)
-- Use `include_headers=true` to see response headers like Last-Modified, ETag, Cache-Control"""
+- Use `include_headers=true` to see response headers like Last-Modified, ETag, Cache-Control
+
+**SSL certificate issues:**
+- If a request fails with `ssl_error: true`, ask the user if they trust the host
+- If the user confirms, retry with `insecure=true` to skip SSL verification
+- Never set `insecure=true` without explicit user confirmation"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Web fetch is read-only and safe - auto-approve it."""
@@ -260,13 +273,17 @@ web_fetch(url="https://example.com", include_headers=true)
     def _fetch_url(
         self,
         url: str,
-        custom_headers: Optional[Dict[str, str]] = None
+        custom_headers: Optional[Dict[str, str]] = None,
+        verify_ssl: bool = True,
     ) -> tuple[str, str, Optional[str], Optional[Dict[str, Any]]]:
         """Fetch URL and return (content, final_url, error, metadata).
 
         Args:
-            url: The URL to fetch
-            custom_headers: Optional dict of custom HTTP headers (e.g., for auth)
+            url: The URL to fetch.
+            custom_headers: Optional dict of custom HTTP headers (e.g., for auth).
+            verify_ssl: Whether to verify SSL certificates. Defaults to True.
+                Set to False only for explicitly user-trusted hosts with
+                certificate issues (e.g., weak key, self-signed).
 
         Returns:
             Tuple of (content, final_url, error_message, metadata)
@@ -301,6 +318,7 @@ web_fetch(url="https://example.com", include_headers=true)
                     headers=request_headers,
                     allow_redirects=self._follow_redirects,
                     stream=True,  # Don't download body yet
+                    verify=verify_ssl,
                     **proxy_kwargs,
                 )
                 response.raise_for_status()
@@ -345,6 +363,7 @@ web_fetch(url="https://example.com", include_headers=true)
                 timeout=self._timeout,
                 follow_redirects=self._follow_redirects,
                 headers=request_headers,
+                verify=verify_ssl,
                 **proxy_kwargs,
             ) as client:
                 # First, do a HEAD request to check content type (if supported)
@@ -819,6 +838,20 @@ web_fetch(url="https://example.com", include_headers=true)
 
         return 'html'  # Default to html
 
+    @staticmethod
+    def _is_ssl_error(error_msg: str) -> bool:
+        """Check whether an error message indicates an SSL certificate failure."""
+        ssl_indicators = (
+            "CERTIFICATE_VERIFY_FAILED",
+            "certificate verify failed",
+            "SSL: CERTIFICATE_VERIFY_FAILED",
+            "[SSL]",
+            "certificate key too weak",
+            "self-signed certificate",
+            "unable to get local issuer certificate",
+        )
+        return any(indicator in error_msg for indicator in ssl_indicators)
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute web fetch.
 
@@ -832,6 +865,7 @@ web_fetch(url="https://example.com", include_headers=true)
                 - headers: Custom HTTP headers (e.g., for authentication)
                 - no_cache: Bypass cache and fetch fresh content
                 - include_headers: Include response headers in result
+                - insecure: Skip SSL certificate verification (default: false)
 
         Returns:
             Dict containing fetched content or error.
@@ -844,8 +878,12 @@ web_fetch(url="https://example.com", include_headers=true)
         custom_headers = args.get('headers')
         no_cache = args.get('no_cache', False)
         include_headers = args.get('include_headers', False)
+        insecure = bool(args.get('insecure', False))
 
-        self._trace(f"web_fetch: url={url!r}, mode={mode}, selector={selector}, no_cache={no_cache}")
+        self._trace(
+            f"web_fetch: url={url!r}, mode={mode}, selector={selector}, "
+            f"no_cache={no_cache}, insecure={insecure}"
+        )
 
         # Validate URL
         if not url:
@@ -875,9 +913,20 @@ web_fetch(url="https://example.com", include_headers=true)
             fetch_metadata = None
         else:
             # Fetch the URL
-            html, final_url, error, fetch_metadata = self._fetch_url(url, custom_headers)
+            verify_ssl = not insecure
+            html, final_url, error, fetch_metadata = self._fetch_url(
+                url, custom_headers, verify_ssl=verify_ssl
+            )
             if error:
-                return {'error': error, 'url': url}
+                result: Dict[str, Any] = {'error': error, 'url': url}
+                if self._is_ssl_error(error):
+                    result["ssl_error"] = True
+                    result["hint"] = (
+                        "The SSL certificate for this URL could not be verified. "
+                        "Ask the user whether they trust this host. If they confirm, "
+                        "retry with insecure=true to skip SSL verification."
+                    )
+                return result
 
             # Handle binary content - return metadata instead of garbled text
             if fetch_metadata and fetch_metadata.get('is_binary'):

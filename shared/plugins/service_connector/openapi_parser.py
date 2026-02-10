@@ -661,12 +661,17 @@ def load_spec_from_file(file_path: str) -> Dict[str, Any]:
         raise OpenAPIParseError(f"Failed to parse spec: {e}")
 
 
-async def fetch_spec_from_url(url: str, timeout: int = 30) -> Dict[str, Any]:
+async def fetch_spec_from_url(
+    url: str, timeout: int = 30, verify_ssl: bool = True
+) -> Dict[str, Any]:
     """Fetch an OpenAPI spec from a URL.
 
     Args:
         url: URL to fetch the spec from.
         timeout: Request timeout in seconds.
+        verify_ssl: Whether to verify SSL certificates. Defaults to True.
+            Set to False only for explicitly trusted services with
+            certificate issues (e.g., weak key, self-signed).
 
     Returns:
         Parsed specification dict.
@@ -683,7 +688,9 @@ async def fetch_spec_from_url(url: str, timeout: int = 30) -> Dict[str, Any]:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, verify=verify_ssl
+        ) as client:
             response = await client.get(url)
             response.raise_for_status()
             content = response.text
@@ -709,12 +716,17 @@ async def fetch_spec_from_url(url: str, timeout: int = 30) -> Dict[str, Any]:
         raise OpenAPIParseError(f"Failed to parse spec: {e}")
 
 
-def fetch_spec_from_url_sync(url: str, timeout: int = 30) -> Dict[str, Any]:
+def fetch_spec_from_url_sync(
+    url: str, timeout: int = 30, verify_ssl: bool = True
+) -> Dict[str, Any]:
     """Fetch an OpenAPI spec from a URL (synchronous version).
 
     Args:
         url: URL to fetch the spec from.
         timeout: Request timeout in seconds.
+        verify_ssl: Whether to verify SSL certificates. Defaults to True.
+            Set to False only for explicitly trusted services with
+            certificate issues (e.g., weak key, self-signed).
 
     Returns:
         Parsed specification dict.
@@ -730,7 +742,9 @@ def fetch_spec_from_url_sync(url: str, timeout: int = 30) -> Dict[str, Any]:
             from shared.http import get_requests_kwargs
 
             proxy_kwargs = get_requests_kwargs(url)
-            response = requests.get(url, timeout=timeout, **proxy_kwargs)
+            response = requests.get(
+                url, timeout=timeout, verify=verify_ssl, **proxy_kwargs
+            )
             response.raise_for_status()
             content = response.text
         except ImportError:
@@ -746,7 +760,9 @@ def fetch_spec_from_url_sync(url: str, timeout: int = 30) -> Dict[str, Any]:
         proxy_kwargs = get_httpx_kwargs(url)
 
         try:
-            with httpx.Client(timeout=timeout, **proxy_kwargs) as client:
+            with httpx.Client(
+                timeout=timeout, verify=verify_ssl, **proxy_kwargs
+            ) as client:
                 response = client.get(url)
                 response.raise_for_status()
                 content = response.text

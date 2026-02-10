@@ -323,6 +323,10 @@ class ServiceConfig:
         auth: Authentication configuration.
         default_headers: Headers to include in every request.
         timeout: Default timeout in milliseconds.
+        ssl_trusted: Whether the user has explicitly trusted this service's
+            SSL certificate despite verification failures (e.g., weak key,
+            self-signed). When True, SSL verification is skipped for all
+            requests to this service. Defaults to False (verify SSL).
     """
     name: str
     base_url: str
@@ -332,6 +336,7 @@ class ServiceConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     default_headers: Dict[str, str] = field(default_factory=dict)
     timeout: int = 30000
+    ssl_trusted: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServiceConfig":
@@ -349,6 +354,7 @@ class ServiceConfig:
             auth=auth,
             default_headers=data.get("default_headers", {}),
             timeout=data.get("timeout", 30000),
+            ssl_trusted=data.get("ssl_trusted", False),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -370,6 +376,8 @@ class ServiceConfig:
             result["default_headers"] = self.default_headers
         if self.timeout != 30000:
             result["timeout"] = self.timeout
+        if self.ssl_trusted:
+            result["ssl_trusted"] = True
 
         return result
 

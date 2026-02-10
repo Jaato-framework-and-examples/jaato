@@ -177,6 +177,15 @@ class ServiceConnectorPlugin:
                         "alias": {
                             "type": "string",
                             "description": "Short name to reference this service (e.g., 'github', 'stripe')"
+                        },
+                        "insecure": {
+                            "type": "boolean",
+                            "description": (
+                                "Skip SSL certificate verification for this request. "
+                                "Only use after the user explicitly confirms they trust "
+                                "the service. When set, the service is marked as trusted "
+                                "so future requests skip SSL verification automatically."
+                            )
                         }
                     },
                     "required": ["source", "alias"]
@@ -291,6 +300,15 @@ class ServiceConnectorPlugin:
                         "truncate_at": {
                             "type": "integer",
                             "description": "Response truncation limit in chars (default: 10000)"
+                        },
+                        "insecure": {
+                            "type": "boolean",
+                            "description": (
+                                "Skip SSL certificate verification for this request. "
+                                "Only use after the user explicitly confirms they trust "
+                                "the service. When used with a named service, marks "
+                                "the service as trusted for future requests."
+                            )
                         }
                     },
                     "required": ["method"]
@@ -517,6 +535,14 @@ class ServiceConnectorPlugin:
 - Request bodies are validated against schema before sending
 - Response bodies are validated after receiving (warnings only)
 - Use `preview_request` to see exactly what would be sent
+
+**SSL certificate issues:**
+- If a request fails with `ssl_error: true`, ask the user if they trust the service
+- If the user confirms, retry the same call with `insecure=true`
+- For `discover_service`: the service will be marked as trusted permanently
+- For `call_service` with a named service: the service will be marked as trusted permanently
+- Once trusted, all future requests to that service skip SSL verification automatically
+- Never set `insecure=true` without explicit user confirmation
 
 **Tips:**
 - Use `preview_request` to debug auth issues (shows curl command)
@@ -759,6 +785,10 @@ class ServiceConnectorPlugin:
                 desc = desc[:117] + "..."
             lines.append((f"  Description: {desc}", "dim"))
 
+        # SSL trust
+        if config.ssl_trusted:
+            lines.append((f"  SSL verify:  DISABLED (trusted by user)", "bold"))
+
         # Auth summary
         auth = config.auth
         lines.append((f"  Auth type:   {auth.type.value}", ""))
@@ -948,27 +978,66 @@ class ServiceConnectorPlugin:
 
     # === Tool Executors ===
 
+    @staticmethod
+    def _is_ssl_error(exc: Exception) -> bool:
+        """Check whether an exception is caused by an SSL certificate failure.
+
+        Detects common SSL verification errors from httpx, requests, and the
+        standard library so the caller can offer the user an ``insecure``
+        retry option.
+        """
+        text = str(exc)
+        ssl_indicators = (
+            "CERTIFICATE_VERIFY_FAILED",
+            "certificate verify failed",
+            "SSL: CERTIFICATE_VERIFY_FAILED",
+            "[SSL]",
+            "certificate key too weak",
+            "self-signed certificate",
+            "unable to get local issuer certificate",
+        )
+        return any(indicator in text for indicator in ssl_indicators)
+
     def _execute_discover_service(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute discover_service tool."""
+        """Execute discover_service tool.
+
+        When ``insecure=true`` is passed, SSL certificate verification is
+        skipped for the initial spec fetch. The discovered service is then
+        persisted with ``ssl_trusted=True`` so that subsequent
+        ``call_service`` invocations automatically skip verification too.
+
+        If a normal (verified) fetch fails due to an SSL error, the tool
+        returns a structured error containing ``ssl_error: true`` and a
+        ``hint`` suggesting the agent ask the user whether the service is
+        trusted and, if so, retry with ``insecure=true``.
+        """
         source = args.get("source", "").strip()
         alias = args.get("alias", "").strip()
+        insecure = bool(args.get("insecure", False))
 
-        self._trace(f"discover_service: source={source}, alias={alias}")
+        self._trace(f"discover_service: source={source}, alias={alias}, insecure={insecure}")
 
         if not source:
             return {"error": "source is required"}
         if not alias:
             return {"error": "alias is required"}
 
+        verify_ssl = not insecure
+
         try:
             # Load spec
             if source.startswith(("http://", "https://")):
-                spec = fetch_spec_from_url_sync(source)
+                spec = fetch_spec_from_url_sync(source, verify_ssl=verify_ssl)
             else:
                 spec = load_spec_from_file(source)
 
             # Parse spec
             discovered = parse_openapi_spec(spec, alias, source)
+
+            # When the user opted into insecure mode, mark the service as
+            # SSL-trusted so all future requests skip verification.
+            if insecure:
+                discovered.config.ssl_trusted = True
 
             # Cache in memory
             self._discovered_services[alias] = discovered
@@ -982,7 +1051,7 @@ class ServiceConnectorPlugin:
                     source=source,
                 )
 
-            return {
+            result: Dict[str, Any] = {
                 "alias": alias,
                 "base_url": discovered.base_url,
                 "title": discovered.config.title,
@@ -990,10 +1059,35 @@ class ServiceConnectorPlugin:
                 "endpoint_count": discovered.endpoint_count,
                 "auth_schemes": discovered.auth_schemes,
             }
+            if insecure:
+                result["ssl_trusted"] = True
+            return result
 
         except OpenAPIParseError as e:
+            if self._is_ssl_error(e):
+                return {
+                    "error": f"SSL certificate verification failed: {e}",
+                    "ssl_error": True,
+                    "hint": (
+                        "The SSL certificate for this service could not be verified. "
+                        "Ask the user whether they trust this service. If they confirm, "
+                        "retry with insecure=true to skip SSL verification. The service "
+                        "will be marked as trusted for all future requests."
+                    ),
+                }
             return {"error": f"Failed to parse spec: {e}"}
         except Exception as e:
+            if self._is_ssl_error(e):
+                return {
+                    "error": f"SSL certificate verification failed: {e}",
+                    "ssl_error": True,
+                    "hint": (
+                        "The SSL certificate for this service could not be verified. "
+                        "Ask the user whether they trust this service. If they confirm, "
+                        "retry with insecure=true to skip SSL verification. The service "
+                        "will be marked as trusted for all future requests."
+                    ),
+                }
             return {"error": f"Unexpected error: {e}"}
 
     def _get_service(self, service_name: str) -> Optional[DiscoveredService]:
@@ -1113,7 +1207,22 @@ class ServiceConnectorPlugin:
         return endpoint.to_dict()
 
     def _execute_call_service(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute call_service tool."""
+        """Execute call_service tool.
+
+        SSL verification is skipped when:
+        1. The caller passes ``insecure=true`` (one-shot override), or
+        2. The resolved ``ServiceConfig`` has ``ssl_trusted=True`` (persistent
+           trust set by a previous ``discover_service`` or ``call_service``
+           with ``insecure=true``).
+
+        When ``insecure=true`` is used with a named service, that service is
+        permanently marked as trusted so subsequent calls skip verification
+        automatically.
+
+        If an SSL error occurs during a normal (verified) request, the tool
+        returns ``ssl_error: true`` with a hint for the agent to ask the user
+        and retry with ``insecure=true``.
+        """
         service_name = args.get("service", "").strip()
         url = args.get("url", "").strip()
         method = args.get("method", "").upper()
@@ -1124,8 +1233,12 @@ class ServiceConnectorPlugin:
         auth_override = args.get("auth")
         timeout = args.get("timeout")
         truncate_at = args.get("truncate_at")
+        insecure = bool(args.get("insecure", False))
 
-        self._trace(f"call_service: service={service_name}, url={url}, {method} {path}")
+        self._trace(
+            f"call_service: service={service_name}, url={url}, "
+            f"{method} {path}, insecure={insecure}"
+        )
 
         if not method:
             return {"error": "method is required"}
@@ -1158,6 +1271,23 @@ class ServiceConnectorPlugin:
             if not service_config:
                 return {"error": f"Service not found: {service_name}"}
 
+        # Determine SSL verification: skip if insecure or service is trusted
+        verify_ssl = True
+        if insecure:
+            verify_ssl = False
+        elif service_config and service_config.ssl_trusted:
+            verify_ssl = False
+
+        # If caller explicitly passed insecure and we have a named service,
+        # persist the trust flag for future calls.
+        if insecure and service_config and not service_config.ssl_trusted:
+            service_config.ssl_trusted = True
+            if self._schema_store:
+                self._schema_store.save_service_config(service_config)
+            # Also update in-memory discovered service
+            if service_name and service_name in self._discovered_services:
+                self._discovered_services[service_name].config.ssl_trusted = True
+
         # Validate request body
         request_validation = None
         if endpoint_schema and body and self._validator:
@@ -1188,14 +1318,35 @@ class ServiceConnectorPlugin:
                 truncate_at=truncate_at,
                 request_validation=request_validation,
                 response_validator=response_validator,
+                verify_ssl=verify_ssl,
             )
             return response.to_dict()
 
         except AuthError as e:
             return {"error": f"Authentication error: {e}"}
         except HttpClientError as e:
+            if self._is_ssl_error(e):
+                return {
+                    "error": f"SSL certificate verification failed: {e}",
+                    "ssl_error": True,
+                    "hint": (
+                        "The SSL certificate for this service could not be verified. "
+                        "Ask the user whether they trust this service. If they confirm, "
+                        "retry with insecure=true to skip SSL verification."
+                    ),
+                }
             return {"error": str(e)}
         except Exception as e:
+            if self._is_ssl_error(e):
+                return {
+                    "error": f"SSL certificate verification failed: {e}",
+                    "ssl_error": True,
+                    "hint": (
+                        "The SSL certificate for this service could not be verified. "
+                        "Ask the user whether they trust this service. If they confirm, "
+                        "retry with insecure=true to skip SSL verification."
+                    ),
+                }
             return {"error": f"Request failed: {e}"}
 
     def _execute_preview_request(self, args: Dict[str, Any]) -> Dict[str, Any]:
