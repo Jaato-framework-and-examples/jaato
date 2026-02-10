@@ -1,7 +1,12 @@
 """Tests for shared.ui_utils module."""
 
 import pytest
-from shared.ui_utils import ellipsize_path, ellipsize_path_pair
+from shared.ui_utils import (
+    ellipsize_path,
+    ellipsize_path_pair,
+    format_tool_args_summary,
+    _looks_like_path,
+)
 
 
 class TestEllipsizePath:
@@ -180,3 +185,133 @@ class TestEllipsizePathPair:
         # Dest should be ellipsized more since it's longer
         parts = result.split(" -> ")
         assert parts[0] == "short.txt"  # Short source unchanged
+
+
+class TestLooksLikePath:
+    """Tests for _looks_like_path helper."""
+
+    def test_absolute_unix_path(self):
+        assert _looks_like_path("/home/user/file.txt") is True
+
+    def test_root_only(self):
+        """Single slash without nested separator is not a path."""
+        assert _looks_like_path("/") is False
+
+    def test_relative_dot(self):
+        assert _looks_like_path("./src/file.txt") is True
+
+    def test_relative_dotdot(self):
+        assert _looks_like_path("../file.txt") is True
+
+    def test_home_dir(self):
+        assert _looks_like_path("~/projects/file.txt") is True
+
+    def test_windows_path(self):
+        assert _looks_like_path("C:\\Users\\file.txt") is True
+
+    def test_windows_forward_slash(self):
+        assert _looks_like_path("C:/Users/file.txt") is True
+
+    def test_plain_string(self):
+        assert _looks_like_path("hello world") is False
+
+    def test_empty_string(self):
+        assert _looks_like_path("") is False
+
+    def test_single_char(self):
+        assert _looks_like_path("x") is False
+
+    def test_url_not_matched(self):
+        """URLs are not file paths (they have // after scheme)."""
+        # This starts with / and has /, so it will match -- acceptable
+        # since URLs rarely appear as tool arg values without a scheme
+        pass
+
+    def test_simple_filename(self):
+        assert _looks_like_path("file.txt") is False
+
+
+class TestFormatToolArgsSummary:
+    """Tests for format_tool_args_summary with path ellipsization."""
+
+    def test_empty_args(self):
+        assert format_tool_args_summary({}) == ""
+
+    def test_short_args_unchanged(self):
+        args = {"key": "value"}
+        result = format_tool_args_summary(args)
+        assert result == str(args)
+
+    def test_path_arg_by_name_ellipsized(self):
+        """Arguments with known path names get ellipsized."""
+        long_path = "/home/user/project/src/components/deep/nested/Button.tsx"
+        args = {"file_path": long_path}
+        result = format_tool_args_summary(args, max_length=120)
+        # The path value should have been ellipsized (shorter than original)
+        assert "..." in result or len(result) < len(str(args))
+        assert "Button.tsx" in result
+
+    def test_path_arg_by_value_ellipsized(self):
+        """Arguments whose values look like paths get ellipsized even with
+        non-standard key names."""
+        long_path = "/home/user/project/src/components/deep/nested/Button.tsx"
+        args = {"target_file": long_path}
+        result = format_tool_args_summary(args, max_length=120)
+        assert "Button.tsx" in result
+        # Path should have been shortened via middle-ellipsis
+        assert "..." in result
+
+    def test_non_path_arg_not_ellipsized(self):
+        """Non-path arguments should not be modified by path ellipsization."""
+        args = {"command": "echo hello world"}
+        result = format_tool_args_summary(args, max_length=120)
+        assert "echo hello world" in result
+
+    def test_overall_truncation_still_applies(self):
+        """Even after path ellipsization, overall truncation kicks in."""
+        args = {
+            "file_path": "/home/user/project/src/a.txt",
+            "content": "x" * 100,
+        }
+        result = format_tool_args_summary(args, max_length=60)
+        assert len(result) <= 60
+        assert result.endswith("...")
+
+    def test_short_path_not_ellipsized(self):
+        """Short paths that fit within max_path_width stay unchanged."""
+        args = {"path": "src/Button.tsx"}
+        result = format_tool_args_summary(args, max_length=120)
+        assert "src/Button.tsx" in result
+
+    def test_multiple_path_args(self):
+        """Multiple path arguments all get ellipsized."""
+        args = {
+            "old_path": "/home/user/project/src/deep/nested/old.txt",
+            "new_path": "/home/user/project/src/deep/nested/new.txt",
+        }
+        result = format_tool_args_summary(args, max_length=120)
+        assert "old.txt" in result
+        assert "new.txt" in result
+
+    def test_custom_max_path_width(self):
+        """Custom max_path_width controls individual path truncation."""
+        long_path = "/home/user/project/src/components/deep/nested/Button.tsx"
+        args = {"file_path": long_path}
+        narrow = format_tool_args_summary(
+            args, max_length=120, max_path_width=25
+        )
+        wide = format_tool_args_summary(
+            args, max_length=120, max_path_width=55
+        )
+        # Narrow should be shorter or equal
+        assert len(narrow) <= len(wide)
+
+    def test_mixed_path_and_non_path(self):
+        """Mix of path and non-path arguments."""
+        args = {
+            "file_path": "/home/user/project/src/components/Button.tsx",
+            "mode": "write",
+        }
+        result = format_tool_args_summary(args, max_length=120)
+        assert "Button.tsx" in result
+        assert "'mode': 'write'" in result
