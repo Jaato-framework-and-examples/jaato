@@ -399,11 +399,16 @@ class DiscoveredService:
         endpoints: List of endpoint schemas.
         auth_schemes: List of supported auth scheme names.
         source: Where the spec was loaded from (URL or file path).
+        warnings: Non-fatal issues encountered during parsing (e.g.,
+            unresolvable ``$ref``, unsupported parameter locations).
+            The service is still usable; these describe endpoints or
+            details that were skipped.
     """
     config: ServiceConfig
     endpoints: List[EndpointSchema] = field(default_factory=list)
     auth_schemes: List[str] = field(default_factory=list)
     source: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
