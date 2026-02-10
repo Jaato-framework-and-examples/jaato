@@ -1346,6 +1346,16 @@ class JaatoServer:
                     show_popup=show_popup,
                 ))
 
+                # After discover_service succeeds, refresh the client's
+                # service completion cache so 'services list' reflects the
+                # newly discovered service immediately.
+                if tool_name == "discover_service" and success:
+                    svc_plugin = server._find_plugin_for_command("services")
+                    if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
+                        server.emit(ServiceListEvent(
+                            services=svc_plugin.get_service_metadata(),
+                        ))
+
             def on_tool_output(self, agent_id, call_id, chunk):
                 # Process tool output through formatter pipeline for syntax highlighting
                 # and marker transformation (e.g., <notebook-cell> → <nb-row>)
