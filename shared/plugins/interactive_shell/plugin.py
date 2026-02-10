@@ -19,7 +19,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
-from .session import ShellSession
+from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 
@@ -122,8 +122,12 @@ class InteractiveShellPlugin:
             f"initialize: max_sessions={self._max_sessions}, "
             f"max_lifetime={self._max_lifetime}, "
             f"max_idle={self._max_idle}, "
-            f"workspace_root={self._workspace_root}"
+            f"workspace_root={self._workspace_root}, "
+            f"backend={_BACKEND or 'NONE'}, "
+            f"msys2={IS_MSYS2}"
         )
+        if _BACKEND is None and _BACKEND_ERROR:
+            self._trace(f"initialize: WARNING - no backend: {_BACKEND_ERROR}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin, closing all sessions."""
@@ -448,7 +452,7 @@ IMPORTANT NOTES:
                 session_id = f"session_{self._session_counter}"
                 self._session_counter += 1
 
-        self._trace(f"spawn: id={session_id}, cmd={command[:80]}")
+        self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
 
         try:
             session = ShellSession(
