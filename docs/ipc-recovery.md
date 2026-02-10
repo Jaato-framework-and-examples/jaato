@@ -244,13 +244,42 @@ Connection lost permanently: Max retries exceeded
 
 - **Session ID** - Tracked for reattachment
 - **Conversation history** - Persisted on server disk
-- **Tool states** - Managed by server
+- **Subagent state** - Registry + per-agent conversation history (dedicated persistence)
+- **TODO plans** - Agent-plan mapping + plan files (dedicated persistence)
+- **Plugin session state** - Generic mechanism for all other plugins (see below)
+- **Turn accounting** - Token usage per turn
+- **Budget state** - Conversation budget snapshot
+- **Interrupted turns** - Pending tool calls (recovered with synthetic errors)
+
+### Plugin State Persistence
+
+SessionManager persists plugin in-memory state via two mechanisms:
+
+**1. Generic mechanism** — Iterates all exposed plugins, calls `get_persistence_state()` on each that implements it, stores results in `metadata['plugin_states']` inside the session JSON. On restore, calls `restore_persistence_state(state)` on each.
+
+Currently integrated:
+
+| Plugin | What's Persisted | What's Restored |
+|--------|-----------------|-----------------|
+| `service_connector` | Discovered service alias list | In-memory cache pre-warmed from SchemaStore YAML |
+| `reliability` | Tool trust states, turn index, session settings, escalation overrides | Full tool escalation state rebuilt |
+
+**2. Dedicated mechanism** — Plugins with complex multi-file state or non-standard restore signatures use custom save/load orchestration in SessionManager:
+
+| Plugin | Why Dedicated | Storage |
+|--------|---------------|---------|
+| `subagent` | Per-agent state files (MB+), restore needs runtime instance | `sessions/<id>/subagents/*.json` |
+| `todo` | Plan files managed by storage backend, restore re-registers event bus dependencies | `sessions/<id>/plans/` |
+
+See [Plugin README — Session Persistence](../shared/plugins/README.md#plugin-with-session-persistence) for implementation guide.
 
 ### What's Lost
 
 - **Active IPC connection** - Replaced by new connection
 - **In-flight requests** - Pending permission responses, etc.
 - **Real-time event stream** - Restarted after reconnect
+- **Interactive shell sessions** - PTY processes cannot be serialized
+- **MCP server-side state** - Servers are reconnected, but any in-process server state is server-dependent
 
 ### Session Reattachment
 

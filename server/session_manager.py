@@ -754,6 +754,22 @@ class SessionManager:
         # Restore TODO plugin state (agent-plan mapping, blocked steps)
         self._load_todo_state(server, session_dir)
 
+        # Generic plugin state restoration: iterate plugin_states saved by
+        # the generic persistence loop and call restore_persistence_state()
+        # on each plugin that implements it.
+        if state.metadata.get('plugin_states') and server.registry:
+            for plugin_name, plugin_state in state.metadata['plugin_states'].items():
+                plugin = server.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'restore_persistence_state'):
+                    try:
+                        plugin.restore_persistence_state(plugin_state)
+                        logger.debug(f"Restored persistence state for plugin: {plugin_name}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to restore persistence state for plugin "
+                            f"'{plugin_name}': {e}"
+                        )
+
         # Check for and recover from interrupted turn
         recovered_count = 0
         if state.interrupted_turn:
@@ -1021,6 +1037,30 @@ class SessionManager:
             session_dir = pathlib.Path(self._session_config.storage_path) / session.session_id
             if session.server:
                 self._save_todo_state(session.server, session_dir)
+
+            # Generic plugin state persistence: iterate all exposed plugins
+            # and collect state from any that implement get_persistence_state().
+            # Plugins with dedicated persistence (subagent, todo) are skipped
+            # since they're handled above with their own file-based storage.
+            plugin_states = {}
+            _DEDICATED_PLUGINS = {'subagent', 'todo'}
+            if session.server and session.server.registry:
+                for plugin_name in session.server.registry.list_exposed():
+                    if plugin_name in _DEDICATED_PLUGINS:
+                        continue
+                    plugin = session.server.registry.get_plugin(plugin_name)
+                    if plugin and hasattr(plugin, 'get_persistence_state'):
+                        try:
+                            pstate = plugin.get_persistence_state()
+                            if pstate:
+                                plugin_states[plugin_name] = pstate
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to get persistence state for plugin "
+                                f"'{plugin_name}': {e}"
+                            )
+            if plugin_states:
+                subagent_metadata['plugin_states'] = plugin_states
 
             # Get conversation budget for persistence (other budget sources are
             # automatically recreated when the session is restored)
