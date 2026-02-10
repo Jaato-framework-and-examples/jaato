@@ -345,6 +345,141 @@ class SandboxManagerPlugin:
             self._trace(f"Error saving session config: {e}")
             return False
 
+    # ==================== Programmatic API ====================
+
+    def add_path_programmatic(self, path: str, access: str = "readonly") -> bool:
+        """Add a path to the sandbox programmatically.
+
+        Used by other plugins (e.g., references) to grant access to paths
+        without going through the user command flow. The path is persisted
+        in the session config and synced to the registry.
+
+        If the sandbox has no workspace or session configured, falls back
+        to registering directly with the plugin registry for immediate
+        (non-persisted) effect.
+
+        Args:
+            path: Absolute path to add. Must already be resolved/absolute.
+            access: Access mode - "readonly" or "readwrite" (default: "readonly").
+
+        Returns:
+            True if the path was added successfully, False on error.
+        """
+        if access not in ("readonly", "readwrite"):
+            self._trace(f"add_path_programmatic: invalid access mode {access!r}")
+            return False
+
+        # Normalize the path
+        path = os.path.normpath(os.path.abspath(path))
+
+        self._trace(f"add_path_programmatic: path={path}, access={access}")
+
+        # If we can't persist (no workspace or session), fall back to direct
+        # registry authorization for immediate effect
+        if not self._workspace_path or not self._get_current_session_id():
+            if self._registry:
+                self._registry.authorize_external_path(path, self.name, access=access)
+                self._trace(f"add_path_programmatic: fallback to direct registry auth")
+                return True
+            return False
+
+        # Check if already in session config with same access
+        session_config = self._load_session_config()
+        for item in session_config.get("allowed_paths", []):
+            existing_path = item["path"] if isinstance(item, dict) else item
+            if existing_path == path:
+                existing_access = item.get("access", "readwrite") if isinstance(item, dict) else "readwrite"
+                if existing_access == access:
+                    self._trace(f"add_path_programmatic: already allowed with same access")
+                    return True
+                # Update access mode
+                if isinstance(item, dict):
+                    item["access"] = access
+                    if not self._save_session_config(session_config):
+                        return False
+                    self._load_all_configs()
+                    return True
+
+        # Remove from denied_paths if present
+        session_config["denied_paths"] = [
+            p for p in session_config.get("denied_paths", [])
+            if (p["path"] if isinstance(p, dict) else p) != path
+        ]
+
+        # Add to allowed_paths
+        session_config.setdefault("allowed_paths", []).append({
+            "path": path,
+            "access": access,
+            "added_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+
+        # Save and reload
+        if not self._save_session_config(session_config):
+            return False
+
+        self._load_all_configs()
+        self._trace(f"add_path_programmatic: added successfully")
+        return True
+
+    def remove_path_programmatic(self, path: str) -> bool:
+        """Remove a path from the sandbox programmatically.
+
+        Used by other plugins (e.g., references) to revoke access to paths
+        that were previously added via add_path_programmatic(). If the path
+        was added at the session level, it is simply removed from allowed_paths.
+        If it was allowed at a higher level, it is added to denied_paths.
+
+        If the sandbox has no workspace or session configured, falls back
+        to deauthorizing directly from the plugin registry.
+
+        Args:
+            path: Absolute path to remove. Must already be resolved/absolute.
+
+        Returns:
+            True if the path was removed successfully, False on error.
+        """
+        # Normalize the path
+        path = os.path.normpath(os.path.abspath(path))
+
+        self._trace(f"remove_path_programmatic: path={path}")
+
+        # If we can't persist, fall back to direct registry deauthorization
+        if not self._workspace_path or not self._get_current_session_id():
+            if self._registry:
+                self._registry.deauthorize_external_path(path, self.name)
+                self._trace(f"remove_path_programmatic: fallback to direct registry deauth")
+                return True
+            return False
+
+        # Load session config
+        session_config = self._load_session_config()
+
+        # Check if path was added to session's allowed_paths
+        existing_allowed = [
+            p["path"] if isinstance(p, dict) else p
+            for p in session_config.get("allowed_paths", [])
+        ]
+        was_session_allowed = path in existing_allowed
+
+        if was_session_allowed:
+            # Symmetric undo: just remove from allowed_paths
+            session_config["allowed_paths"] = [
+                p for p in session_config.get("allowed_paths", [])
+                if (p["path"] if isinstance(p, dict) else p) != path
+            ]
+        else:
+            # Not in session allowed - nothing to remove
+            self._trace(f"remove_path_programmatic: path not in session allowed_paths")
+            return False
+
+        # Save and reload
+        if not self._save_session_config(session_config):
+            return False
+
+        self._load_all_configs()
+        self._trace(f"remove_path_programmatic: removed successfully")
+        return True
+
     # ==================== User Commands ====================
 
     def get_tool_schemas(self) -> List[ToolSchema]:

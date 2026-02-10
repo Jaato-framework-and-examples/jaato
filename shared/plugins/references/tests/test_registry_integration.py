@@ -1,9 +1,14 @@
 """Tests for references plugin integration with the plugin registry."""
 
+import json
+import os
 import pytest
+from pathlib import Path
+from unittest.mock import Mock, MagicMock, patch
 
 from ...registry import PluginRegistry
 from ..plugin import ReferencesPlugin, create_plugin
+from ..models import ReferenceSource, InjectionMode, SourceType
 
 
 class TestRegistryPluginDiscovery:
@@ -328,3 +333,194 @@ class TestRegistryShutdownCleanup:
 
         # After shutdown, selections should be cleared
         assert plugin._selected_source_ids == []
+
+
+class TestReferencesSandboxIntegration:
+    """Tests for references plugin interaction with the sandbox manager.
+
+    Verifies that selecting/unselecting references correctly adds/removes
+    paths from the sandbox via the sandbox plugin's programmatic API.
+    """
+
+    @pytest.fixture
+    def plugin_with_sandbox(self, tmp_path):
+        """Create a references plugin with a mock sandbox_manager plugin."""
+        # Create a mock registry that returns a mock sandbox plugin
+        mock_sandbox = Mock()
+        mock_sandbox.add_path_programmatic = Mock(return_value=True)
+        mock_sandbox.remove_path_programmatic = Mock(return_value=True)
+
+        mock_registry = Mock()
+        mock_registry.get_plugin = Mock(return_value=mock_sandbox)
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deauthorize_external_path = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+
+        # Create a local reference source with a real file
+        ref_file = tmp_path / "docs" / "spec.md"
+        ref_file.parent.mkdir(parents=True)
+        ref_file.write_text("# API Spec\nSome content.")
+
+        source = ReferenceSource(
+            id="api-spec",
+            name="API Spec",
+            description="API specification",
+            type=SourceType.LOCAL,
+            mode=InjectionMode.SELECTABLE,
+            path=str(ref_file),
+            resolved_path=str(ref_file),
+        )
+
+        plugin = create_plugin()
+        plugin._plugin_registry = mock_registry
+        plugin._sources = [source]
+        plugin._selected_source_ids = []
+        plugin._initialized = True
+        plugin._project_root = str(tmp_path)
+
+        return plugin, mock_sandbox, mock_registry, source, ref_file
+
+    def test_select_calls_sandbox_add_readonly(self, plugin_with_sandbox):
+        """Test that selecting a reference calls sandbox add_path_programmatic with readonly."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+
+        result = plugin._cmd_references_select("api-spec")
+
+        assert result["status"] == "selected"
+        mock_sandbox.add_path_programmatic.assert_called_once_with(
+            str(ref_file), access="readonly"
+        )
+
+    def test_unselect_calls_sandbox_remove(self, plugin_with_sandbox):
+        """Test that unselecting a reference calls sandbox remove_path_programmatic."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+
+        # First select
+        plugin._cmd_references_select("api-spec")
+        mock_sandbox.reset_mock()
+
+        # Now unselect
+        result = plugin._cmd_references_unselect("api-spec")
+
+        assert result["status"] == "unselected"
+        mock_sandbox.remove_path_programmatic.assert_called_once_with(
+            str(ref_file)
+        )
+
+    def test_select_unselect_roundtrip(self, plugin_with_sandbox):
+        """Test that select then unselect results in clean state."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+
+        # Select
+        plugin._cmd_references_select("api-spec")
+        assert "api-spec" in plugin._selected_source_ids
+        assert mock_sandbox.add_path_programmatic.call_count == 1
+
+        # Unselect
+        plugin._cmd_references_unselect("api-spec")
+        assert "api-spec" not in plugin._selected_source_ids
+        assert mock_sandbox.remove_path_programmatic.call_count == 1
+
+    def test_select_falls_back_to_registry_when_no_sandbox(self, tmp_path):
+        """Test fallback to direct registry auth when sandbox plugin is not available."""
+        ref_file = tmp_path / "doc.md"
+        ref_file.write_text("content")
+
+        source = ReferenceSource(
+            id="doc-1",
+            name="Doc",
+            description="A doc",
+            type=SourceType.LOCAL,
+            mode=InjectionMode.SELECTABLE,
+            path=str(ref_file),
+            resolved_path=str(ref_file),
+        )
+
+        mock_registry = Mock()
+        mock_registry.get_plugin = Mock(return_value=None)  # No sandbox plugin
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deauthorize_external_path = Mock()
+
+        plugin = create_plugin()
+        plugin._plugin_registry = mock_registry
+        plugin._sources = [source]
+        plugin._selected_source_ids = []
+        plugin._initialized = True
+        plugin._project_root = str(tmp_path)
+
+        plugin._cmd_references_select("doc-1")
+
+        # Should fall back to direct registry call with readonly
+        mock_registry.authorize_external_path.assert_called_once_with(
+            str(ref_file), "references", access="readonly"
+        )
+
+    def test_unselect_falls_back_to_registry_when_no_sandbox(self, tmp_path):
+        """Test fallback to direct registry deauth when sandbox plugin is not available."""
+        ref_file = tmp_path / "doc.md"
+        ref_file.write_text("content")
+
+        source = ReferenceSource(
+            id="doc-1",
+            name="Doc",
+            description="A doc",
+            type=SourceType.LOCAL,
+            mode=InjectionMode.SELECTABLE,
+            path=str(ref_file),
+            resolved_path=str(ref_file),
+        )
+
+        mock_registry = Mock()
+        mock_registry.get_plugin = Mock(return_value=None)  # No sandbox plugin
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deauthorize_external_path = Mock()
+
+        plugin = create_plugin()
+        plugin._plugin_registry = mock_registry
+        plugin._sources = [source]
+        plugin._selected_source_ids = ["doc-1"]
+        plugin._initialized = True
+        plugin._project_root = str(tmp_path)
+
+        plugin._cmd_references_unselect("doc-1")
+
+        # Should fall back to direct registry deauth
+        mock_registry.deauthorize_external_path.assert_called_once_with(
+            str(ref_file), "references"
+        )
+
+    def test_non_local_source_skips_sandbox(self, plugin_with_sandbox):
+        """Test that non-LOCAL sources don't interact with sandbox."""
+        plugin, mock_sandbox, _, _, _ = plugin_with_sandbox
+
+        url_source = ReferenceSource(
+            id="url-ref",
+            name="URL Ref",
+            description="A URL reference",
+            type=SourceType.URL,
+            mode=InjectionMode.SELECTABLE,
+            url="https://example.com/doc",
+        )
+        plugin._sources.append(url_source)
+
+        plugin._cmd_references_select("url-ref")
+
+        # Sandbox should not be called for URL sources
+        mock_sandbox.add_path_programmatic.assert_not_called()
+
+    def test_select_via_execute_select_calls_sandbox(self, plugin_with_sandbox):
+        """Test that the model tool selectReferences also calls sandbox."""
+        plugin, mock_sandbox, _, source, ref_file = plugin_with_sandbox
+
+        # Mock the channel to return our source as selected
+        mock_channel = Mock()
+        mock_channel.present_selection = Mock(return_value=["api-spec"])
+        mock_channel.notify_result = Mock()
+        plugin._channel = mock_channel
+
+        result = plugin._execute_select({})
+
+        assert result["status"] == "success"
+        mock_sandbox.add_path_programmatic.assert_called_once_with(
+            str(ref_file), access="readonly"
+        )

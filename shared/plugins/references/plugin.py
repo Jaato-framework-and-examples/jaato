@@ -93,10 +93,14 @@ class ReferencesPlugin:
         self._trace(f"set_plugin_registry: registry set")
 
     def _authorize_source_path(self, source: ReferenceSource) -> None:
-        """Authorize a source's path for external access via the plugin registry.
+        """Authorize a source's path for readonly access via the sandbox plugin.
 
-        For LOCAL sources outside the workspace, this registers them with the
-        plugin registry so that readFile can access them.
+        For LOCAL sources, this registers them with the sandbox manager plugin
+        so that readFile can access them as readonly. The sandbox plugin persists
+        the path in the session config and syncs to the registry.
+
+        Falls back to direct registry authorization if the sandbox plugin is
+        not available.
 
         Args:
             source: The reference source whose path should be authorized.
@@ -112,10 +116,51 @@ class ReferencesPlugin:
         if not resolved_path:
             return
 
-        # Authorize this path
         path_str = str(resolved_path)
-        self._plugin_registry.authorize_external_path(path_str, self._name)
-        self._trace(f"authorized external path: {path_str}")
+
+        # Try to use the sandbox plugin's programmatic API
+        sandbox_plugin = self._plugin_registry.get_plugin("sandbox_manager")
+        if sandbox_plugin and hasattr(sandbox_plugin, 'add_path_programmatic'):
+            if sandbox_plugin.add_path_programmatic(path_str, access="readonly"):
+                self._trace(f"authorized external path via sandbox: {path_str}")
+                return
+
+        # Fallback: authorize directly via registry
+        self._plugin_registry.authorize_external_path(path_str, self._name, access="readonly")
+        self._trace(f"authorized external path via registry fallback: {path_str}")
+
+    def _deauthorize_source_path(self, source: ReferenceSource) -> None:
+        """Remove a source's path from the sandbox / registry authorization.
+
+        Reverses the effect of _authorize_source_path(). Tries the sandbox
+        plugin's programmatic API first, falls back to direct registry
+        deauthorization.
+
+        Args:
+            source: The reference source whose path should be deauthorized.
+        """
+        if not self._plugin_registry:
+            return
+
+        if source.type != SourceType.LOCAL:
+            return
+
+        resolved_path = self._resolve_path_for_access(source)
+        if not resolved_path:
+            return
+
+        path_str = str(resolved_path)
+
+        # Try to use the sandbox plugin's programmatic API
+        sandbox_plugin = self._plugin_registry.get_plugin("sandbox_manager")
+        if sandbox_plugin and hasattr(sandbox_plugin, 'remove_path_programmatic'):
+            if sandbox_plugin.remove_path_programmatic(path_str):
+                self._trace(f"deauthorized external path via sandbox: {path_str}")
+                return
+
+        # Fallback: deauthorize directly via registry
+        self._plugin_registry.deauthorize_external_path(path_str, self._name)
+        self._trace(f"deauthorized external path via registry fallback: {path_str}")
 
     def _resolve_source_for_context(self, source: ReferenceSource) -> None:
         """Resolve a catalog source's path for the current project context.
@@ -910,16 +955,25 @@ class ReferencesPlugin:
         }
 
     def _cmd_references_unselect(self, ref_id: str) -> Dict[str, Any]:
-        """Execute 'references unselect <ref-id>'."""
+        """Execute 'references unselect <ref-id>'.
+
+        Removes the reference from the selected set and deauthorizes its
+        path from the sandbox so the model can no longer access it.
+        """
         ref_id = ref_id.strip()
 
         if ref_id not in self._selected_source_ids:
             return {"error": f"Reference '{ref_id}' is not currently selected."}
 
         self._selected_source_ids.remove(ref_id)
+
+        # Deauthorize the path so the model can no longer access it
+        source = next((s for s in self._sources if s.id == ref_id), None)
+        if source:
+            self._deauthorize_source_path(source)
+
         self._trace(f"references unselect: unselected '{ref_id}'")
 
-        source = next((s for s in self._sources if s.id == ref_id), None)
         name = source.name if source else ref_id
         return {
             "status": "unselected",
