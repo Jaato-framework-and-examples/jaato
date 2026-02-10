@@ -28,6 +28,7 @@ class GCPolicy(Enum):
     PRESERVABLE = "preservable" # Prefer to keep, GC only under extreme pressure
     PARTIAL = "partial"         # Some parts GC-able (container with mixed children)
     EPHEMERAL = "ephemeral"     # Can be fully GC'd
+    CONDITIONAL = "conditional" # Delegated to plugin evaluation
 
 
 # UI indicators for each policy
@@ -36,6 +37,7 @@ GC_POLICY_INDICATORS: Dict[GCPolicy, str] = {
     GCPolicy.PRESERVABLE: "◑",
     GCPolicy.PARTIAL: "◐",
     GCPolicy.EPHEMERAL: "○",
+    GCPolicy.CONDITIONAL: "◈",  # Diamond - indicates dynamic evaluation
 }
 
 
