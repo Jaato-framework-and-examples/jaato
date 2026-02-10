@@ -61,8 +61,15 @@ def _resolve_all_refs(
     spec: Dict[str, Any],
     obj: Any,
     warnings: Optional[List[str]] = None,
+    _seen: Optional[set] = None,
 ) -> Any:
     """Recursively resolve all $ref in an object.
+
+    Handles circular references by tracking which ``$ref`` paths have
+    already been visited in the current resolution chain.  When a cycle
+    is detected, the circular ``$ref`` is replaced with an empty dict
+    and a warning is recorded (if *warnings* is provided) or an error
+    is raised.
 
     When *warnings* is provided, unresolvable references are replaced
     with an empty dict and a warning message is appended instead of
@@ -73,35 +80,54 @@ def _resolve_all_refs(
         spec: The full OpenAPI spec for reference resolution.
         obj: Object to process.
         warnings: If provided, collects warning strings for
-            unresolvable references instead of raising.
+            unresolvable or circular references instead of raising.
+        _seen: Internal set tracking ``$ref`` strings already being
+            resolved in the current chain (for cycle detection).
+            Callers should not pass this parameter.
 
     Returns:
         Object with all references resolved (or placeholders for
-        unresolvable ones when *warnings* is not None).
+        unresolvable/circular ones when *warnings* is not None).
 
     Raises:
         OpenAPIParseError: If a reference cannot be resolved and
             *warnings* is None (strict mode).
     """
+    if _seen is None:
+        _seen = set()
+
     if isinstance(obj, dict):
         if "$ref" in obj:
+            ref = obj["$ref"]
+
+            # Cycle detection
+            if ref in _seen:
+                if warnings is not None:
+                    warnings.append(
+                        f"Circular $ref skipped: {ref}"
+                    )
+                return {}
+
             try:
-                resolved = _resolve_ref(spec, obj["$ref"])
+                resolved = _resolve_ref(spec, ref)
             except OpenAPIParseError:
                 if warnings is not None:
                     warnings.append(
-                        f"Unresolvable $ref: {obj['$ref']}"
+                        f"Unresolvable $ref: {ref}"
                     )
                     return {}
                 raise
-            # Recursively resolve refs in the resolved object
-            return _resolve_all_refs(spec, resolved, warnings)
+            # Recursively resolve refs in the resolved object,
+            # adding this ref to the seen set for cycle detection.
+            return _resolve_all_refs(
+                spec, resolved, warnings, _seen | {ref},
+            )
         return {
-            k: _resolve_all_refs(spec, v, warnings)
+            k: _resolve_all_refs(spec, v, warnings, _seen)
             for k, v in obj.items()
         }
     elif isinstance(obj, list):
-        return [_resolve_all_refs(spec, item, warnings) for item in obj]
+        return [_resolve_all_refs(spec, item, warnings, _seen) for item in obj]
     return obj
 
 
