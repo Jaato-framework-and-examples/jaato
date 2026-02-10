@@ -1153,6 +1153,28 @@ class PluginRegistry:
         for path in paths:
             self.authorize_external_path(path, source_plugin, access=access)
 
+    def deauthorize_external_path(self, path: str, source_plugin: str) -> bool:
+        """Remove authorization for a single external path.
+
+        Only removes the path if it was authorized by the specified plugin.
+        This is the single-path counterpart to clear_authorized_paths().
+
+        Args:
+            path: Absolute path to deauthorize (will be normalized).
+            source_plugin: Name of the plugin that originally authorized it.
+                Only removes if the current authorization matches this plugin.
+
+        Returns:
+            True if the path was found and removed, False otherwise.
+        """
+        normalized = os.path.realpath(os.path.abspath(path))
+        entry = self._authorized_external_paths.get(normalized)
+        if entry and entry[0] == source_plugin:
+            del self._authorized_external_paths[normalized]
+            _trace(f"deauthorize_external_path: {normalized} (from {source_plugin})")
+            return True
+        return False
+
     def is_path_authorized(self, path: str, mode: str = "read") -> bool:
         """Check if a path is authorized for model access.
 

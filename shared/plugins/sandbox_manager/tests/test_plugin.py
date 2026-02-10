@@ -784,3 +784,175 @@ class TestEdgeCases:
 
         assert result["status"] == "denied"
         assert result["path"] == str(workspace / "relative" / "path")
+
+
+class TestProgrammaticAPI:
+    """Tests for the programmatic add/remove API used by other plugins."""
+
+    @pytest.fixture
+    def initialized_plugin(self, tmp_path):
+        """Create fully initialized plugin with mock registry."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+        mock_registry.deauthorize_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        plugin.set_workspace_path(str(workspace))
+
+        return plugin, mock_registry, workspace
+
+    def test_add_path_programmatic_readonly(self, initialized_plugin):
+        """Test adding a readonly path programmatically."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        result = plugin.add_path_programmatic("/docs/reference.md", access="readonly")
+
+        assert result is True
+
+        # Verify persisted in session config
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        allowed = config["allowed_paths"]
+        assert len(allowed) == 1
+        assert allowed[0]["access"] == "readonly"
+        assert "/docs/reference.md" in allowed[0]["path"]
+
+    def test_add_path_programmatic_readwrite(self, initialized_plugin):
+        """Test adding a readwrite path programmatically."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        result = plugin.add_path_programmatic("/tmp/scratch", access="readwrite")
+
+        assert result is True
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        assert config["allowed_paths"][0]["access"] == "readwrite"
+
+    def test_add_path_programmatic_already_exists(self, initialized_plugin):
+        """Test that adding the same path twice is a noop."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+        result = plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+
+        assert result is True
+
+        # Should still only have one entry
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        assert len(config["allowed_paths"]) == 1
+
+    def test_add_path_programmatic_updates_access(self, initialized_plugin):
+        """Test that adding with different access mode updates the entry."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+        result = plugin.add_path_programmatic("/docs/ref.md", access="readwrite")
+
+        assert result is True
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        assert config["allowed_paths"][0]["access"] == "readwrite"
+
+    def test_add_path_programmatic_invalid_access(self, initialized_plugin):
+        """Test that invalid access mode returns False."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        result = plugin.add_path_programmatic("/docs/ref.md", access="invalid")
+
+        assert result is False
+
+    def test_add_path_programmatic_syncs_to_registry(self, initialized_plugin):
+        """Test that adding a path syncs to the registry."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+
+        # The _load_all_configs -> _sync_to_registry flow should call authorize_external_path
+        mock_registry.authorize_external_path.assert_called()
+        # Find the call with our path
+        calls = [c for c in mock_registry.authorize_external_path.call_args_list
+                 if "/docs/ref.md" in str(c)]
+        assert len(calls) > 0
+
+    def test_remove_path_programmatic(self, initialized_plugin):
+        """Test removing a previously added path."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+        result = plugin.remove_path_programmatic("/docs/ref.md")
+
+        assert result is True
+
+        # Verify removed from session config
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        assert len(config.get("allowed_paths", [])) == 0
+
+    def test_remove_path_programmatic_not_found(self, initialized_plugin):
+        """Test removing a path that was never added returns False."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        result = plugin.remove_path_programmatic("/nonexistent/path")
+
+        assert result is False
+
+    def test_add_then_remove_symmetric(self, initialized_plugin):
+        """Test that add then remove is symmetric - no residual state."""
+        plugin, mock_registry, workspace = initialized_plugin
+
+        plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+        plugin.remove_path_programmatic("/docs/ref.md")
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+
+        # Should be empty - not in allowed or denied
+        assert len(config.get("allowed_paths", [])) == 0
+        assert len(config.get("denied_paths", [])) == 0
+
+    def test_add_path_programmatic_fallback_without_workspace(self):
+        """Test fallback to direct registry auth when no workspace."""
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.authorize_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test"})
+        # Don't set workspace
+
+        result = plugin.add_path_programmatic("/docs/ref.md", access="readonly")
+
+        assert result is True
+        mock_registry.authorize_external_path.assert_called_once_with(
+            "/docs/ref.md", "sandbox_manager", access="readonly"
+        )
+
+    def test_remove_path_programmatic_fallback_without_workspace(self):
+        """Test fallback to direct registry deauth when no workspace."""
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.deauthorize_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test"})
+        # Don't set workspace
+
+        result = plugin.remove_path_programmatic("/docs/ref.md")
+
+        assert result is True
+        mock_registry.deauthorize_external_path.assert_called_once_with(
+            "/docs/ref.md", "sandbox_manager"
+        )
