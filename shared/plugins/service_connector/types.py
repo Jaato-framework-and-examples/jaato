@@ -327,6 +327,10 @@ class ServiceConfig:
             SSL certificate despite verification failures (e.g., weak key,
             self-signed). When True, SSL verification is skipped for all
             requests to this service. Defaults to False (verify SSL).
+        proxy_bypass: Whether the user has explicitly opted to bypass the
+            configured proxy for this service (e.g., because the service is
+            on a local network or the proxy blocks it). When True, requests
+            to this service connect directly. Defaults to False (use proxy).
     """
     name: str
     base_url: str
@@ -337,6 +341,7 @@ class ServiceConfig:
     default_headers: Dict[str, str] = field(default_factory=dict)
     timeout: int = 30000
     ssl_trusted: bool = False
+    proxy_bypass: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServiceConfig":
@@ -355,6 +360,7 @@ class ServiceConfig:
             default_headers=data.get("default_headers", {}),
             timeout=data.get("timeout", 30000),
             ssl_trusted=data.get("ssl_trusted", False),
+            proxy_bypass=data.get("proxy_bypass", False),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -378,6 +384,8 @@ class ServiceConfig:
             result["timeout"] = self.timeout
         if self.ssl_trusted:
             result["ssl_trusted"] = True
+        if self.proxy_bypass:
+            result["proxy_bypass"] = True
 
         return result
 
