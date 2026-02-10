@@ -50,6 +50,7 @@ from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
 from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
+from shared.ui_utils import format_tool_args_summary
 from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
@@ -980,9 +981,7 @@ class OutputBuffer:
         intent_arg_names = {"message", "summary", "intent", "rationale"}
         display_args = {k: v for k, v in (tool_args or {}).items() if k not in intent_arg_names}
         args_full = str(display_args) if display_args else ""
-        args_str = args_full
-        if len(args_str) > 60:
-            args_str = args_str[:57] + "..."
+        args_str = format_tool_args_summary(display_args) if display_args else ""
 
         # Don't add duplicates - check by call_id if provided, otherwise by name
         for tool in self._active_tools:

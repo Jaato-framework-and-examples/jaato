@@ -237,19 +237,85 @@ def format_permission_options(
     return " ".join(parts)
 
 
-def format_tool_args_summary(tool_args: Dict[str, Any], max_length: int = 60) -> str:
-    """Format tool arguments as a truncated summary string.
+# Argument names that typically contain file paths.
+_PATH_ARG_NAMES = frozenset({
+    "file_path", "path", "filepath", "file", "directory", "dir",
+    "target", "source", "dest", "destination", "folder", "filename",
+    "target_path", "source_path", "dest_path", "working_directory",
+    "cwd", "base_path", "root_path", "old_file_path", "new_file_path",
+    "old_path", "new_path",
+})
+
+
+def _looks_like_path(value: str) -> bool:
+    """Check if a string value looks like a file system path.
+
+    Returns True for absolute Unix paths (with at least one directory
+    separator beyond the root), relative paths starting with ``./`` or
+    ``../``, home-directory paths (``~/``), and Windows absolute paths.
+    """
+    if not value or len(value) < 2:
+        return False
+    # Absolute Unix path with at least one nested separator
+    if value.startswith("/") and "/" in value[1:]:
+        return True
+    # Relative paths
+    if value.startswith("./") or value.startswith("../"):
+        return True
+    # Home directory
+    if value.startswith("~/"):
+        return True
+    # Windows absolute path (C:\... or C:/...)
+    if (
+        len(value) >= 3
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in ("\\", "/")
+    ):
+        return True
+    return False
+
+
+def format_tool_args_summary(
+    tool_args: Dict[str, Any],
+    max_length: int = 60,
+    *,
+    max_path_width: int = 40,
+) -> str:
+    """Format tool arguments as a summary string with path ellipsization.
+
+    Path-like argument values are ellipsized using middle-ellipsis to
+    preserve context (project root + filename) while fitting within the
+    available width.  A value is treated as a path if its key name is a
+    known path argument name *or* if the value itself looks like an
+    absolute/relative file path.
 
     Args:
         tool_args: Dictionary of tool arguments.
-        max_length: Maximum length before truncation.
+        max_length: Maximum total length before final truncation.
+        max_path_width: Maximum width for individual path values
+            before ellipsization is applied.
 
     Returns:
-        Truncated string representation of args.
+        Formatted and (possibly) truncated string representation of args
+        with path values ellipsized.
     """
-    args_str = str(tool_args)
+    if not tool_args:
+        return ""
+
+    # Pre-process: ellipsize path values so the dict repr is already compact
+    processed: Dict[str, Any] = {}
+    for key, value in tool_args.items():
+        if isinstance(value, str) and (
+            key.lower() in _PATH_ARG_NAMES or _looks_like_path(value)
+        ):
+            processed[key] = ellipsize_path(value, max_path_width)
+        else:
+            processed[key] = value
+
+    args_str = str(processed)
     if len(args_str) > max_length:
-        return args_str[:max_length - 3] + "..."
+        return args_str[: max_length - 3] + "..."
     return args_str
 
 
