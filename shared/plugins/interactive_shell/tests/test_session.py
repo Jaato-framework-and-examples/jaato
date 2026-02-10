@@ -1,17 +1,23 @@
 """Tests for ShellSession — the pexpect/wexpect wrapper with idle detection."""
 
+import os
 import sys
 import time
 
 import pytest
 
-from shared.plugins.interactive_shell.session import ShellSession
+from shared.plugins.interactive_shell.session import ShellSession, IS_MSYS2
 
 # Helpers for cross-platform test commands
 IS_WINDOWS = sys.platform == "win32"
 
-# Use platform-appropriate shell for tests
-if IS_WINDOWS:
+# Use platform-appropriate shell for tests.
+# On MSYS2, bash is the natural shell (cmd.exe would work but isn't idiomatic).
+if IS_MSYS2:
+    SHELL_CMD = "bash --norc --noprofile"
+    ECHO_CMD = "echo hello_world"
+    EXIT_CMD = "exit"
+elif IS_WINDOWS:
     SHELL_CMD = "cmd.exe /Q"     # /Q disables echo
     ECHO_CMD = "echo hello_world"
     EXIT_CMD = "exit"
