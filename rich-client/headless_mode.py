@@ -158,7 +158,7 @@ async def run_headless_mode(
 
     async def handle_events():
         """Handle events from the server."""
-        nonlocal model_running, should_exit, turn_completed, session_id_printed, main_agent_activated, active_subagents
+        nonlocal model_running, should_exit, turn_completed, turn_count, session_id_printed, main_agent_activated, active_subagents
 
         async for event in client.events():
             if should_exit:
