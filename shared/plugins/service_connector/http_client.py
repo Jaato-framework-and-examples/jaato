@@ -276,6 +276,7 @@ class ServiceHttpClient:
         truncate_at: Optional[int] = None,
         request_validation: Optional[ValidationResult] = None,
         response_validator: Optional[Any] = None,  # Callable for validation
+        verify_ssl: bool = True,
     ) -> HttpResponse:
         """Execute an HTTP request.
 
@@ -293,6 +294,9 @@ class ServiceHttpClient:
             truncate_at: Response body truncation limit.
             request_validation: Pre-computed request validation result.
             response_validator: Callable to validate response body.
+            verify_ssl: Whether to verify SSL certificates. Defaults to True.
+                Set to False only for explicitly trusted services with
+                certificate issues (e.g., weak key, self-signed).
 
         Returns:
             HttpResponse with status, headers, body, etc.
@@ -375,6 +379,7 @@ class ServiceHttpClient:
                     headers=request_headers,
                     data=body_str,
                     timeout=timeout_sec,
+                    verify=verify_ssl,
                     **proxy_kwargs
                 )
                 elapsed_ms = int((time.time() - start_time) * 1000)
@@ -403,7 +408,9 @@ class ServiceHttpClient:
             proxy_kwargs = get_httpx_kwargs(full_url)
 
             try:
-                with httpx.Client(timeout=timeout_sec, **proxy_kwargs) as client:
+                with httpx.Client(
+                    timeout=timeout_sec, verify=verify_ssl, **proxy_kwargs
+                ) as client:
                     response = client.request(
                         method=preview.method,
                         url=full_url,
