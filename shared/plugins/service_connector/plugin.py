@@ -186,6 +186,15 @@ class ServiceConnectorPlugin:
                                 "the service. When set, the service is marked as trusted "
                                 "so future requests skip SSL verification automatically."
                             )
+                        },
+                        "no_proxy": {
+                            "type": "boolean",
+                            "description": (
+                                "Bypass the configured HTTP proxy for this request. "
+                                "Only use after the user confirms the service should "
+                                "be reached directly. When set, the service is marked "
+                                "so future requests bypass the proxy automatically."
+                            )
                         }
                     },
                     "required": ["source", "alias"]
@@ -308,6 +317,15 @@ class ServiceConnectorPlugin:
                                 "Only use after the user explicitly confirms they trust "
                                 "the service. When used with a named service, marks "
                                 "the service as trusted for future requests."
+                            )
+                        },
+                        "no_proxy": {
+                            "type": "boolean",
+                            "description": (
+                                "Bypass the configured HTTP proxy for this request. "
+                                "Only use after the user confirms the service should "
+                                "be reached directly. When used with a named service, "
+                                "marks it so future requests bypass the proxy automatically."
                             )
                         }
                     },
@@ -543,6 +561,12 @@ class ServiceConnectorPlugin:
 - For `call_service` with a named service: the service will be marked as trusted permanently
 - Once trusted, all future requests to that service skip SSL verification automatically
 - Never set `insecure=true` without explicit user confirmation
+
+**Proxy issues:**
+- If a request fails with `proxy_error: true`, ask the user if the service should be reached directly
+- If the user confirms, retry the same call with `no_proxy=true`
+- For named services, the proxy bypass is persisted so future requests connect directly
+- Never set `no_proxy=true` without explicit user confirmation
 
 **Tips:**
 - Use `preview_request` to debug auth issues (shows curl command)
@@ -789,6 +813,10 @@ class ServiceConnectorPlugin:
         if config.ssl_trusted:
             lines.append((f"  SSL verify:  DISABLED (trusted by user)", "bold"))
 
+        # Proxy bypass
+        if config.proxy_bypass:
+            lines.append((f"  Proxy:       BYPASSED (direct connection)", "bold"))
+
         # Auth summary
         auth = config.auth
         lines.append((f"  Auth type:   {auth.type.value}", ""))
@@ -998,6 +1026,28 @@ class ServiceConnectorPlugin:
         )
         return any(indicator in text for indicator in ssl_indicators)
 
+    @staticmethod
+    def _is_proxy_error(exc: Exception) -> bool:
+        """Check whether an exception is caused by an HTTP proxy failure.
+
+        Detects common proxy errors from httpx, requests, and the standard
+        library so the caller can offer the user a ``no_proxy`` retry option.
+        """
+        exc_type_name = type(exc).__name__
+        if exc_type_name in ("ProxyError", "ConnectError"):
+            return True
+        text = str(exc)
+        proxy_indicators = (
+            "ProxyError",
+            "407 Proxy Authentication Required",
+            "Proxy Authentication Required",
+            "Tunnel connection failed",
+            "Cannot connect to proxy",
+            "proxy",
+        )
+        text_lower = text.lower()
+        return any(indicator.lower() in text_lower for indicator in proxy_indicators)
+
     def _execute_discover_service(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute discover_service tool.
 
@@ -1006,16 +1056,27 @@ class ServiceConnectorPlugin:
         persisted with ``ssl_trusted=True`` so that subsequent
         ``call_service`` invocations automatically skip verification too.
 
+        When ``no_proxy=true`` is passed, the configured HTTP proxy is
+        bypassed for the spec fetch. The discovered service is then
+        persisted with ``proxy_bypass=True`` so that subsequent
+        ``call_service`` invocations automatically bypass the proxy too.
+
         If a normal (verified) fetch fails due to an SSL error, the tool
         returns a structured error containing ``ssl_error: true`` and a
         ``hint`` suggesting the agent ask the user whether the service is
         trusted and, if so, retry with ``insecure=true``.
+
+        If the fetch fails due to a proxy error, the tool returns a
+        structured error containing ``proxy_error: true`` and a ``hint``
+        suggesting the agent ask the user whether the service should be
+        reached directly and, if so, retry with ``no_proxy=true``.
         """
         source = args.get("source", "").strip()
         alias = args.get("alias", "").strip()
         insecure = bool(args.get("insecure", False))
+        no_proxy = bool(args.get("no_proxy", False))
 
-        self._trace(f"discover_service: source={source}, alias={alias}, insecure={insecure}")
+        self._trace(f"discover_service: source={source}, alias={alias}, insecure={insecure}, no_proxy={no_proxy}")
 
         if not source:
             return {"error": "source is required"}
@@ -1027,7 +1088,9 @@ class ServiceConnectorPlugin:
         try:
             # Load spec
             if source.startswith(("http://", "https://")):
-                spec = fetch_spec_from_url_sync(source, verify_ssl=verify_ssl)
+                spec = fetch_spec_from_url_sync(
+                    source, verify_ssl=verify_ssl, use_proxy=not no_proxy,
+                )
             else:
                 spec = load_spec_from_file(source)
 
@@ -1038,6 +1101,11 @@ class ServiceConnectorPlugin:
             # SSL-trusted so all future requests skip verification.
             if insecure:
                 discovered.config.ssl_trusted = True
+
+            # When the user opted to bypass the proxy, persist the flag
+            # so all future requests to this service connect directly.
+            if no_proxy:
+                discovered.config.proxy_bypass = True
 
             # Cache in memory
             self._discovered_services[alias] = discovered
@@ -1061,6 +1129,8 @@ class ServiceConnectorPlugin:
             }
             if insecure:
                 result["ssl_trusted"] = True
+            if no_proxy:
+                result["proxy_bypass"] = True
             return result
 
         except OpenAPIParseError as e:
@@ -1075,6 +1145,16 @@ class ServiceConnectorPlugin:
                         "will be marked as trusted for all future requests."
                     ),
                 }
+            if self._is_proxy_error(e):
+                return {
+                    "error": f"Proxy error: {e}",
+                    "proxy_error": True,
+                    "hint": (
+                        "The request failed due to a proxy issue. Ask the user "
+                        "whether this service should be reached directly (bypassing "
+                        "the proxy). If they confirm, retry with no_proxy=true."
+                    ),
+                }
             return {"error": f"Failed to parse spec: {e}"}
         except Exception as e:
             if self._is_ssl_error(e):
@@ -1086,6 +1166,16 @@ class ServiceConnectorPlugin:
                         "Ask the user whether they trust this service. If they confirm, "
                         "retry with insecure=true to skip SSL verification. The service "
                         "will be marked as trusted for all future requests."
+                    ),
+                }
+            if self._is_proxy_error(e):
+                return {
+                    "error": f"Proxy error: {e}",
+                    "proxy_error": True,
+                    "hint": (
+                        "The request failed due to a proxy issue. Ask the user "
+                        "whether this service should be reached directly (bypassing "
+                        "the proxy). If they confirm, retry with no_proxy=true."
                     ),
                 }
             return {"error": f"Unexpected error: {e}"}
@@ -1215,13 +1305,26 @@ class ServiceConnectorPlugin:
            trust set by a previous ``discover_service`` or ``call_service``
            with ``insecure=true``).
 
+        Proxy is bypassed when:
+        1. The caller passes ``no_proxy=true`` (one-shot override), or
+        2. The resolved ``ServiceConfig`` has ``proxy_bypass=True`` (persistent
+           flag set by a previous ``discover_service`` or ``call_service``
+           with ``no_proxy=true``).
+
         When ``insecure=true`` is used with a named service, that service is
         permanently marked as trusted so subsequent calls skip verification
         automatically.
 
+        When ``no_proxy=true`` is used with a named service, that service is
+        permanently marked to bypass the proxy so subsequent calls connect
+        directly.
+
         If an SSL error occurs during a normal (verified) request, the tool
         returns ``ssl_error: true`` with a hint for the agent to ask the user
         and retry with ``insecure=true``.
+
+        If a proxy error occurs, the tool returns ``proxy_error: true`` with
+        a hint for the agent to ask the user and retry with ``no_proxy=true``.
         """
         service_name = args.get("service", "").strip()
         url = args.get("url", "").strip()
@@ -1234,10 +1337,11 @@ class ServiceConnectorPlugin:
         timeout = args.get("timeout")
         truncate_at = args.get("truncate_at")
         insecure = bool(args.get("insecure", False))
+        no_proxy = bool(args.get("no_proxy", False))
 
         self._trace(
             f"call_service: service={service_name}, url={url}, "
-            f"{method} {path}, insecure={insecure}"
+            f"{method} {path}, insecure={insecure}, no_proxy={no_proxy}"
         )
 
         if not method:
@@ -1288,6 +1392,22 @@ class ServiceConnectorPlugin:
             if service_name and service_name in self._discovered_services:
                 self._discovered_services[service_name].config.ssl_trusted = True
 
+        # Determine proxy usage: bypass if no_proxy or service is flagged
+        use_proxy = True
+        if no_proxy:
+            use_proxy = False
+        elif service_config and service_config.proxy_bypass:
+            use_proxy = False
+
+        # If caller explicitly passed no_proxy and we have a named service,
+        # persist the bypass flag for future calls.
+        if no_proxy and service_config and not service_config.proxy_bypass:
+            service_config.proxy_bypass = True
+            if self._schema_store:
+                self._schema_store.save_service_config(service_config)
+            if service_name and service_name in self._discovered_services:
+                self._discovered_services[service_name].config.proxy_bypass = True
+
         # Validate request body
         request_validation = None
         if endpoint_schema and body and self._validator:
@@ -1319,6 +1439,7 @@ class ServiceConnectorPlugin:
                 request_validation=request_validation,
                 response_validator=response_validator,
                 verify_ssl=verify_ssl,
+                use_proxy=use_proxy,
             )
             return response.to_dict()
 
@@ -1335,6 +1456,16 @@ class ServiceConnectorPlugin:
                         "retry with insecure=true to skip SSL verification."
                     ),
                 }
+            if self._is_proxy_error(e):
+                return {
+                    "error": f"Proxy error: {e}",
+                    "proxy_error": True,
+                    "hint": (
+                        "The request failed due to a proxy issue. Ask the user "
+                        "whether this service should be reached directly (bypassing "
+                        "the proxy). If they confirm, retry with no_proxy=true."
+                    ),
+                }
             return {"error": str(e)}
         except Exception as e:
             if self._is_ssl_error(e):
@@ -1345,6 +1476,16 @@ class ServiceConnectorPlugin:
                         "The SSL certificate for this service could not be verified. "
                         "Ask the user whether they trust this service. If they confirm, "
                         "retry with insecure=true to skip SSL verification."
+                    ),
+                }
+            if self._is_proxy_error(e):
+                return {
+                    "error": f"Proxy error: {e}",
+                    "proxy_error": True,
+                    "hint": (
+                        "The request failed due to a proxy issue. Ask the user "
+                        "whether this service should be reached directly (bypassing "
+                        "the proxy). If they confirm, retry with no_proxy=true."
                     ),
                 }
             return {"error": f"Request failed: {e}"}

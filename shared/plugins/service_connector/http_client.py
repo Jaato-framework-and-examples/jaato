@@ -277,6 +277,7 @@ class ServiceHttpClient:
         request_validation: Optional[ValidationResult] = None,
         response_validator: Optional[Any] = None,  # Callable for validation
         verify_ssl: bool = True,
+        use_proxy: bool = True,
     ) -> HttpResponse:
         """Execute an HTTP request.
 
@@ -297,6 +298,9 @@ class ServiceHttpClient:
             verify_ssl: Whether to verify SSL certificates. Defaults to True.
                 Set to False only for explicitly trusted services with
                 certificate issues (e.g., weak key, self-signed).
+            use_proxy: Whether to use the configured proxy. Defaults to True.
+                Set to False for services that should connect directly,
+                bypassing any configured HTTP/HTTPS proxy.
 
         Returns:
             HttpResponse with status, headers, body, etc.
@@ -371,7 +375,7 @@ class ServiceHttpClient:
                 import requests
                 from shared.http import get_requests_kwargs
 
-                proxy_kwargs = get_requests_kwargs(full_url)
+                proxy_kwargs = get_requests_kwargs(full_url) if use_proxy else {"proxies": {}}
 
                 response = requests.request(
                     method=preview.method,
@@ -405,7 +409,7 @@ class ServiceHttpClient:
         else:
             from shared.http import get_httpx_kwargs
 
-            proxy_kwargs = get_httpx_kwargs(full_url)
+            proxy_kwargs = get_httpx_kwargs(full_url) if use_proxy else {"proxy": None}
 
             try:
                 with httpx.Client(

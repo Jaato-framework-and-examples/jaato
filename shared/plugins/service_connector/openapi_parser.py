@@ -662,7 +662,8 @@ def load_spec_from_file(file_path: str) -> Dict[str, Any]:
 
 
 async def fetch_spec_from_url(
-    url: str, timeout: int = 30, verify_ssl: bool = True
+    url: str, timeout: int = 30, verify_ssl: bool = True,
+    use_proxy: bool = True,
 ) -> Dict[str, Any]:
     """Fetch an OpenAPI spec from a URL.
 
@@ -672,6 +673,8 @@ async def fetch_spec_from_url(
         verify_ssl: Whether to verify SSL certificates. Defaults to True.
             Set to False only for explicitly trusted services with
             certificate issues (e.g., weak key, self-signed).
+        use_proxy: Whether to use the configured proxy. Defaults to True.
+            Set to False for services that should connect directly.
 
     Returns:
         Parsed specification dict.
@@ -688,9 +691,10 @@ async def fetch_spec_from_url(
         )
 
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout, verify=verify_ssl
-        ) as client:
+        client_kwargs: Dict[str, Any] = {"timeout": timeout, "verify": verify_ssl}
+        if not use_proxy:
+            client_kwargs["proxy"] = None
+        async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.get(url)
             response.raise_for_status()
             content = response.text
@@ -717,7 +721,8 @@ async def fetch_spec_from_url(
 
 
 def fetch_spec_from_url_sync(
-    url: str, timeout: int = 30, verify_ssl: bool = True
+    url: str, timeout: int = 30, verify_ssl: bool = True,
+    use_proxy: bool = True,
 ) -> Dict[str, Any]:
     """Fetch an OpenAPI spec from a URL (synchronous version).
 
@@ -727,6 +732,8 @@ def fetch_spec_from_url_sync(
         verify_ssl: Whether to verify SSL certificates. Defaults to True.
             Set to False only for explicitly trusted services with
             certificate issues (e.g., weak key, self-signed).
+        use_proxy: Whether to use the configured proxy. Defaults to True.
+            Set to False for services that should connect directly.
 
     Returns:
         Parsed specification dict.
@@ -741,7 +748,7 @@ def fetch_spec_from_url_sync(
             import requests
             from shared.http import get_requests_kwargs
 
-            proxy_kwargs = get_requests_kwargs(url)
+            proxy_kwargs = get_requests_kwargs(url) if use_proxy else {"proxies": {}}
             response = requests.get(
                 url, timeout=timeout, verify=verify_ssl, **proxy_kwargs
             )
@@ -757,7 +764,7 @@ def fetch_spec_from_url_sync(
     else:
         from shared.http import get_httpx_kwargs
 
-        proxy_kwargs = get_httpx_kwargs(url)
+        proxy_kwargs = get_httpx_kwargs(url) if use_proxy else {"proxy": None}
 
         try:
             with httpx.Client(
