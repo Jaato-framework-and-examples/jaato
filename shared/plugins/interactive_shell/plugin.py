@@ -37,8 +37,20 @@ DEFAULT_MAX_IDLE = 300  # 5 minutes
 class InteractiveShellPlugin:
     """Plugin that provides interactive shell session management.
 
-    Allows the model to spawn long-lived PTY sessions and drive any
+    Allows the model to spawn long-lived sessions and drive any
     interactive command by reading output and sending input.
+
+    Platform backends (selected at import time by ``session.py``):
+
+    - **pexpect** (Unix / macOS, or MSYS Python with ``pty``): full PTY.
+    - **popen_spawn** (MSYS2 with MINGW Python): ``subprocess.Popen`` pipes.
+      No real PTY — child ``isatty()`` is ``False``, terminal dimensions
+      are ignored, password-prompt echo control is unavailable — but
+      timeout/idle detection works reliably.
+    - **wexpect** (native Windows): Windows console APIs + named pipes.
+
+    The active backend is exposed as ``session._BACKEND`` and logged in
+    the plugin's trace output at ``initialize()`` and ``spawn()`` time.
 
     Configuration:
         max_sessions: Maximum concurrent sessions (default: 8).
@@ -412,7 +424,14 @@ IMPORTANT NOTES:
     # --- Executors ---
 
     def _exec_spawn(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute shell_spawn: start a new interactive session."""
+        """Execute shell_spawn: start a new interactive session.
+
+        Creates a ``ShellSession`` using the platform-appropriate backend
+        (see ``session.py`` module docstring).  On MSYS2 with the
+        ``popen_spawn`` backend the child process has no PTY — ``isatty()``
+        returns ``False`` and terminal dimensions are not forwarded.  Most
+        REPLs and debuggers still work; password prompts may not hide input.
+        """
         command = args.get('command')
         if not command:
             return {'error': 'shell_spawn: command is required'}

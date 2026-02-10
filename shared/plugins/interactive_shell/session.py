@@ -222,6 +222,23 @@ class ShellSession:
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
     ):
+        """Spawn an interactive process and prepare idle-based I/O.
+
+        Args:
+            command: Shell command to run (e.g. ``"python3"``, ``"bash --norc"``).
+            session_id: Unique identifier for this session.
+            rows: PTY height.  **Ignored by the ``popen_spawn`` backend** (MSYS2)
+                because ``PopenSpawn`` uses plain pipes with no terminal.
+            cols: PTY width.  Same caveat as *rows*.
+            idle_timeout: Seconds of silence before output is considered settled.
+            max_wait: Hard ceiling on any single read operation.
+            max_lifetime: Session lifetime ceiling (seconds).
+            env: Extra environment variables merged into ``os.environ``.
+            cwd: Working directory for the spawned process.
+
+        Raises:
+            ImportError: If no backend is available (``_spawn is None``).
+        """
         if _spawn is None:
             raise ImportError(_BACKEND_ERROR or "No PTY backend available")
 
