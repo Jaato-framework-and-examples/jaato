@@ -598,6 +598,14 @@ class PTDisplay:
         self._paste_threshold_lines: int = 10  # Lines threshold for placeholder
         self._paste_threshold_chars: int = 1000  # Character threshold for placeholder
 
+        # Fallback paste detection for terminals without bracketed paste support
+        # (e.g., MSYS2 on Windows Terminal where ConPTY corrupts escape sequences).
+        # Detects rapid multi-line/large input bursts and collapses them into
+        # placeholders, same as the BracketedPaste handler would.
+        self._paste_fallback_snapshot_len: int = 0  # Buffer length before current burst
+        self._paste_fallback_timer: object = None  # Scheduled call_later handle
+        self._paste_fallback_collapsing: bool = False  # Guard against recursive triggers
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -650,6 +658,10 @@ class PTDisplay:
         In permission mode, this also validates input and reverts invalid characters.
         Also triggers completion for @file and %prompt references on deletion,
         since prompt_toolkit's complete_while_typing only triggers on insertion.
+
+        In normal mode, also runs the fallback paste detection heuristic so that
+        terminals without bracketed paste support (MSYS2 on Windows Terminal)
+        still get large pastes collapsed into placeholders.
         """
         # In permission mode, validate input and revert if invalid
         if self._waiting_for_channel_input and self._valid_input_prefixes:
@@ -669,6 +681,9 @@ class PTDisplay:
             # prompt_toolkit's complete_while_typing only triggers on insertion,
             # so we manually trigger when user is in a completion context
             self._maybe_retrigger_completion()
+
+            # Fallback paste detection for terminals without bracketed paste
+            self._schedule_paste_fallback_check()
 
         if self._app and self._app.is_running:
             self._app.invalidate()
@@ -1171,6 +1186,87 @@ class PTDisplay:
         """
         line_count = len(data.splitlines()) if data else 0
         return line_count > self._paste_threshold_lines or len(data) > self._paste_threshold_chars
+
+    def _schedule_paste_fallback_check(self) -> None:
+        """Schedule a delayed check for uncollapsed paste content.
+
+        This is a fallback for terminals that don't support bracketed paste mode
+        (e.g., MSYS2 on Windows Terminal where ConPTY corrupts the escape
+        sequences). It detects rapid bursts of input that exceed paste thresholds
+        and collapses them into placeholders.
+
+        On platforms where bracketed paste works, this is a no-op: the
+        BracketedPaste handler inserts a short placeholder, and the fallback
+        timer sees only that short text — well below the thresholds.
+        """
+        # Don't trigger during our own buffer replacement
+        if self._paste_fallback_collapsing:
+            return
+
+        # Don't run in permission or search mode
+        if self._waiting_for_channel_input or self._search_mode:
+            return
+
+        app = self._app
+        if not app or not app.loop:
+            return
+
+        if self._paste_fallback_timer is None:
+            # First change in a new burst — snapshot the buffer length BEFORE
+            # this character was inserted (on_text_changed fires after the
+            # change, so subtract 1 for the character that just arrived).
+            self._paste_fallback_snapshot_len = max(
+                0, len(self._input_buffer.text) - 1
+            )
+
+        # Cancel the previous timer and reschedule.  The 150 ms idle window
+        # means: "if no more characters arrive for 150 ms, check whether
+        # what arrived so far looks like a paste."
+        if self._paste_fallback_timer is not None:
+            self._paste_fallback_timer.cancel()
+
+        self._paste_fallback_timer = app.loop.call_later(
+            0.15, self._collapse_if_paste_fallback
+        )
+
+    def _collapse_if_paste_fallback(self) -> None:
+        """Check whether recent rapid input exceeds paste thresholds and collapse.
+
+        Called by the event-loop timer scheduled in
+        ``_schedule_paste_fallback_check``.  Only the *newly added* portion of
+        the buffer (since the burst started) is evaluated, so pre-existing text
+        that the user typed before pasting is preserved.
+        """
+        self._paste_fallback_timer = None
+
+        text = self._input_buffer.text
+        old_len = self._paste_fallback_snapshot_len
+        self._paste_fallback_snapshot_len = len(text)
+
+        # Nothing new, or buffer shrank (e.g., user deleted text)
+        if len(text) <= old_len:
+            return
+
+        new_content = text[old_len:]
+
+        if not self._is_large_paste(new_content):
+            return
+
+        # The newly arrived content exceeds paste thresholds — collapse it.
+        prefix = text[:old_len]
+        line_count = len(new_content.splitlines()) if new_content else 0
+        paste_id = self._register_paste(new_content)
+        placeholder = f"[paste #{paste_id}: +{line_count} lines]"
+        new_text = prefix + placeholder
+
+        # Guard: setting buffer.text triggers on_text_changed again
+        self._paste_fallback_collapsing = True
+        try:
+            self._input_buffer.text = new_text
+            self._input_buffer.cursor_position = len(new_text)
+            self._paste_fallback_snapshot_len = len(new_text)
+        finally:
+            self._paste_fallback_collapsing = False
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
