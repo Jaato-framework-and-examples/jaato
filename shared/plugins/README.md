@@ -664,6 +664,102 @@ class BackgroundPlugin:
             pass
 ```
 
+### Plugin with Session Persistence
+
+Plugins that maintain in-memory state across turns can implement two optional methods to have that state automatically persisted and restored when a session is saved/loaded (e.g., across IPC disconnects, server restarts):
+
+```python
+from typing import Any, Dict
+
+class StatefulPlugin:
+    def __init__(self):
+        self._cache: Dict[str, Any] = {}
+        self._turn_index: int = 0
+
+    @property
+    def name(self) -> str:
+        return "stateful"
+
+    def get_persistence_state(self) -> Dict[str, Any]:
+        """Return session-level state for persistence.
+
+        Called by SessionManager when saving a session. Must return a
+        JSON-serializable dict. Return empty dict if there is nothing
+        to persist (the framework skips empty dicts).
+
+        Do NOT include:
+        - Callbacks or function references
+        - File handles, sockets, or connections
+        - Thread-local data
+        - Large binary blobs (use file-based storage instead)
+        """
+        if not self._cache:
+            return {}
+        return {
+            "cache_keys": list(self._cache.keys()),
+            "turn_index": self._turn_index,
+            "version": 1,  # For future migrations
+        }
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Restore session-level state from persistence.
+
+        Called by SessionManager when loading a session. The state dict
+        is exactly what was returned by get_persistence_state().
+
+        Plugins should:
+        - Rebuild internal data structures
+        - Re-register any dynamic hooks/callbacks that were lost
+        - Handle missing keys gracefully (forward compatibility)
+        """
+        self._turn_index = state.get("turn_index", 0)
+        for key in state.get("cache_keys", []):
+            self._cache[key] = self._load_from_disk(key)
+
+    # ... rest of implementation
+```
+
+#### How It Works
+
+The `SessionManager` runs a generic persistence loop during session save/load:
+
+1. **Save**: Iterates all exposed plugins, calls `get_persistence_state()` on each that implements it, and stores results in `metadata['plugin_states'][plugin_name]` inside the session JSON.
+
+2. **Load**: Iterates `metadata['plugin_states']` and calls `restore_persistence_state(state)` on each matching plugin found in the registry.
+
+Exceptions in individual plugins are caught and logged — a broken plugin does not prevent other plugins from being saved/restored.
+
+#### Design Constraints
+
+- **State must be JSON-serializable.** Use `to_dict()` / `from_dict()` patterns for complex objects.
+- **Keep state lightweight.** The dict is stored inline in `session.json`. For large data (conversation history, file contents), persist to your own files and store only references (IDs, paths) in the persistence state.
+- **Empty dict = nothing to save.** Return `{}` when the plugin has no meaningful state. The framework skips it to avoid bloating the session file.
+- **Include a `version` key.** This lets you migrate state format in future releases without breaking existing session files.
+
+#### Relationship to Dedicated Persistence
+
+Two plugins have **dedicated persistence** that goes beyond the generic mechanism:
+
+| Plugin | Why Dedicated | What's Different |
+|--------|---------------|------------------|
+| `subagent` | Per-agent state files can be megabytes (full conversation history). `restore_persistence_state()` needs both the registry index AND per-agent files AND the runtime instance (3-arg signature). | SessionManager orchestrates two-level save: lightweight registry in metadata + per-agent `.json` files in `sessions/<id>/subagents/`. |
+| `todo` | Plan files are managed by the storage backend independently. Restore must re-register BLOCKED step dependencies with the event bus (cross-agent coordination). | SessionManager saves agent-plan mapping to `sessions/<id>/plans/_state.json`. Plan content is persisted separately by the `FileStorage` backend. |
+
+These plugins are **excluded from the generic loop** (`_DEDICATED_PLUGINS = {'subagent', 'todo'}`) because:
+
+1. **Subagent** cannot use the generic mechanism — its `restore_persistence_state()` takes `(registry_data, agent_states, runtime)`, not just `(state: Dict)`. It needs SessionManager to load per-agent files from disk and provide the runtime for session recreation.
+
+2. **Todo** could technically use the generic mechanism (its state dict is small), but keeping it dedicated preserves the semantic clarity of the `plans/` directory structure and ensures the critical event-bus dependency re-registration step remains visible and explicit.
+
+**When to choose which approach:**
+
+| Use Generic Mechanism | Use Dedicated Persistence |
+|----------------------|--------------------------|
+| State is a small, flat dict (< ~10KB) | State involves multiple files or large data |
+| `restore_persistence_state(state: Dict)` is sufficient | Restore needs extra arguments (runtime, file paths) |
+| No coordination with other plugins during restore | Restore must re-register hooks, bus subscriptions, etc. |
+| Plugin owns all its state internally | SessionManager must orchestrate multi-step save/load |
+
 ---
 
 ## Built-in Plugins
