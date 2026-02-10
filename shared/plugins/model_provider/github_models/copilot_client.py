@@ -257,7 +257,7 @@ class CopilotClient:
             "Authorization": f"Bearer {self._token}",
         }
 
-        # Bypass proxy if URL matches JAATO_NO_PROXY
+        # Bypass proxy if URL matches NO_PROXY or JAATO_NO_PROXY
         proxies = {} if should_bypass_proxy(url) else None
 
         try:
