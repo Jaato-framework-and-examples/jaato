@@ -1632,3 +1632,479 @@ class TestTransitiveNotificationFormatting:
         assert message is not None
         assert "@parent-a" in message
         assert "@parent-b" in message
+
+
+class TestRuntimeTransitiveViaSelectReferences:
+    """Tests for transitive resolution during runtime selectReferences calls.
+
+    When the model selects references via the selectReferences tool, transitive
+    resolution should discover and inject any referenced catalog sources,
+    just as it does during initialization for preselected sources.
+    """
+
+    def _make_plugin_with_sources(self, sources_config, transitive=True):
+        """Create an initialized plugin with given sources, none preselected.
+
+        Args:
+            sources_config: List of source dicts.
+            transitive: Whether transitive injection is enabled.
+
+        Returns:
+            Initialized ReferencesPlugin. Caller must call shutdown().
+        """
+        plugin = create_plugin()
+        config = {
+            "sources": sources_config,
+            "transitive_injection": transitive,
+            "exclude_tools": [],
+        }
+        plugin.initialize(config)
+        return plugin
+
+    def test_select_triggers_transitive_discovery(self):
+        """selectReferences discovers transitive references from selected source."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "main-doc",
+                "name": "Main Document",
+                "description": "Primary",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Main content. See appendix-a for more.",
+            },
+            {
+                "id": "appendix-a",
+                "name": "Appendix A",
+                "description": "Supplementary",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Appendix content.",
+            },
+        ])
+
+        try:
+            result = plugin._execute_select({"ids": ["main-doc"]})
+            assert result["status"] == "success"
+
+            # Both main-doc and appendix-a should be selected
+            selected = plugin.get_selected_ids()
+            assert "main-doc" in selected
+            assert "appendix-a" in selected
+
+            # Response should indicate transitive inclusion
+            assert result.get("transitive_count") == 1
+            source_ids = [s["id"] for s in result["sources"]]
+            assert "appendix-a" in source_ids
+
+            # Transitive source should be marked
+            appendix_entry = next(s for s in result["sources"] if s["id"] == "appendix-a")
+            assert appendix_entry.get("transitive") is True
+            assert "main-doc" in appendix_entry.get("transitive_from", [])
+        finally:
+            plugin.shutdown()
+
+    def test_select_transitive_chain(self):
+        """selectReferences follows transitive chains: A -> B -> C."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "ref-a",
+                "name": "Ref A",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See ref-b for details.",
+            },
+            {
+                "id": "ref-b",
+                "name": "Ref B",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See ref-c for final info.",
+            },
+            {
+                "id": "ref-c",
+                "name": "Ref C",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Terminal content.",
+            },
+        ])
+
+        try:
+            result = plugin._execute_select({"ids": ["ref-a"]})
+            assert result["status"] == "success"
+
+            selected = plugin.get_selected_ids()
+            assert "ref-a" in selected
+            assert "ref-b" in selected
+            assert "ref-c" in selected
+            assert result.get("transitive_count") == 2
+        finally:
+            plugin.shutdown()
+
+    def test_select_no_transitive_when_disabled(self):
+        """selectReferences does not resolve transitive when disabled."""
+        plugin = self._make_plugin_with_sources(
+            [
+                {
+                    "id": "main-doc",
+                    "name": "Main Document",
+                    "description": "Test",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "See appendix-a for more.",
+                },
+                {
+                    "id": "appendix-a",
+                    "name": "Appendix A",
+                    "description": "Test",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "Appendix content.",
+                },
+            ],
+            transitive=False,
+        )
+
+        try:
+            result = plugin._execute_select({"ids": ["main-doc"]})
+            assert result["status"] == "success"
+
+            selected = plugin.get_selected_ids()
+            assert "main-doc" in selected
+            assert "appendix-a" not in selected
+            assert "transitive_count" not in result
+        finally:
+            plugin.shutdown()
+
+    def test_select_skips_already_selected(self):
+        """Transitive resolution does not re-add already-selected references."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "doc-a",
+                "name": "Doc A",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See doc-b for context.",
+            },
+            {
+                "id": "doc-b",
+                "name": "Doc B",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Independent content.",
+            },
+        ])
+
+        try:
+            # First, select doc-b directly
+            plugin._execute_select({"ids": ["doc-b"]})
+            assert "doc-b" in plugin.get_selected_ids()
+
+            # Now select doc-a which references doc-b
+            result = plugin._execute_select({"ids": ["doc-a"]})
+            assert result["status"] == "success"
+
+            # doc-b should not appear as transitive (already selected)
+            assert result.get("transitive_count") is None
+            source_ids = [s["id"] for s in result["sources"]]
+            assert "doc-a" in source_ids
+            assert "doc-b" not in source_ids  # not re-added
+        finally:
+            plugin.shutdown()
+
+    def test_select_with_folder_reference(self):
+        """selectReferences resolves transitive from folder content."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create folder with a doc that mentions another reference
+            doc_file = os.path.join(temp_dir, "guide.md")
+            with open(doc_file, 'w') as f:
+                f.write("# Guide\n\nSee companion-ref for companion material.")
+
+            plugin = self._make_plugin_with_sources([
+                {
+                    "id": "folder-ref",
+                    "name": "Folder Reference",
+                    "description": "A folder",
+                    "type": "local",
+                    "mode": "selectable",
+                    "path": temp_dir,
+                },
+                {
+                    "id": "companion-ref",
+                    "name": "Companion",
+                    "description": "Companion material",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "Companion content.",
+                },
+            ])
+
+            try:
+                result = plugin._execute_select({"ids": ["folder-ref"]})
+                assert result["status"] == "success"
+
+                selected = plugin.get_selected_ids()
+                assert "folder-ref" in selected
+                assert "companion-ref" in selected
+                assert result.get("transitive_count") == 1
+            finally:
+                plugin.shutdown()
+
+    def test_select_sets_notification_pending(self):
+        """Runtime transitive selection sets notification pending flag."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "main-doc",
+                "name": "Main Document",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See appendix-a for more.",
+            },
+            {
+                "id": "appendix-a",
+                "name": "Appendix A",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Appendix content.",
+            },
+        ])
+
+        try:
+            assert not plugin._transitive_notification_pending
+
+            plugin._execute_select({"ids": ["main-doc"]})
+
+            assert plugin._transitive_notification_pending
+        finally:
+            plugin.shutdown()
+
+    def test_select_updates_parent_map(self):
+        """Runtime transitive selection updates the parent map."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "parent-doc",
+                "name": "Parent",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See child-doc for details.",
+            },
+            {
+                "id": "child-doc",
+                "name": "Child",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Child content.",
+            },
+        ])
+
+        try:
+            plugin._execute_select({"ids": ["parent-doc"]})
+
+            assert "child-doc" in plugin._transitive_parent_map
+            assert "parent-doc" in plugin._transitive_parent_map["child-doc"]
+        finally:
+            plugin.shutdown()
+
+    def test_select_by_tags_triggers_transitive(self):
+        """selectReferences by tags also triggers transitive resolution."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "tagged-doc",
+                "name": "Tagged Doc",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See linked-doc for context.",
+                "tags": ["architecture"],
+            },
+            {
+                "id": "linked-doc",
+                "name": "Linked Doc",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Linked content.",
+            },
+        ])
+
+        try:
+            result = plugin._execute_select({"filter_tags": ["architecture"]})
+            assert result["status"] == "success"
+
+            selected = plugin.get_selected_ids()
+            assert "tagged-doc" in selected
+            assert "linked-doc" in selected
+        finally:
+            plugin.shutdown()
+
+
+class TestRuntimeTransitiveViaCmdSelect:
+    """Tests for transitive resolution during 'references select' user command."""
+
+    def _make_plugin_with_sources(self, sources_config, transitive=True):
+        """Create an initialized plugin with given sources, none preselected."""
+        plugin = create_plugin()
+        config = {
+            "sources": sources_config,
+            "transitive_injection": transitive,
+            "exclude_tools": [],
+        }
+        plugin.initialize(config)
+        return plugin
+
+    def test_cmd_select_triggers_transitive(self):
+        """'references select' discovers transitive references."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "main-doc",
+                "name": "Main Document",
+                "description": "Primary",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Main content. See appendix-a for more.",
+            },
+            {
+                "id": "appendix-a",
+                "name": "Appendix A",
+                "description": "Supplementary",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "Appendix content.",
+            },
+        ])
+
+        try:
+            result = plugin._cmd_references_select("main-doc")
+            assert result["status"] == "selected"
+
+            selected = plugin.get_selected_ids()
+            assert "main-doc" in selected
+            assert "appendix-a" in selected
+
+            # Response should mention transitive inclusions
+            assert result.get("transitive_count") == 1
+            assert "appendix-a" in result.get("transitive_ids", [])
+            assert "transitively included" in result["message"].lower()
+        finally:
+            plugin.shutdown()
+
+    def test_cmd_select_no_transitive_when_disabled(self):
+        """'references select' does not resolve transitive when disabled."""
+        plugin = self._make_plugin_with_sources(
+            [
+                {
+                    "id": "main-doc",
+                    "name": "Main Document",
+                    "description": "Test",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "See appendix-a for more.",
+                },
+                {
+                    "id": "appendix-a",
+                    "name": "Appendix A",
+                    "description": "Test",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "Appendix content.",
+                },
+            ],
+            transitive=False,
+        )
+
+        try:
+            result = plugin._cmd_references_select("main-doc")
+            assert result["status"] == "selected"
+
+            selected = plugin.get_selected_ids()
+            assert "main-doc" in selected
+            assert "appendix-a" not in selected
+            assert "transitive_count" not in result
+        finally:
+            plugin.shutdown()
+
+    def test_cmd_select_with_folder(self):
+        """'references select' on a folder triggers transitive resolution."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            doc_file = os.path.join(temp_dir, "overview.md")
+            with open(doc_file, 'w') as f:
+                f.write("# Overview\n\nSee extra-ref for additional info.")
+
+            plugin = self._make_plugin_with_sources([
+                {
+                    "id": "folder-ref",
+                    "name": "Folder",
+                    "description": "A folder source",
+                    "type": "local",
+                    "mode": "selectable",
+                    "path": temp_dir,
+                },
+                {
+                    "id": "extra-ref",
+                    "name": "Extra",
+                    "description": "Extra material",
+                    "type": "inline",
+                    "mode": "selectable",
+                    "content": "Extra content.",
+                },
+            ])
+
+            try:
+                result = plugin._cmd_references_select("folder-ref")
+                assert result["status"] == "selected"
+
+                selected = plugin.get_selected_ids()
+                assert "folder-ref" in selected
+                assert "extra-ref" in selected
+            finally:
+                plugin.shutdown()
+
+    def test_cmd_select_transitive_chain(self):
+        """'references select' follows transitive chains."""
+        plugin = self._make_plugin_with_sources([
+            {
+                "id": "ref-1",
+                "name": "Ref 1",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See ref-2 for next.",
+            },
+            {
+                "id": "ref-2",
+                "name": "Ref 2",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "See ref-3 for final.",
+            },
+            {
+                "id": "ref-3",
+                "name": "Ref 3",
+                "description": "Test",
+                "type": "inline",
+                "mode": "selectable",
+                "content": "End of chain.",
+            },
+        ])
+
+        try:
+            result = plugin._cmd_references_select("ref-1")
+            assert result["status"] == "selected"
+
+            selected = plugin.get_selected_ids()
+            assert "ref-1" in selected
+            assert "ref-2" in selected
+            assert "ref-3" in selected
+            assert result.get("transitive_count") == 2
+        finally:
+            plugin.shutdown()
