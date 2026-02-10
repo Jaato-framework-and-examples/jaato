@@ -75,12 +75,18 @@ class ReferencesPlugin:
         self._plugin_registry = None
         # Transitive reference metadata: maps each transitively discovered ID
         # to the set of parent source IDs that referenced it.
-        # Populated during initialize() when transitive_injection is enabled.
+        # Populated during initialize() when transitive_injection is enabled,
+        # and updated during runtime selection via _apply_transitive_selection().
         self._transitive_parent_map: Dict[str, Set[str]] = {}
         # One-time flag: when True, the next prompt enrichment call will emit
         # a lightweight transitive-selection hint so the model and user are
         # notified. Reset to False after the first emission.
         self._transitive_notification_pending: bool = False
+        # Whether transitive reference injection is enabled.
+        # Set during initialize() from the transitive_injection config option.
+        # When True, runtime selections (selectReferences tool and
+        # 'references select' command) also trigger transitive resolution.
+        self._transitive_enabled: bool = True
 
     @property
     def name(self) -> str:
@@ -555,6 +561,83 @@ class ReferencesPlugin:
 
         return resolved_ids, parent_map
 
+    def _apply_transitive_selection(
+        self,
+        newly_selected_ids: List[str],
+    ) -> List[ReferenceSource]:
+        """Run transitive resolution on newly selected references and apply results.
+
+        Scans the content of the given newly selected sources for mentions of
+        other catalog references, recursively discovers transitive dependencies,
+        and adds any newly found sources to the selected set. Updates
+        ``_transitive_parent_map`` and sets ``_transitive_notification_pending``
+        so the next prompt enrichment notifies the model.
+
+        Called from both ``_execute_select`` (model tool) and
+        ``_cmd_references_select`` (user command) when
+        ``self._transitive_enabled`` is True.
+
+        Args:
+            newly_selected_ids: IDs of sources that were just directly selected
+                (already appended to ``_selected_source_ids`` and authorized).
+
+        Returns:
+            List of ReferenceSource objects that were transitively added.
+            Empty list if transitive injection is disabled or nothing was found.
+        """
+        if not self._transitive_enabled or not newly_selected_ids:
+            return []
+
+        # Build catalog from all known sources
+        catalog_by_id: Dict[str, ReferenceSource] = {
+            s.id: s for s in self._sources
+        }
+        if self._config:
+            for s in self._config.sources:
+                if s.id not in catalog_by_id:
+                    catalog_by_id[s.id] = s
+
+        all_resolved, transitive_parent_map = self._resolve_transitive_references(
+            newly_selected_ids, catalog_by_id
+        )
+
+        # Filter to only truly new IDs (not already selected)
+        already_selected = set(self._selected_source_ids)
+        transitive_sources: List[ReferenceSource] = []
+        current_source_ids = {s.id for s in self._sources}
+
+        for ref_id in all_resolved:
+            if ref_id in already_selected:
+                continue
+
+            # Add to selected set and authorize
+            self._selected_source_ids.append(ref_id)
+            already_selected.add(ref_id)
+
+            # Ensure source is in self._sources
+            if ref_id not in current_source_ids and ref_id in catalog_by_id:
+                source = catalog_by_id[ref_id]
+                self._resolve_source_for_context(source)
+                self._sources.append(source)
+                current_source_ids.add(ref_id)
+
+            source = next((s for s in self._sources if s.id == ref_id), None)
+            if source:
+                self._authorize_source_path(source)
+                transitive_sources.append(source)
+
+        # Merge new transitive parent mappings (only for truly new entries)
+        for ref_id, parents in transitive_parent_map.items():
+            if ref_id not in already_selected or ref_id in {s.id for s in transitive_sources}:
+                self._transitive_parent_map.setdefault(ref_id, set()).update(parents)
+
+        if transitive_sources:
+            transitive_ids = [s.id for s in transitive_sources]
+            self._trace(f"transitive (runtime): injected {len(transitive_ids)}: {transitive_ids}")
+            self._transitive_notification_pending = True
+
+        return transitive_sources
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
 
@@ -573,7 +656,9 @@ class ReferencesPlugin:
                    - transitive_injection: Enable transitive reference detection (default: True).
                                            When enabled, pre-selected references are scanned for
                                            mentions of other catalog references, which are then
-                                           automatically injected.
+                                           automatically injected. Also applies to runtime
+                                           selections via selectReferences tool and
+                                           'references select' command.
                    - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
@@ -683,8 +768,8 @@ class ReferencesPlugin:
         # Resolve transitive references if enabled (default: True)
         # This scans pre-selected references for mentions of other catalog references
         # and automatically adds them to the selected set
-        transitive_enabled = config.get("transitive_injection", True)
-        if transitive_enabled and self._selected_source_ids:
+        self._transitive_enabled = config.get("transitive_injection", True)
+        if self._transitive_enabled and self._selected_source_ids:
             # Build complete catalog including inline sources
             full_catalog = dict(catalog_by_id)
             for source in self._sources:
@@ -851,12 +936,19 @@ class ReferencesPlugin:
         Selected references have their paths authorized in the sandbox so the
         model can read them, and their resolved real paths are returned.
 
+        When transitive injection is enabled, the content of each newly selected
+        source is scanned for mentions of other catalog references. Any
+        discovered references are automatically selected and included in the
+        response with ``transitive: true`` and ``transitive_from`` fields.
+
         Args:
             args: Tool arguments with optional 'ids' (list of reference IDs)
                 and/or 'filter_tags' (list of tags to match).
 
         Returns:
-            Dict with status, selected sources, and their resolved paths.
+            Dict with status, selected sources (direct + transitive), and their
+            resolved paths. Includes ``transitive_count`` when transitive
+            sources were added.
         """
         ids = args.get("ids", [])
         filter_tags = args.get("filter_tags", [])
@@ -952,13 +1044,18 @@ class ReferencesPlugin:
         selected_ids = [s.id for s in selected_sources]
         self._trace(f"selectReferences: selected={selected_ids}")
 
-        # Emit selection resolved hook for UI integration
-        if self._on_selection_resolved:
-            self._on_selection_resolved("selectReferences", selected_ids)
+        # Resolve transitive references from the newly selected sources
+        transitive_sources = self._apply_transitive_selection(selected_ids)
 
-        # Build result with resolved paths for each source
+        # Emit selection resolved hook for UI integration (include transitive)
+        all_selected_ids = selected_ids + [s.id for s in transitive_sources]
+        if self._on_selection_resolved:
+            self._on_selection_resolved("selectReferences", all_selected_ids)
+
+        # Build result with resolved paths for each source (direct + transitive)
+        transitive_ids_set = {s.id for s in transitive_sources}
         source_results = []
-        for source in selected_sources:
+        for source in selected_sources + transitive_sources:
             entry: Dict[str, Any] = {
                 "id": source.id,
                 "name": source.name,
@@ -966,6 +1063,13 @@ class ReferencesPlugin:
                 "type": source.type.value,
                 "tags": source.tags,
             }
+            # Mark transitively included sources with their parent references
+            if source.id in transitive_ids_set:
+                entry["transitive"] = True
+                parents = self._transitive_parent_map.get(source.id)
+                if parents:
+                    entry["transitive_from"] = sorted(parents)
+
             # Include resolved path for LOCAL sources
             if source.type == SourceType.LOCAL:
                 resolved = self._resolve_path_for_access(source)
@@ -986,11 +1090,15 @@ class ReferencesPlugin:
 
             source_results.append(entry)
 
-        return {
+        result: Dict[str, Any] = {
             "status": "success",
             "selected_count": len(selected_sources),
             "sources": source_results,
         }
+        if transitive_sources:
+            result["transitive_count"] = len(transitive_sources)
+
+        return result
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all available reference sources."""
@@ -1111,7 +1219,11 @@ class ReferencesPlugin:
         return self._format_list_as_help_lines(sources, filter_arg)
 
     def _cmd_references_select(self, ref_id: str) -> Dict[str, Any]:
-        """Execute 'references select <ref-id>'."""
+        """Execute 'references select <ref-id>'.
+
+        Selects the reference and runs transitive resolution to automatically
+        include any references mentioned within the selected source's content.
+        """
         ref_id = ref_id.strip()
 
         # Look up the source
@@ -1126,11 +1238,24 @@ class ReferencesPlugin:
         self._authorize_source_path(source)
         self._trace(f"references select: selected '{ref_id}'")
 
-        return {
+        # Resolve transitive references from the newly selected source
+        transitive_sources = self._apply_transitive_selection([ref_id])
+
+        result: Dict[str, Any] = {
             "status": "selected",
             "message": f"Selected reference '{source.name}' ({ref_id}).",
             "source": source.to_instruction(),
         }
+        if transitive_sources:
+            transitive_ids = [s.id for s in transitive_sources]
+            result["transitive_count"] = len(transitive_ids)
+            result["transitive_ids"] = transitive_ids
+            result["message"] += (
+                f" Also transitively included {len(transitive_ids)} "
+                f"referenced source(s): {', '.join(transitive_ids)}."
+            )
+
+        return result
 
     def _cmd_references_unselect(self, ref_id: str) -> Dict[str, Any]:
         """Execute 'references unselect <ref-id>'.
