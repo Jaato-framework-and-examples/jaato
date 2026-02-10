@@ -178,10 +178,16 @@ class OutputLine:
 
 @dataclass
 class ToolBlock:
-    """A block of completed tools stored inline in the output buffer.
+    """A finalized block of completed tools stored inline in the output buffer.
 
-    This allows tool blocks to be rendered dynamically with expand/collapse
-    state while maintaining their position in the output flow.
+    Created by ``_finalize_completed_tools()`` when all active tools have
+    completed and either a new tool arrives or the model's turn ends.
+    The block holds deep-copied ``ActiveToolCall`` objects and is inserted
+    into ``_lines`` at the chronological placeholder position.
+
+    Rendered by ``_render_tool_block()`` with ``finalized=True`` — output is
+    capped at 70 % of visible height using standard beginning + ellipsis + end
+    truncation.
     """
     tools: List['ActiveToolCall']  # The tools in this block
     expanded: bool = True  # Whether the block is in expanded view
@@ -201,7 +207,24 @@ class ActiveToolsMarker:
 
 @dataclass
 class ActiveToolCall:
-    """Represents an actively executing or completed tool call."""
+    """Represents a tool call through its full lifecycle.
+
+    Lifecycle::
+
+        add_active_tool()            → in _active_tools, completed=False  (running)
+        mark_tool_completed()        → in _active_tools, completed=True   (completed)
+        _finalize_completed_tools()  → deep-copied into ToolBlock in _lines,
+                                       removed from _active_tools           (finalized)
+
+    **Completed** means execution finished but the tool still lives in
+    ``_active_tools`` and renders via ``_render_active_tools_inline()``.
+    A tool can stay completed-but-not-finalized while sibling tools are
+    still running or the model's turn hasn't ended.
+
+    **Finalized** means the tool has been moved into a ``ToolBlock`` in
+    ``_lines``. Rendering uses ``_render_tool_block()`` with
+    ``finalized=True``.
+    """
     name: str
     args_summary: str  # Truncated string representation of args (for tree display)
     args_full: Optional[str] = None  # Full untruncated args (for popup header)
