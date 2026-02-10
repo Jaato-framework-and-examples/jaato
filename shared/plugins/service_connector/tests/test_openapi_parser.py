@@ -463,8 +463,8 @@ class TestOpenAPIParser:
         assert endpoint.request_body is not None
         assert endpoint.request_body.content_type == "application/json"
 
-    def test_unknown_parameter_location_raises_parse_error(self):
-        """Test that unknown parameter location raises OpenAPIParseError."""
+    def test_unknown_parameter_location_produces_warning(self):
+        """Test that unknown parameter location is skipped with a warning."""
         spec = {
             "swagger": "2.0",
             "info": {"title": "Test", "version": "1.0"},
@@ -478,6 +478,11 @@ class TestOpenAPIParser:
                                 "in": "cookie",
                                 "type": "string",
                             },
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "type": "integer",
+                            },
                         ],
                         "responses": {"200": {"description": "OK"}},
                     },
@@ -485,15 +490,19 @@ class TestOpenAPIParser:
             },
         }
 
-        with pytest.raises(OpenAPIParseError) as exc_info:
-            parse_openapi_spec(spec, "bad-param")
+        result = parse_openapi_spec(spec, "bad-param")
 
-        assert "token" in str(exc_info.value)
-        assert "cookie" in str(exc_info.value)
-        assert "Supported: path, query, header" in str(exc_info.value)
+        # The endpoint is still parsed, just without the bad parameter
+        assert len(result.endpoints) == 1
+        assert len(result.endpoints[0].parameters) == 1
+        assert result.endpoints[0].parameters[0].name == "limit"
+        # Warning recorded
+        assert len(result.warnings) == 1
+        assert "token" in result.warnings[0]
+        assert "cookie" in result.warnings[0]
 
-    def test_unknown_parameter_location_v3_raises_parse_error(self):
-        """Test that unknown parameter location in v3 raises OpenAPIParseError."""
+    def test_unknown_parameter_location_v3_produces_warning(self):
+        """Test that unknown parameter location in v3 is skipped with a warning."""
         spec = {
             "openapi": "3.0.0",
             "info": {"title": "Test", "version": "1.0"},
@@ -513,9 +522,135 @@ class TestOpenAPIParser:
             },
         }
 
-        with pytest.raises(OpenAPIParseError) as exc_info:
-            parse_openapi_spec(spec, "bad-param-v3")
+        result = parse_openapi_spec(spec, "bad-param-v3")
 
-        assert "token" in str(exc_info.value)
-        assert "banana" in str(exc_info.value)
-        assert "Supported: path, query, header" in str(exc_info.value)
+        # Endpoint parsed, but the bad parameter was skipped
+        assert len(result.endpoints) == 1
+        assert len(result.endpoints[0].parameters) == 0
+        assert len(result.warnings) == 1
+        assert "token" in result.warnings[0]
+        assert "banana" in result.warnings[0]
+
+    def test_unresolvable_ref_skipped_with_warning(self):
+        """Test that unresolvable $ref in parameter is skipped gracefully."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "z/OS API", "version": "1.0"},
+            "host": "mainframe.example.com",
+            "basePath": "/api",
+            "paths": {
+                "/volumes": {
+                    "get": {
+                        "summary": "List volumes",
+                        "parameters": [
+                            {"$ref": "#/definitions/z/OS volume object"},
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "type": "integer",
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "zos-api")
+
+        # Service info is still returned
+        assert result.name == "zos-api"
+        assert result.base_url == "https://mainframe.example.com/api"
+        assert len(result.endpoints) == 1
+        # The resolvable parameter is kept
+        assert len(result.endpoints[0].parameters) == 1
+        assert result.endpoints[0].parameters[0].name == "limit"
+        # Warning about the unresolvable ref
+        assert any("$ref" in w for w in result.warnings)
+
+    def test_unresolvable_ref_in_response_skipped(self):
+        """Test that unresolvable $ref in response schema produces a warning."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/items": {
+                    "get": {
+                        "summary": "List items",
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "schema": {
+                                    "$ref": "#/definitions/NonExistent",
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "ref-resp-api")
+
+        assert len(result.endpoints) == 1
+        assert any("NonExistent" in w for w in result.warnings)
+
+    def test_mixed_good_and_bad_endpoints(self):
+        """Test that good endpoints survive when others fail."""
+        spec = {
+            "swagger": "2.0",
+            "info": {"title": "Mixed API", "version": "1.0"},
+            "host": "api.example.com",
+            "paths": {
+                "/healthy": {
+                    "get": {
+                        "summary": "Health check",
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+                "/broken": {
+                    "$ref": "#/definitions/does/not/exist",
+                },
+                "/also-healthy": {
+                    "post": {
+                        "summary": "Create thing",
+                        "responses": {"201": {"description": "Created"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "mixed-api")
+
+        assert len(result.endpoints) == 2
+        methods = {e.method for e in result.endpoints}
+        assert methods == {"GET", "POST"}
+        assert any("broken" in w or "does/not/exist" in w for w in result.warnings)
+
+    def test_no_warnings_on_clean_spec(self):
+        """Test that a valid spec produces no warnings."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Clean API", "version": "1.0"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {
+                "/users": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "page",
+                                "in": "query",
+                                "schema": {"type": "integer"},
+                            },
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    },
+                },
+            },
+        }
+
+        result = parse_openapi_spec(spec, "clean-api")
+
+        assert len(result.endpoints) == 1
+        assert result.warnings == []

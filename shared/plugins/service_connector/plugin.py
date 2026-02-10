@@ -1131,6 +1131,8 @@ class ServiceConnectorPlugin:
                 result["ssl_trusted"] = True
             if no_proxy:
                 result["proxy_bypass"] = True
+            if discovered.warnings:
+                result["warnings"] = discovered.warnings
             return result
 
         except OpenAPIParseError as e:
