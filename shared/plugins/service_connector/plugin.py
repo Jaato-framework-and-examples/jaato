@@ -110,6 +110,39 @@ class ServiceConnectorPlugin:
         self._discovered_services.clear()
         self._initialized = False
 
+    # === Session Persistence ===
+
+    def get_persistence_state(self) -> Dict[str, Any]:
+        """Return plugin state for session persistence.
+
+        Persists the list of discovered service aliases so the in-memory
+        cache can be pre-warmed from SchemaStore on session restore. The
+        actual spec data lives in SchemaStore YAML files; this just tracks
+        which services were active in the session.
+        """
+        if not self._discovered_services:
+            return {}
+        return {
+            "discovered_services": list(self._discovered_services.keys()),
+            "version": 1,
+        }
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Restore plugin state from session persistence.
+
+        Pre-warms the in-memory cache by loading each previously-discovered
+        service from SchemaStore. Services whose YAML files are missing
+        (e.g., workspace changed) are silently skipped.
+        """
+        service_names = state.get("discovered_services", [])
+        for name in service_names:
+            if name not in self._discovered_services:
+                # _get_service loads from SchemaStore and caches in memory
+                self._get_service(name)
+        self._trace(
+            f"restore_persistence_state: pre-warmed {len(service_names)} services"
+        )
+
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace path for schema storage.
 

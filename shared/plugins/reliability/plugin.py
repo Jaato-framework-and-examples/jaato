@@ -335,8 +335,61 @@ class ReliabilityPlugin:
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
-        # Could persist state here
         logger.info("Reliability plugin shutdown")
+
+    # -------------------------------------------------------------------------
+    # Session Persistence
+    # -------------------------------------------------------------------------
+
+    def get_persistence_state(self) -> Dict[str, Any]:
+        """Return session-level state for persistence.
+
+        Captures tool reliability states, turn tracking, and escalation
+        overrides so they survive session unload/reload.
+        """
+        if not self._tool_states and not self._turn_index:
+            return {}
+
+        state: Dict[str, Any] = {"version": 1}
+
+        if self._tool_states:
+            state["tool_states"] = {
+                key: ts.to_dict()
+                for key, ts in self._tool_states.items()
+            }
+
+        state["turn_index"] = self._turn_index
+        state["session_id"] = self._session_id
+
+        if self._session_settings and self._session_settings != SessionSettings():
+            state["session_settings"] = self._session_settings.to_dict()
+
+        return state
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Restore session-level state from persistence.
+
+        Rebuilds tool reliability states and turn tracking from the
+        previously-saved session state.
+        """
+        if state.get("tool_states"):
+            self._tool_states = {
+                key: ToolReliabilityState.from_dict(ts_data)
+                for key, ts_data in state["tool_states"].items()
+            }
+
+        self._turn_index = state.get("turn_index", 0)
+        self._session_id = state.get("session_id", self._session_id)
+
+        if state.get("session_settings"):
+            self._session_settings = SessionSettings.from_dict(
+                state["session_settings"]
+            )
+
+        logger.debug(
+            f"Restored reliability state: {len(self._tool_states)} tool states, "
+            f"turn_index={self._turn_index}"
+        )
 
     # -------------------------------------------------------------------------
     # Auto-wiring Methods
