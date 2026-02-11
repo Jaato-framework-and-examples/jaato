@@ -628,7 +628,7 @@ The template plugin exposes four tools for code generation:
 |------|---------|----------------|
 | `renderTemplate` | Render template with full Jinja2 or Mustache support | Discoverable |
 | `renderTemplateToFile` | Render and write to file with overwrite control | Discoverable |
-| `listExtractedTemplates` | List all templates in the unified index | Discoverable |
+| `listAvailableTemplates` | List all templates in the unified index | Discoverable |
 | `listTemplateVariables` | List variables required by a specific template | Discoverable |
 
 ### Rendering Flow

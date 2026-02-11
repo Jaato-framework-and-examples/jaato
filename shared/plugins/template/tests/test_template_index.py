@@ -291,7 +291,7 @@ class TestIndexResolution:
 
 class TestUnifiedListing:
     def test_list_empty(self, plugin):
-        result = plugin._execute_list_extracted({})
+        result = plugin._execute_list_available({})
         assert result["templates"] == []
         assert "message" in result
 
@@ -300,7 +300,7 @@ class TestUnifiedListing:
         for entry in entries:
             plugin._template_index[entry.name] = entry
 
-        result = plugin._execute_list_extracted({})
+        result = plugin._execute_list_available({})
         assert result["count"] == 3
 
         # All should be standalone origin
@@ -329,7 +329,7 @@ class TestUnifiedListing:
         plugin._templates_dir.mkdir(parents=True, exist_ok=True)
         (plugin._templates_dir / "custom.java.tmpl").write_text("class {{ class_name }} {}")
 
-        result = plugin._execute_list_extracted({})
+        result = plugin._execute_list_available({})
         assert result["count"] == 4
 
         origins = {t["origin"] for t in result["templates"]}
