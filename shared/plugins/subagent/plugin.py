@@ -1233,6 +1233,13 @@ class SubagentPlugin:
             # Subagent is idle - process directly
             logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, processing directly")
 
+            # Transition to active so UI shows spinner
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="active"
+                )
+
             # Emit the parent's message to UI
             if self._ui_hooks:
                 self._ui_hooks.on_agent_output(
@@ -1274,49 +1281,57 @@ class SubagentPlugin:
                             budget_snapshot=session.instruction_budget.snapshot()
                         )
 
-            # Process the message
-            response = session.send_message(
-                message,
-                on_output=output_callback,
-                on_usage_update=usage_callback
-            )
-
-            # Update context after processing (match main agent behavior)
-            if self._ui_hooks:
-                usage = session.get_context_usage()
-                # Debug: Log full usage info to trace token accounting issues
-                logger.debug(
-                    f"SUBAGENT_USAGE [{agent_id}]: "
-                    f"total={usage.get('total_tokens', 0)}, "
-                    f"prompt={usage.get('prompt_tokens', 0)}, "
-                    f"output={usage.get('output_tokens', 0)}, "
-                    f"context_limit={usage.get('context_limit', 'N/A')}, "
-                    f"percent_used={usage.get('percent_used', 0):.2f}%, "
-                    f"turns={usage.get('turns', 0)}, "
-                    f"model={usage.get('model', 'unknown')}"
-                )
-                self._ui_hooks.on_agent_context_updated(
-                    agent_id=agent_id,
-                    total_tokens=usage.get('total_tokens', 0),
-                    prompt_tokens=usage.get('prompt_tokens', 0),
-                    output_tokens=usage.get('output_tokens', 0),
-                    turns=usage.get('turns', 0),
-                    percent_used=usage.get('percent_used', 0)
+            try:
+                # Process the message
+                response = session.send_message(
+                    message,
+                    on_output=output_callback,
+                    on_usage_update=usage_callback
                 )
 
-            # Forward response to parent (CHILD source - status update)
-            if self._parent_session:
-                self._parent_session.inject_prompt(
-                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}",
-                    source_id=agent_id,
-                    source_type=SourceType.CHILD
-                )
+                # Update context after processing (match main agent behavior)
+                if self._ui_hooks:
+                    usage = session.get_context_usage()
+                    # Debug: Log full usage info to trace token accounting issues
+                    logger.debug(
+                        f"SUBAGENT_USAGE [{agent_id}]: "
+                        f"total={usage.get('total_tokens', 0)}, "
+                        f"prompt={usage.get('prompt_tokens', 0)}, "
+                        f"output={usage.get('output_tokens', 0)}, "
+                        f"context_limit={usage.get('context_limit', 'N/A')}, "
+                        f"percent_used={usage.get('percent_used', 0):.2f}%, "
+                        f"turns={usage.get('turns', 0)}, "
+                        f"model={usage.get('model', 'unknown')}"
+                    )
+                    self._ui_hooks.on_agent_context_updated(
+                        agent_id=agent_id,
+                        total_tokens=usage.get('total_tokens', 0),
+                        prompt_tokens=usage.get('prompt_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        turns=usage.get('turns', 0),
+                        percent_used=usage.get('percent_used', 0)
+                    )
 
-            return {
-                'success': True,
-                'status': 'processed',
-                'response': response
-            }
+                # Forward response to parent (CHILD source - status update)
+                if self._parent_session:
+                    self._parent_session.inject_prompt(
+                        f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}",
+                        source_id=agent_id,
+                        source_type=SourceType.CHILD
+                    )
+
+                return {
+                    'success': True,
+                    'status': 'processed',
+                    'response': response
+                }
+            finally:
+                # Transition back to idle so UI shows pause icon
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=agent_id,
+                        status="idle"
+                    )
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
