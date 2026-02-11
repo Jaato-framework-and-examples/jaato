@@ -319,6 +319,39 @@ def format_tool_args_summary(
     return args_str
 
 
+def format_tool_arg_value(value: Any, max_width: int) -> str:
+    """Format a single tool argument value as a string, truncated to fit.
+
+    Multi-line values are collapsed to their first line. Path-like values
+    are ellipsized to preserve context. The result is truncated with ``...``
+    if it exceeds *max_width*.
+
+    Args:
+        value: The argument value (any type).
+        max_width: Maximum display width for the formatted value.
+
+    Returns:
+        Formatted string representation, at most *max_width* characters.
+    """
+    if max_width < 4:
+        return "..."[:max_width]
+
+    s = str(value)
+
+    # Collapse multi-line values to first line
+    if "\n" in s:
+        first_line = s.split("\n", 1)[0]
+        s = first_line + "..."
+
+    # Ellipsize path-like values
+    if isinstance(value, str) and _looks_like_path(value):
+        s = ellipsize_path(s, max_width)
+
+    if len(s) > max_width:
+        return s[: max_width - 3] + "..."
+    return s
+
+
 def format_duration(seconds: Optional[float]) -> str:
     """Format a duration in seconds for display.
 
