@@ -27,7 +27,7 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 
 ## Critical policy
 
-**Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed. Do not call `selectReferences`, `listExtractedTemplates`, or any tool that queries existing reference/template state. Only use file-reading and file-writing tools.
+**Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed. Do not call `selectReferences` or `listExtractedTemplates`. However, you **should** use `listTemplateVariables`, `validateReference`, `validateTemplateIndex`, and `validateProfile` — these are read-only analysis tools that help you produce correct output.
 
 **Execute autonomously without asking for confirmation.** This prompt is self-contained — everything you need to know is already described here. Do not pause to ask whether you should proceed, do not ask for clarification, and do not present plans for approval. Start immediately, be eager, and work through all phases to completion.
 
@@ -146,17 +146,9 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
 
 9. **Find standalone template files** — files with `.tpl` or `.tmpl` extensions anywhere under `{{source}}`.
 
-10. **For each template file**, read it and detect syntax and variables:
+10. **For each template file**, use `listTemplateVariables` to extract syntax and variables:
 
-    **Syntax detection** (check in order):
-    1. **Mustache**: File contains `{{#section}}`, `{{/section}}`, `{{^inverted}}`, or `{{.}}` → `"mustache"`
-    2. **Jinja2**: File contains `{% ... %}` control tags or `{{ var | filter }}` pipe expressions → `"jinja2"`
-    3. **Default**: Simple `{{ variable }}` patterns only → `"jinja2"`
-
-    **Variable extraction**:
-    - **Mustache**: Extract from `{{variableName}}`, skip section markers (`#`, `/`, `^`, `!`) and `{{.}}`
-    - **Jinja2**: Extract from `{{ variableName }}`, skip filter expressions and control tags
-    - Sort alphabetically and deduplicate
+    Call `listTemplateVariables(template_name=<absolute-path-to-template-file>)`. The tool reads the file, auto-detects the syntax (Jinja2 vs Mustache), and returns the complete, deduplicated variable list using proper parsing (Jinja2 AST analysis or Mustache regex). Use its `syntax` and `variables` output directly for the index entry — do **not** manually parse template variables yourself.
 
     **Name resolution** (to handle collisions like multiple `Entity.java.tpl`):
     - If filename is unique across all discovered templates → use as-is (e.g., `Application.java.tpl`)
@@ -399,7 +391,7 @@ knowledge/
 Follow the processing strategy strictly:
 
 1. **Phase 0**: List the directory tree of `{{source}}` (structure only, no file reads). Build the full inventory.
-2. **Phase 1**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → read validation README if present → write validation-ref JSON → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one.
-3. **Phase 2**: Write the template index JSON.
-4. **Phase 3**: Generate subagent profiles using the collected reference IDs.
+2. **Phase 1**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one. If validation fails, fix the JSON and rewrite before proceeding.
+3. **Phase 2**: Write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
+4. **Phase 3**: Generate subagent profiles using the collected reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
 5. **Report**: Produce the final summary table.

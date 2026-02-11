@@ -282,6 +282,75 @@ def validate_source(source: Dict[str, Any], index: int, errors: List[str]) -> No
         errors.append(f"{prefix}: 'tags' must contain only strings")
 
 
+def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
+    """Validate a single standalone reference JSON file.
+
+    Unlike validate_config() which validates a full references.json with a
+    sources[] array, this validates a single reference definition (the format
+    produced by gen-references and stored in .jaato/references/*.json).
+
+    Args:
+        data: Raw reference dict loaded from a single-reference JSON file.
+
+    Returns:
+        Tuple of (is_valid, errors, warnings).
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not isinstance(data, dict):
+        return False, ["File must contain a JSON object"], []
+
+    # Required fields
+    if not data.get("id"):
+        errors.append("'id' is required")
+    if not data.get("name"):
+        errors.append("'name' is required")
+
+    # Validate type
+    source_type = data.get("type", "local")
+    valid_types = ("local", "url", "mcp", "inline")
+    if source_type not in valid_types:
+        errors.append(f"Invalid type '{source_type}'. Must be one of: {', '.join(valid_types)}")
+
+    # Validate mode
+    mode = data.get("mode", "selectable")
+    valid_modes = ("auto", "selectable")
+    if mode not in valid_modes:
+        errors.append(f"Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}")
+
+    # Type-specific validation
+    if source_type == "local":
+        if not data.get("path"):
+            errors.append("'path' is required for local type")
+        else:
+            # Warn if path doesn't exist on disk
+            path_val = data["path"]
+            if os.path.isabs(path_val) and not os.path.exists(path_val):
+                warnings.append(f"path does not exist on disk: {path_val}")
+    elif source_type == "url":
+        if not data.get("url"):
+            errors.append("'url' is required for url type")
+    elif source_type == "mcp":
+        if not data.get("server"):
+            errors.append("'server' is required for mcp type")
+        if not data.get("tool"):
+            errors.append("'tool' is required for mcp type")
+    elif source_type == "inline":
+        if not data.get("content"):
+            errors.append("'content' is required for inline type")
+
+    # Validate tags
+    tags = data.get("tags")
+    if tags is not None:
+        if not isinstance(tags, list):
+            errors.append("'tags' must be an array")
+        elif not all(isinstance(t, str) for t in tags):
+            errors.append("'tags' must contain only strings")
+
+    return len(errors) == 0, errors, warnings
+
+
 def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Validate a references configuration dict.
 

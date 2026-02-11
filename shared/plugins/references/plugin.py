@@ -27,7 +27,7 @@ from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
-from .config_loader import load_config, ReferencesConfig, resolve_source_paths
+from .config_loader import load_config, ReferencesConfig, resolve_source_paths, validate_reference_file
 from ..base import (
     UserCommand,
     CommandParameter,
@@ -913,7 +913,28 @@ class ReferencesPlugin:
                 },
                 category="system",
                 discoverability="discoverable",
-            )
+            ),
+            ToolSchema(
+                name="validateReference",
+                description=(
+                    "Validate a single reference JSON file against the expected schema. "
+                    "Checks for required fields, valid enum values, type-specific fields, "
+                    "and tag format. Returns structured validation results with errors "
+                    "and warnings."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to a reference JSON file to validate."
+                        }
+                    },
+                    "required": ["path"]
+                },
+                category="system",
+                discoverability="discoverable",
+            ),
         ]
 
         # Filter out excluded tools
@@ -926,6 +947,7 @@ class ReferencesPlugin:
         return {
             "selectReferences": self._execute_select,   # model tool
             "listReferences": self._execute_list,        # model tool
+            "validateReference": self._execute_validate_reference,  # model tool
             "references": self._execute_references_cmd,  # user command
         }
 
@@ -1174,6 +1196,50 @@ class ReferencesPlugin:
             "selected_count": sum(
                 1 for s in sources if s.id in self._selected_source_ids
             ),
+        }
+
+    def _execute_validate_reference(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate a single reference JSON file against the expected schema.
+
+        Reads the file, parses it as JSON, and runs validate_reference_file()
+        to check required fields, valid enum values, type-specific fields,
+        and tag format.
+
+        Args:
+            args: Tool arguments with 'path' (string, required).
+
+        Returns:
+            Dict with 'valid', 'path', 'errors', and 'warnings' fields.
+        """
+        file_path = args.get("path", "")
+        if not file_path:
+            return {"valid": False, "path": "", "errors": ["'path' is required"], "warnings": []}
+
+        # Resolve relative paths against project root
+        path_obj = Path(file_path)
+        if not path_obj.is_absolute() and self._project_root:
+            path_obj = Path(self._project_root) / path_obj
+
+        if not path_obj.exists():
+            return {"valid": False, "path": str(path_obj), "errors": [f"File not found: {path_obj}"], "warnings": []}
+
+        try:
+            content = path_obj.read_text(encoding='utf-8')
+        except (IOError, OSError) as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Cannot read file: {e}"], "warnings": []}
+
+        try:
+            import json
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Invalid JSON: {e}"], "warnings": []}
+
+        is_valid, errors, warnings = validate_reference_file(data)
+        return {
+            "valid": is_valid,
+            "path": str(path_obj),
+            "errors": errors,
+            "warnings": warnings,
         }
 
     def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
@@ -1465,7 +1531,7 @@ class ReferencesPlugin:
 
     def get_auto_approved_tools(self) -> List[str]:
         """All tools are auto-approved - this is a user-triggered plugin."""
-        return ["selectReferences", "listReferences", "references"]
+        return ["selectReferences", "listReferences", "validateReference", "references"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.

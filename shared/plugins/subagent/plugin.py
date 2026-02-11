@@ -17,7 +17,7 @@ from datetime import datetime
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
     discover_profiles, expand_plugin_configs, _find_workspace_root,
-    gc_profile_to_plugin_config
+    gc_profile_to_plugin_config, validate_profile
 )
 from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
@@ -648,6 +648,26 @@ class SubagentPlugin:
                 category="coordination",
                 discoverability="discoverable",
             ),
+            ToolSchema(
+                name='validateProfile',
+                description=(
+                    'Validate a subagent profile JSON file against the expected schema. '
+                    'Checks required fields, type constraints, plugin/config structure, '
+                    'and GC sub-configuration. Returns structured validation results.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to a profile JSON file to validate."
+                        }
+                    },
+                    "required": ["path"]
+                },
+                category="coordination",
+                discoverability="discoverable",
+            ),
         ]
         return declarations
 
@@ -660,6 +680,7 @@ class SubagentPlugin:
             'cancel_subagent': self._execute_cancel_subagent,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
+            'validateProfile': self._execute_validate_profile,
             # User command aliases
             'profiles': self._execute_list_profiles,
             'active': self._execute_list_active_subagents,
@@ -858,11 +879,56 @@ class SubagentPlugin:
             "Without a profile, subagents inherit your current plugin configuration."
         )
 
+    def _execute_validate_profile(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate a subagent profile JSON file against the expected schema.
+
+        Reads the file, parses it as JSON, and runs validate_profile()
+        to check required fields, type constraints, plugin/config structure,
+        and GC sub-configuration.
+
+        Args:
+            args: Tool arguments with 'path' (string, required).
+
+        Returns:
+            Dict with 'valid', 'path', 'errors', and 'warnings' fields.
+        """
+        import json
+        from pathlib import Path
+
+        file_path = args.get("path", "")
+        if not file_path:
+            return {"valid": False, "path": "", "errors": ["'path' is required"], "warnings": []}
+
+        path_obj = Path(file_path)
+        if not path_obj.is_absolute() and self._workspace_path:
+            path_obj = Path(self._workspace_path) / path_obj
+
+        if not path_obj.exists():
+            return {"valid": False, "path": str(path_obj), "errors": [f"File not found: {path_obj}"], "warnings": []}
+
+        try:
+            content = path_obj.read_text(encoding='utf-8')
+        except (IOError, OSError) as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Cannot read file: {e}"], "warnings": []}
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Invalid JSON: {e}"], "warnings": []}
+
+        is_valid, errors, warnings = validate_profile(data)
+        return {
+            "valid": is_valid,
+            "path": str(path_obj),
+            "errors": errors,
+            "warnings": warnings,
+        }
+
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
         # Read-only tools are safe and can be auto-approved
         # spawn_subagent and send_to_subagent should require permission unless auto_approved
-        return ['list_subagent_profiles', 'list_active_subagents']
+        return ['list_subagent_profiles', 'list_active_subagents', 'validateProfile']
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
