@@ -25,6 +25,10 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 - **Templates index**: `{{templates_index}}`
 - **Profiles output**: `{{profiles_dir}}`
 
+## Critical policy
+
+**Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed. Do not call `selectReferences`, `listExtractedTemplates`, or any tool that queries existing reference/template state. Only use file-reading and file-writing tools.
+
 ## Task
 
 Scan `{{source}}` recursively and produce four outputs:
