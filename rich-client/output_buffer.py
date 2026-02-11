@@ -266,6 +266,7 @@ class ActiveToolCall:
     output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
     # Continuation grouping (e.g., interactive shell sessions)
     continuation_id: Optional[str] = None  # Shared session ID for tools that belong together
+    popup_header_override: Optional[str] = None  # If set, popup header shows this instead of args (for continuation groups)
     show_output: bool = True  # Whether to render output_lines in the main panel (popup unaffected)
     show_popup: bool = True  # Whether to track/update the tool output popup
     # Per-tool expand state for navigation
@@ -1019,9 +1020,10 @@ class OutputBuffer:
             tool.show_output = False  # Continuation follow-ups hide output in main panel
             # Inherit the original command as popup header (e.g., show "sh script.sh"
             # instead of "{'session_id': '...', 'input': '10\n'}")
+            # Uses popup_header_override so the inline tree still shows this tool's own args.
             original = self._popup_tools.get(continuation_id)
             if original:
-                tool.display_args_summary = original.display_args_summary or original.args_full or original.args_summary
+                tool.popup_header_override = original.popup_header_override or original.args_full or original.args_summary
         self._active_tools.append(tool)
         # Scroll to show the full tool tree (prioritizing top if it's taller than visible area)
         self.scroll_to_show_tool_tree()
