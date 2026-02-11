@@ -74,7 +74,15 @@ class ToolOutputPopup:
 
     @staticmethod
     def _get_header_text(tool: "ActiveToolCall") -> str:
-        """Get the header text for the popup — full untruncated args."""
+        """Get the header text for the popup — full untruncated args.
+
+        For continuation group tools (e.g., shell_input following shell_spawn),
+        ``popup_header_override`` carries the original command so the popup
+        shows a stable header like "python3" rather than changing every time
+        a new input is sent.
+        """
+        if tool.popup_header_override is not None:
+            return tool.popup_header_override
         if tool.display_args_summary is not None:
             return tool.display_args_summary
         return tool.args_full or tool.args_summary
