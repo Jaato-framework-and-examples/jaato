@@ -273,10 +273,15 @@ class IPCClient:
         if self._is_windows_pipe():
             # Windows: use named pipe connection
             pipe_path = self._get_pipe_path()
+            # When auto-start is available, use a short initial probe so we
+            # don't waste the time budget waiting for a server that isn't
+            # running yet.  If the server IS already running, 2s is plenty
+            # for the pipe to respond.
+            initial_timeout = min(2.0, timeout) if self.auto_start else timeout
             try:
                 self._reader, self._writer = await asyncio.wait_for(
                     self._connect_windows_pipe(pipe_path),
-                    timeout=timeout,
+                    timeout=initial_timeout,
                 )
                 self._connected = True
             except (asyncio.TimeoutError, OSError, ConnectionRefusedError, FileNotFoundError) as e:
@@ -486,20 +491,34 @@ class IPCClient:
         start = time.time()
 
         if self._is_windows_pipe():
-            # Windows: try to connect to the named pipe
+            # Windows: use WaitNamedPipeW to check pipe availability without
+            # consuming a pipe instance.  Unlike creating a full connection
+            # (which uses up a server pipe instance and requires the server to
+            # create a new one), WaitNamedPipeW simply checks whether a pipe
+            # instance is available for connection.
             pipe_path = self._get_pipe_path()
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.WaitNamedPipeW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
+            kernel32.WaitNamedPipeW.restype = ctypes.c_int
+            loop = asyncio.get_running_loop()
+
             while time.time() - start < timeout:
+                remaining = timeout - (time.time() - start)
+                if remaining <= 0:
+                    break
+                # Wait up to 1s per probe (or remaining time, whichever is less)
+                wait_ms = min(int(remaining * 1000), 1000)
                 try:
-                    # Try to open the pipe briefly to check if server is listening
-                    reader, writer = await asyncio.wait_for(
-                        self._connect_windows_pipe(pipe_path),
-                        timeout=0.5,
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda wms=wait_ms: kernel32.WaitNamedPipeW(pipe_path, wms),
                     )
-                    writer.close()
-                    await writer.wait_closed()
-                    return True
-                except (OSError, asyncio.TimeoutError, ConnectionRefusedError, FileNotFoundError):
-                    await asyncio.sleep(0.2)
+                    if result:
+                        return True
+                except OSError:
+                    pass
+                await asyncio.sleep(0.2)
             return False
         else:
             # Unix: wait for socket file to appear
