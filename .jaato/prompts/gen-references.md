@@ -207,11 +207,13 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
     For long-running profiles (max_turns > 15), add GC config:
     ```json
     "gc": {
-      "type": "hybrid",
+      "type": "budget",
       "threshold_percent": 80.0,
+      "target_percent": 60.0,
+      "pressure_percent": 0,
       "preserve_recent_turns": 5,
-      "notify_on_gc": true,
-      "summarize_middle_turns": 10
+      "summarize_middle_turns": 10,
+      "notify_on_gc": false
     }
     ```
 

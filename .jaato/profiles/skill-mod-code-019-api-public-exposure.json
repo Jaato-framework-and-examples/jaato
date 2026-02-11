@@ -6,5 +6,6 @@
   "system_instructions": "Add public API exposure patterns and pagination support.",
   "max_turns": 16,
   "auto_approved": false,
-  "icon_name": "api"
+  "icon_name": "api",
+  "gc": {"type": "budget","threshold_percent": 80.0,"target_percent": 60.0,"pressure_percent": 0,"preserve_recent_turns": 5,"summarize_middle_turns": 10,"notify_on_gc": false}
 }
