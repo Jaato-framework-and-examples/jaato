@@ -2669,7 +2669,7 @@ class RichClient:
         lines = [
             ("=" * 60, ""),
             (f"  Conversation History: {selected_agent.name}", "bold"),
-            (f"  Agent: {selected_agent.agent_id} ({selected_agent.agent_type})", "dim"),
+            (f"  Agent: {selected_agent.name} ({selected_agent.agent_type})", "dim"),
             (f"  Messages: {count}, Turns: {total_turns}", "dim"),
             ("  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn (main agent only)", "dim"),
             ("=" * 60, ""),
@@ -2879,7 +2879,7 @@ class RichClient:
         lines = [
             ("─" * 50, "dim"),
             (f"Context Usage: {selected_agent.name}", "bold"),
-            (f"  Agent: {selected_agent.agent_id}", "dim"),
+            (f"  Agent: {selected_agent.name}", "dim"),
             (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
             (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
             (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
@@ -5085,7 +5085,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         lines = [
                             ("─" * 50, "dim"),
                             (f"Context Usage: {selected_agent.name}", "bold"),
-                            (f"  Agent: {selected_agent.agent_id}", "dim"),
+                            (f"  Agent: {selected_agent.name}", "dim"),
                             (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
                             (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
                             (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),

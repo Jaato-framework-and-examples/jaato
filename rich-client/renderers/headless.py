@@ -111,7 +111,8 @@ class HeadlessFileRenderer(Renderer):
             self._consoles[agent_id] = console
 
             # Write session header
-            console.rule(f"[bold]Agent: {agent_id}[/bold]")
+            display_name = self._agent_names.get(agent_id, agent_id)
+            console.rule(f"[bold]Agent: {display_name}[/bold]")
             console.print(f"[dim]Started: {datetime.now().isoformat()}[/dim]")
             console.print()
 
@@ -146,7 +147,8 @@ class HeadlessFileRenderer(Renderer):
         if profile_name:
             info_parts.append(f"Profile: {profile_name}")
         if parent_agent_id:
-            info_parts.append(f"Parent: {parent_agent_id}")
+            parent_name = self._agent_names.get(parent_agent_id, parent_agent_id)
+            info_parts.append(f"Parent: {parent_name}")
 
         console.print(Panel(
             "\n".join(info_parts),
