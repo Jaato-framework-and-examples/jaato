@@ -4,15 +4,18 @@ Provides tools for rendering templates with variable substitution
 and writing the results to files.
 
 Key features:
-1. System instruction enrichment: Detects embedded templates in system
-   instructions (from MODULE.md injected by references plugin) and extracts
-   them to .jaato/templates/ for later use via renderTemplate tool.
-2. Tool result enrichment: Detects embedded templates in tool outputs
-   (e.g., from cat, readFile) and extracts them similarly.
-3. Standalone template discovery: Detects .tpl/.tmpl files in directories
+1. Standalone template discovery: Detects .tpl/.tmpl files in directories
    referenced by the references plugin and indexes them without copying.
-4. Template rendering: Renders templates with variable substitution.
+   Runs during system instruction enrichment.
+2. Tool result enrichment: Detects embedded templates in tool outputs
+   (e.g., from readFile, cat) and extracts them to .jaato/templates/.
+3. Template rendering: Renders templates with variable substitution.
    Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected).
+
+Note: System instruction code blocks are NOT scanned for templates.
+Instructions contain documentation and examples that may use template
+syntax illustratively; extracting those produces false positives. Only
+actual file content (via tool results) triggers embedded extraction.
 
 Template Index:
 All templates (embedded and standalone) are registered in a unified index
@@ -600,16 +603,18 @@ Template rendering requires approval since it writes files."""
         self,
         instructions: str
     ) -> SystemInstructionEnrichmentResult:
-        """Detect and index templates from system instructions and referenced directories.
+        """Discover standalone templates and annotate system instructions.
 
-        Two discovery paths:
-        1. Embedded templates: Scans code blocks in instructions for Jinja2/Mustache
-           syntax, extracts them to .jaato/templates/.
-        2. Standalone templates: Queries the references plugin for selected LOCAL
-           directory sources, scans for .tpl/.tmpl files (left in original location).
+        Queries the references plugin for selected LOCAL directory sources and
+        scans for .tpl/.tmpl files (left in original location). Discovered
+        templates are registered in the unified index and annotated in the
+        instructions so the model knows what templates are available.
 
-        Both types are registered in the unified template index and annotated in
-        the instructions so the model knows what templates are available.
+        Note: Code blocks in system instructions are NOT scanned for embedded
+        templates. System instructions contain documentation and examples that
+        may use template syntax illustratively — extracting those would produce
+        false positives. Embedded template extraction only happens via
+        enrich_tool_result(), where the content is actual file data.
 
         Args:
             instructions: Combined system instructions (includes MODULE.md content
@@ -617,103 +622,12 @@ Template rendering requires approval since it writes files."""
 
         Returns:
             SystemInstructionEnrichmentResult with annotated instructions and
-            extraction metadata.
+            discovery metadata.
         """
         instructions_preview = instructions[:100].replace('\n', '\\n') + ('...' if len(instructions) > 100 else '')
         self._trace(f"enrich_system_instructions called: {len(instructions)} chars, preview: {instructions_preview}")
 
-        # Find all code blocks in the instructions
-        code_blocks = self._find_code_blocks(instructions)
-
-        # Filter to blocks that contain template syntax
-        template_blocks = []
-        if code_blocks:
-            template_blocks = [
-                (lang, content, start, end)
-                for lang, content, start, end in code_blocks
-                if self._is_template(content)
-            ]
-
-            if not template_blocks:
-                for i, (lang, content, start, end) in enumerate(code_blocks):
-                    preview = content[:80].replace('\n', '\\n') + ('...' if len(content) > 80 else '')
-                    self._trace(f"  code block {i+1}: lang={lang!r}, {len(content)} chars: {preview}")
-                self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
-        else:
-            self._trace("  no code blocks found in instructions")
-
-        if template_blocks:
-            self._trace(f"enrich_system_instructions: found {len(template_blocks)} template blocks")
-
-        # Extract each template and collect annotations
-        extracted: List[Tuple[str, Path, List[str]]] = []  # (content_hash, path, variables)
         annotations: List[str] = []
-
-        for lang, content, start, end in template_blocks:
-            # Generate template ID and path
-            content_hash = self._hash_content(content)
-
-            # Check if already processed this content in this session
-            if content_hash in self._extracted_templates:
-                template_path = self._extracted_templates[content_hash]
-                self._trace(f"  reusing already-extracted: {template_path.name}")
-            else:
-                # Determine template filename and extract
-                template_name = self._generate_template_name(instructions, content, lang, start)
-                template_path, is_new = self._extract_template(template_name, content, lang)
-
-                if template_path:
-                    self._extracted_templates[content_hash] = template_path
-                    if is_new:
-                        self._trace(f"  extracted new: {template_path.name}")
-                    else:
-                        self._trace(f"  found existing on disk: {template_path.name}")
-
-            # Always add annotation for available templates (new or existing)
-            if template_path:
-                variables = self._extract_variables(content)
-                syntax = self._detect_template_syntax(content)
-                extracted.append((content_hash, template_path, variables))
-
-                # Build annotation with COMPLETE variable list
-                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-
-                # Show ALL variables so the model knows exactly what to provide
-                if variables:
-                    var_list = ", ".join(variables)
-                    var_dict_example = ", ".join(f'"{v}": <value>' for v in variables[:3])
-                    if len(variables) > 3:
-                        var_dict_example += ", ..."
-                else:
-                    var_list = "(none detected)"
-                    var_dict_example = ""
-
-                annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                    f"  Syntax: {syntax}\n"
-                    f"  Required variables: [{var_list}]\n"
-                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: renderTemplateToFile(\n"
-                    f"      template_name=\"{rel_path}\",\n"
-                    f"      variables={{{var_dict_example}}},\n"
-                    f"      output_path=\"<your-output-file>\"\n"
-                    f"  )"
-                )
-
-        # Register embedded templates in the unified index
-        for content_hash, template_path, variables in extracted:
-            index_name = template_path.name
-            if index_name not in self._template_index:
-                syntax = self._detect_template_syntax(
-                    template_path.read_text() if template_path.exists() else ""
-                )
-                self._template_index[index_name] = TemplateIndexEntry(
-                    name=index_name,
-                    source_path=str(template_path),
-                    syntax=syntax,
-                    variables=variables,
-                    origin="embedded",
-                )
 
         # Discover standalone templates from referenced directories
         standalone_entries = self._discover_from_references()
@@ -755,12 +669,7 @@ Template rendering requires approval since it writes files."""
         return SystemInstructionEnrichmentResult(
             instructions=enriched_instructions,
             metadata={
-                "extracted_count": len(extracted),
                 "standalone_count": len(standalone_entries),
-                "templates": [
-                    {"hash": h, "path": str(p), "variables": v}
-                    for h, p, v in extracted
-                ],
                 "standalone_templates": [
                     {"name": e.name, "path": e.source_path, "variables": e.variables}
                     for e in standalone_entries
