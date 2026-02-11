@@ -91,14 +91,64 @@ class TestIsMsys2Environment:
         mock_sys.platform = "darwin"
         assert is_msys2_environment() is False
 
+    @mock.patch("shared.path_utils.sys")
+    def test_mingw_prefix_detected(self, mock_sys):
+        """MINGW_PREFIX env var triggers detection (daemon fallback)."""
+        mock_sys.platform = "win32"
+        mock_sys.executable = "C:\\Python312\\python.exe"
+        env = {"MINGW_PREFIX": "/mingw64"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            is_msys2_environment.cache_clear()
+            assert is_msys2_environment() is True
+
+    @mock.patch("shared.path_utils.sys")
+    def test_mingw_chost_detected(self, mock_sys):
+        """MINGW_CHOST env var triggers detection (daemon fallback)."""
+        mock_sys.platform = "win32"
+        mock_sys.executable = "C:\\Python312\\python.exe"
+        env = {"MINGW_CHOST": "x86_64-w64-mingw32"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            is_msys2_environment.cache_clear()
+            assert is_msys2_environment() is True
+
+    @mock.patch("shared.path_utils.sys")
+    def test_executable_in_msys64_detected(self, mock_sys):
+        """Python executable inside msys64 directory triggers detection."""
+        mock_sys.platform = "win32"
+        mock_sys.executable = "C:\\msys64\\mingw64\\bin\\python.exe"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            is_msys2_environment.cache_clear()
+            assert is_msys2_environment() is True
+
+    @mock.patch("shared.path_utils.sys")
+    def test_executable_in_mingw64_detected(self, mock_sys):
+        """Python executable inside mingw64 directory triggers detection."""
+        mock_sys.platform = "win32"
+        mock_sys.executable = "C:\\mingw64\\bin\\python.exe"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            is_msys2_environment.cache_clear()
+            assert is_msys2_environment() is True
+
+    @mock.patch("shared.path_utils.sys")
+    def test_executable_in_ucrt64_detected(self, mock_sys):
+        """Python executable inside ucrt64 directory triggers detection."""
+        mock_sys.platform = "win32"
+        mock_sys.executable = "D:\\ucrt64\\bin\\python3.exe"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            is_msys2_environment.cache_clear()
+            assert is_msys2_environment() is True
+
     @mock.patch.dict(os.environ, {}, clear=False)
     @mock.patch("shared.path_utils.sys")
     def test_not_detected_plain_windows(self, mock_sys):
         mock_sys.platform = "win32"
+        mock_sys.executable = "C:\\Python312\\python.exe"
         # Ensure no MSYS2 indicators
         env_copy = dict(os.environ)
         env_copy.pop("MSYSTEM", None)
         env_copy.pop("TERM_PROGRAM", None)
+        env_copy.pop("MINGW_PREFIX", None)
+        env_copy.pop("MINGW_CHOST", None)
         with mock.patch.dict(os.environ, env_copy, clear=True):
             is_msys2_environment.cache_clear()
             assert is_msys2_environment() is False

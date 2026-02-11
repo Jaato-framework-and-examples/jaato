@@ -14,6 +14,7 @@ Backend selection:
 - Windows (native): wexpect (Windows console and named pipes)
 """
 
+import logging
 import os
 import sys
 import time
@@ -171,6 +172,8 @@ else:
     _EOF = pexpect.EOF
     _BACKEND = 'pexpect'
 
+
+logger = logging.getLogger(__name__)
 
 # Default PTY dimensions
 DEFAULT_ROWS = 24
@@ -540,6 +543,50 @@ class ShellSession:
 
         return ''.join(chunks)
 
+    def _wexpect_read_with_timeout(self, size: int, timeout: float) -> str:
+        """Run wexpect's blocking read_nonblocking in a daemon thread with a timeout.
+
+        wexpect's ``read_nonblocking`` calls ``win32file.ReadFile`` which blocks
+        indefinitely when no data is available and ``PeekNamedPipe`` is not
+        usable. This helper offloads the blocking call to a daemon thread and
+        joins it with a timeout so the caller always regains control.
+
+        The daemon thread is abandoned (not forcibly killed) on timeout.  It
+        will unblock and exit when ``close()`` terminates the child process,
+        causing ``ReadFile`` to error out.
+
+        Args:
+            size: Maximum bytes to read.
+            timeout: Seconds to wait before giving up.
+
+        Returns:
+            Data read from the process (str or bytes depending on wexpect version).
+
+        Raises:
+            _TIMEOUT: If the thread did not complete within *timeout*.
+            _EOF: Propagated from read_nonblocking if the process exited.
+        """
+        result = [None]  # [data | Exception]
+
+        def _reader():
+            try:
+                result[0] = self._process.read_nonblocking(size=size)
+            except Exception as exc:
+                result[0] = exc
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+
+        if t.is_alive():
+            # Thread still blocked — treat as timeout
+            raise _TIMEOUT("wexpect read_nonblocking timed out")
+
+        if isinstance(result[0], Exception):
+            raise result[0]
+
+        return result[0]
+
     def _read_until_idle_windows(
         self,
         idle_timeout: float,
@@ -562,7 +609,10 @@ class ShellSession:
                 import win32pipe as _win32pipe
                 _peek = lambda: _win32pipe.PeekNamedPipe(pipe_handle, 0)[1]
             except ImportError:
-                pass
+                logger.warning(
+                    "PeekNamedPipe unavailable (win32pipe not installed); "
+                    "wexpect reads will use thread-based timeout fallback"
+                )
 
         while time.time() < deadline:
             try:
@@ -577,8 +627,17 @@ class ShellSession:
                             break
                         time.sleep(self._POLL_INTERVAL)
                         continue
+                    chunk = self._process.read_nonblocking(size=4096)
+                else:
+                    # No peek available — use thread-based timeout to prevent
+                    # an indefinite hang on win32file.ReadFile.
+                    remaining = min(idle_timeout, deadline - time.time())
+                    if remaining <= 0:
+                        break
+                    chunk = self._wexpect_read_with_timeout(
+                        size=4096, timeout=remaining,
+                    )
 
-                chunk = self._process.read_nonblocking(size=4096)
                 if chunk:
                     # Ensure we always have str (wexpect may return bytes
                     # depending on version/codepage configuration)
