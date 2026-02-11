@@ -35,6 +35,38 @@ Scan `{{source}}` recursively and produce four outputs:
 
 ---
 
+## Processing strategy
+
+The source folder may contain dozens of documentation folders, validation folders, and template files. To avoid exceeding context window limits, process the knowledge base **progressively** — never load all content at once.
+
+### Phase 0 — Inventory (read structure only, not content)
+List the directory tree of `{{source}}` to build a complete inventory of folders and files. Do **not** read any file content yet. Record:
+- Which folders contain documentation files (MODULE.md, ERI.md, ADR.md, etc.)
+- Which folders are named `validation/`
+- Which files have `.tpl` or `.tmpl` extensions
+
+### Phase 1 — Process one category at a time
+Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`). Within each category, process **one folder at a time**:
+1. Read only the entry-point file (e.g., MODULE.md) — extract just the first paragraph for the description
+2. Write the reference JSON for that folder immediately
+3. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), write the validation reference JSON
+4. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
+5. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+
+### Phase 2 — Write template index
+After all categories are processed, write the accumulated template index to `{{templates_index}}`.
+
+### Phase 3 — Generate profiles
+Use only the inventory and the reference IDs collected during Phase 1 (not the file contents) to generate subagent profiles.
+
+### Key constraints
+- **Never read more than one documentation file at a time.** Read a file, extract what you need, write the output, move on.
+- **Extract only what is needed** — for descriptions, read only the first paragraph or Purpose section, not the entire file.
+- **For template files**, reading the content is necessary for syntax detection and variable extraction, but write the index entry immediately and move on.
+- **Do not batch-read** multiple folders in parallel. Sequential, one-at-a-time processing is required.
+
+---
+
 ## Part 1: Documentation references
 
 1. **Traverse** `{{source}}` recursively to find documentation folders — folders containing `MODULE.md`, `SKILL.md`, `ERI.md`, `ADR.md`, `OVERVIEW.md`, `README.md`, or similar entry-point files.
@@ -358,4 +390,10 @@ knowledge/
 
 ## Begin
 
-Start by listing the contents of `{{source}}` to understand the folder structure, then proceed with generating the outputs in order: documentation references, validation references, template index, and finally subagent profiles.
+Follow the processing strategy strictly:
+
+1. **Phase 0**: List the directory tree of `{{source}}` (structure only, no file reads). Build the full inventory.
+2. **Phase 1**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → read validation README if present → write validation-ref JSON → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one.
+3. **Phase 2**: Write the template index JSON.
+4. **Phase 3**: Generate subagent profiles using the collected reference IDs.
+5. **Report**: Produce the final summary table.
