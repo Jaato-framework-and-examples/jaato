@@ -570,9 +570,10 @@ class JaatoSession:
         (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT) are NOT forwarded to avoid cluttering
         the parent's context and causing the model to echo them.
 
-        These messages are queued with CHILD priority, meaning they will be
-        processed when the parent becomes idle (not mid-turn). This prevents
-        status updates from interrupting the parent's current work.
+        Most events use CHILD priority (processed when parent becomes idle).
+        However, CLARIFICATION_REQUESTED and PERMISSION_REQUESTED use SYSTEM
+        priority because the subagent is BLOCKED waiting for a response — these
+        must be processed mid-turn to avoid deadlock.
 
         Args:
             event_type: Type of event:
@@ -595,11 +596,19 @@ class JaatoSession:
         if event_type in ("MODEL_OUTPUT", "TOOL_CALL", "TOOL_OUTPUT"):
             return
 
+        # CLARIFICATION_REQUESTED and PERMISSION_REQUESTED are urgent:
+        # the subagent is blocked waiting for a response. Use SYSTEM priority
+        # so the parent processes them mid-turn instead of waiting until idle.
+        if event_type in ("CLARIFICATION_REQUESTED", "PERMISSION_REQUESTED"):
+            source_type = SourceType.SYSTEM
+        else:
+            source_type = SourceType.CHILD
+
         message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
         self._parent_session.inject_prompt(
             message,
             source_id=self._agent_id,
-            source_type=SourceType.CHILD
+            source_type=source_type,
         )
 
     def _has_active_streams(self) -> bool:
