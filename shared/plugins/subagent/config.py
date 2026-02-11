@@ -386,6 +386,127 @@ def discover_profiles(
     return profiles
 
 
+def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
+    """Validate a subagent profile JSON structure.
+
+    Checks required fields, type constraints, and GC sub-configuration
+    for a single profile definition (the format stored in .jaato/profiles/*.json).
+
+    Args:
+        data: Parsed JSON data from a profile file.
+
+    Returns:
+        Tuple of (is_valid, errors, warnings).
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not isinstance(data, dict):
+        return False, ["File must contain a JSON object"], []
+
+    # Required fields
+    if not data.get("name"):
+        errors.append("'name' is required")
+    if not data.get("description"):
+        errors.append("'description' is required")
+
+    # plugins: list of strings
+    plugins = data.get("plugins")
+    if plugins is not None:
+        if not isinstance(plugins, list):
+            errors.append("'plugins' must be an array")
+        elif not all(isinstance(p, str) for p in plugins):
+            errors.append("'plugins' must contain only strings")
+
+    # plugin_configs: dict of dicts
+    plugin_configs = data.get("plugin_configs")
+    if plugin_configs is not None:
+        if not isinstance(plugin_configs, dict):
+            errors.append("'plugin_configs' must be an object")
+        else:
+            for key, val in plugin_configs.items():
+                if not isinstance(val, dict):
+                    errors.append(f"plugin_configs['{key}'] must be an object")
+
+    # max_turns: positive int
+    max_turns = data.get("max_turns")
+    if max_turns is not None:
+        if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+            errors.append("'max_turns' must be an integer")
+        elif max_turns <= 0:
+            errors.append("'max_turns' must be a positive integer")
+
+    # auto_approved: bool
+    auto_approved = data.get("auto_approved")
+    if auto_approved is not None:
+        if not isinstance(auto_approved, bool):
+            errors.append("'auto_approved' must be a boolean")
+
+    # model: string or null
+    model = data.get("model")
+    if model is not None and not isinstance(model, str):
+        errors.append("'model' must be a string or null")
+
+    # provider: string or null
+    provider = data.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        errors.append("'provider' must be a string or null")
+
+    # icon: list of exactly 3 strings or null
+    icon = data.get("icon")
+    if icon is not None:
+        if not isinstance(icon, list):
+            errors.append("'icon' must be an array of 3 strings or null")
+        elif len(icon) != 3:
+            errors.append(f"'icon' must contain exactly 3 strings, got {len(icon)}")
+        elif not all(isinstance(line, str) for line in icon):
+            errors.append("'icon' must contain only strings")
+
+    # icon_name: string or null
+    icon_name = data.get("icon_name")
+    if icon_name is not None and not isinstance(icon_name, str):
+        errors.append("'icon_name' must be a string or null")
+
+    # GC sub-validation
+    gc_data = data.get("gc")
+    if gc_data is not None:
+        if not isinstance(gc_data, dict):
+            errors.append("'gc' must be an object or null")
+        else:
+            valid_gc_types = ("truncate", "summarize", "hybrid", "budget")
+            gc_type = gc_data.get("type", "truncate")
+            if gc_type not in valid_gc_types:
+                errors.append(
+                    f"gc.type '{gc_type}' is invalid. "
+                    f"Must be one of: {', '.join(valid_gc_types)}"
+                )
+
+            # Numeric range checks
+            for field_name in ("threshold_percent", "target_percent", "pressure_percent"):
+                val = gc_data.get(field_name)
+                if val is not None:
+                    if not isinstance(val, (int, float)) or isinstance(val, bool):
+                        errors.append(f"gc.{field_name} must be a number")
+                    elif val < 0 or val > 100:
+                        errors.append(f"gc.{field_name} must be between 0 and 100")
+
+            gc_preserve = gc_data.get("preserve_recent_turns")
+            if gc_preserve is not None:
+                if not isinstance(gc_preserve, int) or isinstance(gc_preserve, bool):
+                    errors.append("gc.preserve_recent_turns must be an integer")
+                elif gc_preserve < 0:
+                    errors.append("gc.preserve_recent_turns must be non-negative")
+
+            gc_max_turns = gc_data.get("max_turns")
+            if gc_max_turns is not None:
+                if not isinstance(gc_max_turns, int) or isinstance(gc_max_turns, bool):
+                    errors.append("gc.max_turns must be an integer")
+                elif gc_max_turns <= 0:
+                    errors.append("gc.max_turns must be a positive integer")
+
+    return len(errors) == 0, errors, warnings
+
+
 @dataclass
 class SubagentConfig:
     """Top-level configuration for the subagent plugin.

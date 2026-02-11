@@ -302,6 +302,27 @@ class TemplatePlugin:
                 discoverability="discoverable",
             ),
             ToolSchema(
+                name="validateTemplateIndex",
+                description=(
+                    "Validate a template index JSON file against the expected schema. "
+                    "Checks for required top-level fields, per-entry required fields, "
+                    "valid syntax and origin values, variable format, and optionally "
+                    "whether source paths exist on disk."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to a template index JSON file to validate."
+                        }
+                    },
+                    "required": ["path"]
+                },
+                category="code",
+                discoverability="discoverable",
+            ),
+            ToolSchema(
                 name="listTemplateVariables",
                 description=(
                     "List all variables required by a template. Call this before renderTemplateToFile "
@@ -330,6 +351,7 @@ class TemplatePlugin:
             "listExtractedTemplates": self._execute_list_extracted,
             "renderTemplateToFile": self._execute_render_template_to_file,
             "listTemplateVariables": self._execute_list_template_variables,
+            "validateTemplateIndex": self._execute_validate_template_index,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -477,7 +499,7 @@ Template rendering requires approval since it writes files."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
-        return ["listExtractedTemplates", "listTemplateVariables"]
+        return ["listExtractedTemplates", "listTemplateVariables", "validateTemplateIndex"]
 
     def format_permission_request(
         self,
@@ -1708,6 +1730,139 @@ Template rendering requires approval since it writes files."""
             "variables_used": sorted(variables.keys()),
             "template_source": template_source,
             "template_syntax": syntax
+        }
+
+    def _validate_template_index(self, data: Any) -> Tuple[bool, List[str], List[str]]:
+        """Validate a template index JSON structure.
+
+        Checks the top-level structure and each template entry for required
+        fields, valid enum values, and correct types.
+
+        Args:
+            data: Parsed JSON data from a template index file.
+
+        Returns:
+            Tuple of (is_valid, errors, warnings).
+        """
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        if not isinstance(data, dict):
+            return False, ["File must contain a JSON object"], []
+
+        # Top-level fields
+        if "generated_at" not in data:
+            errors.append("'generated_at' is required")
+        elif not isinstance(data["generated_at"], str):
+            errors.append("'generated_at' must be a string")
+
+        if "template_count" not in data:
+            errors.append("'template_count' is required")
+        elif not isinstance(data["template_count"], int):
+            errors.append("'template_count' must be an integer")
+
+        if "templates" not in data:
+            errors.append("'templates' is required")
+            return len(errors) == 0, errors, warnings
+
+        templates = data["templates"]
+        if not isinstance(templates, dict):
+            errors.append("'templates' must be an object")
+            return len(errors) == 0, errors, warnings
+
+        # Warn if template_count doesn't match actual count
+        if isinstance(data.get("template_count"), int):
+            if data["template_count"] != len(templates):
+                warnings.append(
+                    f"template_count ({data['template_count']}) does not match "
+                    f"actual number of templates ({len(templates)})"
+                )
+
+        valid_syntaxes = ("jinja2", "mustache")
+        valid_origins = ("standalone", "embedded")
+
+        for name, entry in templates.items():
+            prefix = f"templates['{name}']"
+
+            if not isinstance(entry, dict):
+                errors.append(f"{prefix}: must be an object")
+                continue
+
+            # Required fields
+            if not entry.get("name"):
+                errors.append(f"{prefix}: 'name' is required")
+            if not entry.get("source_path"):
+                errors.append(f"{prefix}: 'source_path' is required")
+
+            # Validate syntax
+            syntax = entry.get("syntax")
+            if not syntax:
+                errors.append(f"{prefix}: 'syntax' is required")
+            elif syntax not in valid_syntaxes:
+                errors.append(f"{prefix}: invalid syntax '{syntax}'. Must be one of: {', '.join(valid_syntaxes)}")
+
+            # Validate origin
+            origin = entry.get("origin")
+            if not origin:
+                errors.append(f"{prefix}: 'origin' is required")
+            elif origin not in valid_origins:
+                errors.append(f"{prefix}: invalid origin '{origin}'. Must be one of: {', '.join(valid_origins)}")
+
+            # Validate variables
+            variables = entry.get("variables")
+            if variables is not None:
+                if not isinstance(variables, list):
+                    errors.append(f"{prefix}: 'variables' must be an array")
+                elif not all(isinstance(v, str) for v in variables):
+                    errors.append(f"{prefix}: 'variables' must contain only strings")
+
+            # Warn if source_path doesn't exist for standalone entries
+            source_path = entry.get("source_path", "")
+            if origin == "standalone" and source_path and os.path.isabs(source_path):
+                if not os.path.exists(source_path):
+                    warnings.append(f"{prefix}: source_path does not exist: {source_path}")
+
+        return len(errors) == 0, errors, warnings
+
+    def _execute_validate_template_index(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate a template index JSON file against the expected schema.
+
+        Reads the file, parses it as JSON, and runs _validate_template_index()
+        to check structure, entry fields, syntax/origin values, and variable format.
+
+        Args:
+            args: Tool arguments with 'path' (string, required).
+
+        Returns:
+            Dict with 'valid', 'path', 'errors', and 'warnings' fields.
+        """
+        file_path = args.get("path", "")
+        if not file_path:
+            return {"valid": False, "path": "", "errors": ["'path' is required"], "warnings": []}
+
+        path_obj = Path(file_path)
+        if not path_obj.is_absolute():
+            path_obj = self._base_path / path_obj
+
+        if not path_obj.exists():
+            return {"valid": False, "path": str(path_obj), "errors": [f"File not found: {path_obj}"], "warnings": []}
+
+        try:
+            content = path_obj.read_text(encoding='utf-8')
+        except (IOError, OSError) as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Cannot read file: {e}"], "warnings": []}
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            return {"valid": False, "path": str(path_obj), "errors": [f"Invalid JSON: {e}"], "warnings": []}
+
+        is_valid, errors, warnings = self._validate_template_index(data)
+        return {
+            "valid": is_valid,
+            "path": str(path_obj),
+            "errors": errors,
+            "warnings": warnings,
         }
 
     def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
