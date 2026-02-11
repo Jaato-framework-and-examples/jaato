@@ -1711,6 +1711,7 @@ class JaatoServer:
                     'content': step.get('description', ''),
                     'status': step.get('status', 'pending'),
                     'active_form': step.get('active_form'),
+                    'step_id': step.get('step_id', ''),
                 }
                 # Include cross-agent dependency info for blocked steps
                 if step.get('blocked_by'):

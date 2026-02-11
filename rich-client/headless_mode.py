@@ -319,6 +319,7 @@ async def run_headless_mode(
                         "status": step.get("status", "pending"),
                         "active_form": step.get("active_form"),
                         "sequence": i + 1,
+                        "step_id": step.get("step_id", ""),
                     }
                     if step.get("blocked_by"):
                         step_data["blocked_by"] = step["blocked_by"]

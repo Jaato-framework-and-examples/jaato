@@ -59,6 +59,8 @@ class HeadlessFileRenderer(Renderer):
 
         # Track active tools for output formatting
         self._active_tools: Dict[str, Dict[str, Any]] = {}  # call_id -> tool info
+        # Step ID → step number mapping for human-readable display in tool args
+        self._step_id_to_number: Dict[str, int] = {}
 
     # ==================== Lifecycle ====================
 
@@ -258,10 +260,13 @@ class HeadlessFileRenderer(Renderer):
         console.print()
         console.print(f"[bold yellow]┌─ {tool_name}[/bold yellow]")
 
-        # Print args
+        # Print args (replace step_id UUIDs with human-readable step numbers)
         for key, value in tool_args.items():
+            display_value = value
+            if key == "step_id" and isinstance(value, str) and value in self._step_id_to_number:
+                display_value = f"Step #{self._step_id_to_number[value]}"
             # Truncate long values
-            str_value = str(value)
+            str_value = str(display_value)
             if len(str_value) > 200:
                 str_value = str_value[:200] + "..."
             console.print(f"[dim]│ {key}: {str_value}[/dim]")
@@ -348,6 +353,13 @@ class HeadlessFileRenderer(Renderer):
 
         # Store current plan for reference
         self._current_plans[agent_id] = plan_data
+
+        # Build step_id → step number mapping for tool args display
+        for step in plan_data.get("steps", []):
+            sid = step.get("step_id")
+            seq = step.get("sequence")
+            if sid and seq is not None:
+                self._step_id_to_number[sid] = seq
 
         # Build plan display
         title = plan_data.get("title", "Plan")
