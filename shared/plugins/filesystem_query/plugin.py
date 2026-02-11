@@ -432,6 +432,11 @@ Tips:
         if not pattern:
             return {"error": "Pattern is required", "files": [], "total": 0}
 
+        # Normalize trailing ** — Python pathlib.glob("dir/**") only matches
+        # the directory itself, not files inside it. Append /* to match files.
+        if pattern.endswith("**"):
+            pattern = pattern + "/*"
+
         # Sandbox check: ensure root path is within allowed workspace (with /tmp support)
         if not self._is_path_allowed(root):
             return {
@@ -932,6 +937,11 @@ Tips:
                 chunk_type="error"
             )
             return
+
+        # Normalize trailing ** — Python pathlib.glob("dir/**") only matches
+        # the directory itself, not files inside it. Append /* to match files.
+        if pattern.endswith("**"):
+            pattern = pattern + "/*"
 
         # Sandbox check
         if not self._is_path_allowed(root):
