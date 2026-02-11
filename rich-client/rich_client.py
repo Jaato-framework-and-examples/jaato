@@ -4004,9 +4004,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         )
                     pending_permission_request = None
                 else:
-                    pending_permission_request = None
-                    display.set_waiting_for_channel_input(False)
-                    # Update tool tree with permission result
+                    # Only clear pending permission state if this resolution matches
+                    # the request we're waiting on. Auto-approved permissions from
+                    # subagents (e.g. readFile) must not cancel the main agent's
+                    # pending interactive permission prompt.
+                    is_pending_resolved = (
+                        pending_permission_request
+                        and event.request_id
+                        and event.request_id == pending_permission_request.get("request_id")
+                    )
+                    if is_pending_resolved:
+                        pending_permission_request = None
+                        display.set_waiting_for_channel_input(False)
+                    # Always update tool tree with permission result regardless
                     # Route to the agent whose permission was resolved, not the selected agent
                     buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                     if buffer:
