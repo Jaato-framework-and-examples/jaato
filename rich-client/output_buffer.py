@@ -50,7 +50,7 @@ from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
 from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
-from shared.ui_utils import format_tool_args_summary
+from shared.ui_utils import format_tool_arg_value, format_tool_args_summary
 from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
@@ -229,6 +229,7 @@ class ActiveToolCall:
     name: str
     args_summary: str  # Truncated string representation of args (for tree display)
     args_full: Optional[str] = None  # Full untruncated args (for popup header)
+    tool_args_dict: Optional[Dict[str, Any]] = None  # Raw args dict for multi-line param rendering
     call_id: Optional[str] = None  # Unique ID for correlating start/end of same tool call
     completed: bool = False  # True when tool execution finished
     backgrounded: bool = False  # True when auto-backgrounded (completed but still producing output)
@@ -1011,6 +1012,7 @@ class OutputBuffer:
         tool = ActiveToolCall(
             name=tool_name, args_summary=args_str,
             args_full=args_full or None,
+            tool_args_dict=display_args or None,
             call_id=call_id, continuation_id=continuation_id,
         )
         # If joining an existing continuation group, carry over shared state
@@ -2857,9 +2859,13 @@ class OutputBuffer:
 
                 tool_display_name = tool.display_name or tool.name
                 output.append(tool_display_name, style=row_style)
-                args_to_show = tool.display_args_summary if tool.display_args_summary is not None else tool.args_summary
-                if args_to_show:
-                    output.append(f"({args_to_show})", style=row_style)
+                # Show single-line args summary only when display override is active
+                # or multi-line dict is not available; otherwise params render below
+                if tool.display_args_summary is not None:
+                    if tool.display_args_summary:
+                        output.append(f"({tool.display_args_summary})", style=row_style)
+                elif not tool.tool_args_dict and tool.args_summary:
+                    output.append(f"({tool.args_summary})", style=row_style)
                 output.append(f" {status_icon}", style=status_style)
 
                 if tool.permission_state == "granted" and tool.permission_method:
@@ -2869,6 +2875,11 @@ class OutputBuffer:
 
                 if tool.completed and tool.duration_seconds is not None:
                     output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
+
+                # Multi-line parameter display (when dict is available and no display override)
+                if tool.display_args_summary is None and tool.tool_args_dict:
+                    param_style = self._style("muted", "dim")
+                    self._render_tool_params_multiline(output, tool, is_last, param_style)
 
                 # Tool output preview
                 show_output = tool.expanded if self._tool_nav_active else True
@@ -3018,6 +3029,42 @@ class OutputBuffer:
                 output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                 scroll_down_key = self._format_key_hint("nav_down")
                 output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+
+    def _render_tool_params_multiline(
+        self,
+        output: Text,
+        tool: 'ActiveToolCall',
+        is_last: bool,
+        style: str,
+    ) -> None:
+        """Render tool parameters as one key: value pair per line.
+
+        Each parameter is rendered on its own indented line below the tool
+        name, using tree continuation characters to maintain the visual
+        tree structure.  Values are truncated with ``...`` only when they
+        exceed the available terminal width.
+
+        Args:
+            output: Rich Text object to append to.
+            tool: The tool whose parameters to render.
+            is_last: Whether this is the last tool in the block (affects
+                tree continuation character: ``│`` vs space).
+            style: Style string to apply to the parameter lines.
+        """
+        if not tool.tool_args_dict:
+            return
+
+        cont_char = " " if is_last else "│"
+        prefix = f"    {cont_char}  "
+        prefix_width = len(prefix)
+        # "key: " takes len(key) + 2 chars
+        for key, value in tool.tool_args_dict.items():
+            key_label = f"{key}: "
+            available = max(10, self._console_width - prefix_width - len(key_label))
+            formatted = format_tool_arg_value(value, available)
+            output.append("\n")
+            output.append(prefix, style=self._style("tree_connector", "dim"))
+            output.append(f"{key_label}{formatted}", style=style)
 
     def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool,
                                    finalized: bool = False) -> None:
@@ -4155,10 +4202,13 @@ class OutputBuffer:
                 # Use display_name if set (e.g., showing actual tool instead of askPermission)
                 tool_display_name = tool.display_name or tool.name
                 output.append(tool_display_name, style=row_style)
-                # Use display_args_summary if set, otherwise fall back to args_summary
-                args_to_show = tool.display_args_summary if tool.display_args_summary is not None else tool.args_summary
-                if args_to_show:
-                    output.append(f"({args_to_show})", style=row_style)
+                # Show single-line args summary only when display override is active
+                # or multi-line dict is not available; otherwise params render below
+                if tool.display_args_summary is not None:
+                    if tool.display_args_summary:
+                        output.append(f"({tool.display_args_summary})", style=row_style)
+                elif not tool.tool_args_dict and tool.args_summary:
+                    output.append(f"({tool.args_summary})", style=row_style)
                 output.append(f" {status_icon}", style=status_style)
 
                 # Approval indicator
@@ -4170,6 +4220,11 @@ class OutputBuffer:
                 # Duration
                 if tool.duration_seconds is not None:
                     output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
+
+                # Multi-line parameter display (when dict is available and no display override)
+                if tool.display_args_summary is None and tool.tool_args_dict:
+                    param_style = self._style("muted", "dim")
+                    self._render_tool_params_multiline(output, tool, is_last, param_style)
 
                 # Tool output - use shared rendering method with smart truncation
                 if show_tool_output and tool.show_output and tool.output_lines:
