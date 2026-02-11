@@ -278,35 +278,36 @@ class TestDependencyRegistrationOrder:
     def test_add_dependent_step_saves_before_registering(self):
         """addDependentStep must save the plan before registering the dependency waiter.
 
-        We verify this by checking that the step exists in storage at the
-        time the event bus register_dependency is called.
+        We verify this by checking that the step (with its new dependency)
+        exists in storage at the time the event bus register_dependency is called.
         """
         plugin = _make_plugin()
         plan = _create_started_plan(plugin, steps=["Step 1", "Step 2"])
+        target_step_id = plan.steps[1].step_id  # "Step 2"
 
         # Patch register_dependency to verify plan state at call time
         original_register = plugin._event_bus.register_dependency
         step_in_storage_at_register_time = [None]
 
         def checking_register(dependency_ref, waiting_agent, waiting_plan_id, waiting_step_id):
-            # At this point, the plan should already be saved with the new step
+            # At this point, the plan should already be saved with the dependency
             current_plan = plugin._storage.get_plan(waiting_plan_id)
             step = current_plan.get_step_by_id(waiting_step_id) if current_plan else None
-            step_in_storage_at_register_time[0] = step is not None
+            step_in_storage_at_register_time[0] = step is not None and len(step.depends_on) > 0
             return original_register(dependency_ref, waiting_agent, waiting_plan_id, waiting_step_id)
 
         plugin._event_bus.register_dependency = checking_register
 
-        # Create a dependent step
+        # Add a dependency to an existing step
         dep_ref = {"agent_id": "sub", "step_id": "sub-step-1"}
         result = plugin._execute_add_dependent_step({
-            "description": "Wait for subagent",
+            "step_id": target_step_id,
             "depends_on": [dep_ref],
         })
 
         assert "error" not in result, result.get("error")
         assert step_in_storage_at_register_time[0] is True, (
-            "Step should be in storage when register_dependency is called"
+            "Step with dependency should be in storage when register_dependency is called"
         )
 
     def test_dependency_resolved_raises_on_missing_plan(self):
@@ -371,36 +372,39 @@ class TestAddDependentStepVisibility:
         TaskEventBus.reset()
 
     def test_dependent_step_visible_in_plan_status(self):
-        """The step created by addDependentStep must appear in getPlanStatus."""
+        """A step with dependencies added by addDependentStep must show as blocked in getPlanStatus."""
         plugin = _make_plugin()
         plan = _create_started_plan(plugin, steps=[
             "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6"
         ])
+        target_step_id = plan.steps[5].step_id  # "Step 6"
 
-        # Add a dependent step
+        # Add a dependency to an existing step
         result = plugin._execute_add_dependent_step({
-            "description": "Wait for subagent results",
+            "step_id": target_step_id,
             "depends_on": [{"agent_id": "subagent_1", "step_id": "sub-step-4"}],
         })
         assert "error" not in result
-        assert result["total_steps"] == 7
+        # No new step created — still 6 steps
+        assert result["total_steps"] == 6
 
-        # Verify getPlanStatus sees 7 steps
+        # Verify getPlanStatus sees 6 steps with 1 blocked
         status = plugin._execute_get_plan_status({})
-        assert len(status["steps"]) == 7, (
-            f"Expected 7 steps in getPlanStatus, got {len(status['steps'])}"
+        assert len(status["steps"]) == 6, (
+            f"Expected 6 steps in getPlanStatus, got {len(status['steps'])}"
         )
-        assert status["progress"]["total"] == 7
+        assert status["progress"]["total"] == 6
         assert status["progress"]["blocked"] == 1
 
     def test_dependent_step_visible_after_concurrent_update(self):
-        """The dependent step must survive a concurrent step completion."""
+        """The dependency added to an existing step must survive a concurrent step completion."""
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin = _make_plugin("file", f"{tmpdir}/plans")
             plan = _create_started_plan(plugin, steps=[
                 "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6"
             ])
             step_ids = [s.step_id for s in plan.steps]
+            target_step_id = step_ids[5]  # "Step 6" — will get the dependency
 
             # Mark step 1 as in_progress
             plugin._execute_update_step({
@@ -414,7 +418,7 @@ class TestAddDependentStepVisibility:
                 try:
                     barrier.wait(timeout=5)
                     result = plugin._execute_add_dependent_step({
-                        "description": "Wait for subagent",
+                        "step_id": target_step_id,
                         "depends_on": [{"agent_id": "sub", "step_id": "s1"}],
                     })
                     if result.get("error"):
@@ -444,12 +448,12 @@ class TestAddDependentStepVisibility:
 
             assert not errors, f"Thread errors: {errors}"
 
-            # Both the dependent step AND the completed step must be visible
+            # The dependency on step 6 and the completed step 1 must both be visible
             status = plugin._execute_get_plan_status({})
-            assert len(status["steps"]) == 7, (
-                f"Expected 7 steps, got {len(status['steps'])}"
+            assert len(status["steps"]) == 6, (
+                f"Expected 6 steps, got {len(status['steps'])}"
             )
-            assert status["progress"]["total"] == 7
+            assert status["progress"]["total"] == 6
             assert status["progress"]["blocked"] == 1
             assert status["progress"]["completed"] == 1
 

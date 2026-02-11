@@ -443,24 +443,28 @@ class TodoPlugin:
             ToolSchema(
                 name="addDependentStep",
                 description=(
-                    "Add a step that waits for tasks from other agents. The step will be "
-                    "BLOCKED until ALL dependencies complete, then auto-unblocks.\n\n"
+                    "Add a cross-agent dependency to an EXISTING step in your plan. "
+                    "The step will be BLOCKED until ALL dependencies complete, then "
+                    "auto-unblocks.\n\n"
                     "WHEN TO USE: After receiving a [SUBAGENT event=plan_created] message "
-                    "showing subagent step IDs, call this to link your plan to their work.\n\n"
+                    "showing subagent step IDs, call this to link an existing step in "
+                    "your plan to their work.\n\n"
                     "WORKFLOW:\n"
                     "1. Subscribe to events (subscribeToTasks)\n"
-                    "2. Spawn subagents\n"
-                    "3. When you see plan_created events with step IDs, call addDependentStep\n"
-                    "4. Wait - your step auto-unblocks when dependencies complete\n"
-                    "5. Check getPlanStatus to see received_outputs from subagents\n\n"
+                    "2. Create your plan with steps including one for awaiting results\n"
+                    "3. Spawn subagents\n"
+                    "4. When you see plan_created events with step IDs, call "
+                    "addDependentStep to link your existing step to their work\n"
+                    "5. Wait - your step auto-unblocks when dependencies complete\n"
+                    "6. Check getPlanStatus to see received_outputs from subagents\n\n"
                     "Example (single dependency):\n"
                     "  addDependentStep(\n"
-                    "    description='Review implementation results',\n"
+                    "    step_id='<your_existing_step_id>',\n"
                     "    depends_on=[{agent_id: 'implementer', step_id: 'final_step'}]\n"
                     "  )\n\n"
                     "Example (multiple dependencies - all must complete):\n"
                     "  addDependentStep(\n"
-                    "    description='Check all validations passed',\n"
+                    "    step_id='<your_existing_step_id>',\n"
                     "    depends_on=[\n"
                     "      {agent_id: 'type_checker', step_id: 'check'},\n"
                     "      {agent_id: 'test_runner', step_id: 'run'},\n"
@@ -471,9 +475,9 @@ class TodoPlugin:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "description": {
+                        "step_id": {
                             "type": "string",
-                            "description": "Description of the step"
+                            "description": "ID of an existing step in your plan to add dependencies to"
                         },
                         "depends_on": {
                             "type": "array",
@@ -507,18 +511,14 @@ class TodoPlugin:
                                 },
                                 "required": ["agent_id", "step_id"]
                             },
-                            "description": "Tasks this step depends on"
-                        },
-                        "after_step_id": {
-                            "type": "string",
-                            "description": "Insert after this step (optional)"
+                            "description": "Cross-agent tasks this step depends on"
                         },
                         "provides": {
                             "type": "string",
                             "description": "Named output key for this step (optional)"
                         }
                     },
-                    "required": ["description", "depends_on"]
+                    "required": ["step_id", "depends_on"]
                 },
                 category="coordination",
                 discoverability="core",
@@ -688,11 +688,11 @@ class TodoPlugin:
             "subscribeToTasks(event_types=['plan_created', 'step_completed'])\n"
             "```\n"
             "This lets you see subagent plans and react when they complete work.\n\n"
-            "**Step 2: Create your master plan with placeholder steps**\n"
+            "**Step 2: Create your master plan with steps for awaiting results**\n"
             "```\n"
             "createPlan(title='Main Task', steps=[\n"
             "  'Analyze requirements and spawn workers',\n"
-            "  'Await and integrate results',  // Will become dependent step\n"
+            "  'Await and integrate results',  // Will get dependencies added\n"
             "  'Validate and iterate'\n"
             "])\n"
             "```\n\n"
@@ -701,15 +701,15 @@ class TodoPlugin:
             "spawn_subagent(name='implementer', task='...')\n"
             "spawn_subagent(name='validator', task='...')\n"
             "```\n\n"
-            "**Step 4: When you receive plan_created events, add dependent steps**\n"
+            "**Step 4: When you receive plan_created events, add dependencies to your existing step**\n"
             "After receiving `[SUBAGENT event=plan_created]` with step IDs:\n"
             "```\n"
             "addDependentStep(\n"
-            "  description='Integrate implementation results',\n"
+            "  step_id='<your_await_step_id>',\n"
             "  depends_on=[{agent_id: 'implementer', step_id: '<final_step>'}]\n"
             ")\n"
             "```\n"
-            "This step will be BLOCKED until the subagent completes that step.\n\n"
+            "Your existing step will be BLOCKED until the subagent completes that step.\n\n"
             "**Step 5: Subagents use completeStepWithOutput for structured results**\n"
             "Subagents should complete their final steps with:\n"
             "```\n"
@@ -725,10 +725,10 @@ class TodoPlugin:
             "For tasks requiring validation:\n"
             "1. Spawn implementation subagent\n"
             "2. Spawn validation subagents (type checker, test runner, linter)\n"
-            "3. Add step depending on ALL validators:\n"
+            "3. Add dependencies on ALL validators to your 'check results' step:\n"
             "   ```\n"
             "   addDependentStep(\n"
-            "     description='Check all validations passed',\n"
+            "     step_id='<your_check_step_id>',\n"
             "     depends_on=[\n"
             "       {agent_id: 'type_checker', step_id: 'final'},\n"
             "       {agent_id: 'test_runner', step_id: 'final'},\n"
@@ -1508,16 +1508,21 @@ class TodoPlugin:
         }
 
     def _execute_add_dependent_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the addDependentStep tool."""
-        description = args.get("description", "")
+        """Execute the addDependentStep tool.
+
+        Adds cross-agent dependencies to an existing step in the current plan.
+        The step will be BLOCKED until all dependencies complete, then
+        auto-unblocks. Unlike addStep, this does NOT create a new step — it
+        modifies an existing one by attaching dependency references.
+        """
+        step_id = args.get("step_id", "")
         depends_on_raw = args.get("depends_on", [])
-        after_step_id = args.get("after_step_id")
         provides = args.get("provides")
 
-        self._trace(f"addDependentStep: description={description!r}, deps={len(depends_on_raw)}")
+        self._trace(f"addDependentStep: step_id={step_id!r}, deps={len(depends_on_raw)}")
 
-        if not description:
-            return {"error": "description is required"}
+        if not step_id:
+            return {"error": "step_id is required"}
 
         if not depends_on_raw:
             return {"error": "depends_on is required and must not be empty"}
@@ -1541,13 +1546,18 @@ class TodoPlugin:
             if not plan.started:
                 return {"error": "Plan not started. Call startPlan first to get user approval."}
 
-            # Add the step with dependencies
-            new_step = plan.add_step(
-                description=description,
-                after_step_id=after_step_id,
-                depends_on=depends_on,
-                provides=provides
-            )
+            # Find the existing step
+            step = plan.get_step_by_id(step_id)
+            if not step:
+                return {"error": f"Step '{step_id}' not found in plan."}
+
+            # Add each dependency to the existing step
+            for dep in depends_on:
+                step.add_dependency(dep)
+
+            # Optionally set the provides key
+            if provides is not None:
+                step.provides = provides
 
             # Save to storage BEFORE registering with event bus (Root Cause 3 fix).
             # The plan must be persisted before the dependency waiter is visible,
@@ -1564,12 +1574,12 @@ class TodoPlugin:
                     dependency_ref=dep,
                     waiting_agent=self._get_agent_name(),
                     waiting_plan_id=plan.plan_id,
-                    waiting_step_id=new_step.step_id
+                    waiting_step_id=step.step_id
                 )
 
-        # Report the addition (outside lock — read-only on plan)
+        # Report the update (outside lock — read-only on plan)
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
         # Publish step_blocked event
         if self._event_bus:
@@ -1577,22 +1587,22 @@ class TodoPlugin:
                 event_type=TaskEventType.STEP_BLOCKED,
                 agent_id=self._get_agent_name(),
                 plan=plan,
-                step=new_step,
+                step=step,
                 payload={
-                    "blocked_by": [ref.to_dict() for ref in new_step.blocked_by]
+                    "blocked_by": [ref.to_dict() for ref in step.blocked_by]
                 }
             )
             self._event_bus.publish(event)
 
         return {
-            "step_id": new_step.step_id,
-            "sequence": new_step.sequence,
-            "description": new_step.description,
-            "status": new_step.status.value,
-            "blocked_by": [ref.to_dict() for ref in new_step.blocked_by],
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "description": step.description,
+            "status": step.status.value,
+            "blocked_by": [ref.to_dict() for ref in step.blocked_by],
             "total_steps": len(plan.steps),
             "progress": plan.get_progress(),
-            "message": f"Step added with {len(depends_on)} dependencies (BLOCKED)"
+            "message": f"Added {len(depends_on)} dependencies to existing step (BLOCKED)"
         }
 
     def _execute_complete_step_with_output(self, args: Dict[str, Any]) -> Dict[str, Any]:
