@@ -661,6 +661,20 @@ class RichClient:
                     # Fallback: try direct match (shouldn't happen normally)
                     self._trace(f"Plan update: agent_name '{agent_name}' not found in registry")
                     target_id = agent_name
+
+            # Build step_id → step number mapping so tool args display
+            # human-readable "Step #N" instead of raw UUIDs
+            step_id_map = {}
+            for step in plan_data.get("steps", []):
+                sid = step.get("step_id")
+                seq = step.get("sequence")
+                if sid and seq is not None:
+                    step_id_map[sid] = seq
+            if step_id_map:
+                buffer = self._agent_registry.get_buffer(target_id)
+                if buffer:
+                    buffer.update_step_id_map(step_id_map)
+
             self._display.update_plan(plan_data, agent_id=target_id)
 
         def clear_callback(agent_name):

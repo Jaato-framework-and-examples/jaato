@@ -64,6 +64,7 @@ class LivePlanReporter(TodoReporter):
         steps = []
         for step in plan.steps:
             step_data = {
+                "step_id": step.step_id,
                 "sequence": step.sequence,
                 "description": step.description,
                 "status": step.status.value,
