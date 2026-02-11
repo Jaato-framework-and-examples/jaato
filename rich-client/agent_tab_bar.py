@@ -20,6 +20,7 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Status symbols
 STATUS_SYMBOLS = {
     "active": None,  # Uses animated spinner
+    "idle": "⏸",
     "waiting": "⏸",
     "pending": "⏸",
     "done": "🏁",
@@ -30,6 +31,7 @@ STATUS_SYMBOLS = {
 # Status colors (prompt_toolkit style classes)
 STATUS_STYLES = {
     "active": "class:agent-tab.processing",
+    "idle": "class:agent-tab.awaiting",
     "waiting": "class:agent-tab.awaiting",
     "pending": "class:agent-tab.awaiting",
     "done": "class:agent-tab.finished",
@@ -353,6 +355,7 @@ class AgentTabBar:
         """
         style_map = {
             "active": "class:agent-tab.symbol.processing",
+            "idle": "class:agent-tab.symbol.awaiting",
             "waiting": "class:agent-tab.symbol.awaiting",
             "pending": "class:agent-tab.symbol.awaiting",
             "done": "class:agent-tab.symbol.finished",
@@ -378,6 +381,7 @@ class AgentTabBar:
         # Status display
         status_labels = {
             "active": "Processing",
+            "idle": "Idle",
             "waiting": "Awaiting",
             "pending": "Awaiting",
             "done": "Finished",
@@ -472,6 +476,7 @@ class AgentTabBar:
         """
         style_map = {
             "active": "class:agent-popup.status.processing",
+            "idle": "class:agent-popup.status.awaiting",
             "waiting": "class:agent-popup.status.awaiting",
             "pending": "class:agent-popup.status.awaiting",
             "done": "class:agent-popup.status.finished",

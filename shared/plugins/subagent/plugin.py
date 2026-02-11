@@ -1230,7 +1230,10 @@ class SubagentPlugin:
                     'message': f'Subagent is busy. Message queued for processing.'
                 }
 
-            # Subagent is idle - process directly
+            # Subagent is idle - process directly.
+            # The running-state callback on the session will emit
+            # active/idle status automatically when send_message()
+            # transitions the activity phase.
             logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, processing directly")
 
             # Emit the parent's message to UI
@@ -1876,10 +1879,6 @@ class SubagentPlugin:
                     icon_lines=profile.icon,
                     created_at=datetime.now()
                 )
-                self._ui_hooks.on_agent_status_changed(
-                    agent_id=agent_id,
-                    status="active"
-                )
 
             # Expand variables in plugin_configs
             # Pass workspace_path as override to ensure ${workspaceRoot} expands correctly
@@ -1960,6 +1959,22 @@ class SubagentPlugin:
             # Set retry callback
             if self._retry_callback:
                 session.set_retry_callback(self._retry_callback)
+
+            # Wire running-state callback so the session drives active/idle
+            # status changes automatically via _set_activity_phase transitions.
+            # This replaces manual on_agent_status_changed calls scattered
+            # across spawn and send_to_subagent code paths.
+            if self._ui_hooks:
+                ui_hooks = self._ui_hooks
+                _agent_id = agent_id  # capture for closure
+
+                def _on_running_state_changed(is_active: bool) -> None:
+                    ui_hooks.on_agent_status_changed(
+                        agent_id=_agent_id,
+                        status="active" if is_active else "idle"
+                    )
+
+                session.set_running_state_callback(_on_running_state_changed)
 
             # Configure GC for subagent if profile specifies it
             if profile.gc:
@@ -2099,11 +2114,9 @@ class SubagentPlugin:
                     history=history
                 )
 
-                # Change status to "idle" - ready for more prompts via send_to_subagent
-                self._ui_hooks.on_agent_status_changed(
-                    agent_id=agent_id,
-                    status="idle"
-                )
+                # Note: "idle" status is emitted automatically by the
+                # running-state callback wired in set_running_state_callback
+                # when send_message() returns and the session phase goes IDLE.
 
         except Exception as e:
             logger.exception(f"Error in async subagent {agent_id}")
