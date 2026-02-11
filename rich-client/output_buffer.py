@@ -345,6 +345,10 @@ class OutputBuffer:
         self._search_current_idx: int = 0
         # Terminal emulators for tool output (pyte-backed, keyed by call_id)
         self._tool_emulators: Dict[str, TerminalEmulator] = {}
+        # Step ID → step number mapping for human-readable display in tool args.
+        # Updated when plan data changes; used by add_active_tool() to replace
+        # raw UUIDs with step numbers (e.g., "Step #3") in the tool tree.
+        self._step_id_to_number: Dict[str, int] = {}
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -962,6 +966,21 @@ class OutputBuffer:
         """Check if spinner is currently active."""
         return self._spinner_active
 
+    def update_step_id_map(self, step_id_map: Dict[str, int]) -> None:
+        """Replace the step_id → step-number mapping used for display.
+
+        When a PlanUpdatedEvent arrives, the caller builds a dict mapping
+        each step's UUID to its 1-based sequence number and passes it here.
+        Subsequent ``add_active_tool()`` calls will replace any ``step_id``
+        argument value that appears in this map with ``Step #<N>`` so the
+        user sees a human-readable reference instead of a raw UUID.
+
+        Args:
+            step_id_map: Mapping from step_id (UUID string) to 1-based
+                sequence number.
+        """
+        self._step_id_to_number = step_id_map
+
     def add_active_tool(self, tool_name: str, tool_args: dict,
                         call_id: Optional[str] = None) -> None:
         """Add a tool to the active tools list.
@@ -982,6 +1001,11 @@ class OutputBuffer:
         # Filter out intent args (message, summary, etc.) since they're shown as model text
         intent_arg_names = {"message", "summary", "intent", "rationale"}
         display_args = {k: v for k, v in (tool_args or {}).items() if k not in intent_arg_names}
+        # Replace step_id UUIDs with human-readable step numbers when a plan is active
+        if "step_id" in display_args and display_args["step_id"] in self._step_id_to_number:
+            display_args = dict(display_args)  # shallow copy to avoid mutating caller's dict
+            step_num = self._step_id_to_number[display_args["step_id"]]
+            display_args["step_id"] = f"Step #{step_num}"
         args_full = str(display_args) if display_args else ""
         args_str = format_tool_args_summary(display_args) if display_args else ""
 
