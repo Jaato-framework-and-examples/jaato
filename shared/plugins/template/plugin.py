@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import EditableContent, ToolSchema
 from shared.trace import trace as _trace_write
 
 
@@ -300,6 +300,11 @@ class TemplatePlugin:
                 },
                 category="code",
                 discoverability="discoverable",
+                editable=EditableContent(
+                    parameters=["template", "variables"],
+                    format="yaml",
+                    template="# Edit the template content and/or variables below. Save and exit to continue.\n",
+                ),
             ),
             ToolSchema(
                 name="validateTemplateIndex",
