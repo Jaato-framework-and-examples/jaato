@@ -112,12 +112,12 @@ renderTemplateToFile(
 }
 ```
 
-### 4. List Extracted Templates (`listExtractedTemplates`)
+### 4. List Available Templates (`listAvailableTemplates`)
 
 View all templates that have been extracted in the current session:
 
 ```python
-listExtractedTemplates()
+listAvailableTemplates()
 # Returns:
 # {
 #   "templates": [

@@ -122,7 +122,7 @@ class TemplatePlugin:
     Tools provided:
     - renderTemplate: Render a template with variables and write to file
     - renderTemplateToFile: Same as renderTemplate with overwrite option
-    - listExtractedTemplates: List all templates in the unified index
+    - listAvailableTemplates: List all templates in the unified index
     - listTemplateVariables: List all variables required by a template
 
     Enrichment:
@@ -213,7 +213,7 @@ class TemplatePlugin:
                 description=(
                     "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
                     "and write the result to a file. When a template exists for your task (check "
-                    ".jaato/templates/ or use listExtractedTemplates), you MUST use this tool instead "
+                    ".jaato/templates/ or use listAvailableTemplates), you MUST use this tool instead "
                     "of writing code manually. Templates ensure consistency and reduce errors. "
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}. "
@@ -247,7 +247,7 @@ class TemplatePlugin:
                 discoverability="discoverable",
             ),
             ToolSchema(
-                name="listExtractedTemplates",
+                name="listAvailableTemplates",
                 description=(
                     "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
                     "session. If a template exists for your task, you MUST use renderTemplate "
@@ -348,7 +348,7 @@ class TemplatePlugin:
         """Return executor functions for each tool."""
         return {
             "renderTemplate": self._execute_render_template,
-            "listExtractedTemplates": self._execute_list_extracted,
+            "listAvailableTemplates": self._execute_list_available,
             "renderTemplateToFile": self._execute_render_template_to_file,
             "listTemplateVariables": self._execute_list_template_variables,
             "validateTemplateIndex": self._execute_validate_template_index,
@@ -392,7 +392,7 @@ invent variable names - use the ones shown in the annotation.
   - Also creates parent directories automatically
   - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
 
-**listExtractedTemplates()** - List all available templates
+**listAvailableTemplates()** - List all available templates
   - Shows all templates discovered in this session (embedded + standalone)
   - Each entry shows: name, origin, syntax, variables, source path
   - Auto-approved (no permission required)
@@ -445,7 +445,7 @@ renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/reposit
 1. ALWAYS check if a template exists before writing code
 2. If a template matches your task, USE IT via template tools
 3. ONLY write code manually if NO suitable template exists
-4. When in doubt, use `listExtractedTemplates` to see available templates
+4. When in doubt, use `listAvailableTemplates` to see available templates
 
 ### Non-Compliance Policy
 
@@ -499,7 +499,7 @@ Template rendering requires approval since it writes files."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
-        return ["listExtractedTemplates", "listTemplateVariables", "validateTemplateIndex"]
+        return ["listAvailableTemplates", "listTemplateVariables", "validateTemplateIndex"]
 
     def format_permission_request(
         self,
@@ -905,6 +905,24 @@ Template rendering requires approval since it writes files."""
                     f"      output_path=\"<your-output-file>\"\n"
                     f"  )"
                 )
+
+        # Register extracted templates in the unified index
+        for content_hash, template_path, variables in extracted:
+            index_name = template_path.name
+            if index_name not in self._template_index:
+                syntax = self._detect_template_syntax(
+                    template_path.read_text() if template_path.exists() else ""
+                )
+                self._template_index[index_name] = TemplateIndexEntry(
+                    name=index_name,
+                    source_path=str(template_path),
+                    syntax=syntax,
+                    variables=variables,
+                    origin="embedded",
+                )
+
+        # Persist the unified index to disk
+        self._persist_index()
 
         if not annotations:
             return ToolResultEnrichmentResult(result=result)
@@ -1585,7 +1603,7 @@ Template rendering requires approval since it writes files."""
             "template_source": template_source
         }
 
-    def _execute_list_extracted(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_list_available(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all templates available in this session.
 
         Returns templates from the unified index, covering both embedded

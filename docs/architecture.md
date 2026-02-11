@@ -1246,7 +1246,7 @@ classDiagram
     class TemplatePlugin {
         +name = "template"
         +renderTemplate(template, variables, output_path)
-        +listExtractedTemplates()
+        +listAvailableTemplates()
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult
         +get_enrichment_priority() int

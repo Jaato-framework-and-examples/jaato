@@ -536,9 +536,9 @@ loadImage(path="./diagram.png")
           <table>
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>template</code></td></tr>
-              <tr><td><strong>Tools</strong></td><td><code>renderTemplate</code>, <code>listExtractedTemplates</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>renderTemplate</code>, <code>listAvailableTemplates</code></td></tr>
               <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment (priority: 40)</td></tr>
-              <tr><td><strong>Auto-approved</strong></td><td><code>listExtractedTemplates</code> only</td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td><code>listAvailableTemplates</code> only</td></tr>
             </tbody>
           </table>
 
@@ -607,9 +607,9 @@ renderTemplate(
 )</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">List extracted templates</div>
+          <div class="code-label" style="margin-top: 24px;">List available templates</div>
           <div class="code-block">
-            <pre><code class="language-python">listExtractedTemplates()
+            <pre><code class="language-python">listAvailableTemplates()
 # Returns:
 {
   "templates": [
