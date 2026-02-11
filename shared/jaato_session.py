@@ -230,6 +230,13 @@ class JaatoSession:
         # Callback receives the collected child message text as argument
         self._on_continuation_needed: Optional[Callable[[str], None]] = None
 
+        # Callback when the session transitions between idle and non-idle.
+        # Fires on the first non-IDLE phase after IDLE (is_active=True) and
+        # when returning to IDLE from a non-IDLE phase (is_active=False).
+        # Used by the subagent plugin to drive AgentStatusChangedEvents
+        # so that the UI tab bar spinner starts/stops automatically.
+        self._on_running_state_changed: Optional[Callable[[bool], None]] = None
+
         # Current output callback for this turn (used by enrichment to route notifications)
         # Stored here so _enrich_tool_result_dict can pass it to registry.enrich_tool_result()
         # This ensures enrichment notifications go to the correct agent panel even when
@@ -451,6 +458,24 @@ class JaatoSession:
             callback: Function called with collected child message text.
         """
         self._on_continuation_needed = callback
+
+    def set_running_state_callback(
+        self,
+        callback: Optional[Callable[[bool], None]]
+    ) -> None:
+        """Set callback for when the session transitions between idle and non-idle.
+
+        The callback fires when ``_set_activity_phase`` moves the session from
+        ``IDLE`` to any working phase (``is_active=True``) or back to ``IDLE``
+        (``is_active=False``).  The subagent plugin uses this to emit
+        ``AgentStatusChangedEvent`` so the UI tab-bar spinner starts/stops
+        automatically whenever the session processes a message.
+
+        Args:
+            callback: Function called with ``True`` when the session starts
+                      processing and ``False`` when it becomes idle.
+        """
+        self._on_running_state_changed = callback
 
     def set_mid_turn_interrupt_callback(
         self,
@@ -754,12 +779,23 @@ class JaatoSession:
     def _set_activity_phase(self, phase: ActivityPhase) -> None:
         """Set the current activity phase (internal use).
 
+        Fires ``_on_running_state_changed`` when the session crosses the
+        idle/non-idle boundary (i.e. ``IDLE → WAITING_FOR_LLM`` or
+        ``STREAMING → IDLE``), so external listeners like the subagent plugin
+        can drive UI status updates automatically.
+
         Args:
             phase: The new activity phase.
         """
         previous_phase = self._activity_phase
         self._activity_phase = phase
         self._phase_started_at = datetime.now() if phase != ActivityPhase.IDLE else None
+
+        # Notify when the running status changes (idle ↔ non-idle)
+        was_idle = previous_phase == ActivityPhase.IDLE
+        is_idle = phase == ActivityPhase.IDLE
+        if was_idle != is_idle and self._on_running_state_changed:
+            self._on_running_state_changed(not is_idle)
 
         # Clear permission suspensions on phase transitions
         if phase == ActivityPhase.IDLE and self._runtime and self._runtime.permission_plugin:
