@@ -46,6 +46,8 @@ Thumbs.db
 !.jaato/keybindings/
 !.jaato/references/
 !.jaato/commands/
+!.jaato/prompts/
+!.jaato/skills/
 !.jaato/system_instructions.md
 
 # Test folders
@@ -72,4 +74,4 @@ shared/plugins/template/SINGLE_BRACE_SYNTAX_ANALYSIS.md
 
 # Template examples (generated)
 knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01-customer-domain-api/template/src/
-.jaato
+knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01-customer-domain-api/template/src/.jaato
