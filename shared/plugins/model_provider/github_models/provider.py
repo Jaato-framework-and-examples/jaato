@@ -854,6 +854,9 @@ class GitHubModelsProvider:
 
                 return provider_response
             except Exception as e:
+                # Rollback the user message we added
+                if self._history and self._history[-1].role == Role.USER:
+                    self._history.pop()
                 self._handle_api_error(e)
                 raise
         else:
@@ -888,6 +891,9 @@ class GitHubModelsProvider:
 
                 return provider_response
             except Exception as e:
+                # Rollback the user message we added
+                if self._history and self._history[-1].role == Role.USER:
+                    self._history.pop()
                 self._handle_api_error(e)
                 raise
 
@@ -977,6 +983,8 @@ class GitHubModelsProvider:
 
                 return provider_response
             except Exception as e:
+                # Rollback the tool result messages we added
+                self._rollback_tool_results(len(results))
                 self._handle_api_error(e)
                 raise
         else:
@@ -1011,6 +1019,8 @@ class GitHubModelsProvider:
 
                 return provider_response
             except Exception as e:
+                # Rollback the tool result messages we added
+                self._rollback_tool_results(len(results))
                 self._handle_api_error(e)
                 raise
 
@@ -1048,6 +1058,18 @@ class GitHubModelsProvider:
         """Add the model's response to history."""
         if response.parts:
             self._history.append(Message(role=Role.MODEL, parts=response.parts))
+
+    def _rollback_tool_results(self, count: int) -> None:
+        """Remove the last `count` tool result messages from history.
+
+        Called on API failure to prevent duplicate tool messages on retry.
+        GitHub Models appends one history message per tool result (unlike
+        Anthropic which batches them into a single message), so we need
+        to pop multiple entries.
+        """
+        for _ in range(count):
+            if self._history and self._history[-1].role == Role.TOOL:
+                self._history.pop()
 
     # ==================== Copilot API Helpers ====================
 
@@ -1848,41 +1870,48 @@ class GitHubModelsProvider:
             messages = self._build_copilot_messages()
             tools = self._build_copilot_tools()
 
-            # Route to Responses API for codex models
-            if self._is_responses_api_model():
-                self._trace(f"[SEND_MESSAGE_STREAMING] Using Responses API for {self._copilot_model_name()}")
-                provider_response = self._copilot_responses_streaming(
-                    messages=messages,
-                    tools=tools,
-                    on_chunk=on_chunk,
-                    cancel_token=cancel_token,
-                    on_usage_update=on_usage_update,
-                    on_thinking=on_thinking,
-                    trace_prefix="RESPONSES_STREAM",
-                )
-            else:
-                provider_response = self._copilot_streaming_response(
-                    messages=messages,
-                    tools=tools,
-                    on_chunk=on_chunk,
-                    cancel_token=cancel_token,
-                    on_usage_update=on_usage_update,
-                    on_thinking=on_thinking,
-                    trace_prefix="STREAM",
-                )
+            try:
+                # Route to Responses API for codex models
+                if self._is_responses_api_model():
+                    self._trace(f"[SEND_MESSAGE_STREAMING] Using Responses API for {self._copilot_model_name()}")
+                    provider_response = self._copilot_responses_streaming(
+                        messages=messages,
+                        tools=tools,
+                        on_chunk=on_chunk,
+                        cancel_token=cancel_token,
+                        on_usage_update=on_usage_update,
+                        on_thinking=on_thinking,
+                        trace_prefix="RESPONSES_STREAM",
+                    )
+                else:
+                    provider_response = self._copilot_streaming_response(
+                        messages=messages,
+                        tools=tools,
+                        on_chunk=on_chunk,
+                        cancel_token=cancel_token,
+                        on_usage_update=on_usage_update,
+                        on_thinking=on_thinking,
+                        trace_prefix="STREAM",
+                    )
 
-            self._last_usage = provider_response.usage
-            self._add_response_to_history(provider_response)
+                self._last_usage = provider_response.usage
+                self._add_response_to_history(provider_response)
 
-            # Parse structured output if schema was requested
-            final_text = provider_response.get_text()
-            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
-                try:
-                    provider_response.structured_output = json.loads(final_text)
-                except json.JSONDecodeError:
-                    pass
+                # Parse structured output if schema was requested
+                final_text = provider_response.get_text()
+                if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
+                    try:
+                        provider_response.structured_output = json.loads(final_text)
+                    except json.JSONDecodeError:
+                        pass
 
-            return provider_response
+                return provider_response
+            except Exception as e:
+                # Rollback the user message we added
+                if self._history and self._history[-1].role == Role.USER:
+                    self._history.pop()
+                self._handle_api_error(e)
+                raise
 
         # Azure SDK path
         if not self._client or not self._model_name:
@@ -1992,6 +2021,9 @@ class GitHubModelsProvider:
                 was_cancelled = True
                 finish_reason = FinishReason.CANCELLED
             else:
+                # Rollback the user message we added
+                if self._history and self._history[-1].role == Role.USER:
+                    self._history.pop()
                 self._handle_api_error(e)
                 raise
 
@@ -2063,41 +2095,47 @@ class GitHubModelsProvider:
             messages = self._build_copilot_messages()
             tools = self._build_copilot_tools()
 
-            # Route to Responses API for codex models
-            if self._is_responses_api_model():
-                self._trace(f"[SEND_TOOL_RESULTS_STREAMING] Using Responses API for {self._copilot_model_name()}")
-                provider_response = self._copilot_responses_streaming(
-                    messages=messages,
-                    tools=tools,
-                    on_chunk=on_chunk,
-                    cancel_token=cancel_token,
-                    on_usage_update=on_usage_update,
-                    on_thinking=on_thinking,
-                    trace_prefix="RESPONSES_STREAM_TOOL_RESULTS",
-                )
-            else:
-                provider_response = self._copilot_streaming_response(
-                    messages=messages,
-                    tools=tools,
-                    on_chunk=on_chunk,
-                    cancel_token=cancel_token,
-                    on_usage_update=on_usage_update,
-                    on_thinking=on_thinking,
-                    trace_prefix="STREAM_TOOL_RESULTS",
-                )
+            try:
+                # Route to Responses API for codex models
+                if self._is_responses_api_model():
+                    self._trace(f"[SEND_TOOL_RESULTS_STREAMING] Using Responses API for {self._copilot_model_name()}")
+                    provider_response = self._copilot_responses_streaming(
+                        messages=messages,
+                        tools=tools,
+                        on_chunk=on_chunk,
+                        cancel_token=cancel_token,
+                        on_usage_update=on_usage_update,
+                        on_thinking=on_thinking,
+                        trace_prefix="RESPONSES_STREAM_TOOL_RESULTS",
+                    )
+                else:
+                    provider_response = self._copilot_streaming_response(
+                        messages=messages,
+                        tools=tools,
+                        on_chunk=on_chunk,
+                        cancel_token=cancel_token,
+                        on_usage_update=on_usage_update,
+                        on_thinking=on_thinking,
+                        trace_prefix="STREAM_TOOL_RESULTS",
+                    )
 
-            self._last_usage = provider_response.usage
-            self._add_response_to_history(provider_response)
+                self._last_usage = provider_response.usage
+                self._add_response_to_history(provider_response)
 
-            # Parse structured output if schema was requested
-            final_text = provider_response.get_text()
-            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
-                try:
-                    provider_response.structured_output = json.loads(final_text)
-                except json.JSONDecodeError:
-                    pass
+                # Parse structured output if schema was requested
+                final_text = provider_response.get_text()
+                if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
+                    try:
+                        provider_response.structured_output = json.loads(final_text)
+                    except json.JSONDecodeError:
+                        pass
 
-            return provider_response
+                return provider_response
+            except Exception as e:
+                # Rollback the tool result messages we added
+                self._rollback_tool_results(len(results))
+                self._handle_api_error(e)
+                raise
 
         # Azure SDK path
         if not self._client or not self._model_name:
@@ -2213,6 +2251,8 @@ class GitHubModelsProvider:
                 was_cancelled = True
                 finish_reason = FinishReason.CANCELLED
             else:
+                # Rollback the tool result messages we added
+                self._rollback_tool_results(len(results))
                 self._handle_api_error(e)
                 raise
 
