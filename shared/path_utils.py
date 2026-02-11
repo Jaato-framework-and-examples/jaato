@@ -33,9 +33,16 @@ from typing import Optional
 def is_msys2_environment() -> bool:
     """Detect if running under MSYS2 or Git Bash on Windows.
 
-    Checks for MSYS2 environment indicators:
-    - MSYSTEM env var set to MINGW64, MINGW32, MSYS, UCRT64, CLANG64, CLANGARM64
-    - TERM_PROGRAM set to mintty (Git Bash default terminal)
+    Checks for MSYS2 environment indicators (in order):
+    1. MSYSTEM env var (MINGW64, MINGW32, MSYS, UCRT64, CLANG64, CLANGARM64)
+    2. TERM_PROGRAM set to mintty (Git Bash default terminal)
+    3. MINGW_PREFIX env var (e.g. /mingw64 — set by MSYS2 shell init)
+    4. MINGW_CHOST env var (e.g. x86_64-w64-mingw32)
+    5. sys.executable path containing MSYS2 installation directories
+
+    Checks 3-5 are fallback heuristics for daemon processes or non-mintty
+    terminals where MSYSTEM and TERM_PROGRAM may not be propagated from
+    the parent MSYS2 shell.
 
     This only returns True when running native Windows Python (sys.platform == 'win32')
     in an MSYS2 shell. MSYS2's own Python (Cygwin-derived) already uses Unix paths
@@ -57,6 +64,25 @@ def is_msys2_environment() -> bool:
 
     # mintty is Git Bash's default terminal
     if os.environ.get('TERM_PROGRAM') == 'mintty':
+        return True
+
+    # Fallback: MINGW_PREFIX is set by MSYS2 shell init (e.g. /mingw64)
+    if os.environ.get('MINGW_PREFIX'):
+        return True
+
+    # Fallback: MINGW_CHOST is set by MSYS2 (e.g. x86_64-w64-mingw32)
+    if os.environ.get('MINGW_CHOST'):
+        return True
+
+    # Fallback: check if the Python executable lives inside an MSYS2 installation.
+    # This works even in daemon processes with a clean environment because
+    # sys.executable is determined by the interpreter binary path, not env vars.
+    _msys2_markers = ('\\msys64\\', '\\mingw64\\', '\\mingw32\\',
+                      '\\clang64\\', '\\clangarm64\\', '\\ucrt64\\',
+                      '/msys64/', '/mingw64/', '/mingw32/',
+                      '/clang64/', '/clangarm64/', '/ucrt64/')
+    exe_lower = sys.executable.lower()
+    if any(marker in exe_lower for marker in _msys2_markers):
         return True
 
     return False
