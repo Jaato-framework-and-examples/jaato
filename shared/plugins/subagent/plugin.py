@@ -1174,8 +1174,16 @@ class SubagentPlugin:
     def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Send a message to a subagent for processing.
 
-        If the subagent is idle, the message is processed immediately.
-        If the subagent is busy, the message is queued for mid-turn processing.
+        In both cases (idle or busy subagent), this method returns immediately
+        without blocking the caller.  The subagent session auto-forwards
+        ``COMPLETED`` / ``IDLE`` / ``ERROR`` events to the parent via
+        ``_forward_to_parent``, so the parent will be notified asynchronously
+        when processing finishes.
+
+        - **Busy subagent**: message is queued via ``inject_prompt`` for
+          mid-turn processing (high-priority PARENT message).
+        - **Idle subagent**: message is dispatched to the thread-pool executor
+          so the blocking ``send_message`` call runs in a background thread.
 
         Args:
             args: Tool arguments containing:
@@ -1183,7 +1191,7 @@ class SubagentPlugin:
                 - message: Message to send to the subagent
 
         Returns:
-            Status dict with the subagent's response or error.
+            Status dict indicating the message was queued/dispatched.
         """
         subagent_id = args.get('subagent_id', '')
         message = args.get('message', '')
@@ -1230,11 +1238,13 @@ class SubagentPlugin:
                     'message': f'Subagent is busy. Message queued for processing.'
                 }
 
-            # Subagent is idle - process directly.
+            # Subagent is idle - dispatch to background thread.
             # The running-state callback on the session will emit
             # active/idle status automatically when send_message()
-            # transitions the activity phase.
-            logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, processing directly")
+            # transitions the activity phase.  The session also
+            # auto-forwards COMPLETED/IDLE/ERROR events to the parent
+            # via _forward_to_parent, so we do not need to block here.
+            logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, dispatching to background thread")
 
             # Emit the parent's message to UI
             if self._ui_hooks:
@@ -1245,6 +1255,50 @@ class SubagentPlugin:
                     mode="write"
                 )
 
+            # Submit to thread pool (non-blocking, like spawn_subagent)
+            self._executor.submit(
+                self._process_send_to_subagent_async,
+                session,
+                agent_id,
+                message
+            )
+
+            return {
+                'success': True,
+                'status': 'dispatched',
+                'message': f'Message dispatched to idle subagent. Response will arrive as a COMPLETED event.'
+            }
+
+        except Exception as e:
+            logger.exception(f"Error sending to subagent {subagent_id}")
+            return {
+                'success': False,
+                'error': f'Error processing message: {str(e)}'
+            }
+
+    def _process_send_to_subagent_async(
+        self,
+        session: 'JaatoSession',
+        agent_id: str,
+        message: str,
+    ) -> None:
+        """Run send_message on a subagent in a background thread.
+
+        This is the async counterpart for the idle-subagent path in
+        ``_execute_send_to_subagent``.  It mirrors ``_run_subagent_async``
+        (used by ``spawn_subagent``) but skips session creation since the
+        session already exists.
+
+        The session auto-forwards ``COMPLETED``, ``IDLE``, and ``ERROR``
+        events to the parent via ``_forward_to_parent``, so no explicit
+        ``inject_prompt`` to the parent is needed here.
+
+        Args:
+            session: The subagent's JaatoSession (already idle).
+            agent_id: The subagent's agent ID.
+            message: The message to process.
+        """
+        try:
             # Create output callback for model response
             def output_callback(source: str, text: str, mode: str) -> None:
                 if self._ui_hooks:
@@ -1256,7 +1310,6 @@ class SubagentPlugin:
                     )
 
             # Create usage callback for real-time context updates during streaming
-            # This ensures the status bar reflects actual token usage from the provider
             def usage_callback(usage) -> None:
                 if self._ui_hooks and usage.total_tokens > 0:
                     context_limit = session.get_context_limit()
@@ -1277,27 +1330,31 @@ class SubagentPlugin:
                             budget_snapshot=session.instruction_budget.snapshot()
                         )
 
-            # Process the message
-            response = session.send_message(
+            # Process the message (blocking, but we're in a background thread)
+            session.send_message(
                 message,
                 on_output=output_callback,
                 on_usage_update=usage_callback
             )
 
-            # Update context after processing (match main agent behavior)
+            # Update context after processing (match _run_subagent_async behavior)
+            usage = session.get_context_usage()
+            logger.debug(
+                f"SUBAGENT_USAGE [{agent_id}]: "
+                f"total={usage.get('total_tokens', 0)}, "
+                f"prompt={usage.get('prompt_tokens', 0)}, "
+                f"output={usage.get('output_tokens', 0)}, "
+                f"context_limit={usage.get('context_limit', 'N/A')}, "
+                f"percent_used={usage.get('percent_used', 0):.2f}%, "
+                f"turns={usage.get('turns', 0)}, "
+                f"model={usage.get('model', 'unknown')}"
+            )
+            with self._sessions_lock:
+                if agent_id in self._active_sessions:
+                    self._active_sessions[agent_id]['last_activity'] = datetime.now()
+                    self._active_sessions[agent_id]['turn_count'] = usage.get('turns', 0)
+
             if self._ui_hooks:
-                usage = session.get_context_usage()
-                # Debug: Log full usage info to trace token accounting issues
-                logger.debug(
-                    f"SUBAGENT_USAGE [{agent_id}]: "
-                    f"total={usage.get('total_tokens', 0)}, "
-                    f"prompt={usage.get('prompt_tokens', 0)}, "
-                    f"output={usage.get('output_tokens', 0)}, "
-                    f"context_limit={usage.get('context_limit', 'N/A')}, "
-                    f"percent_used={usage.get('percent_used', 0):.2f}%, "
-                    f"turns={usage.get('turns', 0)}, "
-                    f"model={usage.get('model', 'unknown')}"
-                )
                 self._ui_hooks.on_agent_context_updated(
                     agent_id=agent_id,
                     total_tokens=usage.get('total_tokens', 0),
@@ -1307,26 +1364,16 @@ class SubagentPlugin:
                     percent_used=usage.get('percent_used', 0)
                 )
 
-            # Forward response to parent (CHILD source - status update)
+        except Exception as e:
+            logger.exception(f"Error processing send_to_subagent for {agent_id}")
+            # Forward error to parent so it can react
             if self._parent_session:
                 self._parent_session.inject_prompt(
-                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}",
+                    f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
+                    f"Error processing message: {str(e)}",
                     source_id=agent_id,
                     source_type=SourceType.CHILD
                 )
-
-            return {
-                'success': True,
-                'status': 'processed',
-                'response': response
-            }
-
-        except Exception as e:
-            logger.exception(f"Error sending to subagent {subagent_id}")
-            return {
-                'success': False,
-                'error': f'Error processing message: {str(e)}'
-            }
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close an active subagent session.
