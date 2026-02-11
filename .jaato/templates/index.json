@@ -1,5 +1,396 @@
 {
-  "generated_at": "2026-02-11T15:05:55.876860",
-  "template_count": 0,
-  "templates": {}
+  "generated_at": "2026-02-11T19:27:43.657412",
+  "template_count": 32,
+  "templates": {
+    "mod-code-015-hexagonal-base-java-spring-pom-xml.xml.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-pom-xml.xml.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-pom-xml.xml.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "artifactId",
+        "groupId",
+        "javaVersion",
+        "serviceNamePascal",
+        "springBootVersion"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-application-java.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-application-java.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-application-java.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "serviceNamePascal"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-application-yml.yaml.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-application-yml.yaml.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-application-yml.yaml.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "basePackage",
+        "entityNamePlural",
+        "serviceName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-domain-entity.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-domain-entity.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-domain-entity.java.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "basePackage",
+        "constructorParams",
+        "entityImports",
+        "entityName",
+        "fieldName",
+        "fieldNamePascal",
+        "fieldType",
+        "updateParams"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-value-object-id.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-value-object-id.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-value-object-id.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-domain-registration-command.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-domain-registration-command.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-domain-registration-command.java.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "entityNameLower",
+        "fieldName",
+        "fieldType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-domain-service.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-domain-service.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-domain-service.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "entityNameLower",
+        "updateArgs",
+        "updateParams"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-repository-interface-port.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-repository-interface-port.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-repository-interface-port.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-domain-exception-not-found.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-domain-exception-not-found.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-domain-exception-not-found.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "entityNameLower"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-application-service.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-application-service.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-application-service.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "updateArgsFromRequest"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-rest-controller.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-rest-controller.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-rest-controller.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "entityNamePlural"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-dto-response.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-dto-response.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-dto-response.java.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "fieldName",
+        "fieldType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-create-request-dto.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-create-request-dto.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-create-request-dto.java.tmpl",
+      "syntax": "mustache",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "fieldName",
+        "fieldType",
+        "validationAnnotation"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-application-config.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-application-config.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-application-config.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "entityNameLower"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-global-exception-handler.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-global-exception-handler.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-global-exception-handler.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-015-hexagonal-base-java-spring-domain-service-unit-test.java.tmpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring-domain-service-unit-test.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-015-hexagonal-base-java-spring-domain-service-unit-test.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage",
+        "entityName",
+        "testRegistrationArgs"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring-restclient-default.java.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring-restclient-default.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring-restclient-default.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "ApiName",
+        "RequestDto",
+        "ResponseDto",
+        "api",
+        "basePackage",
+        "name",
+        "resource"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring.java.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring-feign-only-if-explicitly-reque.java.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring-feign-only-if-explicitly-reque.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring-feign-only-if-explicitly-reque.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "ApplicationName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring.java-1.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring.java-1.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring.java-1.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "ApiName",
+        "RequestDto",
+        "ResponseDto",
+        "api",
+        "basePackage",
+        "name",
+        "resource"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring.java-2.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring.java-2.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring.java-2.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "ApiName",
+        "basePackage"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring-resttemplate-deprecated-legacy.java.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring-resttemplate-deprecated-legacy.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring-resttemplate-deprecated-legacy.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "ApiName",
+        "RequestDto",
+        "ResponseDto",
+        "api",
+        "basePackage",
+        "name",
+        "resource"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring.java-3.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring.java-3.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring.java-3.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "basePackage"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-018-api-integration-rest-java-spring.yaml.tmpl": {
+      "name": "mod-code-018-api-integration-rest-java-spring.yaml.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-018-api-integration-rest-java-spring.yaml.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "API_NAME",
+        "api",
+        "name"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j-basic-with-single-fallback.java.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j-basic-with-single-fallback.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j-basic-with-single-fallback.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "circuitBreakerName",
+        "fallbackLogic",
+        "fallbackMethodName",
+        "methodName",
+        "methodParameters",
+        "originalMethodBody",
+        "returnType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j.java.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "cacheKey",
+        "returnType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j.yaml.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j.yaml.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j.yaml.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "circuitBreakerName",
+        "failureRateThreshold",
+        "minimumNumberOfCalls",
+        "slidingWindowSize",
+        "waitDurationInOpenState"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j-multiple-fallbacks-chain.java.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j-multiple-fallbacks-chain.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j-multiple-fallbacks-chain.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "alternativeServiceCall",
+        "cacheKey",
+        "circuitBreakerName",
+        "defaultValue",
+        "methodName",
+        "methodParameters",
+        "originalMethodBody",
+        "parameterNames",
+        "primaryFallbackName",
+        "returnType",
+        "secondaryFallbackName",
+        "tertiaryFallbackName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "circuitBreakerName",
+        "exceptionType",
+        "methodName",
+        "methodParameters",
+        "originalMethodBody",
+        "returnType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java-1.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java-1.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j-fail-fast-no-fallback.java-1.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "arguments",
+        "methodName",
+        "returnType"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j-programmatic-no-annotations.java.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j-programmatic-no-annotations.java.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j-programmatic-no-annotations.java.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "circuitBreakerName",
+        "clientType",
+        "fallbackLogic",
+        "methodName",
+        "methodParameters",
+        "originalMethodBody",
+        "returnType",
+        "serviceName"
+      ],
+      "origin": "embedded"
+    },
+    "mod-code-001-circuit-breaker-java-resilience4j.java-1.tmpl": {
+      "name": "mod-code-001-circuit-breaker-java-resilience4j.java-1.tmpl",
+      "source_path": "/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/.jaato/templates/mod-code-001-circuit-breaker-java-resilience4j.java-1.tmpl",
+      "syntax": "jinja2",
+      "variables": [
+        "clientType",
+        "methodName",
+        "returnType",
+        "serviceName"
+      ],
+      "origin": "embedded"
+    }
+  }
 }
