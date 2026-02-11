@@ -51,6 +51,7 @@ from shared.plugins.hidden_content_filter import create_plugin as create_hidden_
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
 from shared.plugins.table_formatter import create_plugin as create_table_formatter
+from shared.plugins.inline_markdown_formatter import create_plugin as create_inline_md_formatter
 
 
 def consolidate_fragments(fragments):
@@ -475,6 +476,7 @@ class PTDisplay:
         # Skip in server_formatted mode - server already handles formatting
         self._formatter_pipeline = None
         self._code_block_formatter = None  # Keep reference for theme updates
+        self._inline_md_formatter = None  # Keep reference for theme updates
         if not server_formatted:
             self._formatter_pipeline = create_pipeline()
             self._formatter_pipeline.register(create_hidden_filter())         # priority 5
@@ -485,6 +487,10 @@ class PTDisplay:
             self._code_block_formatter.initialize({"line_numbers": True})
             self._code_block_formatter.set_syntax_theme(self._theme.name)  # Match UI theme
             self._formatter_pipeline.register(self._code_block_formatter)     # priority 40
+            # Inline markdown formatter (bold, italic, code, links, strikethrough)
+            self._inline_md_formatter = create_inline_md_formatter()
+            self._apply_inline_md_theme(self._theme)
+            self._formatter_pipeline.register(self._inline_md_formatter)      # priority 45
             self._formatter_pipeline.set_console_width(output_width)
             self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
@@ -2687,6 +2693,10 @@ class PTDisplay:
         if self._code_block_formatter:
             self._code_block_formatter.set_syntax_theme(theme.name)
 
+        # Update inline markdown formatter colors to match UI theme
+        if self._inline_md_formatter:
+            self._apply_inline_md_theme(theme)
+
         # Update prompt_toolkit styles on the running application
         if self._app:
             from prompt_toolkit.styles import merge_styles
@@ -2700,6 +2710,30 @@ class PTDisplay:
                 self._app.style = default_style
 
         self.refresh()
+
+    def _apply_inline_md_theme(self, theme: "ThemeConfig") -> None:
+        """Apply theme colors to the inline markdown formatter.
+
+        Reads ``inline_code`` and ``markdown_link`` semantic styles from
+        the theme and configures the formatter's ANSI colors accordingly.
+
+        Args:
+            theme: ThemeConfig to extract colors from.
+        """
+        if not self._inline_md_formatter:
+            return
+
+        # Inline code style
+        ic = theme.semantic.get("inline_code")
+        if ic and ic.fg:
+            fg = theme.resolve_color(ic.fg)
+            bg = theme.resolve_color(ic.bg) if ic.bg else None
+            self._inline_md_formatter.set_inline_code_style(fg, bg)
+
+        # Link style
+        lk = theme.semantic.get("markdown_link")
+        if lk and lk.fg:
+            self._inline_md_formatter.set_link_style(theme.resolve_color(lk.fg))
 
     # Output buffer methods
 
