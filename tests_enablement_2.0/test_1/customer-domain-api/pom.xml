@@ -65,6 +65,13 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Added per validator subagent: test-scoped logstash encoder -->
+        <dependency>
+          <groupId>net.logstash.logback</groupId>
+          <artifactId>logstash-logback-encoder</artifactId>
+          <version>7.4</version>
+          <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
