@@ -35,12 +35,13 @@ class CustomerControllerTest {
     @Test
     void getCustomerById_shouldReturnCustomer() throws Exception {
         var customerId = UUID.randomUUID();
-        var customer = new Customer();
-        customer.setId(customerId);
-        customer.setFirstName("John");
-        customer.setLastName("Doe");
-        customer.setStatus(CustomerStatus.ACTIVE);
-        customer.setDateOfBirth(LocalDate.of(1990, 1, 1));
+        var customer = Customer.builder()
+                .id(customerId)
+                .firstName("John")
+                .lastName("Doe")
+                .status(CustomerStatus.ACTIVE)
+                .dateOfBirth(LocalDate.of(1990, 1, 1))
+                .build();
 
         when(customerService.getCustomerById(customerId)).thenReturn(customer);
 
