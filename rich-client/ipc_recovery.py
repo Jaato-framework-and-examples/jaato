@@ -278,9 +278,23 @@ class IPCRecoveryClient:
                 env_file=self._env_file,
             )
 
+            # When auto-start is enabled, the inner connect() may need to:
+            # 1. Try initial connection (timeout seconds)
+            # 2. Start server daemon subprocess
+            # 3. Wait for socket/pipe to appear (up to 10s)
+            # 4. Retry connection (timeout seconds)
+            # This can take 2*timeout + 10s+, so we need a generous outer
+            # timeout to avoid cancelling the inner operation prematurely.
+            # On Windows named pipes this is especially important because
+            # pipe creation and server initialization take longer.
+            if self._auto_start:
+                outer_timeout = timeout * 2 + 20.0
+            else:
+                outer_timeout = timeout + 1.0
+
             connected = await asyncio.wait_for(
                 self._client.connect(timeout=timeout),
-                timeout=timeout + 1.0,  # Slightly longer outer timeout
+                timeout=outer_timeout,
             )
 
             if connected:
