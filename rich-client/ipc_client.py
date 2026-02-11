@@ -464,9 +464,19 @@ class IPCClient:
         # Start server as daemon
         print("Starting Jaato server...")
 
+        # On Windows, pass the resolved pipe path (e.g. \\.\pipe\jaato) rather
+        # than the raw socket_path which may have been mangled by the shell
+        # (e.g. MSYS2 eats backslashes: \\.\pipe\jaato -> \.pipejaato).
+        # The server's simpler _get_pipe_path() would create the wrong pipe
+        # name from the mangled input, causing a name mismatch.
+        if self._is_windows_pipe():
+            ipc_arg = self._get_pipe_path()
+        else:
+            ipc_arg = self.socket_path
+
         cmd = [
             sys.executable, "-m", "server",
-            "--ipc-socket", self.socket_path,
+            "--ipc-socket", ipc_arg,
             "--daemon",
         ]
 
