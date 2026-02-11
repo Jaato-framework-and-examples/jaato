@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-018-api-integration",
+  "description": "[GENERATE] Add API integration client scaffolding using mod-code-018 templates.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-018-api-integration-rest-java-spring","eri-code-013-api-integration-rest-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Integrate external APIs with generated clients and config.",
+  "max_turns": 16,
+  "auto_approved": false,
+  "icon_name": "api"
+}

@@ -1,0 +1,10 @@
+{
+  "name": "validator-tier2-java-spring",
+  "description": "Technology validator: Java/Spring-specific checks and conventions.",
+  "plugins": ["lsp", "cli", "filesystem_query", "references"],
+  "plugin_configs": {"references": {"preselected": ["adr-004-resilience-patterns","adr-009-service-architecture-patterns"], "exclude_tools": ["selectReferences"]}, "lsp": {"config_path": "${workspaceRoot}/.lsp.json"}},
+  "system_instructions": "Run Java/Spring style checks and verify code patterns against ADRs.",
+  "max_turns": 10,
+  "auto_approved": true,
+  "icon_name": "validator"
+}

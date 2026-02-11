@@ -1,0 +1,10 @@
+{
+  "name": "validator-tier3-pattern-compliance",
+  "description": "Pattern compliance validator: ensure implementations match module templates and skill specifications.",
+  "plugins": ["lsp", "filesystem_query", "references", "template"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-001-circuit-breaker-java-resilience4j","mod-code-015-hexagonal-base-java-spring"], "exclude_tools": ["selectReferences"]}, "lsp": {"config_path": "${workspaceRoot}/.lsp.json"}},
+  "system_instructions": "Compare implementation to templates and validation references; report mismatches.",
+  "max_turns": 15,
+  "auto_approved": true,
+  "icon_name": "validator"
+}

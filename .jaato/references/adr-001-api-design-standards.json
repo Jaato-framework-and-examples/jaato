@@ -1,0 +1,10 @@
+{
+  "id": "adr-001-api-design-standards",
+  "name": "ADR-001: Api Design Standards",
+  "description": "ADR-001: API Design - Fusion API Model, Types & Standards (Status: Accepted).",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/ADRs/adr-001-api-design-standards",
+  "mode": "selectable",
+  "tags": ["adr", "api", "architecture", "microservices", "fusion-api-model"],
+  "fetchHint": "Read ADR.md for details"
+}

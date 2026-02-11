@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-008-circuit-breaker-java-resilience4j",
+  "name": "ERI-008: Circuit Breaker (Java/Resilience4j)",
+  "description": "ERI-CODE-008: Circuit Breaker Pattern - Java/Spring Boot with Resilience4j (Active).",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/ERIs/eri-code-008-circuit-breaker-java-resilience4j",
+  "mode": "selectable",
+  "tags": ["eri", "java", "spring-boot", "resilience4j", "circuit-breaker"],
+  "fetchHint": "Read ERI.md for implementation details and examples"
+}

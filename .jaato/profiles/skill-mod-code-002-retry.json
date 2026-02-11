@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-002-retry",
+  "description": "[GENERATE/ADD Flow] Assist adding retry patterns using mod-code-002 templates and ERI guidance.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-002-retry-java-resilience4j","eri-code-009-retry-java-resilience4j"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Use module templates and ERI to insert retry patterns into codebase.",
+  "max_turns": 15,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

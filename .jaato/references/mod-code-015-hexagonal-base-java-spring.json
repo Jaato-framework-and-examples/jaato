@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-015-hexagonal-base-java-spring",
+  "name": "MOD-015: Hexagonal Base Java Spring",
+  "description": "Module: Hexagonal Base - Java/Spring (foundation templates and configuration).",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-015-hexagonal-base-java-spring",
+  "mode": "selectable",
+  "tags": ["module","hexagonal","java","spring"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

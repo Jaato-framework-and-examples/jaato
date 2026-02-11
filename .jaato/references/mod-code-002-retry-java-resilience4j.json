@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-002-retry-java-resilience4j",
+  "name": "MOD-002: Retry Java Resilience4j",
+  "description": "Module: Retry - Java/Resilience4j. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-002-retry-java-resilience4j",
+  "mode": "selectable",
+  "tags": ["module","retry","java","resilience4j"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

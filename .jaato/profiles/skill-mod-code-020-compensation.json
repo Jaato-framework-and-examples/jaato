@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-020-compensation",
+  "description": "[GENERATE] Add compensation / saga scaffolding using mod-code-020 templates.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-020-compensation-java-spring","eri-code-015-distributed-transactions-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Apply compensation transaction patterns and repositories.",
+  "max_turns": 16,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "adr-009-service-architecture-patterns",
+  "name": "ADR-009: Service Architecture Patterns",
+  "description": "ADR-009: Service Architecture Patterns (Status: Accepted).",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/ADRs/adr-009-service-architecture-patterns",
+  "mode": "selectable",
+  "tags": ["adr", "architecture", "hexagonal", "microservices"],
+  "fetchHint": "Read ADR.md for recommended service architectures"
+}

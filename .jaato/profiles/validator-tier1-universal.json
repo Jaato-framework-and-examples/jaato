@@ -1,0 +1,10 @@
+{
+  "name": "validator-tier1-universal",
+  "description": "Universal validator: basic quality gates (syntax, formatting, secrets, security).",
+  "plugins": ["lsp", "cli", "filesystem_query", "references"],
+  "plugin_configs": {"references": {"preselected": [], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Run universal checks: syntax, formatting, secrets scan, basic security heuristics.",
+  "max_turns": 5,
+  "auto_approved": true,
+  "icon_name": "validator"
+}

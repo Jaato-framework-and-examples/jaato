@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-016-persistence-jpa-spring",
+  "name": "MOD-016: Persistence JPA Spring",
+  "description": "Module: Persistence - JPA/Spring. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-016-persistence-jpa-spring",
+  "mode": "selectable",
+  "tags": ["module","persistence","jpa","spring"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

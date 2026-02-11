@@ -1,0 +1,10 @@
+{
+  "name": "analyst-codebase-documentation",
+  "description": "Analyst: research and documentation profile for enablement model and high-level docs.",
+  "plugins": ["cli", "filesystem_query", "memory", "references", "web_search"],
+  "plugin_configs": {"references": {"preselected": ["eri-code-001-hexagonal-light-java-spring","adr-001-api-design-standards"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Use the model docs and ADRs to prepare high-level docs and reports.",
+  "max_turns": 15,
+  "auto_approved": false,
+  "icon_name": "document"
+}

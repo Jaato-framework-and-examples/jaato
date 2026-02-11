@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-019-api-public-exposure-java-spring",
+  "name": "MOD-019: API Public Exposure Java Spring",
+  "description": "Module: API Public Exposure - Java/Spring. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-019-api-public-exposure-java-spring",
+  "mode": "selectable",
+  "tags": ["module","api-public","java","spring"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-003-timeout-java-resilience4j",
+  "name": "MOD-003: Timeout Java Resilience4j",
+  "description": "Module: Timeout - Java/Resilience4j. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-003-timeout-java-resilience4j",
+  "mode": "selectable",
+  "tags": ["module","timeout","java","resilience4j"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

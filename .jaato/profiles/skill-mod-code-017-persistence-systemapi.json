@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-017-persistence-systemapi",
+  "description": "[GENERATE] Add persistence SystemAPI adapter using mod-code-017 templates.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-017-persistence-systemapi","eri-code-012-persistence-patterns-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Apply system API adapter templates and tests.",
+  "max_turns": 16,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

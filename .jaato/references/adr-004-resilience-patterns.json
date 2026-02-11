@@ -1,0 +1,10 @@
+{
+  "id": "adr-004-resilience-patterns",
+  "name": "ADR-004: Resilience Patterns",
+  "description": "ADR-004: Resilience Patterns (Status: Accepted).",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/ADRs/adr-004-resilience-patterns",
+  "mode": "selectable",
+  "tags": ["adr", "resilience", "circuit-breaker", "retry", "bulkhead", "rate-limiter"],
+  "fetchHint": "Read ADR.md for patterns and recommendations"
+}

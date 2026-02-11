@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-020-compensation-java-spring-validation",
+  "name": "MOD-020: Compensation - Validation",
+  "description": "Validation checks for Compensation module. Read README.md in validation/ for usage.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-020-compensation-java-spring/validation",
+  "mode": "selectable",
+  "tags": ["validation","module","compensation","java","spring"],
+  "fetchHint": "Read README.md for validation checks and usage"
+}

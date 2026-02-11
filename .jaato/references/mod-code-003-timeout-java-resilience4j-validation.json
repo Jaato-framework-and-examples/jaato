@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-003-timeout-java-resilience4j-validation",
+  "name": "MOD-003: Timeout - Validation",
+  "description": "Validation checks for Timeout module. Read README.md in validation/ for usage.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-003-timeout-java-resilience4j/validation",
+  "mode": "selectable",
+  "tags": ["validation","module","timeout","java","resilience4j"],
+  "fetchHint": "Read README.md for validation checks and usage"
+}

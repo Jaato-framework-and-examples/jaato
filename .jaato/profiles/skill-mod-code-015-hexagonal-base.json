@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-015-hexagonal-base",
+  "description": "[GENERATE] Generate hexagonal base microservice skeleton using mod-code-015 templates.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-015-hexagonal-base-java-spring","eri-code-001-hexagonal-light-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Generate a microservice skeleton following hexagonal patterns.",
+  "max_turns": 18,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

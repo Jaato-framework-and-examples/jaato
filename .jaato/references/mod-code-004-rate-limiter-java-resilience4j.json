@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-004-rate-limiter-java-resilience4j",
+  "name": "MOD-004: Rate Limiter Java Resilience4j",
+  "description": "Module: Rate Limiter - Java/Resilience4j. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-004-rate-limiter-java-resilience4j",
+  "mode": "selectable",
+  "tags": ["module","rate-limiter","java","resilience4j"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-019-api-public-exposure-java-spring-validation",
+  "name": "MOD-019: API Public Exposure - Validation",
+  "description": "Validation checks for API Public Exposure module. Read README.md in validation/ for usage.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-019-api-public-exposure-java-spring/validation",
+  "mode": "selectable",
+  "tags": ["validation","module","api-public","java","spring"],
+  "fetchHint": "Read README.md for validation checks and usage"
+}

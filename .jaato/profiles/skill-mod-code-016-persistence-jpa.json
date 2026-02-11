@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-016-persistence-jpa",
+  "description": "[GENERATE] Add persistence JPA scaffolding using mod-code-016 templates.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-016-persistence-jpa-spring","eri-code-012-persistence-patterns-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Apply JPA entities, repositories and adapters from module templates.",
+  "max_turns": 18,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

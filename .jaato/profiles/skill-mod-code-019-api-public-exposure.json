@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-019-api-public-exposure",
+  "description": "[GENERATE] Apply API public exposure templates (controllers, pagination, HATEOAS).",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-019-api-public-exposure-java-spring","eri-code-014-api-public-exposure-java-spring"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Add public API exposure patterns and pagination support.",
+  "max_turns": 16,
+  "auto_approved": false,
+  "icon_name": "api"
+}

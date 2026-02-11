@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-017-persistence-systemapi",
+  "name": "MOD-017: Persistence SystemAPI",
+  "description": "Module: Persistence - System API adapter. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-017-persistence-systemapi",
+  "mode": "selectable",
+  "tags": ["module","persistence","systemapi"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

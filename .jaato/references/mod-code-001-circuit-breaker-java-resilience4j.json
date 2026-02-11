@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-001-circuit-breaker-java-resilience4j",
+  "name": "MOD-001: Circuit Breaker Java Resilience4j",
+  "description": "Module: Circuit Breaker - Java/Resilience4j. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-001-circuit-breaker-java-resilience4j",
+  "mode": "selectable",
+  "tags": ["module","circuit-breaker","java","resilience4j"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-017-persistence-systemapi-validation",
+  "name": "MOD-017: Persistence SystemAPI - Validation",
+  "description": "Validation checks for Persistence SystemAPI module. Read README.md in validation/ for usage.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-017-persistence-systemapi/validation",
+  "mode": "selectable",
+  "tags": ["validation","module","persistence","systemapi"],
+  "fetchHint": "Read README.md for validation checks and usage"
+}

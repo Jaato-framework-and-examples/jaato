@@ -1,0 +1,10 @@
+{
+  "name": "skill-mod-code-004-rate-limiter",
+  "description": "[GENERATE/ADD Flow] Assist adding rate limiter patterns using mod-code-004 templates and ERI guidance.",
+  "plugins": ["artifact_tracker","cli","filesystem_query","lsp","references","template","memory"],
+  "plugin_configs": {"references": {"preselected": ["mod-code-004-rate-limiter-java-resilience4j","eri-code-011-rate-limiter-java-resilience4j"], "exclude_tools": ["selectReferences"]}},
+  "system_instructions": "Use module templates and ERI to insert rate limiter patterns into codebase.",
+  "max_turns": 15,
+  "auto_approved": false,
+  "icon_name": "microservice"
+}

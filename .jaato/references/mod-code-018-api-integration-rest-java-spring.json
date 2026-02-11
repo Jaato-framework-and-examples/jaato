@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-018-api-integration-rest-java-spring",
+  "name": "MOD-018: API Integration REST Java Spring",
+  "description": "Module: API Integration - REST Java/Spring. See MODULE.md for usage and templates.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-018-api-integration-rest-java-spring",
+  "mode": "selectable",
+  "tags": ["module","api-integration","java","spring"],
+  "fetchHint": "Read MODULE.md for templates and instructions"
+}

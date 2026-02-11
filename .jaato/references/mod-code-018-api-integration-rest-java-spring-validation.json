@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-018-api-integration-rest-java-spring-validation",
+  "name": "MOD-018: API Integration - Validation",
+  "description": "Validation checks for API Integration module. Read README.md in validation/ for usage.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/jaato/knowledge/modules/mod-code-018-api-integration-rest-java-spring/validation",
+  "mode": "selectable",
+  "tags": ["validation","module","api-integration","java","spring"],
+  "fetchHint": "Read README.md for validation checks and usage"
+}
