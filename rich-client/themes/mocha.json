@@ -110,6 +110,9 @@
     "notebook_output_label": {"fg": "primary", "bold": true},
     "notebook_error_label": {"fg": "error", "bold": true},
 
+    "inline_code": {"fg": "#94e2d5", "bg": "#453838"},
+    "markdown_link": {"fg": "#89b4fa", "underline": true},
+
     "line": {"fg": "text"},
 
     "permission_prompt": {"fg": "warning", "bold": true},

@@ -359,6 +359,10 @@ DEFAULT_SEMANTIC_STYLES = {
     "notebook_output_label": StyleSpec(fg="primary", bold=True),  # Out [n]:
     "notebook_error_label": StyleSpec(fg="error", bold=True),     # Err [n]:
 
+    # Output - inline markdown (used by inline_markdown_formatter)
+    "inline_code": StyleSpec(fg="#87d7d7", bg="#2d2d3d"),
+    "markdown_link": StyleSpec(fg="#5f87ff", underline=True),
+
     # Output - basic line style (used by output_buffer for plain text lines)
     "line": StyleSpec(fg="text"),
 
@@ -569,6 +573,9 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["thinking_content"] = StyleSpec(fg="#555555", italic=True)
         semantic["thinking_footer"] = StyleSpec(fg="#555555")
         semantic["thinking_footer_separator"] = StyleSpec(fg="#888888")
+        # Inline markdown - darker colors for light background
+        semantic["inline_code"] = StyleSpec(fg="#0055aa", bg="#e8e8f0")
+        semantic["markdown_link"] = StyleSpec(fg="#0055aa", underline=True)
         return ThemeConfig(
             name="light",
             description="Light theme for bright terminals (fallback)",
@@ -608,6 +615,9 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["thinking_content"] = StyleSpec(fg="#cccccc", italic=True)
         semantic["thinking_footer"] = StyleSpec(fg="#cccccc")
         semantic["thinking_footer_separator"] = StyleSpec(fg="#aaaaaa")
+        # Inline markdown - bright colors for high contrast
+        semantic["inline_code"] = StyleSpec(fg="#00ffff", bg="#1a1a2e")
+        semantic["markdown_link"] = StyleSpec(fg="#66ccff", underline=True)
         return ThemeConfig(
             name="high-contrast",
             description="High contrast theme for accessibility (fallback)",
