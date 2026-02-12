@@ -384,8 +384,7 @@ class FileEditPlugin:
                 discoverability="discoverable",
                 editable=EditableContent(
                     parameters=["old", "new", "new_content"],
-                    format="text",
-                    template="# Edit the file content below. Save and exit to continue.\n",
+                    format="diff",
                 ),
             ),
             ToolSchema(
