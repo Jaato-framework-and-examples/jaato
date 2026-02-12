@@ -671,6 +671,38 @@ class PluginRegistry:
         for name in list(self._exposed):
             self.unexpose_tool(name)
 
+    def collect_prerequisite_policies(self) -> list:
+        """Collect prerequisite policies from all exposed plugins.
+
+        Iterates over all exposed (and enrichment-only) plugins, calling
+        ``get_prerequisite_policies()`` on those that implement it. Returns
+        a flat list of PrerequisitePolicy objects that can be registered
+        with the ReliabilityPlugin.
+
+        This follows the same ``hasattr()``-based duck-typing pattern used
+        for enrichment subscriptions.
+
+        Returns:
+            List of PrerequisitePolicy objects from all plugins.
+        """
+        policies = []
+        all_names = self._exposed | getattr(self, '_enrichment_only', set())
+        for name in all_names:
+            try:
+                plugin = self._plugins[name]
+                if hasattr(plugin, 'get_prerequisite_policies'):
+                    plugin_policies = plugin.get_prerequisite_policies()
+                    if plugin_policies:
+                        # Tag each policy with its owner plugin name
+                        for p in plugin_policies:
+                            if hasattr(p, 'owner_plugin') and not p.owner_plugin:
+                                p.owner_plugin = name
+                        policies.extend(plugin_policies)
+                        _trace(f"Collected {len(plugin_policies)} prerequisite policies from '{name}'")
+            except Exception as exc:
+                _trace(f"Error collecting prerequisite policies from '{name}': {exc}")
+        return policies
+
     def set_workspace_path(self, path: str) -> None:
         """Set workspace path and broadcast to all plugins that support it.
 

@@ -488,6 +488,38 @@ class ToolPlugin(Protocol):
     #     """
     #     ...
 
+    # Prerequisite Policies:
+    #
+    # def get_prerequisite_policies(self) -> List["PrerequisitePolicy"]:
+    #     """Return prerequisite policies for the reliability plugin to enforce.
+    #
+    #     Prerequisite policies declare that certain tools (the "gated" tools)
+    #     require another tool (the "prerequisite") to have been called recently
+    #     before they can be used. The reliability plugin's PatternDetector
+    #     generically enforces all registered policies.
+    #
+    #     This follows the same cross-plugin delegation pattern as
+    #     evaluate_gc_policy() — the owning plugin declares what should happen,
+    #     and the enforcement plugin (reliability) carries it out.
+    #
+    #     Returns:
+    #         List of PrerequisitePolicy objects. Import the type from
+    #         shared.plugins.reliability.types.
+    #
+    #     Example:
+    #         from shared.plugins.reliability.types import (
+    #             PrerequisitePolicy, BehavioralPatternType, PatternSeverity, NudgeType
+    #         )
+    #         return [PrerequisitePolicy(
+    #             policy_id="template_check",
+    #             prerequisite_tool="listAvailableTemplates",
+    #             gated_tools={"writeNewFile", "updateFile"},
+    #             pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+    #             nudge_templates={...},
+    #         )]
+    #     """
+    #     ...
+
     # Optional method - not part of the required protocol, but recognized by
     # the permission system if implemented:
     #

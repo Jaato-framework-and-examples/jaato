@@ -601,6 +601,10 @@ class BehavioralPatternType(Enum):
     TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
     ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
 
+    # Prerequisite violations (generic + specific)
+    PREREQUISITE_VIOLATED = "prerequisite_violated"      # Generic: any prerequisite policy violated
+    TEMPLATE_CHECK_SKIPPED = "template_check_skipped"    # Specific: file-writing tool without listAvailableTemplates
+
 
 class PatternSeverity(Enum):
     """Severity levels for detected patterns."""
@@ -757,6 +761,62 @@ class NudgeType(Enum):
     GENTLE_REMINDER = "gentle"      # Soft suggestion, low urgency
     DIRECT_INSTRUCTION = "direct"   # Clear instruction, moderate urgency
     INTERRUPT = "interrupt"         # Stop and require user input
+
+
+@dataclass
+class PrerequisitePolicy:
+    """A prerequisite policy declared by a plugin for the reliability plugin to enforce.
+
+    This allows any plugin to declare that certain tools require another tool
+    to have been called recently before they can be used. The reliability
+    plugin's PatternDetector generically enforces all registered policies.
+
+    Example — the template plugin declares::
+
+        PrerequisitePolicy(
+            policy_id="template_check",
+            prerequisite_tool="listAvailableTemplates",
+            gated_tools={"writeNewFile", "updateFile", "multiFileEdit", "findAndReplace"},
+            lookback_turns=2,
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            nudge_templates={
+                PatternSeverity.MINOR: (NudgeType.DIRECT_INSTRUCTION, "Call listAvailableTemplates first..."),
+                PatternSeverity.SEVERE: (NudgeType.INTERRUPT, "BLOCKED: ..."),
+            },
+            expected_action_template="Call {prerequisite_tool} before using {tool_name}",
+        )
+
+    Attributes:
+        policy_id: Unique identifier for this policy (e.g., "template_check").
+        prerequisite_tool: The tool that must be called to satisfy the prerequisite.
+        gated_tools: The tools that require the prerequisite to have been met.
+        lookback_turns: How many previous turns to look back (0 = current turn only).
+        pattern_type: The BehavioralPatternType to fire on violation. Use a
+            specific type (e.g., TEMPLATE_CHECK_SKIPPED) for well-known policies,
+            or PREREQUISITE_VIOLATED as a generic fallback.
+        nudge_templates: Nudge messages per severity level. The template strings
+            may contain ``{tool_name}`` (the gated tool that was called),
+            ``{prerequisite_tool}`` (the required tool), and ``{count}``
+            (the number of prior violations).
+        expected_action_template: Template for the ``expected_action`` field on
+            the BehavioralPattern. May contain ``{tool_name}`` and
+            ``{prerequisite_tool}`` placeholders.
+        owner_plugin: Name of the plugin that declared this policy (set
+            automatically during registration).
+    """
+
+    policy_id: str
+    prerequisite_tool: str
+    gated_tools: Set[str]
+    lookback_turns: int = 2
+    pattern_type: BehavioralPatternType = BehavioralPatternType.PREREQUISITE_VIOLATED
+    nudge_templates: Dict["PatternSeverity", Tuple["NudgeType", str]] = field(
+        default_factory=dict
+    )
+    expected_action_template: str = (
+        "Call {prerequisite_tool} before using {tool_name}"
+    )
+    owner_plugin: str = ""
 
 
 class NudgeLevel(Enum):

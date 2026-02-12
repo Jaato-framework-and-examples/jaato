@@ -16,6 +16,7 @@ from .types import (
     BehavioralPatternType,
     PatternDetectionConfig,
     PatternSeverity,
+    PrerequisitePolicy,
     ToolCall,
 )
 
@@ -27,6 +28,18 @@ class PatternDetector:
 
     This class tracks tool calls and model outputs within a turn to detect
     stall patterns that indicate the model is stuck in an unproductive loop.
+
+    Prerequisite policy enforcement:
+        Plugins can declare ``PrerequisitePolicy`` objects (via their
+        ``get_prerequisite_policies()`` method) which are registered here
+        through ``register_prerequisite_policy()``. For each policy, the
+        detector tracks when the prerequisite tool was last called and
+        fires a ``BehavioralPattern`` when a gated tool is invoked without
+        the prerequisite having been met within the lookback window.
+
+        This keeps the detector generic — it doesn't know about templates
+        or any specific domain. The owning plugins declare what should be
+        enforced, and the detector enforces it.
     """
 
     def __init__(
@@ -49,6 +62,15 @@ class PatternDetector:
         self._announced_actions: List[str] = []
         self._consecutive_reads: int = 0
 
+        # Prerequisite policies registered by plugins.
+        # Maps policy_id → PrerequisitePolicy for lookup.
+        self._prerequisite_policies: Dict[str, PrerequisitePolicy] = {}
+        # Cross-turn tracking: maps prerequisite_tool → last turn it was called.
+        # Shared across policies that use the same prerequisite tool.
+        self._last_prerequisite_tool_turn: Dict[str, Optional[int]] = {}
+        # Reverse index: maps gated tool name → list of policies that gate it.
+        self._gated_tool_to_policies: Dict[str, List[PrerequisitePolicy]] = {}
+
         # Pattern history (for reporting)
         self._detected_patterns: List[BehavioralPattern] = []
 
@@ -58,6 +80,27 @@ class PatternDetector:
     # -------------------------------------------------------------------------
     # Configuration
     # -------------------------------------------------------------------------
+
+    def register_prerequisite_policy(self, policy: PrerequisitePolicy) -> None:
+        """Register a prerequisite policy declared by a plugin.
+
+        The detector will enforce this policy by checking that the
+        prerequisite tool has been called within the lookback window
+        before any of the gated tools are invoked.
+
+        Args:
+            policy: The prerequisite policy to enforce.
+        """
+        self._prerequisite_policies[policy.policy_id] = policy
+        # Initialize cross-turn tracking for this prerequisite tool
+        if policy.prerequisite_tool not in self._last_prerequisite_tool_turn:
+            self._last_prerequisite_tool_turn[policy.prerequisite_tool] = None
+        # Build reverse index
+        for tool in policy.gated_tools:
+            if tool not in self._gated_tool_to_policies:
+                self._gated_tool_to_policies[tool] = []
+            if policy not in self._gated_tool_to_policies[tool]:
+                self._gated_tool_to_policies[tool].append(policy)
 
     def set_session_context(self, session_id: str, model_name: str = "") -> None:
         """Set session context for pattern records."""
@@ -132,11 +175,21 @@ class PatternDetector:
         call = ToolCall(tool_name=tool_name, args=args, timestamp=datetime.now())
         self._turn_history.append(call)
 
+        # Track cross-turn prerequisite tool calls
+        if tool_name in self._last_prerequisite_tool_turn:
+            self._last_prerequisite_tool_turn[tool_name] = self._turn_index
+
         # Track read vs action tools
         if tool_name in self._config.read_only_tools:
             self._consecutive_reads += 1
         elif tool_name in self._config.action_tools:
             self._consecutive_reads = 0
+
+        # Check for prerequisite policy violations
+        pattern = self._check_prerequisite_policies(tool_name)
+        if pattern:
+            self._emit_pattern(pattern)
+            return pattern
 
         # Check for repetitive calls
         pattern = self._check_repetitive_calls(tool_name)
@@ -218,6 +271,88 @@ class PatternDetector:
     # -------------------------------------------------------------------------
     # Pattern Detection Logic
     # -------------------------------------------------------------------------
+
+    def _check_prerequisite_policies(self, tool_name: str) -> Optional[BehavioralPattern]:
+        """Check if any registered prerequisite policy is violated.
+
+        For each policy that gates this tool, verifies that the prerequisite
+        tool was called within the lookback window (current turn + N previous
+        turns). Returns the first violation found.
+
+        Returns:
+            BehavioralPattern if a prerequisite was violated, None if all
+            policies are satisfied or no policies gate this tool.
+        """
+        policies = self._gated_tool_to_policies.get(tool_name)
+        if not policies:
+            return None
+
+        for policy in policies:
+            violation = self._check_single_prerequisite(tool_name, policy)
+            if violation:
+                return violation
+
+        return None
+
+    def _check_single_prerequisite(
+        self,
+        tool_name: str,
+        policy: PrerequisitePolicy,
+    ) -> Optional[BehavioralPattern]:
+        """Check a single prerequisite policy for a gated tool call.
+
+        Args:
+            tool_name: The gated tool that was called.
+            policy: The prerequisite policy to check.
+
+        Returns:
+            BehavioralPattern if the prerequisite was violated, None if satisfied.
+        """
+        lookback = policy.lookback_turns
+
+        # Check cross-turn tracking for the prerequisite tool
+        last_turn = self._last_prerequisite_tool_turn.get(policy.prerequisite_tool)
+        if last_turn is not None:
+            turns_since_check = self._turn_index - last_turn
+            if turns_since_check <= lookback:
+                return None  # Prerequisite satisfied
+
+        # Also check the current turn's history (the prerequisite tool may
+        # have been called earlier in this same turn).
+        for call in self._turn_history:
+            if call.tool_name == policy.prerequisite_tool:
+                return None  # Prerequisite satisfied within this turn
+
+        # Determine severity based on how many violations for this policy
+        violation_count = sum(
+            1 for p in self._detected_patterns
+            if p.pattern_type == policy.pattern_type
+        )
+        if violation_count >= 2:
+            severity = PatternSeverity.SEVERE
+        elif violation_count >= 1:
+            severity = PatternSeverity.MODERATE
+        else:
+            severity = PatternSeverity.MINOR
+
+        duration = self._calculate_duration()
+        expected_action = policy.expected_action_template.format(
+            tool_name=tool_name,
+            prerequisite_tool=policy.prerequisite_tool,
+        )
+
+        return BehavioralPattern(
+            pattern_type=policy.pattern_type,
+            detected_at=datetime.now(),
+            turn_index=self._turn_index,
+            session_id=self._session_id,
+            tool_sequence=[tool_name],
+            repetition_count=violation_count + 1,
+            duration_seconds=duration,
+            model_name=self._model_name,
+            severity=severity,
+            expected_action=expected_action,
+        )
 
     def _check_repetitive_calls(self, tool_name: str) -> Optional[BehavioralPattern]:
         """Check for same tool called repeatedly."""
@@ -493,11 +628,19 @@ class PatternDetector:
         self._detected_patterns = []
 
     def reset(self) -> None:
-        """Reset all state."""
+        """Reset all state, including cross-turn tracking.
+
+        Registered policies are preserved — only runtime tracking state
+        is cleared. Call ``register_prerequisite_policy()`` again only if
+        you want to change the policy set.
+        """
         self._turn_history = []
         self._turn_start = None
         self._turn_index = 0
         self._last_action_index = -1
         self._announced_actions = []
         self._consecutive_reads = 0
+        # Reset cross-turn tracking for all prerequisite tools
+        for tool in self._last_prerequisite_tool_turn:
+            self._last_prerequisite_tool_turn[tool] = None
         self._detected_patterns = []

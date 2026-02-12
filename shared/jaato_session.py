@@ -989,6 +989,12 @@ class JaatoSession:
                     provider_name=self._provider_name_override
                 )
                 self._runtime.reliability_plugin.set_model_context(self._model_name, available)
+            # Collect and register prerequisite policies from all plugins
+            if self._runtime.registry:
+                policies = self._runtime.registry.collect_prerequisite_policies()
+                if policies:
+                    self._runtime.reliability_plugin.register_prerequisite_policies(policies)
+                    self._trace(f"configure: registered {len(policies)} prerequisite policies with reliability plugin")
 
         # Set this session as parent for subagent plugin (for cancellation propagation)
         if self._runtime.registry:

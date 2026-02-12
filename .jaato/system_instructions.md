@@ -404,3 +404,29 @@ When creating a detailed plan, you MUST evaluate each step against the available
 **Output Contract:** Subagents MUST finish with structured output containing at minimum: the list of files produced or modified, a summary of what was done, a pass/fail status, and any errors encountered. Parents consume these outputs programmatically to resolve dependencies and trigger next steps.
 
 **Dependency Registration:** When a subagent produces a plan or creates artifacts, the parent MUST link its own plan steps to the subagent's deliverables so that dependent work does not proceed until the subagent has completed successfully.
+
+## Principle 17: Template-First File Creation
+
+Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEdit`, `findAndReplace`), you MUST call `listAvailableTemplates` at least once in the current or recent turns to check whether a template exists that can produce or contribute to the target file. This is non-negotiable.
+
+**The Rule:**
+1. **Before creating a new file** (`writeNewFile`, `multiFileEdit` with create operations): Call `listAvailableTemplates`. If a matching template exists, use `renderTemplateToFile` instead of writing content manually.
+2. **Before modifying an existing file** (`updateFile`, `multiFileEdit` with edit operations): Call `listAvailableTemplates`. A template may provide the content you need to patch into the file — render it mentally or to a scratch location, then apply the relevant portion as a patch.
+3. **After checking**: If no template matches your task, proceed freely with file-writing tools. The check itself is the gate, not the outcome.
+
+**Why This Matters:**
+- Templates encode **validated patterns** — they've been reviewed, tested, and standardized
+- Manual coding when a template exists produces **inconsistent, non-compliant output**
+- The template check is lightweight (`listAvailableTemplates` is auto-approved, read-only)
+- Skipping it is never worth the risk of producing non-standard code
+
+**Direct vs. Indirect Template Usage:**
+- **Direct**: Template produces a complete file → use `renderTemplateToFile`
+- **Indirect**: Template produces content that must be layered onto an existing file → render the template to understand the pattern, then use `updateFile` or `multiFileEdit` to apply the relevant sections as a patch. The template serves as the source of truth for the new code, even when the delivery mechanism is a patch.
+
+**Anti-patterns:**
+- Calling `writeNewFile` without checking templates first — even if you "know" there's no template
+- Rendering a template to a new file when the file already exists and needs patching instead
+- Ignoring template annotations in system instructions or tool results
+
+**Enforcement:** The reliability plugin monitors file-writing tool calls and detects when `listAvailableTemplates` has not been called recently. A nudge will be injected to remind you. Treat these nudges as mandatory corrections, not suggestions.

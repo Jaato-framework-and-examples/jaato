@@ -132,8 +132,34 @@ class NudgeStrategy:
         ),
     }
 
+    def __init__(self):
+        # Templates registered by plugins via PrerequisitePolicy.nudge_templates.
+        # Maps pattern_type → severity → (nudge_type, template_str).
+        self._policy_templates: Dict[BehavioralPatternType, Dict[PatternSeverity, tuple]] = {}
+
+    def register_policy_templates(
+        self,
+        pattern_type: BehavioralPatternType,
+        nudge_templates: Dict[PatternSeverity, tuple],
+    ) -> None:
+        """Register nudge templates declared by a plugin's PrerequisitePolicy.
+
+        These templates take precedence over the built-in NUDGE_TEMPLATES
+        and DEFAULT_TEMPLATES for the given pattern type.
+
+        Args:
+            pattern_type: The pattern type these templates apply to.
+            nudge_templates: Map of severity → (NudgeType, template_str).
+        """
+        self._policy_templates[pattern_type] = nudge_templates
+
     def create_nudge(self, pattern: BehavioralPattern) -> Nudge:
         """Create appropriate nudge for detected pattern.
+
+        Template lookup order:
+        1. Policy-declared templates (from ``register_policy_templates()``)
+        2. Built-in ``NUDGE_TEMPLATES`` for well-known patterns
+        3. ``DEFAULT_TEMPLATES`` as fallback
 
         Args:
             pattern: The detected behavioral pattern
@@ -141,7 +167,11 @@ class NudgeStrategy:
         Returns:
             A Nudge with appropriate type and message
         """
-        templates = self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
+        # Policy-declared templates take priority
+        templates = self._policy_templates.get(
+            pattern.pattern_type,
+            self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
+        )
         nudge_type, template = templates.get(
             pattern.severity,
             self.DEFAULT_TEMPLATES[pattern.severity]
@@ -209,10 +239,16 @@ class NudgeInjector:
         self._nudge_history: List[Nudge] = []
         self._last_nudge_by_type: Dict[BehavioralPatternType, datetime] = {}
 
-        # Callbacks for injection
+        # Callbacks for injection (model-facing)
         self._inject_system_guidance: Optional[Callable[[str], None]] = None
         self._inject_context_hint: Optional[Callable[[str], None]] = None
         self._request_pause: Optional[Callable[[str], None]] = None
+
+        # Callback for user-visible notification (UI-facing).
+        # Signature: (source: str, text: str, mode: str) -> None
+        # Follows the same OutputCallback pattern used by enrichment
+        # notifications in template/memory/reference plugins.
+        self._notify_user: Optional[Callable[[str, str, str], None]] = None
 
         # Event callbacks
         self._on_nudge_injected: Optional[Callable[[Nudge], None]] = None
@@ -239,6 +275,7 @@ class NudgeInjector:
         inject_system_guidance: Optional[Callable[[str], None]] = None,
         inject_context_hint: Optional[Callable[[str], None]] = None,
         request_pause: Optional[Callable[[str], None]] = None,
+        notify_user: Optional[Callable[[str, str, str], None]] = None,
     ) -> None:
         """Set callbacks for injecting nudges into the session.
 
@@ -246,10 +283,17 @@ class NudgeInjector:
             inject_system_guidance: Inject as system message (high priority)
             inject_context_hint: Inject as context hint (lower priority)
             request_pause: Request user intervention (highest priority)
+            notify_user: Emit a user-visible notification via the output
+                callback. Signature matches OutputCallback:
+                (source: str, text: str, mode: str) -> None.
+                Called with source="enrichment" to integrate with the
+                enrichment notification rendering pipeline (same as
+                template/memory/reference notifications).
         """
         self._inject_system_guidance = inject_system_guidance
         self._inject_context_hint = inject_context_hint
         self._request_pause = request_pause
+        self._notify_user = notify_user
 
     def set_nudge_hooks(
         self,
@@ -319,7 +363,15 @@ class NudgeInjector:
         return elapsed >= self._config.cooldown_seconds
 
     def _inject_nudge(self, nudge: Nudge) -> None:
-        """Actually inject the nudge using configured callbacks."""
+        """Actually inject the nudge using configured callbacks.
+
+        Performs two actions:
+        1. Injects the nudge into the model's context (system guidance,
+           context hint, or pause request depending on severity).
+        2. Emits a user-visible notification via the output callback so
+           the user sees the nudge in the UI alongside other enrichment
+           notifications (template, memory, reference, etc.).
+        """
         message = nudge.to_system_message()
 
         if nudge.nudge_type == NudgeType.INTERRUPT:
@@ -340,6 +392,42 @@ class NudgeInjector:
                 self._inject_context_hint(message)
             elif self._inject_system_guidance:
                 self._inject_system_guidance(message)
+
+        # Emit user-visible notification
+        if self._notify_user:
+            user_message = self._format_user_notification(nudge)
+            self._notify_user("enrichment", user_message, "write")
+
+    @staticmethod
+    def _format_user_notification(nudge: Nudge) -> str:
+        """Format a nudge as a user-visible enrichment notification.
+
+        Produces a compact notification string matching the style used by
+        other enrichment plugins (template, memory, reference). Example::
+
+            nudge <- reliability: Template check missing - writeNewFile called
+                     without prior listAvailableTemplates
+
+        Args:
+            nudge: The nudge being injected.
+
+        Returns:
+            Formatted notification string for the output callback.
+        """
+        pattern = nudge.pattern
+        pattern_label = pattern.pattern_type.value.replace("_", " ")
+        tool_name = pattern.tool_sequence[-1] if pattern.tool_sequence else "unknown"
+
+        severity_prefix = {
+            PatternSeverity.MINOR: "",
+            PatternSeverity.MODERATE: "[repeated] ",
+            PatternSeverity.SEVERE: "[blocked] ",
+        }.get(pattern.severity, "")
+
+        return (
+            f"  nudge \u2190 reliability: {severity_prefix}{pattern_label} "
+            f"\u2014 {tool_name}"
+        )
 
     # -------------------------------------------------------------------------
     # Acknowledgment & Effectiveness Tracking
