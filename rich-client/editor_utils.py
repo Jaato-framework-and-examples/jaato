@@ -448,10 +448,16 @@ def edit_tool_content(
             if error_header and edited_content.startswith(error_header):
                 edited_content = edited_content[len(error_header):]
 
-            # Check if content was modified
-            was_modified = edited_content.strip() != original_content.strip()
+            # If user saved without changes from what we showed → cancel
+            if edited_content.strip() == content.strip():
+                return EditResult(
+                    success=True,
+                    arguments=arguments,
+                    was_modified=False,
+                )
 
-            if not was_modified:
+            # If net result matches the original → no effective change
+            if edited_content.strip() == original_content.strip():
                 return EditResult(
                     success=True,
                     arguments=arguments,
