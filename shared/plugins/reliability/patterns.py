@@ -323,10 +323,10 @@ class PatternDetector:
             if call.tool_name == policy.prerequisite_tool:
                 return None  # Prerequisite satisfied within this turn
 
-        # Determine severity based on how many violations for this policy
+        # Determine severity based on how many violations for this specific policy
         violation_count = sum(
             1 for p in self._detected_patterns
-            if p.pattern_type == policy.pattern_type
+            if getattr(p, 'policy_id', None) == policy.policy_id
         )
         if violation_count >= 2:
             severity = PatternSeverity.SEVERE
@@ -352,6 +352,7 @@ class PatternDetector:
             model_name=self._model_name,
             severity=severity,
             expected_action=expected_action,
+            policy_id=policy.policy_id,
         )
 
     def _check_repetitive_calls(self, tool_name: str) -> Optional[BehavioralPattern]:

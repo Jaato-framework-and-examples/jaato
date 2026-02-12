@@ -601,9 +601,8 @@ class BehavioralPatternType(Enum):
     TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
     ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
 
-    # Prerequisite violations (generic + specific)
-    PREREQUISITE_VIOLATED = "prerequisite_violated"      # Generic: any prerequisite policy violated
-    TEMPLATE_CHECK_SKIPPED = "template_check_skipped"    # Specific: file-writing tool without listAvailableTemplates
+    # Prerequisite violations
+    PREREQUISITE_VIOLATED = "prerequisite_violated"      # Any prerequisite policy violated
 
 
 class PatternSeverity(Enum):
@@ -643,6 +642,9 @@ class BehavioralPattern:
     last_model_text: Optional[str] = None        # What the model said (e.g., "Proceeding now")
     expected_action: Optional[str] = None        # What tool should have been called
 
+    # Policy identity (for prerequisite violations)
+    policy_id: Optional[str] = None              # e.g., "template_check", "profile_check_before_spawn"
+
     # Severity
     severity: PatternSeverity = PatternSeverity.MINOR
 
@@ -659,6 +661,7 @@ class BehavioralPattern:
             "model_name": self.model_name,
             "last_model_text": self.last_model_text,
             "expected_action": self.expected_action,
+            "policy_id": self.policy_id,
             "severity": self.severity.value,
         }
 
@@ -676,6 +679,7 @@ class BehavioralPattern:
             model_name=data["model_name"],
             last_model_text=data.get("last_model_text"),
             expected_action=data.get("expected_action"),
+            policy_id=data.get("policy_id"),
             severity=PatternSeverity(data.get("severity", "minor")),
         )
 
@@ -771,6 +775,15 @@ class PrerequisitePolicy:
     to have been called recently before they can be used. The reliability
     plugin's PatternDetector generically enforces all registered policies.
 
+    Each policy is identified by its ``policy_id`` string, which is used for:
+    - Counting per-policy violations (severity escalation)
+    - Looking up policy-specific nudge templates
+    - Filtering detected patterns in logs and tests
+
+    The ``pattern_type`` field on the emitted ``BehavioralPattern`` is always
+    ``PREREQUISITE_VIOLATED`` — the ``policy_id`` field on the pattern
+    distinguishes which specific policy was violated.
+
     Example — the template plugin declares::
 
         PrerequisitePolicy(
@@ -778,7 +791,6 @@ class PrerequisitePolicy:
             prerequisite_tool="listAvailableTemplates",
             gated_tools={"writeNewFile", "updateFile", "multiFileEdit", "findAndReplace"},
             lookback_turns=2,
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
             nudge_templates={
                 PatternSeverity.MINOR: (NudgeType.DIRECT_INSTRUCTION, "Call listAvailableTemplates first..."),
                 PatternSeverity.SEVERE: (NudgeType.INTERRUPT, "BLOCKED: ..."),
@@ -787,13 +799,15 @@ class PrerequisitePolicy:
         )
 
     Attributes:
-        policy_id: Unique identifier for this policy (e.g., "template_check").
+        policy_id: Unique identifier for this policy (e.g., "template_check",
+            "profile_check_before_spawn"). Used for violation counting, nudge
+            template lookup, and pattern filtering.
         prerequisite_tool: The tool that must be called to satisfy the prerequisite.
         gated_tools: The tools that require the prerequisite to have been met.
         lookback_turns: How many previous turns to look back (0 = current turn only).
-        pattern_type: The BehavioralPatternType to fire on violation. Use a
-            specific type (e.g., TEMPLATE_CHECK_SKIPPED) for well-known policies,
-            or PREREQUISITE_VIOLATED as a generic fallback.
+        pattern_type: The BehavioralPatternType to fire on violation. Defaults to
+            PREREQUISITE_VIOLATED. The ``policy_id`` on the emitted pattern
+            provides the specific identity.
         nudge_templates: Nudge messages per severity level. The template strings
             may contain ``{tool_name}`` (the gated tool that was called),
             ``{prerequisite_tool}`` (the required tool), and ``{count}``

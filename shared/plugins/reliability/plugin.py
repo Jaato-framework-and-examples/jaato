@@ -539,7 +539,7 @@ class ReliabilityPlugin:
         # Register nudge templates with the strategy (via the injector)
         if self._nudge_injector and policy.nudge_templates:
             self._nudge_injector._strategy.register_policy_templates(
-                policy.pattern_type, policy.nudge_templates
+                policy.policy_id, policy.nudge_templates
             )
 
     def register_prerequisite_policies(self, policies) -> None:

@@ -148,6 +148,51 @@ def _find_workspace_root(override: Optional[str] = None) -> str:
     return str(current)
 
 
+def detect_workspace_tech_stack(workspace_path: str) -> str:
+    """Detect the primary technology stack of a workspace by scanning for marker files.
+
+    Checks for common build/config files at the workspace root to determine
+    the project's language and build system.
+
+    Args:
+        workspace_path: Absolute path to the workspace root.
+
+    Returns:
+        Concise summary string (e.g., "Java project (Maven - pom.xml detected)")
+        or empty string if nothing detected.
+    """
+    root = Path(workspace_path)
+    detections = []
+
+    # Check marker files in priority order
+    markers = [
+        ("pom.xml", "Java project (Maven - pom.xml detected)"),
+        ("build.gradle", "Java/Kotlin project (Gradle - build.gradle detected)"),
+        ("build.gradle.kts", "Kotlin project (Gradle KTS - build.gradle.kts detected)"),
+        ("Cargo.toml", "Rust project (Cargo - Cargo.toml detected)"),
+        ("go.mod", "Go project (go.mod detected)"),
+        ("package.json", "JavaScript/TypeScript project (Node.js - package.json detected)"),
+        ("pyproject.toml", "Python project (pyproject.toml detected)"),
+        ("setup.py", "Python project (setup.py detected)"),
+        ("requirements.txt", "Python project (requirements.txt detected)"),
+        ("Gemfile", "Ruby project (Gemfile detected)"),
+        ("composer.json", "PHP project (Composer - composer.json detected)"),
+    ]
+
+    for filename, description in markers:
+        if (root / filename).exists():
+            detections.append(description)
+
+    # Check glob patterns for .NET
+    if any(root.glob("*.sln")) or any(root.glob("*.csproj")):
+        detections.append("C#/.NET project (.sln/.csproj detected)")
+
+    if not detections:
+        return ""
+
+    return "; ".join(detections)
+
+
 def expand_plugin_configs(
     plugin_configs: Dict[str, Dict[str, Any]],
     context: Optional[Dict[str, str]] = None,
