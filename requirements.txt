@@ -40,5 +40,8 @@ mermaid-py>=0.5.0  # Mermaid diagram parsing (fallback renderer when mmdc unavai
 # AST search plugin dependencies (optional)
 ast-grep-py>=0.30.0  # AST-based structural code search
 
+# Workspace file monitoring
+watchdog>=4.0.0  # Cross-platform filesystem event monitoring (inotify/FSEvents/ReadDirectoryChangesW)
+
 # Kerberos proxy authentication (optional)
 pyspnego>=0.10.0  # SPNEGO/Negotiate auth for corporate proxies (Windows SSPI, macOS GSS, Linux Kerberos)
