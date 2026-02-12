@@ -39,6 +39,7 @@ from .find_replace import (
     FindReplaceResult,
     generate_find_replace_preview,
 )
+from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.trace import trace as _trace_write
 
@@ -322,8 +323,11 @@ class FileEditPlugin:
             ),
             ToolSchema(
                 name="updateFile",
-                description="Update an existing file with new content. Shows a diff for approval "
-                           "and creates a backup before modifying. Use this for modifying existing files.",
+                description="Update an existing file. Supports two modes: (1) Targeted edit: "
+                           "provide 'old' and 'new' to replace a specific fragment. Use optional "
+                           "'prologue'/'epilogue' for disambiguation when the search text appears "
+                           "multiple times. (2) Full replacement: provide 'new_content' to replace "
+                           "the entire file.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -331,22 +335,52 @@ class FileEditPlugin:
                             "type": "string",
                             "description": "Path to the file to update"
                         },
+                        "old": {
+                            "type": "string",
+                            "description": (
+                                "Text to find in the file (for targeted edit). "
+                                "Must appear exactly once, or use prologue/epilogue "
+                                "to disambiguate."
+                            )
+                        },
+                        "new": {
+                            "type": "string",
+                            "description": (
+                                "Replacement text (for targeted edit). "
+                                "Replaces only the matched 'old' text."
+                            )
+                        },
+                        "prologue": {
+                            "type": "string",
+                            "description": (
+                                "Lines immediately before the search text, for "
+                                "disambiguation. Not modified in the output."
+                            )
+                        },
+                        "epilogue": {
+                            "type": "string",
+                            "description": (
+                                "Lines immediately after the search text, for "
+                                "disambiguation. Not modified in the output."
+                            )
+                        },
                         "new_content": {
                             "type": "string",
                             "description": (
-                                "The complete new content to write to the file. "
+                                "The complete new content to write to the file "
+                                "(for full replacement mode). "
                                 "Provide the raw file content directly - do NOT wrap in quotes, "
                                 "triple-quotes, or treat as a string literal. The content is "
                                 "written verbatim to the file."
                             )
                         }
                     },
-                    "required": ["path", "new_content"]
+                    "required": ["path"]
                 },
                 category="filesystem",
                 discoverability="discoverable",
                 editable=EditableContent(
-                    parameters=["new_content"],
+                    parameters=["old", "new", "new_content"],
                     format="text",
                     template="# Edit the file content below. Save and exit to continue.\n",
                 ),
@@ -496,11 +530,19 @@ class FileEditPlugin:
                                     },
                                     "old": {
                                         "type": "string",
-                                        "description": "Original content to verify (for edit)"
+                                        "description": "Text fragment to find and replace (for edit). Must appear exactly once, or use prologue/epilogue to disambiguate."
                                     },
                                     "new": {
                                         "type": "string",
-                                        "description": "New content to write (for edit)"
+                                        "description": "Replacement text for the matched fragment (for edit)"
+                                    },
+                                    "prologue": {
+                                        "type": "string",
+                                        "description": "Lines immediately before the search text, for disambiguation (for edit). Not modified."
+                                    },
+                                    "epilogue": {
+                                        "type": "string",
+                                        "description": "Lines immediately after the search text, for disambiguation (for edit). Not modified."
                                     },
                                     "content": {
                                         "type": "string",
@@ -634,7 +676,13 @@ Tools available:
   - Example: `readFile(path="large.txt", offset=101, limit=100)` reads lines 101-200.
   - Chunked responses include: `total_lines`, `start_line`, `end_line`, and `has_more` (boolean).
   - **Image support**: For image files (PNG, JPG, GIF, WebP, BMP, ICO, SVG), returns multimodal content you can view directly.
-- `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
+- `updateFile`: Update an existing file. Shows diff for approval and creates backup. Two modes:
+  - **Targeted edit** (preferred): `updateFile(path, old="text to find", new="replacement text")`
+    Finds `old` in the file and replaces it with `new`. The `old` text must appear exactly once.
+    Use `prologue` and/or `epilogue` to disambiguate when `old` matches multiple locations:
+    `updateFile(path, old="x = 1", new="x = 2", prologue="class Foo:\\n")`
+  - **Full replacement**: `updateFile(path, new_content="entire file content")`
+    Replaces the entire file. Use only when the targeted mode is impractical.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
 - `moveFile(source_path, destination_path, overwrite=False)`: Move or rename a file. Creates destination directories if needed. Creates backup before moving. Fails if destination exists unless overwrite=True.
@@ -642,7 +690,10 @@ Tools available:
 - `undoFileChange(path)`: Restore a file from its most recent backup.
 - `multiFileEdit(operations)`: Execute multiple file operations atomically. ALL changes succeed or NONE are applied.
   - Supports: edit, create, delete, rename operations
-  - Example: `multiFileEdit(operations=[{"action": "edit", "path": "a.py", "old": "...", "new": "..."},
+  - Edit uses targeted search-and-replace: `{"action": "edit", "path": "a.py", "old": "fragment", "new": "replacement"}`
+    Optional `prologue`/`epilogue` for disambiguation.
+  - Multiple edits on the same file are allowed (applied sequentially).
+  - Example: `multiFileEdit(operations=[{"action": "edit", "path": "a.py", "old": "old_name", "new": "new_name"},
                                         {"action": "rename", "from": "b.py", "to": "c.py"}])`
   - Use for refactoring that must succeed together (e.g., renaming a symbol across files)
 - `findAndReplace(pattern, replacement, paths, dry_run=False, include_ignored=False)`: Find and replace across files.
@@ -654,10 +705,8 @@ Tools available:
 - `restoreFile(path, backup_path=None)`: Restore a file from backup. Uses latest backup if backup_path not specified.
 - `listBackups(path=None)`: List available backups. Filter by path or list all backups.
 
-IMPORTANT: When using updateFile or writeNewFile, provide the raw file content directly.
+IMPORTANT: When using updateFile (full replacement mode) or writeNewFile, provide the raw file content directly.
 Do NOT wrap the content in quotes, triple-quotes (''' or \"\"\"), or treat it as a string literal.
-For example, to create a Python file, the content should start with 'import ...' or actual code,
-NOT with ''' or quotes around the code. The content parameter value is written verbatim to the file.
 
 File modifications (updateFile, writeNewFile, removeFile, moveFile, multiFileEdit, findAndReplace)
 will show you a preview and require approval before execution. Backups are automatically created."""
@@ -708,10 +757,16 @@ will show you a preview and require approval before execution. Backups are autom
         return None
 
     def _format_update_file(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:
-        """Format updateFile for permission display."""
+        """Format updateFile for permission display.
+
+        Supports two modes:
+        - Targeted mode (old+new present): reads current file, applies the
+          targeted edit, and diffs original vs result.
+        - Full replacement mode (new_content present): diffs original vs
+          new_content directly.
+        """
         path = arguments.get("path", "")
-        # Accept both 'new_content' (canonical) and 'content' (for consistency with writeNewFile)
-        new_content = arguments.get("new_content") or arguments.get("content", "")
+        old_text = arguments.get("old")
 
         file_path = self._resolve_path(path)
         if not file_path.exists():
@@ -728,6 +783,25 @@ will show you a preview and require approval before execution. Backups are autom
                 details=f"Error reading file: {e}\nTraceback: {traceback.format_exc()}",
                 format_hint="text"
             )
+
+        if old_text is not None:
+            # Targeted mode: compute the result via apply_edit
+            new_text = arguments.get("new", "")
+            prologue = arguments.get("prologue")
+            epilogue = arguments.get("epilogue")
+            try:
+                new_content = apply_edit(old_content, old_text, new_text, prologue, epilogue)
+            except (EditNotFoundError, AmbiguousEditError) as e:
+                display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+                return PermissionDisplayInfo(
+                    summary=f"Update file: {display_path} (edit error)",
+                    details=str(e),
+                    format_hint="text"
+                )
+        else:
+            # Full replacement mode
+            # Accept both 'new_content' (canonical) and 'content' (alias)
+            new_content = arguments.get("new_content") or arguments.get("content", "")
 
         diff_text, truncated, total_lines = generate_unified_diff(
             old_content, new_content, path, max_lines=DEFAULT_MAX_LINES
@@ -971,11 +1045,18 @@ will show you a preview and require approval before execution. Backups are autom
             return {"error": f"Failed to read file: {e}"}
 
     def _execute_update_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute updateFile tool."""
+        """Execute updateFile tool.
+
+        Supports two modes determined by which parameters are present:
+
+        - **Targeted mode** (``old`` + ``new``): reads the file, finds the
+          ``old`` fragment (optionally anchored by ``prologue``/``epilogue``),
+          and replaces it with ``new``.
+        - **Full replacement mode** (``new_content`` or ``content``): replaces
+          the entire file content.
+        """
         path = args.get("path", "")
-        # Accept both 'new_content' (canonical) and 'content' (for consistency with writeNewFile)
-        new_content = args.get("new_content") or args.get("content", "")
-        self._trace(f"updateFile: path={path}, content_len={len(new_content)}")
+        old_text = args.get("old")
 
         if not path:
             return {"error": "path is required"}
@@ -991,6 +1072,34 @@ will show you a preview and require approval before execution. Backups are autom
 
         if not file_path.is_file():
             return {"error": f"Not a file: {path}"}
+
+        # Determine mode and compute final content
+        if old_text is not None:
+            # Targeted mode
+            new_text = args.get("new")
+            if new_text is None:
+                return {"error": "'new' is required when 'old' is provided"}
+            prologue = args.get("prologue")
+            epilogue = args.get("epilogue")
+
+            try:
+                current_content = file_path.read_text()
+            except OSError as e:
+                return {"error": f"Failed to read file: {e}"}
+
+            self._trace(f"updateFile(targeted): path={path}, old_len={len(old_text)}, new_len={len(new_text)}")
+
+            try:
+                new_content = apply_edit(current_content, old_text, new_text, prologue, epilogue)
+            except EditNotFoundError as e:
+                return {"error": f"Targeted edit failed: {e}"}
+            except AmbiguousEditError as e:
+                return {"error": f"Targeted edit failed: {e}"}
+        else:
+            # Full replacement mode
+            # Accept both 'new_content' (canonical) and 'content' (alias)
+            new_content = args.get("new_content") or args.get("content", "")
+            self._trace(f"updateFile(full): path={path}, content_len={len(new_content)}")
 
         # Create backup before modification
         backup_path = None

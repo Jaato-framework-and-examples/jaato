@@ -19,6 +19,7 @@ PLUGIN_KIND = "tool"
 
 from .plugin import FileEditPlugin, create_plugin
 from .backup import BackupManager, BackupInfo
+from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
 from .multi_file import (
     MultiFileExecutor,
     MultiFileResult,
@@ -40,6 +41,10 @@ __all__ = [
     # Backup
     'BackupManager',
     'BackupInfo',
+    # Edit core
+    'apply_edit',
+    'EditNotFoundError',
+    'AmbiguousEditError',
     # Multi-file
     'MultiFileExecutor',
     'MultiFileResult',
