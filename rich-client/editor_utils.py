@@ -7,6 +7,7 @@ Used by the permission system to allow users to edit tool content before
 approving execution.
 """
 
+import difflib
 import json
 import os
 import subprocess
@@ -53,6 +54,7 @@ def get_file_suffix(format: str) -> str:
         "json": ".json",
         "markdown": ".md",
         "text": ".txt",
+        "diff": ".diff",
     }.get(format, ".txt")
 
 
@@ -67,7 +69,11 @@ def format_for_editing(
     Args:
         arguments: Full tool arguments dict.
         parameters: List of parameter names that are editable.
-        format: Format type ('yaml', 'json', 'text', 'markdown').
+        format: Format type ('yaml', 'json', 'text', 'markdown', 'diff').
+            When *format* is ``"diff"`` and ``old``/``new`` are both present
+            in *arguments*, a unified diff is generated with optional
+            prologue/epilogue as context lines.  Falls back to plain text
+            for full-replacement mode (only ``new_content``).
         template: Optional header/instructions to prepend.
 
     Returns:
@@ -105,6 +111,15 @@ def format_for_editing(
                     lines.append(str(value))
                 lines.append("")
         content = "\n".join(lines)
+    elif format == "diff":
+        old_text = arguments.get("old")
+        new_text = arguments.get("new")
+        if old_text is not None and new_text is not None:
+            content = _format_as_unified_diff(arguments)
+        else:
+            # Full replacement mode — show raw content as text
+            val = arguments.get("new_content", "")
+            content = str(val)
     else:
         # Plain text format
         # For single parameter, just show the raw value
@@ -165,6 +180,17 @@ def parse_edited_content(
         elif format == "markdown":
             # Parse markdown sections back to dict
             parsed = _parse_markdown_sections(content, parameters)
+        elif format == "diff":
+            if _looks_like_unified_diff(content):
+                parsed = _parse_unified_diff(content)
+            else:
+                # Full replacement mode — no diff markers, treat as raw text.
+                # Return under "new_content" if it's a known parameter,
+                # otherwise fall back to the first declared parameter.
+                key = "new_content" if "new_content" in parameters else (
+                    parameters[0] if parameters else "content"
+                )
+                parsed = {key: content.strip()}
         else:
             # Plain text - return as-is under first parameter
             if parameters:
@@ -181,6 +207,8 @@ def parse_edited_content(
         return {}, f"YAML parse error: {e}"
     except json.JSONDecodeError as e:
         return {}, f"JSON parse error: {e}"
+    except DiffParseError as e:
+        return {}, str(e)
     except Exception as e:
         return {}, f"Parse error: {e}"
 
@@ -228,12 +256,119 @@ def _parse_section_value(lines: List[str]) -> Any:
     return "\n".join(lines).strip()
 
 
+class DiffParseError(Exception):
+    """Raised when a unified diff cannot be parsed back into old/new text."""
+
+
+def _format_as_unified_diff(arguments: Dict[str, Any]) -> str:
+    """Generate a unified diff from updateFile's old/new/prologue/epilogue args.
+
+    Prologue and epilogue appear as context lines (space-prefixed) in the diff,
+    giving the user surrounding context.  Only the ``-``/``+`` lines (the
+    old → new change) are parsed back when the user saves.
+
+    Args:
+        arguments: Full tool arguments dict.  Expects ``old`` and ``new``;
+            optionally ``prologue``, ``epilogue``, and ``path``.
+
+    Returns:
+        A unified-diff string ready to open in an editor.
+    """
+    old_text: str = arguments["old"]
+    new_text: str = arguments["new"]
+    prologue: str = arguments.get("prologue") or ""
+    epilogue: str = arguments.get("epilogue") or ""
+    path: str = arguments.get("path", "file")
+
+    # Build before/after blocks: prologue + old/new + epilogue
+    before = prologue + old_text + epilogue
+    after = prologue + new_text + epilogue
+
+    # Ensure trailing newline so difflib produces clean output
+    if before and not before.endswith("\n"):
+        before += "\n"
+    if after and not after.endswith("\n"):
+        after += "\n"
+
+    diff_lines = difflib.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+    )
+    return "".join(diff_lines)
+
+
+def _looks_like_unified_diff(content: str) -> bool:
+    """Return True if *content* appears to be a unified diff (has ``@@`` hunks)."""
+    for line in content.splitlines():
+        if line.startswith("@@"):
+            return True
+    return False
+
+
+def _parse_unified_diff(content: str) -> Dict[str, Any]:
+    """Extract ``old`` and ``new`` text from an edited unified diff.
+
+    Walks every hunk, collects ``-`` lines into *old* and ``+`` lines into
+    *new*.  Context lines and diff headers are ignored.
+
+    Args:
+        content: The unified-diff text (possibly user-edited).
+
+    Returns:
+        ``{"old": ..., "new": ...}`` dict suitable for merging back into the
+        tool arguments.
+
+    Raises:
+        DiffParseError: If no hunks or no changes are found.
+    """
+    old_parts: List[str] = []
+    new_parts: List[str] = []
+    found_hunk = False
+
+    for line in content.splitlines():
+        # Skip diff headers and "no newline" markers
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("\\"):          # "\ No newline at end of file"
+            continue
+        if line.startswith("@@"):
+            found_hunk = True
+            continue
+        if not found_hunk:
+            continue
+
+        if line.startswith("-"):
+            old_parts.append(line[1:])
+        elif line.startswith("+"):
+            new_parts.append(line[1:])
+        # Context lines (space prefix) are skipped — they are prologue/epilogue
+
+    if not found_hunk:
+        raise DiffParseError(
+            "No diff hunks found. The file must contain at least one "
+            "'@@ ... @@' hunk header."
+        )
+
+    # Reconstruct text from collected lines.
+    # An empty collection is valid (e.g. pure insertion or pure deletion).
+    return {
+        "old": "\n".join(old_parts),
+        "new": "\n".join(new_parts),
+    }
+
+
 def edit_tool_content(
     arguments: Dict[str, Any],
     editable: Any,  # EditableContent from types.py
     session_dir: Optional[Path] = None,
 ) -> EditResult:
     """Open tool arguments in external editor and return edited version.
+
+    On parse errors the editor is re-opened with the error prepended as a
+    comment so the user can fix it.  If the user saves the file unchanged
+    (including the error header) the edit is treated as cancelled.
 
     Args:
         arguments: Current tool arguments.
@@ -252,7 +387,7 @@ def edit_tool_content(
         )
 
     parameters = getattr(editable, 'parameters', [])
-    format = getattr(editable, 'format', 'yaml')
+    fmt = getattr(editable, 'format', 'yaml')
     template = getattr(editable, 'template', None)
 
     if not parameters:
@@ -264,89 +399,102 @@ def edit_tool_content(
         )
 
     # Format content for editing
-    content = format_for_editing(arguments, parameters, format, template)
+    content = format_for_editing(arguments, parameters, fmt, template)
+    original_content = content
 
     # Create temp file with appropriate suffix
-    suffix = get_file_suffix(format)
+    suffix = get_file_suffix(fmt)
     editor = get_editor()
+    temp_path: Optional[str] = None
 
     try:
-        with tempfile.NamedTemporaryFile(
-            mode='w',
-            suffix=suffix,
-            delete=False,
-            encoding='utf-8',
-        ) as f:
-            f.write(content)
-            temp_path = f.name
+        # Retry loop: re-open editor with error header on parse failures
+        error_header: Optional[str] = None
+        while True:
+            display_content = content
+            if error_header:
+                display_content = error_header + content
 
-        # Record original content for comparison
-        original_content = content
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix=suffix,
+                delete=False,
+                encoding='utf-8',
+            ) as f:
+                f.write(display_content)
+                temp_path = f.name
 
-        # Open in editor (blocking)
-        result = subprocess.run([editor, temp_path], check=False)
+            # Open in editor (blocking)
+            result = subprocess.run([editor, temp_path], check=False)
 
-        if result.returncode != 0:
+            if result.returncode != 0:
+                os.unlink(temp_path)
+                temp_path = None
+                return EditResult(
+                    success=False,
+                    arguments=arguments,
+                    was_modified=False,
+                    error=f"Editor exited with code {result.returncode}",
+                )
+
+            # Read back edited content
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                edited_content = f.read()
+
             os.unlink(temp_path)
-            return EditResult(
-                success=False,
-                arguments=arguments,
-                was_modified=False,
-                error=f"Editor exited with code {result.returncode}",
+            temp_path = None
+
+            # Strip error header if the user left it intact
+            if error_header and edited_content.startswith(error_header):
+                edited_content = edited_content[len(error_header):]
+
+            # Check if content was modified
+            was_modified = edited_content.strip() != original_content.strip()
+
+            if not was_modified:
+                return EditResult(
+                    success=True,
+                    arguments=arguments,
+                    was_modified=False,
+                )
+
+            # Parse edited content
+            parsed_args, parse_error = parse_edited_content(
+                edited_content, parameters, fmt, template
             )
 
-        # Read back edited content
-        with open(temp_path, 'r', encoding='utf-8') as f:
-            edited_content = f.read()
+            if parse_error:
+                # Re-open editor with the error shown as comments at the top
+                error_header = (
+                    f"# ERROR: {parse_error}\n"
+                    f"# Fix the issue below and save, "
+                    f"or save unchanged to cancel.\n\n"
+                )
+                content = edited_content  # preserve user's edits
+                continue
 
-        # Clean up temp file
-        os.unlink(temp_path)
+            # Success — merge edited parameters back into original arguments
+            new_arguments = arguments.copy()
+            new_arguments.update(parsed_args)
 
-        # Check if content was modified
-        was_modified = edited_content.strip() != original_content.strip()
+            # Save to edit history if session_dir provided
+            if session_dir:
+                _save_edit_history(
+                    session_dir,
+                    original_args=arguments,
+                    edited_args=new_arguments,
+                    parameters=parameters,
+                )
 
-        if not was_modified:
             return EditResult(
                 success=True,
-                arguments=arguments,
-                was_modified=False,
+                arguments=new_arguments,
+                was_modified=True,
             )
-
-        # Parse edited content
-        parsed_args, error = parse_edited_content(
-            edited_content, parameters, format, template
-        )
-
-        if error:
-            return EditResult(
-                success=False,
-                arguments=arguments,
-                was_modified=False,
-                error=error,
-            )
-
-        # Merge edited parameters back into original arguments
-        new_arguments = arguments.copy()
-        new_arguments.update(parsed_args)
-
-        # Save to edit history if session_dir provided
-        if session_dir and was_modified:
-            _save_edit_history(
-                session_dir,
-                original_args=arguments,
-                edited_args=new_arguments,
-                parameters=parameters,
-            )
-
-        return EditResult(
-            success=True,
-            arguments=new_arguments,
-            was_modified=True,
-        )
 
     except Exception as e:
         # Clean up temp file if it exists
-        if 'temp_path' in locals():
+        if temp_path:
             try:
                 os.unlink(temp_path)
             except OSError:
