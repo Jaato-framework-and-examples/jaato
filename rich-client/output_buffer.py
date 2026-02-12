@@ -2903,12 +2903,12 @@ class OutputBuffer:
                 # Multi-line parameter display (when dict is available and no display override)
                 if tool.display_args_summary is None and tool.tool_args_dict:
                     param_style = self._style("muted", "dim")
-                    self._render_tool_params_multiline(output, tool, is_last, param_style)
+                    self._render_tool_params_multiline(output, tool, is_last, param_style, wrap_width=wrap_width)
 
                 # Tool output preview
                 show_output = tool.expanded if self._tool_nav_active else True
                 if show_output and tool.show_output and tool.output_lines:
-                    self._render_tool_output_lines(output, tool, is_last)
+                    self._render_tool_output_lines(output, tool, is_last, wrap_width=wrap_width)
 
                 # Permission/error info
                 if tool.permission_state == "denied" and tool.permission_method:
@@ -3060,6 +3060,7 @@ class OutputBuffer:
         tool: 'ActiveToolCall',
         is_last: bool,
         style: str,
+        wrap_width: Optional[int] = None,
     ) -> None:
         """Render tool parameters as one key: value pair per line.
 
@@ -3074,24 +3075,29 @@ class OutputBuffer:
             is_last: Whether this is the last tool in the block (affects
                 tree continuation character: ``│`` vs space).
             style: Style string to apply to the parameter lines.
+            wrap_width: Effective content width (already accounts for debug
+                line-number gutters etc.).  Falls back to
+                ``self._console_width`` when not supplied.
         """
         if not tool.tool_args_dict:
             return
 
+        effective_width = wrap_width if wrap_width is not None else self._console_width
         cont_char = " " if is_last else "│"
         prefix = f"    {cont_char}  "
         prefix_width = len(prefix)
         # "key: " takes len(key) + 2 chars
         for key, value in tool.tool_args_dict.items():
             key_label = f"{key}: "
-            available = max(10, self._console_width - prefix_width - len(key_label))
+            available = max(10, effective_width - prefix_width - len(key_label))
             formatted = format_tool_arg_value(value, available)
             output.append("\n")
             output.append(prefix, style=self._style("tree_connector", "dim"))
             output.append(f"{key_label}{formatted}", style=style)
 
     def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool,
-                                   finalized: bool = False) -> None:
+                                   finalized: bool = False,
+                                   wrap_width: Optional[int] = None) -> None:
         """Render output lines for a tool.
 
         Uses the same approach as _render_permission_prompt: calculates available
@@ -3106,7 +3112,11 @@ class OutputBuffer:
         Args:
             finalized: If True, cap display lines like file output (70% of visible
                        height) instead of filling all available space.
+            wrap_width: Effective content width (already accounts for debug
+                line-number gutters etc.).  Falls back to
+                ``self._console_width`` when not supplied.
         """
+        effective_width = wrap_width if wrap_width is not None else self._console_width
         continuation = "   " if is_last else "│  "
         prefix = "    "
 
@@ -3116,7 +3126,7 @@ class OutputBuffer:
                 and not tool.completed and tool.inline_frozen_lines):
             indent = f"{prefix}{continuation}     "
             indent_width = len(indent)
-            max_width = max(20, self._console_width - indent_width)
+            max_width = max(20, effective_width - indent_width)
             natural_width = max((self._get_content_width(line) for line in tool.inline_frozen_lines), default=0)
             target_width = min(natural_width, max_width)
             for line in tool.inline_frozen_lines:
@@ -3151,7 +3161,7 @@ class OutputBuffer:
         indent_width = len(indent)
 
         # Calculate available width for content (same as permission prompt)
-        max_width = max(20, self._console_width - indent_width)
+        max_width = max(20, effective_width - indent_width)
 
         # Find the natural width of the content (max content width across all lines)
         # This preserves background styling up to the widest content
@@ -4248,11 +4258,11 @@ class OutputBuffer:
                 # Multi-line parameter display (when dict is available and no display override)
                 if tool.display_args_summary is None and tool.tool_args_dict:
                     param_style = self._style("muted", "dim")
-                    self._render_tool_params_multiline(output, tool, is_last, param_style)
+                    self._render_tool_params_multiline(output, tool, is_last, param_style, wrap_width=wrap_width)
 
                 # Tool output - use shared rendering method with smart truncation
                 if show_tool_output and tool.show_output and tool.output_lines:
-                    self._render_tool_output_lines(output, tool, is_last, finalized=True)
+                    self._render_tool_output_lines(output, tool, is_last, finalized=True, wrap_width=wrap_width)
 
                 # Error message
                 if not tool.success and tool.error_message:
