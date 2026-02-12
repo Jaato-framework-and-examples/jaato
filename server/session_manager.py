@@ -56,7 +56,10 @@ from .events import (
     ToolCallEndEvent,
     TurnCompletedEvent,
     AgentStatusChangedEvent,
+    WorkspaceFilesChangedEvent,
+    WorkspaceFilesSnapshotEvent,
 )
+from .workspace_monitor import WorkspaceMonitor
 
 
 logger = logging.getLogger(__name__)
@@ -152,6 +155,9 @@ class SessionManager:
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
 
+        # Workspace file monitors keyed by session_id
+        self._workspace_monitors: Dict[str, WorkspaceMonitor] = {}
+
         logger.info(f"SessionManager initialized with storage: {self._session_config.storage_path}")
 
     def set_event_callback(
@@ -191,6 +197,69 @@ class SessionManager:
 
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
+
+    # ------------------------------------------------------------------
+    # Workspace file monitoring
+    # ------------------------------------------------------------------
+
+    def _start_workspace_monitor(self, session_id: str, workspace_path: str) -> None:
+        """Start (or restart) a workspace file monitor for a session.
+
+        If a monitor already exists for this session it is stopped first.
+
+        Args:
+            session_id: The session to monitor.
+            workspace_path: Absolute path to the workspace directory.
+        """
+        self._stop_workspace_monitor(session_id)
+
+        def on_changed(changes: List[Dict[str, str]]) -> None:
+            """Callback invoked by the debouncer on the timer thread."""
+            # Mark session dirty so the tracked dict gets persisted.
+            with self._lock:
+                session = self._sessions.get(session_id)
+                if session:
+                    session.is_dirty = True
+
+            self._emit_to_session(session_id, WorkspaceFilesChangedEvent(
+                changes=changes,
+            ))
+
+        monitor = WorkspaceMonitor(workspace_path, on_changed=on_changed)
+        monitor.start()
+        self._workspace_monitors[session_id] = monitor
+        logger.debug("Workspace monitor started for session %s", session_id)
+
+    def _stop_workspace_monitor(self, session_id: str) -> None:
+        """Stop the workspace monitor for a session if one exists.
+
+        Args:
+            session_id: The session whose monitor to stop.
+        """
+        monitor = self._workspace_monitors.pop(session_id, None)
+        if monitor:
+            monitor.stop()
+            logger.debug("Workspace monitor stopped for session %s", session_id)
+
+    def _send_workspace_snapshot(self, session_id: str, client_id: str) -> None:
+        """Send the full workspace file snapshot to a specific client.
+
+        Used on reconnect / attach so the client can rebuild its mirror.
+
+        Args:
+            session_id: Session whose monitor state to send.
+            client_id: Target client.
+        """
+        monitor = self._workspace_monitors.get(session_id)
+        if not monitor:
+            return
+
+        snapshot = monitor.get_snapshot()
+        if snapshot:
+            self._emit_to_client(client_id, WorkspaceFilesSnapshotEvent(
+                files=snapshot,
+                total=monitor.active_file_count,
+            ))
 
     def _apply_client_config(self, client_id: str, event: 'ClientConfigRequest') -> None:
         """Apply client configuration settings.
@@ -442,6 +511,10 @@ class SessionManager:
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
 
+        # Start workspace file monitor
+        if workspace_path:
+            self._start_workspace_monitor(session_id, workspace_path)
+
         # Save initial state to disk
         self._save_session(session)
 
@@ -605,6 +678,9 @@ class SessionManager:
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
+
+        # Send workspace files snapshot so client can rebuild its mirror
+        self._send_workspace_snapshot(session_id, client_id)
 
         # Build attach message with description if available
         desc_part = f" - {session.description}" if session.description else ""
@@ -792,6 +868,22 @@ class SessionManager:
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
         )
+
+        # Restore workspace file monitor with persisted tracked state
+        if state.workspace_path:
+            self._start_workspace_monitor(session_id, state.workspace_path)
+            monitor = self._workspace_monitors.get(session_id)
+            if monitor and state.workspace_files:
+                monitor.restore(state.workspace_files)
+                # Reconcile: detect changes that happened while server was down
+                reconcile_changes = monitor.reconcile()
+                if reconcile_changes:
+                    session.is_dirty = True
+                    logger.info(
+                        "Workspace reconciliation found %d changes for session %s",
+                        len(reconcile_changes),
+                        session_id,
+                    )
 
         logger.info(f"Loaded session from disk: {session_id}")
         return session
@@ -1070,6 +1162,12 @@ class SessionManager:
                 if jaato_session and jaato_session.instruction_budget:
                     budget_state = jaato_session.instruction_budget.get_conversation_snapshot()
 
+            # Get workspace file tracking state for persistence
+            workspace_files = None
+            monitor = self._workspace_monitors.get(session.session_id)
+            if monitor:
+                workspace_files = monitor.get_tracked_dict() or None
+
             # Create SessionState
             state = SessionState(
                 session_id=session.session_id,
@@ -1085,6 +1183,7 @@ class SessionManager:
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
+                workspace_files=workspace_files,
             )
 
             self._session_plugin.save(state)
@@ -1242,6 +1341,9 @@ class SessionManager:
         handler = get_session_handler()
         if handler:
             handler.close_session(session_id)
+
+        # Stop workspace monitor
+        self._stop_workspace_monitor(session_id)
 
         # Shutdown server and remove from memory
         session.server.shutdown()
@@ -1844,6 +1946,10 @@ class SessionManager:
     def shutdown(self) -> None:
         """Shutdown all sessions, saving to disk first."""
         logger.info("SessionManager shutting down...")
+
+        # Stop all workspace monitors
+        for sid in list(self._workspace_monitors):
+            self._stop_workspace_monitor(sid)
 
         with self._lock:
             # Save all sessions

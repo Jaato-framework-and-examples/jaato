@@ -162,6 +162,9 @@ DEFAULT_KEYBINDINGS = {
     # Tool output popup
     "tool_output_popup_tab": "c-o",  # Cycle between running tools in output popup
 
+    # Workspace file panel
+    "toggle_workspace": "c-w",  # Toggle workspace file panel
+
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
     "permission_prev": "s-tab",   # Previous permission option
@@ -353,6 +356,9 @@ class KeybindingConfig:
 
     # Tool output popup
     tool_output_popup_tab: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_popup_tab"])
+
+    # Workspace file panel
+    toggle_workspace: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_workspace"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
@@ -550,6 +556,7 @@ class KeybindingConfig:
             "tool_exit": self.tool_exit,
             "tool_output_up": self.tool_output_up,
             "tool_output_down": self.tool_output_down,
+            "toggle_workspace": self.toggle_workspace,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -731,5 +738,7 @@ def generate_example_config() -> str:
         "tool_exit": "escape",
         "tool_output_up": "up",
         "tool_output_down": "down",
+
+        "toggle_workspace": "c-w",
     }
     return json.dumps(example, indent=2)

@@ -3538,6 +3538,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         MidTurnPromptQueuedEvent,
         MidTurnPromptInjectedEvent,
         MidTurnInterruptEvent,
+        WorkspaceFilesChangedEvent,
+        WorkspaceFilesSnapshotEvent,
     )
 
     # Load keybindings and theme
@@ -4178,6 +4180,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, PlanClearedEvent):
                 agent_id = getattr(event, 'agent_id', None)
                 display.clear_plan(agent_id)
+
+            elif isinstance(event, WorkspaceFilesChangedEvent):
+                display.update_workspace_files(event.changes)
+
+            elif isinstance(event, WorkspaceFilesSnapshotEvent):
+                display.set_workspace_snapshot(event.files)
 
             elif isinstance(event, ToolCallStartEvent):
                 # Use tool tree visualization (same as direct mode)

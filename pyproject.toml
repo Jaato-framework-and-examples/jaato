@@ -54,6 +54,7 @@ dependencies = [
     "psutil>=5.0.0; sys_platform == 'win32'",  # wexpect undeclared dep
     "setuptools; sys_platform == 'win32'",  # wexpect requires pkg_resources
     "pyte>=0.8.0",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]

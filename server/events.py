@@ -142,6 +142,10 @@ class EventType(str, Enum):
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
 
+    # Workspace file monitoring (Server -> Client)
+    WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
+    WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
+
 
 # =============================================================================
 # Base Event
@@ -759,6 +763,44 @@ class ConfigUpdatedEvent(Event):
 
 
 # =============================================================================
+# Workspace File Monitoring Events (Server -> Client)
+# =============================================================================
+
+@dataclass
+class WorkspaceFilesChangedEvent(Event):
+    """Incremental workspace file change notification.
+
+    Emitted in real-time (debounced) whenever files in the workspace are
+    created, modified, or deleted during the session.  Each entry carries
+    a ``status`` indicating the nature of the change relative to the
+    session baseline.
+
+    Statuses:
+        ``"created"``  – file did not exist at session start.
+        ``"modified"`` – file existed at session start and was changed.
+        ``"deleted"``  – file was previously tracked and is now gone.
+    """
+    type: EventType = field(default=EventType.WORKSPACE_FILES_CHANGED)
+    changes: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
+
+
+@dataclass
+class WorkspaceFilesSnapshotEvent(Event):
+    """Complete workspace file state snapshot.
+
+    Sent on client reconnect / initial attach so the client can rebuild
+    its local mirror of the session's file tracking state without
+    replaying individual deltas.
+    """
+    type: EventType = field(default=EventType.WORKSPACE_FILES_SNAPSHOT)
+    files: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
+    total: int = 0
+    # ^ Convenience: count of non-deleted entries
+
+
+# =============================================================================
 # Client -> Server Events (Requests)
 # =============================================================================
 
@@ -1078,6 +1120,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CONFIG_STATUS.value: ConfigStatusEvent,
     EventType.CONFIG_UPDATE_REQUEST.value: ConfigUpdateRequest,
     EventType.CONFIG_UPDATED.value: ConfigUpdatedEvent,
+    # Workspace file monitoring
+    EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
+    EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
 }
 
 
