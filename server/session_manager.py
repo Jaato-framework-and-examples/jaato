@@ -1828,7 +1828,15 @@ class SessionManager:
             server.stop()
 
         elif isinstance(event, CommandRequest):
-            result = server.execute_command(event.command, event.args)
+            # Intercept workspace command — it needs the monitor from
+            # session manager, not from the plugin system.
+            if event.command == "workspace":
+                from .workspace_command import handle_workspace_command
+
+                monitor = self._workspace_monitors.get(session_id)
+                result = handle_workspace_command(monitor, event.args or [])
+            else:
+                result = server.execute_command(event.command, event.args)
             # Format result properly
             if isinstance(result, dict):
                 if "_pager" in result:
