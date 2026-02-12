@@ -197,6 +197,12 @@ class JaatoSession:
 
         # Proactive GC tracking
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
+
+        # Token count cache for conversation budget updates.
+        # Maps message_id -> token count. Since message content is immutable
+        # once added to history, cached counts never go stale. This avoids
+        # O(N) network API calls to count_tokens on every budget rebuild.
+        self._msg_token_cache: Dict[str, int] = {}
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
         # Mid-turn prompt interrupt tracking
@@ -1354,25 +1360,42 @@ class JaatoSession:
             if msg.role == Role.USER:
                 current_turn += 1
 
-            # Count tokens for this message and detect content types
-            msg_tokens = 0
+            # Count tokens for this message and detect content types.
+            # Use cached count when available — message content is immutable,
+            # so the token count for a given message_id never changes.
             has_tool_result = False
             has_text = False
             text_content = ""
             tool_names = []
-            for part in msg.parts:
-                if hasattr(part, 'text') and part.text:
-                    msg_tokens += self._count_tokens(part.text)
-                    has_text = True
-                    text_content += part.text
-                elif hasattr(part, 'function_response') and part.function_response:
-                    # Tool results (function_response is a ToolResult)
-                    tr = part.function_response
-                    result_text = str(tr.result) if tr.result else ''
-                    msg_tokens += self._count_tokens(result_text)
-                    has_tool_result = True
-                    if tr.name:
-                        tool_names.append(tr.name)
+            mid = msg.message_id
+            cached = self._msg_token_cache.get(mid)
+            if cached is not None:
+                msg_tokens = cached
+                # Still need metadata (has_text, tool_names, etc.) for labelling
+                for part in msg.parts:
+                    if hasattr(part, 'text') and part.text:
+                        has_text = True
+                        text_content += part.text
+                    elif hasattr(part, 'function_response') and part.function_response:
+                        has_tool_result = True
+                        if part.function_response.name:
+                            tool_names.append(part.function_response.name)
+            else:
+                msg_tokens = 0
+                for part in msg.parts:
+                    if hasattr(part, 'text') and part.text:
+                        msg_tokens += self._count_tokens(part.text)
+                        has_text = True
+                        text_content += part.text
+                    elif hasattr(part, 'function_response') and part.function_response:
+                        # Tool results (function_response is a ToolResult)
+                        tr = part.function_response
+                        result_text = str(tr.result) if tr.result else ''
+                        msg_tokens += self._count_tokens(result_text)
+                        has_tool_result = True
+                        if tr.name:
+                            tool_names.append(tr.name)
+                self._msg_token_cache[mid] = msg_tokens
 
             conversation_tokens += msg_tokens
 
@@ -4538,6 +4561,7 @@ NOTES
         else:
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
         self._turn_accounting = []
+        self._msg_token_cache.clear()
         self._create_provider_session(history)
 
     def get_turn_boundaries(self) -> List[int]:
