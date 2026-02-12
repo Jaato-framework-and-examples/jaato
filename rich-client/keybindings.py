@@ -164,6 +164,7 @@ DEFAULT_KEYBINDINGS = {
 
     # Workspace file panel
     "toggle_workspace": "c-w",  # Toggle workspace file panel
+    "workspace_open_file": "enter",  # Open selected file in external editor
 
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
@@ -359,6 +360,7 @@ class KeybindingConfig:
 
     # Workspace file panel
     toggle_workspace: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_workspace"])
+    workspace_open_file: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_open_file"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
@@ -557,6 +559,7 @@ class KeybindingConfig:
             "tool_output_up": self.tool_output_up,
             "tool_output_down": self.tool_output_down,
             "toggle_workspace": self.toggle_workspace,
+            "workspace_open_file": self.workspace_open_file,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -740,5 +743,6 @@ def generate_example_config() -> str:
         "tool_output_down": "down",
 
         "toggle_workspace": "c-w",
+        "workspace_open_file": "enter",
     }
     return json.dumps(example, indent=2)

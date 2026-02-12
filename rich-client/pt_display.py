@@ -468,7 +468,10 @@ class PTDisplay:
         self._budget_panel.set_theme(self._theme)
         self._tool_output_popup = ToolOutputPopup(tab_key=self._keybinding_config.tool_output_popup_tab)
         self._tool_output_popup.set_theme(self._theme)
-        self._workspace_panel = WorkspacePanel(toggle_key=self._keybinding_config.toggle_workspace)
+        self._workspace_panel = WorkspacePanel(
+            toggle_key=self._keybinding_config.toggle_workspace,
+            open_file_key=self._keybinding_config.workspace_open_file,
+        )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
@@ -1548,7 +1551,7 @@ class PTDisplay:
         not_in_search_mode = Condition(lambda: not getattr(self, '_search_mode', False))
 
         @kb.add(*keys.get_key_args("submit"), eager=True,
-                filter=Condition(lambda: not self._budget_captures_keys()) & not_in_search_mode)
+                filter=Condition(lambda: not self._budget_captures_keys() and not self._workspace_captures_keys()) & not_in_search_mode)
         def handle_enter(event):
             """Handle enter key - submit input, select permission option, or advance pager."""
             if getattr(self, '_pager_active', False):
@@ -1894,6 +1897,44 @@ class PTDisplay:
             if self._workspace_panel.has_files:
                 self._workspace_panel.toggle_popup()
                 self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_open_file"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_open_file(event):
+            """Open the selected workspace file in the external editor ($EDITOR).
+
+            Only active when the workspace panel is visible and capturing keys.
+            Resolves the relative file path against the session workspace root
+            and launches the editor via ``run_in_terminal`` so the TUI is
+            properly suspended and restored.
+            """
+            import os
+            import subprocess
+            from editor_utils import get_editor
+            from prompt_toolkit.application import run_in_terminal
+
+            rel_path = self._workspace_panel.get_selected_file_path()
+            if not rel_path:
+                return
+
+            workspace = (
+                os.path.expanduser(self._session_workspace)
+                if self._session_workspace
+                else os.getcwd()
+            )
+            abs_path = os.path.join(workspace, rel_path)
+
+            if not os.path.isfile(abs_path):
+                return
+
+            editor = get_editor()
+
+            async def _open():
+                def _run():
+                    subprocess.call([editor, abs_path])
+                await run_in_terminal(_run, in_executor=False)
+
+            event.app.create_background_task(_open())
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
         def handle_ctrl_b(event):
