@@ -62,6 +62,10 @@ class HeadlessFileRenderer(Renderer):
         # Step ID → step number mapping for human-readable display in tool args
         self._step_id_to_number: Dict[str, int] = {}
 
+        # Track whether the last output used end="" (streaming), so we know
+        # when a "write" mode block needs a preceding newline separator.
+        self._agent_needs_newline: Dict[str, bool] = {}  # agent_id -> True if mid-stream
+
     # ==================== Lifecycle ====================
 
     def start(self) -> None:
@@ -174,6 +178,7 @@ class HeadlessFileRenderer(Renderer):
         # Ensure we're on a new line (streaming output may not end with newline)
         console.print()
         console.print(f"[{style}]{symbol} Agent status: {status}[/{style}]")
+        self._agent_needs_newline[agent_id] = False
         self._flush(agent_id)
 
     def on_agent_completed(self, agent_id: str) -> None:
@@ -181,6 +186,7 @@ class HeadlessFileRenderer(Renderer):
         console = self._get_console(agent_id)
         console.print()
         console.rule("[dim]Agent completed[/dim]")
+        self._agent_needs_newline[agent_id] = False
         self._flush(agent_id)
 
     # ==================== Output ====================
@@ -192,8 +198,26 @@ class HeadlessFileRenderer(Renderer):
         text: str,
         mode: str,
     ) -> None:
-        """Handle agent output text."""
+        """Handle agent output text.
+
+        Respects the ``mode`` parameter to decide line-break behaviour:
+
+        - ``"write"``: A new logical block.  If the previous output was a
+          streaming chunk (printed with ``end=""``) we emit a newline first
+          so the new block starts on its own line.
+        - ``"append"``: A continuation chunk (streaming).  Printed with
+          ``end=""`` so successive chunks concatenate on the same line.
+        - ``"replace"``: Semantically equivalent to ``"write"`` for this
+          renderer (no in-place replacement in a log file).
+        """
         console = self._get_console(agent_id)
+
+        # When starting a new block, ensure previous streaming output is
+        # terminated with a newline so the new content doesn't concatenate.
+        if mode in ("write", "replace"):
+            if self._agent_needs_newline.get(agent_id, False):
+                console.print()  # emit bare newline
+                self._agent_needs_newline[agent_id] = False
 
         # Style based on source
         if source == "model":
@@ -205,10 +229,15 @@ class HeadlessFileRenderer(Renderer):
         elif source == "system":
             # System messages
             console.print(f"[italic]{text}[/italic]", end="")
+        elif source == "enrichment":
+            # Enrichment notifications (file sizes, diagnostics) - dim
+            console.print(f"[dim]{text}[/dim]", end="")
         else:
             # Default
             console.print(text, end="")
 
+        # All branches above use end="" so we're mid-stream now.
+        self._agent_needs_newline[agent_id] = True
         self._flush(agent_id)
 
     def on_system_message(
@@ -234,6 +263,7 @@ class HeadlessFileRenderer(Renderer):
         rich_style = style_map.get(style, "dim")
 
         console.print(f"[{rich_style}]{message}[/{rich_style}]")
+        self._agent_needs_newline[agent_id] = False
         self._flush(agent_id)
 
     # ==================== Tool Execution ====================
@@ -271,6 +301,7 @@ class HeadlessFileRenderer(Renderer):
                 str_value = str_value[:200] + "..."
             console.print(f"[dim]│ {key}: {str_value}[/dim]")
 
+        self._agent_needs_newline[agent_id] = False
         self._flush(agent_id)
 
     def on_tool_end(
@@ -291,6 +322,7 @@ class HeadlessFileRenderer(Renderer):
 
         # Ensure we're on a new line (tool output may not end with newline)
         console.print()
+        self._agent_needs_newline[agent_id] = False
 
         # Format result
         if success:
