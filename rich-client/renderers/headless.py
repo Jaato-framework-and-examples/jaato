@@ -7,6 +7,7 @@ All permissions are auto-approved.
 """
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
@@ -16,7 +17,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from terminal_emulator import TerminalEmulator
 from .base import Renderer
+
+# Pattern to strip ANSI escape codes for clean log output
+_ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;?]*[A-Za-z~]')
 
 
 # Plan status symbols (same as plan_panel.py)
@@ -61,6 +66,12 @@ class HeadlessFileRenderer(Renderer):
         self._active_tools: Dict[str, Dict[str, Any]] = {}  # call_id -> tool info
         # Step ID → step number mapping for human-readable display in tool args
         self._step_id_to_number: Dict[str, int] = {}
+
+        # Terminal emulators for interpreting ANSI sequences in tool output.
+        # Keyed by call_id. The TUI uses TerminalEmulator via output_buffer.py;
+        # we do the same here so headless logs get clean, interpreted output
+        # instead of raw escape codes.
+        self._tool_emulators: Dict[str, TerminalEmulator] = {}
 
         # Track whether the last output used end="" (streaming), so we know
         # when a "write" mode block needs a preceding newline separator.
@@ -316,9 +327,11 @@ class HeadlessFileRenderer(Renderer):
         """Handle tool execution completion."""
         console = self._get_console(agent_id)
 
-        # Remove from active tools
+        # Remove from active tools and clean up emulator
         if call_id and call_id in self._active_tools:
             del self._active_tools[call_id]
+        if call_id and call_id in self._tool_emulators:
+            del self._tool_emulators[call_id]
 
         # Ensure we're on a new line (tool output may not end with newline)
         console.print()
@@ -336,10 +349,39 @@ class HeadlessFileRenderer(Renderer):
         self._flush(agent_id)
 
     def on_tool_output(self, agent_id: str, call_id: str, chunk: str) -> None:
-        """Handle live tool output chunk."""
+        """Handle live tool output chunk.
+
+        Uses a pyte-based TerminalEmulator to interpret ANSI escape sequences
+        (colors, cursor movement, carriage returns, etc.) before writing to the
+        log file.  This mirrors the approach used in the TUI's output_buffer.py
+        and prevents raw escape codes from appearing in headless output.
+
+        The emulator accumulates all output for a tool call and we print the
+        latest line(s) as they arrive.
+        """
         console = self._get_console(agent_id)
-        # Print as dim indented output
-        console.print(f"[dim]│ {chunk}[/dim]", end="")
+
+        # Get or create terminal emulator for this tool call
+        emulator = self._tool_emulators.get(call_id)
+        prev_line_count = 0
+        if emulator is None:
+            emulator = TerminalEmulator()
+            self._tool_emulators[call_id] = emulator
+        else:
+            prev_line_count = len(emulator.get_lines())
+
+        # Feed chunk through terminal emulator (same as output_buffer.py)
+        emulator.feed(chunk + "\n")
+        all_lines = emulator.get_lines()
+
+        # Print only the new lines since last chunk
+        new_lines = all_lines[prev_line_count:]
+        for line in new_lines:
+            # Strip ANSI codes since the headless console applies its own
+            # Rich markup styling ([dim]) for consistent log appearance
+            clean = _ANSI_ESCAPE_PATTERN.sub('', line)
+            console.print(f"[dim]│ {clean}[/dim]")
+
         self._flush(agent_id)
 
     # ==================== Permissions ====================
