@@ -7,6 +7,7 @@ This approach renders Rich content to ANSI strings, then wraps them with
 prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 """
 
+import logging
 import re
 import shutil
 import sys
@@ -36,6 +37,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from input_handler import InputHandler
     from agent_registry import AgentRegistry
+
+logger = logging.getLogger(__name__)
 
 from plan_panel import PlanPanel
 from workspace_panel import WorkspacePanel
@@ -470,6 +473,7 @@ class PTDisplay:
         self._tool_output_popup.set_theme(self._theme)
         self._workspace_panel = WorkspacePanel(toggle_key=self._keybinding_config.toggle_workspace)
         self._workspace_panel.set_theme(self._theme)
+        self._workspace_render_cache: Optional[str] = None  # Per-frame render cache
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
@@ -1085,13 +1089,41 @@ class PTDisplay:
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_workspace_popup_content(self):
-        """Get rendered workspace popup content as ANSI for prompt_toolkit."""
+        """Get rendered workspace popup content as ANSI for prompt_toolkit.
+
+        Uses a cached rendered string that is produced once per render cycle
+        (shared with ``get_workspace_popup_height``).
+        """
+        try:
+            rendered_str = self._get_workspace_rendered_str()
+            return to_formatted_text(ANSI(rendered_str))
+        except Exception:
+            logger.debug("workspace popup content render failed", exc_info=True)
+            return []
+
+    def _get_workspace_rendered_str(self) -> str:
+        """Render the workspace popup to an ANSI string, caching per frame.
+
+        Both the height calculator and the content function need the
+        rendered string.  Calling ``render_popup`` + Rich console render
+        twice is wasteful, so we cache the result and invalidate it on
+        every ``refresh()`` via ``_workspace_render_cache``.
+
+        Returns:
+            ANSI-encoded string of the rendered popup.
+        """
+        cached = getattr(self, "_workspace_render_cache", None)
+        if cached is not None:
+            return cached
+
         popup_width = max(40, min(70, int(self._width * 0.4)))
         available_height = self._height - 9
         max_lines = max(5, min(30, available_height))
         self._workspace_panel.set_max_visible_lines(max_lines)
         rendered = self._workspace_panel.render_popup(width=popup_width)
-        return to_formatted_text(ANSI(self._renderer.render(rendered)))
+        result = self._renderer.render(rendered)
+        self._workspace_render_cache = result
+        return result
 
     def _workspace_captures_keys(self) -> bool:
         """Check if workspace panel should capture navigation keys.
@@ -2336,12 +2368,13 @@ class PTDisplay:
 
         # Workspace file popup (floating overlay, toggled with Ctrl+W)
         def get_workspace_popup_height():
-            """Calculate workspace popup height by rendering content and counting lines."""
-            popup_width = max(40, min(70, int(self._width * 0.4)))
-            rendered = self._workspace_panel.render_popup(width=popup_width)
-            rendered_str = self._renderer.render(rendered)
-            line_count = rendered_str.count('\n') + 1
-            return min(line_count, self._height - 4)
+            """Calculate workspace popup height using the cached rendered string."""
+            try:
+                rendered_str = self._get_workspace_rendered_str()
+                line_count = rendered_str.count('\n') + 1
+                return min(line_count, self._height - 4)
+            except Exception:
+                return 4  # Fallback minimal height
 
         workspace_popup_window = ConditionalContainer(
             Window(
@@ -2390,6 +2423,7 @@ class PTDisplay:
                     top=3,  # Below session bar, tab bar, and status bar
                     right=2,  # Right-aligned, same side as tool output
                     content=workspace_popup_window,
+                    transparent=True,  # Events pass through to main content
                     z_index=55,  # Above budget (50), below tool output (75)
                 ),
                 # Plan popup LAST so it renders on top of everything
@@ -2436,6 +2470,9 @@ class PTDisplay:
         rapid event bursts (e.g. streaming output). The sync is rate-limited to
         ~30fps; intermediate refreshes just schedule a deferred sync.
         """
+        # Invalidate per-frame caches so the next render cycle produces fresh content.
+        self._workspace_render_cache = None
+
         if self._app and self._app.is_running:
             now = time.monotonic()
             elapsed = now - self._last_sync_time
