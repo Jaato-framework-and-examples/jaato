@@ -446,6 +446,56 @@ class TestUpdateFileTargetedEdit:
         assert display_info is not None
         assert "error" in display_info.summary.lower()
         assert display_info.format_hint == "text"
+        assert display_info.pre_validation_error is not None
+        assert "not found" in display_info.pre_validation_error.lower()
+
+    def test_format_targeted_edit_with_prologue_shows_diff(self, tmp_path):
+        """Test that permission display shows diff when prologue disambiguates."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("class Foo:\n    x = 1\n\nclass Bar:\n    x = 1\n")
+
+        display_info = plugin.format_permission_request(
+            "updateFile",
+            {
+                "path": str(test_file),
+                "old": "x = 1",
+                "new": "x = 2",
+                "prologue": "class Foo:\n    ",
+            },
+            "console"
+        )
+
+        assert display_info is not None
+        assert display_info.format_hint == "diff"
+        assert display_info.pre_validation_error is None
+        assert "-    x = 1" in display_info.details
+        assert "+    x = 2" in display_info.details
+
+    def test_format_targeted_edit_with_bad_prologue_sets_pre_validation_error(self, tmp_path):
+        """Test that bad prologue sets pre_validation_error to skip permission prompt."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("class Foo:\n    x = 1\n")
+
+        display_info = plugin.format_permission_request(
+            "updateFile",
+            {
+                "path": str(test_file),
+                "old": "x = 1",
+                "new": "x = 2",
+                "prologue": "wrong prologue",
+            },
+            "console"
+        )
+
+        assert display_info is not None
+        assert display_info.pre_validation_error is not None
+        assert "not found" in display_info.pre_validation_error.lower()
 
 
 class TestWriteNewFileExecution:

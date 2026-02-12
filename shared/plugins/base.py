@@ -103,6 +103,9 @@ class PermissionDisplayInfo:
         original_lines: Original line count before truncation (if truncated)
         warnings: Optional security/analysis warnings to display separately
         warning_level: Severity level for warnings ("info", "warning", "error")
+        pre_validation_error: If set, the operation is known to fail.
+            The permission system skips the prompt and returns this error
+            directly to the model so it can retry.
     """
     summary: str
     details: str
@@ -112,6 +115,7 @@ class PermissionDisplayInfo:
     original_lines: Optional[int] = None
     warnings: Optional[str] = None
     warning_level: Optional[str] = None
+    pre_validation_error: Optional[str] = None
 
 
 @dataclass
