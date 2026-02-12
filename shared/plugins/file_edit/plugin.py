@@ -324,10 +324,10 @@ class FileEditPlugin:
             ToolSchema(
                 name="updateFile",
                 description="Update an existing file. Supports two modes: (1) Targeted edit: "
-                           "provide 'old' and 'new' to replace a specific fragment. Use optional "
-                           "'prologue'/'epilogue' for disambiguation when the search text appears "
-                           "multiple times. (2) Full replacement: provide 'new_content' to replace "
-                           "the entire file.",
+                           "provide 'old' and 'new' to replace a specific fragment. If 'old' "
+                           "matches multiple locations, add 'prologue'/'epilogue' — short, "
+                           "distinctive text copied verbatim from the file as context anchors. "
+                           "(2) Full replacement: provide 'new_content' to replace the entire file.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -353,15 +353,18 @@ class FileEditPlugin:
                         "prologue": {
                             "type": "string",
                             "description": (
-                                "Lines immediately before the search text, for "
-                                "disambiguation. Not modified in the output."
+                                "Context anchor: text immediately before 'old', "
+                                "copied verbatim from the file. Use a short, "
+                                "distinctive fragment (e.g., a function signature). "
+                                "Not modified in the output."
                             )
                         },
                         "epilogue": {
                             "type": "string",
                             "description": (
-                                "Lines immediately after the search text, for "
-                                "disambiguation. Not modified in the output."
+                                "Context anchor: text immediately after 'old', "
+                                "copied verbatim from the file. Use a short, "
+                                "distinctive fragment. Not modified in the output."
                             )
                         },
                         "new_content": {
@@ -538,11 +541,11 @@ class FileEditPlugin:
                                     },
                                     "prologue": {
                                         "type": "string",
-                                        "description": "Lines immediately before the search text, for disambiguation (for edit). Not modified."
+                                        "description": "Context anchor: text immediately before 'old', copied verbatim from the file. Use a short, distinctive fragment. Not modified."
                                     },
                                     "epilogue": {
                                         "type": "string",
-                                        "description": "Lines immediately after the search text, for disambiguation (for edit). Not modified."
+                                        "description": "Context anchor: text immediately after 'old', copied verbatim from the file. Use a short, distinctive fragment. Not modified."
                                     },
                                     "content": {
                                         "type": "string",
@@ -679,8 +682,13 @@ Tools available:
 - `updateFile`: Update an existing file. Shows diff for approval and creates backup. Two modes:
   - **Targeted edit** (preferred): `updateFile(path, old="text to find", new="replacement text")`
     Finds `old` in the file and replaces it with `new`. The `old` text must appear exactly once.
-    Use `prologue` and/or `epilogue` to disambiguate when `old` matches multiple locations:
-    `updateFile(path, old="x = 1", new="x = 2", prologue="class Foo:\\n")`
+    If `old` matches multiple locations, use `prologue` and/or `epilogue` to disambiguate.
+    Matching is **exact** — copy text verbatim from the file, preserving whitespace and newlines.
+    Tips for prologue/epilogue:
+    - Prefer a single distinctive line (e.g., a function signature, class declaration, or unique comment)
+    - Copy the anchor text exactly as it appears in the file — do not reformat or re-indent
+    - Shorter, more unique anchors are better than long multi-line blocks
+    - Example: `updateFile(path, old="x = 1", new="x = 2", prologue="def setup():\\n")`
   - **Full replacement**: `updateFile(path, new_content="entire file content")`
     Replaces the entire file. Use only when the targeted mode is impractical.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
@@ -691,7 +699,7 @@ Tools available:
 - `multiFileEdit(operations)`: Execute multiple file operations atomically. ALL changes succeed or NONE are applied.
   - Supports: edit, create, delete, rename operations
   - Edit uses targeted search-and-replace: `{"action": "edit", "path": "a.py", "old": "fragment", "new": "replacement"}`
-    Optional `prologue`/`epilogue` for disambiguation.
+    If `old` matches multiple locations, add `prologue` and/or `epilogue` — a single distinctive line copied verbatim from the file.
   - Multiple edits on the same file are allowed (applied sequentially).
   - Example: `multiFileEdit(operations=[{"action": "edit", "path": "a.py", "old": "old_name", "new": "new_name"},
                                         {"action": "rename", "from": "b.py", "to": "c.py"}])`
