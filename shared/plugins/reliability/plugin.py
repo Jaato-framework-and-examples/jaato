@@ -506,8 +506,53 @@ class ReliabilityPlugin:
             )
             # Set up combined pattern hook for user callback + nudge injection
             self._pattern_detector.set_pattern_hook(self._handle_pattern_detected)
+            # Flush any policies queued before pattern detection was enabled
+            if hasattr(self, '_queued_policies'):
+                for policy in self._queued_policies:
+                    self._pattern_detector.register_prerequisite_policy(policy)
+                self._queued_policies.clear()
         elif not enabled:
             self._pattern_detector = None
+
+    def register_prerequisite_policy(self, policy) -> None:
+        """Register a prerequisite policy declared by a plugin.
+
+        Policies are forwarded to the PatternDetector for enforcement and
+        their nudge templates are registered with the NudgeStrategy.
+
+        If pattern detection is not yet enabled, the policy is queued and
+        will be registered when ``enable_pattern_detection()`` is called.
+
+        Args:
+            policy: A PrerequisitePolicy from a plugin's
+                ``get_prerequisite_policies()`` method.
+        """
+        # Queue policies before pattern detection is enabled
+        if not hasattr(self, '_queued_policies'):
+            self._queued_policies = []
+
+        if self._pattern_detector:
+            self._pattern_detector.register_prerequisite_policy(policy)
+        else:
+            self._queued_policies.append(policy)
+
+        # Register nudge templates with the strategy (via the injector)
+        if self._nudge_injector and policy.nudge_templates:
+            self._nudge_injector._strategy.register_policy_templates(
+                policy.pattern_type, policy.nudge_templates
+            )
+
+    def register_prerequisite_policies(self, policies) -> None:
+        """Register multiple prerequisite policies.
+
+        Convenience method for registering all policies from a plugin's
+        ``get_prerequisite_policies()`` return value.
+
+        Args:
+            policies: List of PrerequisitePolicy objects.
+        """
+        for policy in policies:
+            self.register_prerequisite_policy(policy)
 
     def _handle_pattern_detected(self, pattern: BehavioralPattern) -> None:
         """Internal handler for detected patterns. Triggers nudges and user callback."""

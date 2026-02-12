@@ -114,28 +114,6 @@ class NudgeStrategy:
                 "BLOCKED: Stuck in planning loop. System pausing - user needs to confirm direction."
             ),
         },
-        BehavioralPatternType.TEMPLATE_CHECK_SKIPPED: {
-            PatternSeverity.MINOR: (
-                NudgeType.DIRECT_INSTRUCTION,
-                "NOTICE: You called {tool_name} without checking templates first. "
-                "Call listAvailableTemplates before writing files to check if a template "
-                "can produce or contribute to the target file (directly via renderTemplateToFile "
-                "or indirectly as a patch source)."
-            ),
-            PatternSeverity.MODERATE: (
-                NudgeType.DIRECT_INSTRUCTION,
-                "NOTICE: Repeated file writes without template check (#{count}). "
-                "You MUST call listAvailableTemplates before using {tool_name}. "
-                "Templates may exist that produce this file directly or provide "
-                "the code pattern you need to patch in. Check templates NOW."
-            ),
-            PatternSeverity.SEVERE: (
-                NudgeType.INTERRUPT,
-                "BLOCKED: {count} file-writing tool calls without checking templates. "
-                "This violates the Template-First File Creation policy. "
-                "Call listAvailableTemplates immediately before any further file operations."
-            ),
-        },
     }
 
     # Default template for unknown patterns
@@ -154,8 +132,34 @@ class NudgeStrategy:
         ),
     }
 
+    def __init__(self):
+        # Templates registered by plugins via PrerequisitePolicy.nudge_templates.
+        # Maps pattern_type → severity → (nudge_type, template_str).
+        self._policy_templates: Dict[BehavioralPatternType, Dict[PatternSeverity, tuple]] = {}
+
+    def register_policy_templates(
+        self,
+        pattern_type: BehavioralPatternType,
+        nudge_templates: Dict[PatternSeverity, tuple],
+    ) -> None:
+        """Register nudge templates declared by a plugin's PrerequisitePolicy.
+
+        These templates take precedence over the built-in NUDGE_TEMPLATES
+        and DEFAULT_TEMPLATES for the given pattern type.
+
+        Args:
+            pattern_type: The pattern type these templates apply to.
+            nudge_templates: Map of severity → (NudgeType, template_str).
+        """
+        self._policy_templates[pattern_type] = nudge_templates
+
     def create_nudge(self, pattern: BehavioralPattern) -> Nudge:
         """Create appropriate nudge for detected pattern.
+
+        Template lookup order:
+        1. Policy-declared templates (from ``register_policy_templates()``)
+        2. Built-in ``NUDGE_TEMPLATES`` for well-known patterns
+        3. ``DEFAULT_TEMPLATES`` as fallback
 
         Args:
             pattern: The detected behavioral pattern
@@ -163,7 +167,11 @@ class NudgeStrategy:
         Returns:
             A Nudge with appropriate type and message
         """
-        templates = self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
+        # Policy-declared templates take priority
+        templates = self._policy_templates.get(
+            pattern.pattern_type,
+            self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
+        )
         nudge_type, template = templates.get(
             pattern.severity,
             self.DEFAULT_TEMPLATES[pattern.severity]

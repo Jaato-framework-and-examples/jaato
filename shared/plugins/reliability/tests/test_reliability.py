@@ -1373,11 +1373,48 @@ class TestTemplatePrerequisiteDetection:
     template-gated file-writing tool is called without a recent
     listAvailableTemplates call, and that the pattern is suppressed
     when the prerequisite is satisfied.
+
+    The prerequisite policy is now declared by the template plugin and
+    registered with the reliability plugin (rather than being hardcoded
+    in PatternDetectionConfig). The fixture simulates this by creating
+    a PrerequisitePolicy directly.
     """
 
     @pytest.fixture
-    def plugin(self):
-        """Create a plugin with pattern detection and template gating enabled."""
+    def template_policy(self):
+        """Create the template prerequisite policy (normally declared by template plugin)."""
+        from ..types import (
+            BehavioralPatternType, NudgeType, PatternSeverity, PrerequisitePolicy,
+        )
+        return PrerequisitePolicy(
+            policy_id="template_check",
+            prerequisite_tool="listAvailableTemplates",
+            gated_tools={"writeNewFile", "updateFile", "multiFileEdit", "findAndReplace"},
+            lookback_turns=2,
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            nudge_templates={
+                PatternSeverity.MINOR: (
+                    NudgeType.DIRECT_INSTRUCTION,
+                    "NOTICE: You called {tool_name} without checking templates first."
+                ),
+                PatternSeverity.MODERATE: (
+                    NudgeType.DIRECT_INSTRUCTION,
+                    "NOTICE: Repeated file writes without template check (#{count})."
+                ),
+                PatternSeverity.SEVERE: (
+                    NudgeType.INTERRUPT,
+                    "BLOCKED: {count} file-writing tool calls without checking templates."
+                ),
+            },
+            expected_action_template=(
+                "Call {prerequisite_tool} before using {tool_name} "
+                "to check if a template can produce or contribute to the target file"
+            ),
+        )
+
+    @pytest.fixture
+    def plugin(self, template_policy):
+        """Create a plugin with pattern detection and template policy registered."""
         from ..types import PatternDetectionConfig
 
         plugin = ReliabilityPlugin()
@@ -1388,6 +1425,7 @@ class TestTemplatePrerequisiteDetection:
             max_reads_before_action=100,
         ))
         plugin.enable_pattern_detection(True)
+        plugin.register_prerequisite_policy(template_policy)
         return plugin
 
     def test_writeNewFile_without_template_check_triggers_pattern(self, plugin):
@@ -1789,11 +1827,44 @@ class TestNudgeStrategy:
         assert strategy.should_inject(interrupt_nudge, full_config) is True
 
     def test_create_nudge_for_template_check_skipped(self):
-        """Test creating nudge for template check skipped pattern."""
+        """Test creating nudge for template check skipped pattern with policy-registered templates.
+
+        The NudgeStrategy no longer hardcodes template-specific nudge messages.
+        Instead, the template plugin declares its nudge templates via
+        ``get_prerequisite_policies()`` and they are registered at startup.
+        This test verifies the strategy uses policy-registered templates.
+        """
         from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeType
         from ..nudge import NudgeStrategy
 
         strategy = NudgeStrategy()
+
+        # Register the template policy's nudge templates (as would happen at startup)
+        strategy.register_policy_templates(
+            BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            {
+                PatternSeverity.MINOR: (
+                    NudgeType.DIRECT_INSTRUCTION,
+                    "NOTICE: You called {tool_name} without checking templates first. "
+                    "Call listAvailableTemplates before writing files to check if a template "
+                    "can produce or contribute to the target file (directly via renderTemplateToFile "
+                    "or indirectly as a patch source)."
+                ),
+                PatternSeverity.MODERATE: (
+                    NudgeType.DIRECT_INSTRUCTION,
+                    "NOTICE: Repeated file writes without template check (#{count}). "
+                    "You MUST call listAvailableTemplates before using {tool_name}. "
+                    "Templates may exist that produce this file directly or provide "
+                    "the code pattern you need to patch in. Check templates NOW."
+                ),
+                PatternSeverity.SEVERE: (
+                    NudgeType.INTERRUPT,
+                    "BLOCKED: {count} file-writing tool calls without checking templates. "
+                    "This violates the Template-First File Creation policy. "
+                    "Call listAvailableTemplates immediately before any further file operations."
+                ),
+            },
+        )
 
         # MINOR severity — first violation
         pattern = BehavioralPattern(
