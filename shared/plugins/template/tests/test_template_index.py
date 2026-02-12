@@ -573,3 +573,188 @@ class TestPluginLifecycle:
         registry = MagicMock()
         plugin.set_plugin_registry(registry)
         assert plugin._plugin_registry is registry
+
+
+# ==================== Mustache Dotted-Path Preprocessing ====================
+
+class TestMustacheDottedPaths:
+    """Tests for the pybars3 dotted-path preprocessor.
+
+    pybars3 does not support dotted paths in section tags ({{#a.b}}) or
+    inverted section tags ({{^a.b}}), though it handles them in variable
+    interpolation ({{a.b}}) and built-in helper arguments ({{#if a.b}}).
+
+    The preprocessor rewrites:
+      {{#a.b}} → {{#if a.b}}      (section → if helper)
+      {{^a.b}} → {{#unless a.b}}  (inverted → unless helper)
+      {{/a.b}} → matching {{/if}} or {{/unless}}
+    """
+
+    def test_preprocess_section_dot(self, plugin):
+        result = plugin._preprocess_mustache_dotted_paths("{{#a.b}}yes{{/a.b}}")
+        assert result == "{{#if a.b}}yes{{/if}}"
+
+    def test_preprocess_inverted_dot(self, plugin):
+        result = plugin._preprocess_mustache_dotted_paths("{{^a.b}}no{{/a.b}}")
+        assert result == "{{#unless a.b}}no{{/unless}}"
+
+    def test_preprocess_deep_section(self, plugin):
+        result = plugin._preprocess_mustache_dotted_paths("{{#a.b.c}}deep{{/a.b.c}}")
+        assert result == "{{#if a.b.c}}deep{{/if}}"
+
+    def test_preprocess_deep_inverted(self, plugin):
+        result = plugin._preprocess_mustache_dotted_paths("{{^a.b.c}}deep{{/a.b.c}}")
+        assert result == "{{#unless a.b.c}}deep{{/unless}}"
+
+    def test_preprocess_no_dots_unchanged(self, plugin):
+        template = "{{#items}}{{name}}{{/items}}"
+        assert plugin._preprocess_mustache_dotted_paths(template) == template
+
+    def test_preprocess_helper_dots_unchanged(self, plugin):
+        """Helpers like {{#if a.b}} already work in pybars3."""
+        template = "{{#if a.b}}yes{{/if}}"
+        assert plugin._preprocess_mustache_dotted_paths(template) == template
+
+    def test_preprocess_variable_dots_unchanged(self, plugin):
+        template = "{{person.name}}"
+        assert plugin._preprocess_mustache_dotted_paths(template) == template
+
+    def test_preprocess_nested_mixed(self, plugin):
+        """Dotted section inside a non-dotted section."""
+        template = "{{#items}}{{#val.active}}x{{/val.active}}{{/items}}"
+        result = plugin._preprocess_mustache_dotted_paths(template)
+        assert result == "{{#items}}{{#if val.active}}x{{/if}}{{/items}}"
+
+    def test_preprocess_with_whitespace(self, plugin):
+        """Whitespace around the dotted name."""
+        result = plugin._preprocess_mustache_dotted_paths("{{# a.b }}yes{{/ a.b }}")
+        assert result == "{{#if a.b}}yes{{/if}}"
+
+    def test_preprocess_idempotent(self, plugin):
+        """Running the preprocessor twice produces the same output."""
+        template = "{{#a.b}}yes{{/a.b}}"
+        first = plugin._preprocess_mustache_dotted_paths(template)
+        second = plugin._preprocess_mustache_dotted_paths(first)
+        assert first == second
+
+    # -- End-to-end rendering with pybars3 --
+
+    def test_render_section_dot_truthy(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{#a.b}}yes{{/a.b}}", {"a": {"b": True}})
+        assert error is None
+        assert rendered == "yes"
+
+    def test_render_section_dot_falsy(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{#a.b}}yes{{/a.b}}", {"a": {"b": False}})
+        assert error is None
+        assert rendered == ""
+
+    def test_render_section_dot_missing_parent(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{#a.b}}yes{{/a.b}}", {})
+        assert error is None
+        assert rendered == ""
+
+    def test_render_inverted_dot_falsy(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{^a.b}}no{{/a.b}}", {"a": {"b": False}})
+        assert error is None
+        assert rendered == "no"
+
+    def test_render_inverted_dot_truthy(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{^a.b}}no{{/a.b}}", {"a": {"b": True}})
+        assert error is None
+        assert rendered == ""
+
+    def test_render_inverted_dot_missing(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{^a.b}}no{{/a.b}}", {})
+        assert error is None
+        assert rendered == "no"
+
+    def test_render_variable_inside_dotted_section(self, plugin):
+        """The common pattern: conditional section + same-path variable inside."""
+        rendered, error = plugin._render_mustache(
+            '{{#validation.pattern}}@Pattern("{{validation.pattern}}"){{/validation.pattern}}',
+            {"validation": {"pattern": "^[a-z]+$"}})
+        assert error is None
+        assert rendered == '@Pattern("^[a-z]+$")'
+
+    def test_render_realistic_java_template(self, plugin):
+        """Realistic template with multiple dotted conditionals in a loop."""
+        template = (
+            "{{#fields}}"
+            "{{#validation.pattern}}@Pattern(\"{{validation.pattern}}\")\n{{/validation.pattern}}"
+            "{{#validation.maxLength}}@Size(max={{validation.maxLength}})\n{{/validation.maxLength}}"
+            "private {{fieldType}} {{fieldName}};\n"
+            "{{/fields}}"
+        )
+        variables = {
+            "fields": [
+                {
+                    "fieldType": "String",
+                    "fieldName": "email",
+                    "validation": {"pattern": "regex", "maxLength": 255},
+                },
+                {
+                    "fieldType": "int",
+                    "fieldName": "age",
+                    "validation": {},
+                },
+            ]
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert '@Pattern("regex")' in rendered
+        assert "@Size(max=255)" in rendered
+        assert "private String email;" in rendered
+        assert "private int age;" in rendered
+        # No annotations for age (empty validation)
+        assert "@Pattern" not in rendered.split("private int age;")[0].split("private String email;")[1]
+
+    def test_render_mixed_section_and_inverted_dots(self, plugin):
+        """Section and inverted with dots at the same level."""
+        rendered, error = plugin._render_mustache(
+            "{{#a.b}}yes{{/a.b}}{{^a.b}}no{{/a.b}}",
+            {"a": {"b": True}})
+        assert error is None
+        assert rendered == "yes"
+
+        rendered2, error2 = plugin._render_mustache(
+            "{{#a.b}}yes{{/a.b}}{{^a.b}}no{{/a.b}}",
+            {"a": {"b": False}})
+        assert error2 is None
+        assert rendered2 == "no"
+
+    def test_render_deep_dotted_section(self, plugin):
+        rendered, error = plugin._render_mustache(
+            "{{#a.b.c}}deep{{/a.b.c}}",
+            {"a": {"b": {"c": True}}})
+        assert error is None
+        assert rendered == "deep"
+
+    def test_renderTemplateToFile_with_dotted_sections(self, plugin):
+        """renderTemplateToFile should handle dotted section paths."""
+        template = (
+            "{{#fields}}"
+            "{{#validation.required}}required: {{fieldName}}\n{{/validation.required}}"
+            "{{/fields}}"
+        )
+        output_file = plugin._base_path / "output" / "test.txt"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {
+                "fields": [
+                    {"fieldName": "email", "validation": {"required": True}},
+                    {"fieldName": "age", "validation": {"required": False}},
+                ]
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, f"Render failed: {result}"
+        content = output_file.read_text()
+        assert "required: email" in content
+        assert "required: age" not in content

@@ -1346,16 +1346,112 @@ Template rendering requires approval since it writes files."""
         else:
             return self._render_jinja2(template, variables)
 
+    # Regex patterns for the dotted-path preprocessor.
+    # Match section/inverted/closing tags whose name contains at least one dot
+    # but is NOT a helper call (helpers have a space between name and argument).
+    _MUSTACHE_TAG_RE = re.compile(r'\{\{(.*?)\}\}')
+
+    def _preprocess_mustache_dotted_paths(self, template: str) -> str:
+        """Rewrite dotted paths in Mustache section/inverted tags for pybars3.
+
+        pybars3 does not support dotted paths in raw section tags
+        (``{{#a.b}}``) or inverted section tags (``{{^a.b}}``), even though
+        the Mustache spec requires it.  It *does* support dots in:
+
+        * Variable interpolation: ``{{a.b}}``
+        * Built-in helper arguments: ``{{#if a.b}}``, ``{{#each a.b}}``,
+          ``{{#with a.b}}``, ``{{#unless a.b}}``
+
+        This preprocessor rewrites the unsupported forms into equivalent
+        helper-based constructs that pybars3 can compile:
+
+        * ``{{#a.b.c}}…{{/a.b.c}}``  →  ``{{#if a.b.c}}…{{/if}}``
+          Uses ``if`` because it preserves the current context, keeping
+          dotted variable references inside the block working correctly.
+          (pybars3 does not traverse the context stack, so nested-section
+          rewrites like ``{{#a}}{{#b}}{{#c}}`` would break inner
+          ``{{a.b.c}}`` variable references.)
+        * ``{{^a.b.c}}…{{/a.b.c}}``  →  ``{{#unless a.b.c}}…{{/unless}}``
+
+        Limitation: the ``{{#if}}`` rewrite handles conditional checks (the
+        dominant use case for dotted section tags) but does not support
+        context switching or list iteration.  Templates that need those
+        semantics should use explicit ``{{#with a.b}}`` or ``{{#each a.b}}``
+        helpers, which pybars3 supports natively.
+
+        The method is idempotent: templates without dotted section/inverted
+        tags pass through unchanged.
+        """
+        result: list[str] = []
+        # Stack tracks ('section', 'a.b.c') or ('inverted', 'a.b.c') or
+        # ('other', 'name') for non-dotted / helper openings.
+        stack: list[tuple[str, str]] = []
+        last_end = 0
+
+        for m in self._MUSTACHE_TAG_RE.finditer(template):
+            result.append(template[last_end:m.start()])
+            tag_content = m.group(1).strip()
+
+            if tag_content.startswith('#'):
+                rest = tag_content[1:].strip()
+                # A dotted section has no spaces (helpers like {{#if a.b}} do)
+                if '.' in rest and ' ' not in rest:
+                    result.append('{{#if ' + rest + '}}')
+                    stack.append(('section', rest))
+                else:
+                    result.append(m.group(0))
+                    name = rest.split()[0] if rest else rest
+                    stack.append(('other', name))
+
+            elif tag_content.startswith('^'):
+                rest = tag_content[1:].strip()
+                if '.' in rest and ' ' not in rest:
+                    result.append('{{#unless ' + rest + '}}')
+                    stack.append(('inverted', rest))
+                else:
+                    result.append(m.group(0))
+                    stack.append(('other', rest))
+
+            elif tag_content.startswith('/'):
+                rest = tag_content[1:].strip()
+                if '.' in rest and stack and stack[-1][1] == rest:
+                    kind, _ = stack.pop()
+                    if kind == 'section':
+                        result.append('{{/if}}')
+                    elif kind == 'inverted':
+                        result.append('{{/unless}}')
+                    else:
+                        # Shouldn't happen, but be safe
+                        result.append(m.group(0))
+                else:
+                    # Non-dotted close, or unmatched dotted close — pass through
+                    if stack and stack[-1][1] == rest:
+                        stack.pop()
+                    result.append(m.group(0))
+
+            else:
+                # Variable or other tag — pass through unchanged
+                result.append(m.group(0))
+
+            last_end = m.end()
+
+        result.append(template[last_end:])
+        return ''.join(result)
+
     def _render_mustache(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
         """Render template using Handlebars syntax.
 
-        Supports full Handlebars syntax:
-        - Variables: {{variable_name}}
-        - Sections/loops: {{#items}}...{{/items}}
-        - Conditionals: {{#if condition}}...{{/if}}
-        - Each loops: {{#each items}}...{{/each}}
-        - Inverted sections: {{^isEmpty}}...{{/isEmpty}}
-        - Current item: {{.}}, {{this}}
+        Supports full Handlebars syntax including dotted paths:
+        - Variables: ``{{variable_name}}``, ``{{a.b.c}}``
+        - Sections/loops: ``{{#items}}…{{/items}}``, ``{{#a.b}}…{{/a.b}}``
+        - Conditionals: ``{{#if condition}}``, ``{{#if a.b}}``
+        - Each loops: ``{{#each items}}``, ``{{#each a.b}}``
+        - Inverted sections: ``{{^isEmpty}}…{{/isEmpty}}``, ``{{^a.b}}…{{/a.b}}``
+        - Current item: ``{{.}}``, ``{{this}}``
+
+        Dotted paths in section/inverted tags are preprocessed into
+        equivalent pybars3-compatible constructs before compilation
+        (see ``_preprocess_mustache_dotted_paths``).
 
         Args:
             template: Template content string with Handlebars syntax.
@@ -1374,8 +1470,9 @@ Template rendering requires approval since it writes files."""
             }
 
         try:
+            preprocessed = self._preprocess_mustache_dotted_paths(template)
             compiler = Compiler()
-            compiled_template = compiler.compile(template)
+            compiled_template = compiler.compile(preprocessed)
             rendered = compiled_template(variables)
             return rendered, None
         except Exception as e:
