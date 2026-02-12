@@ -50,7 +50,7 @@ class AgentTabBar:
     - Error: 💣 (red)
     - Permission: ? (yellow)
 
-    Selected tab is shown with bold cyan + underline.
+    Selected tab is shown with reverse video (like permission prompt TAB-cycling).
     """
 
     def __init__(
@@ -152,6 +152,9 @@ class AgentTabBar:
     def _build_agent_tabs(self, agents, selected_id) -> List[Tuple[str, str, int]]:
         """Build individual tab entries with their widths.
 
+        Each tab shows the agent_id as its label. The selected tab is
+        rendered in reverse video; unselected tabs are dim.
+
         Args:
             agents: List of AgentInfo objects.
             selected_id: ID of the selected agent.
@@ -169,28 +172,33 @@ class AgentTabBar:
             # Get status symbol (1-2 chars depending on emoji)
             symbol = self.get_status_symbol(agent.status)
 
-            # Determine styles
+            # Determine styles: selected uses reverse video, unselected is dim
             if is_selected:
-                name_style = "class:agent-tab.selected bold underline"
+                name_style = "class:agent-tab.selected reverse"
             else:
                 name_style = "class:agent-tab.dim"
             symbol_style = self._get_symbol_color_style(agent.status)
 
-            # Truncate name if needed
+            # Use agent_id as the tab label
             max_name_len = 15
-            name = agent.name
-            if len(name) > max_name_len:
-                name = name[:max_name_len - 1] + "…"
+            label = agent.agent_id
+            if len(label) > max_name_len:
+                label = label[:max_name_len - 1] + "…"
 
             # Build tab parts
             tab_parts.append((symbol_style, symbol))
             tab_parts.append(("", " "))
-            tab_parts.append((name_style, name))
+            if is_selected:
+                # Pad with spaces for reverse-video readability
+                tab_parts.append((name_style, f" {label} "))
+            else:
+                tab_parts.append((name_style, label))
 
-            # Calculate width (symbol + space + name)
+            # Calculate width (symbol + space + label + optional padding)
             # Note: some symbols like 🏁 and 💣 may render as 2 chars wide
             symbol_width = 2 if symbol in ("🏁", "💣") else 1
-            width = symbol_width + 1 + len(name)
+            label_display_len = len(label) + 2 if is_selected else len(label)
+            width = symbol_width + 1 + label_display_len
 
             result.append((tab_parts, i, width))
 
@@ -365,7 +373,11 @@ class AgentTabBar:
         return style_map.get(status, "class:agent-tab.symbol.awaiting")
 
     def render_popup(self, agent: "AgentInfo") -> List[Tuple[str, str]]:
-        """Render the details popup for an agent.
+        """Render a minimal tooltip showing only the subagent name.
+
+        The tooltip is a single-line box displayed briefly when cycling
+        agents with C-A, giving the user a quick glance at the agent's
+        display name without the heavier icon/status popup.
 
         Args:
             agent: Agent to show details for.
@@ -373,63 +385,10 @@ class AgentTabBar:
         Returns:
             List of (style, text) tuples for prompt_toolkit.
         """
-        lines: List[Tuple[str, str]] = []
-
-        # Get icon lines (3 lines of ASCII art)
-        icon_lines = agent.icon_lines if agent.icon_lines else ["", "", ""]
-
-        # Status display
-        status_labels = {
-            "active": "Processing",
-            "idle": "Idle",
-            "waiting": "Awaiting",
-            "pending": "Awaiting",
-            "done": "Finished",
-            "error": "Error",
-        }
-        status_label = status_labels.get(agent.status, agent.status.capitalize())
-
-        # Calculate dynamic width based on agent name
-        # Min 20, max 40 (force wrapping on long names to keep popup compact)
-        min_width = 20
-        max_width = 40
-        content_width = max(min_width, min(max_width, len(agent.name) + 4))
-
-        # Wrap long names into multiple lines if needed
-        name_lines = self._wrap_text(agent.name, content_width - 2)
-
-        # Build popup content with double-line border for visibility
-        # Top border
-        lines.append(("class:agent-popup.border", "╔" + "═" * content_width + "╗\n"))
-
-        # Icon lines (centered)
-        for icon_line in icon_lines:
-            padded = icon_line.center(content_width)
-            lines.append(("class:agent-popup.border", "║"))
-            lines.append(("class:agent-popup.icon", padded))
-            lines.append(("class:agent-popup.border", "║\n"))
-
-        # Separator after icon
-        lines.append(("class:agent-popup.border", "╟" + "─" * content_width + "╢\n"))
-
-        # Name (potentially multiple lines)
-        for name_line in name_lines:
-            name_padded = name_line.center(content_width)
-            lines.append(("class:agent-popup.border", "║"))
-            lines.append(("class:agent-popup.name", name_padded))
-            lines.append(("class:agent-popup.border", "║\n"))
-
-        # Status
-        status_padded = status_label.center(content_width)
-        status_style = self._get_popup_status_style(agent.status)
-        lines.append(("class:agent-popup.border", "║"))
-        lines.append((status_style, status_padded))
-        lines.append(("class:agent-popup.border", "║\n"))
-
-        # Bottom border
-        lines.append(("class:agent-popup.border", "╚" + "═" * content_width + "╝"))
-
-        return lines
+        name = agent.name
+        # Pad name for visual breathing room
+        content = f" {name} "
+        return [("class:agent-popup.name reverse bold", content)]
 
     def _wrap_text(self, text: str, max_width: int) -> List[str]:
         """Wrap text to fit within max_width.
