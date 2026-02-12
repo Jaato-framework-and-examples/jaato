@@ -16,8 +16,8 @@ from datetime import datetime
 
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
-    discover_profiles, expand_plugin_configs, _find_workspace_root,
-    gc_profile_to_plugin_config, validate_profile
+    detect_workspace_tech_stack, discover_profiles, expand_plugin_configs,
+    _find_workspace_root, gc_profile_to_plugin_config, validate_profile
 )
 from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
@@ -835,6 +835,19 @@ class SubagentPlugin:
             "  completePlan(summary='Found 5 key findings...')  # Triggers event to parent\n\n"
             "This enables observable, traceable multi-agent workflows where both agents "
             "maintain plans and coordinate through the shared TODO event system.\n\n"
+            "PROFILE-FIRST SPAWNING (MANDATORY):\n"
+            "Before spawning any subagent, you MUST call list_subagent_profiles to review available\n"
+            "profiles. This is not optional — the system enforces this as a prerequisite.\n\n"
+            "Rules:\n"
+            "1. If a matching profile exists for the task → use spawn_subagent(profile=...)\n"
+            "2. If an idle profiled subagent can handle the task → use send_to_subagent\n"
+            "3. Only spawn inline (no profile) when NO profile matches AND the task is genuinely\n"
+            "   one-off exploration that doesn't fit any specialist\n\n"
+            "Inline subagents inherit your plugins but lack domain constraints. They MUST NOT be\n"
+            "used for tasks where a specialist profile would produce better, safer results (e.g.,\n"
+            "code generation in a specific language, structured operations on a specific tech stack).\n\n"
+            "Specific principle overrides general: \"profile-first\" takes precedence over\n"
+            "\"autonomous action\" and \"parallel exploration\" when both could apply.\n\n"
             "SPAWN ECONOMY - AVOID UNNECESSARY SPAWNS:\n"
             "Every spawn_subagent call creates a new worker with its own session, context window, "
             "and resource overhead. Before spawning, ask yourself:\n\n"
@@ -878,6 +891,56 @@ class SubagentPlugin:
             "Use spawn_subagent with a profile name and task to delegate work. "
             "Without a profile, subagents inherit your current plugin configuration."
         )
+
+    def get_prerequisite_policies(self):
+        """Declare profile-first spawning policy for reliability enforcement.
+
+        Returns a PrerequisitePolicy that requires ``list_subagent_profiles``
+        to have been called before ``spawn_subagent``. The reliability
+        plugin's PatternDetector generically enforces this policy — the
+        subagent plugin owns the policy declaration and nudge messages,
+        while the reliability plugin owns the enforcement mechanism.
+
+        Returns:
+            List containing the profile check prerequisite policy.
+        """
+        from shared.plugins.reliability.types import (
+            NudgeType,
+            PatternSeverity,
+            PrerequisitePolicy,
+        )
+
+        return [
+            PrerequisitePolicy(
+                policy_id="profile_check_before_spawn",
+                prerequisite_tool="list_subagent_profiles",
+                gated_tools={"spawn_subagent"},
+                lookback_turns=3,
+                nudge_templates={
+                    PatternSeverity.MINOR: (
+                        NudgeType.DIRECT_INSTRUCTION,
+                        "NOTICE: You called {tool_name} without checking available profiles first. "
+                        "Call list_subagent_profiles before spawning to review available specialist "
+                        "profiles. Prefer profiled specialists over inline agents."
+                    ),
+                    PatternSeverity.MODERATE: (
+                        NudgeType.DIRECT_INSTRUCTION,
+                        "NOTICE: Repeated spawns without profile check (#{count}). "
+                        "You MUST review available profiles via list_subagent_profiles and prefer "
+                        "send_to_subagent for existing idle agents."
+                    ),
+                    PatternSeverity.SEVERE: (
+                        NudgeType.INTERRUPT,
+                        "BLOCKED: {count} spawn_subagent calls without checking profiles. "
+                        "Call list_subagent_profiles immediately before any further spawns."
+                    ),
+                },
+                expected_action_template=(
+                    "Call {prerequisite_tool} before using {tool_name} "
+                    "to review available specialist profiles"
+                ),
+            )
+        ]
 
     def _execute_validate_profile(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a subagent profile JSON file against the expected schema.
@@ -1681,6 +1744,14 @@ class SubagentPlugin:
         inline_config = args.get('inline_config')
         custom_name = args.get('name', '')
 
+        # Resolve workspace path early — needed for tech stack detection on inline profiles
+        workspace_path = self._workspace_path
+        if workspace_path is None and self._runtime and self._runtime.registry:
+            workspace_path = self._runtime.registry.get_workspace_path()
+        if workspace_path is None:
+            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
+        parent_cwd = workspace_path or os.getcwd()
+
         # Resolve the profile or create inline
         if profile_name:
             profile = self._config.get_profile(profile_name) if self._config else None
@@ -1743,6 +1814,21 @@ class SubagentPlugin:
                 # Backwards compatibility: use old naming scheme
                 name = '_inline' if inline_config else '_inherited'
 
+            # Inject workspace tech stack context for inline subagents
+            tech_stack = detect_workspace_tech_stack(parent_cwd)
+            if tech_stack:
+                tech_stack_preamble = (
+                    f"WORKSPACE TECHNOLOGY CONTEXT:\n"
+                    f"{tech_stack}\n\n"
+                    f"You MUST constrain your output to the detected technology stack. "
+                    f"Do NOT generate code in a different language or framework than what "
+                    f"the workspace uses unless the task explicitly requires it."
+                )
+                if system_instructions:
+                    system_instructions = f"{tech_stack_preamble}\n\n{system_instructions}"
+                else:
+                    system_instructions = tech_stack_preamble
+
             profile = SubagentProfile(
                 name=name,
                 description='Subagent with inherited plugins',
@@ -1792,17 +1878,7 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        # Get workspace path - priority order:
-        # 1. Directly set path (from server registry broadcast)
-        # 2. Runtime registry (for JaatoClient mode)
-        # 3. JAATO_WORKSPACE_ROOT env var (if set by server context)
-        # 4. os.getcwd() as last resort
-        workspace_path = self._workspace_path
-        if workspace_path is None and self._runtime and self._runtime.registry:
-            workspace_path = self._runtime.registry.get_workspace_path()
-        if workspace_path is None:
-            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
-        parent_cwd = workspace_path or os.getcwd()
+        # parent_cwd already resolved above (before profile creation)
         logger.debug(
             "SubagentPlugin.spawn_subagent: workspace resolution: "
             f"self._workspace_path={self._workspace_path}, "

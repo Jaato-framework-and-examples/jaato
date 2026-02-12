@@ -221,7 +221,6 @@ class TemplatePlugin:
             List containing the template check prerequisite policy.
         """
         from shared.plugins.reliability.types import (
-            BehavioralPatternType,
             NudgeType,
             PatternSeverity,
             PrerequisitePolicy,
@@ -235,7 +234,6 @@ class TemplatePlugin:
                     "writeNewFile", "updateFile", "multiFileEdit", "findAndReplace",
                 },
                 lookback_turns=2,
-                pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
                 nudge_templates={
                     PatternSeverity.MINOR: (
                         NudgeType.DIRECT_INSTRUCTION,

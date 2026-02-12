@@ -1369,29 +1369,27 @@ class TestPatternDetection:
 class TestTemplatePrerequisiteDetection:
     """Tests for template prerequisite pattern detection.
 
-    Verifies that the TEMPLATE_CHECK_SKIPPED pattern fires when a
-    template-gated file-writing tool is called without a recent
-    listAvailableTemplates call, and that the pattern is suppressed
-    when the prerequisite is satisfied.
+    Verifies that a PREREQUISITE_VIOLATED pattern with policy_id="template_check"
+    fires when a template-gated file-writing tool is called without a recent
+    listAvailableTemplates call, and that the pattern is suppressed when the
+    prerequisite is satisfied.
 
-    The prerequisite policy is now declared by the template plugin and
-    registered with the reliability plugin (rather than being hardcoded
-    in PatternDetectionConfig). The fixture simulates this by creating
-    a PrerequisitePolicy directly.
+    The prerequisite policy is declared by the template plugin and registered
+    with the reliability plugin. The fixture simulates this by creating a
+    PrerequisitePolicy directly.
     """
 
     @pytest.fixture
     def template_policy(self):
         """Create the template prerequisite policy (normally declared by template plugin)."""
         from ..types import (
-            BehavioralPatternType, NudgeType, PatternSeverity, PrerequisitePolicy,
+            NudgeType, PatternSeverity, PrerequisitePolicy,
         )
         return PrerequisitePolicy(
             policy_id="template_check",
             prerequisite_tool="listAvailableTemplates",
             gated_tools={"writeNewFile", "updateFile", "multiFileEdit", "findAndReplace"},
             lookback_turns=2,
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
             nudge_templates={
                 PatternSeverity.MINOR: (
                     NudgeType.DIRECT_INSTRUCTION,
@@ -1430,8 +1428,6 @@ class TestTemplatePrerequisiteDetection:
 
     def test_writeNewFile_without_template_check_triggers_pattern(self, plugin):
         """Calling writeNewFile without prior listAvailableTemplates triggers detection."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
@@ -1439,53 +1435,45 @@ class TestTemplatePrerequisiteDetection:
         plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
 
         assert len(patterns) == 1
-        assert patterns[0].pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED
+        assert patterns[0].policy_id == "template_check"
         assert "writeNewFile" in patterns[0].tool_sequence
         assert "listAvailableTemplates" in patterns[0].expected_action
 
     def test_updateFile_without_template_check_triggers_pattern(self, plugin):
         """Calling updateFile without prior listAvailableTemplates triggers detection."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
 
         plugin.on_tool_called("updateFile", {"path": "/tmp/Foo.java", "content": "updated"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 1
 
     def test_multiFileEdit_without_template_check_triggers_pattern(self, plugin):
         """Calling multiFileEdit without prior listAvailableTemplates triggers detection."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
 
         plugin.on_tool_called("multiFileEdit", {"operations": []})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 1
 
     def test_findAndReplace_without_template_check_triggers_pattern(self, plugin):
         """Calling findAndReplace without prior listAvailableTemplates triggers detection."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
 
         plugin.on_tool_called("findAndReplace", {"pattern": "foo", "replacement": "bar"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 1
 
     def test_template_check_in_same_turn_suppresses_pattern(self, plugin):
         """listAvailableTemplates called earlier in same turn satisfies prerequisite."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
@@ -1495,13 +1483,11 @@ class TestTemplatePrerequisiteDetection:
         # Then call a gated tool
         plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 0
 
     def test_template_check_in_previous_turn_suppresses_pattern(self, plugin):
         """listAvailableTemplates called in previous turn within lookback window satisfies prerequisite."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
 
@@ -1513,13 +1499,11 @@ class TestTemplatePrerequisiteDetection:
         plugin.on_turn_start(2)
         plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 0
 
     def test_template_check_two_turns_ago_suppresses_pattern(self, plugin):
         """listAvailableTemplates called 2 turns ago (at lookback boundary) still satisfies prerequisite."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
 
@@ -1535,13 +1519,11 @@ class TestTemplatePrerequisiteDetection:
         plugin.on_turn_start(3)
         plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 0
 
     def test_template_check_beyond_lookback_triggers_pattern(self, plugin):
         """listAvailableTemplates called more than lookback turns ago does NOT satisfy prerequisite."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
 
@@ -1557,13 +1539,11 @@ class TestTemplatePrerequisiteDetection:
         plugin.on_turn_start(4)
         plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 1
 
     def test_non_gated_tools_not_affected(self, plugin):
         """Tools not in the gated set do not trigger the template check pattern."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
         plugin.on_turn_start(1)
@@ -1573,12 +1553,12 @@ class TestTemplatePrerequisiteDetection:
         # renderTemplateToFile is not gated — it IS a template tool
         plugin.on_tool_called("renderTemplateToFile", {"template_name": "Foo.tpl", "output_path": "/tmp/Foo.java", "variables": {}})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 0
 
     def test_severity_escalates_on_repeated_violations(self, plugin):
         """Severity escalates from MINOR to MODERATE to SEVERE on repeated violations."""
-        from ..types import BehavioralPatternType, PatternSeverity
+        from ..types import PatternSeverity
 
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
@@ -1595,7 +1575,7 @@ class TestTemplatePrerequisiteDetection:
         plugin.on_turn_start(3)
         plugin.on_tool_called("multiFileEdit", {"operations": []})
 
-        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 3
         assert template_patterns[0].severity == PatternSeverity.MINOR
         assert template_patterns[1].severity == PatternSeverity.MODERATE
@@ -1603,8 +1583,6 @@ class TestTemplatePrerequisiteDetection:
 
     def test_reset_clears_template_check_state(self, plugin):
         """reset() clears cross-turn template check tracking."""
-        from ..types import BehavioralPatternType
-
         patterns = []
         plugin.set_pattern_hook(lambda p: patterns.append(p))
 
@@ -1623,7 +1601,7 @@ class TestTemplatePrerequisiteDetection:
         # The hook is on the plugin, but we called the detector directly;
         # check patterns via the detector.
         detected = detector.get_detected_patterns()
-        template_patterns = [p for p in detected if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        template_patterns = [p for p in detected if p.policy_id == "template_check"]
         assert len(template_patterns) == 1
 
 
@@ -1841,7 +1819,7 @@ class TestNudgeStrategy:
 
         # Register the template policy's nudge templates (as would happen at startup)
         strategy.register_policy_templates(
-            BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            "template_check",
             {
                 PatternSeverity.MINOR: (
                     NudgeType.DIRECT_INSTRUCTION,
@@ -1868,7 +1846,7 @@ class TestNudgeStrategy:
 
         # MINOR severity — first violation
         pattern = BehavioralPattern(
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            pattern_type=BehavioralPatternType.PREREQUISITE_VIOLATED,
             detected_at=datetime.now(),
             turn_index=1,
             session_id="test",
@@ -1878,6 +1856,7 @@ class TestNudgeStrategy:
             model_name="gemini-2.5-flash",
             severity=PatternSeverity.MINOR,
             expected_action="Call listAvailableTemplates before using writeNewFile",
+            policy_id="template_check",
         )
 
         nudge = strategy.create_nudge(pattern)
@@ -1888,7 +1867,7 @@ class TestNudgeStrategy:
 
         # SEVERE severity — repeated violations
         severe_pattern = BehavioralPattern(
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            pattern_type=BehavioralPatternType.PREREQUISITE_VIOLATED,
             detected_at=datetime.now(),
             turn_index=3,
             session_id="test",
@@ -1897,6 +1876,7 @@ class TestNudgeStrategy:
             duration_seconds=30.0,
             model_name="gemini-2.5-flash",
             severity=PatternSeverity.SEVERE,
+            policy_id="template_check",
         )
 
         severe_nudge = strategy.create_nudge(severe_pattern)
@@ -2012,7 +1992,7 @@ class TestNudgeInjector:
         injector.set_injection_callbacks(notify_user=mock_notify)
 
         pattern = BehavioralPattern(
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            pattern_type=BehavioralPatternType.PREREQUISITE_VIOLATED,
             detected_at=datetime.now(),
             turn_index=1,
             session_id="test",
@@ -2021,6 +2001,7 @@ class TestNudgeInjector:
             duration_seconds=2.0,
             model_name="gemini-2.5-flash",
             severity=PatternSeverity.MINOR,
+            policy_id="template_check",
         )
 
         injector.on_pattern_detected(pattern)
@@ -2030,7 +2011,7 @@ class TestNudgeInjector:
         assert source == "enrichment"
         assert mode == "write"
         assert "reliability" in text
-        assert "template check skipped" in text
+        assert "prerequisite violated" in text
         assert "writeNewFile" in text
 
     def test_notify_user_severity_prefix(self):
@@ -2048,7 +2029,7 @@ class TestNudgeInjector:
 
         # MODERATE severity
         pattern = BehavioralPattern(
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            pattern_type=BehavioralPatternType.PREREQUISITE_VIOLATED,
             detected_at=datetime.now(),
             turn_index=2,
             session_id="test",
@@ -2057,6 +2038,7 @@ class TestNudgeInjector:
             duration_seconds=5.0,
             model_name="gemini-2.5-flash",
             severity=PatternSeverity.MODERATE,
+            policy_id="template_check",
         )
         injector.on_pattern_detected(pattern)
 
@@ -2064,7 +2046,7 @@ class TestNudgeInjector:
 
         # SEVERE severity
         severe_pattern = BehavioralPattern(
-            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            pattern_type=BehavioralPatternType.PREREQUISITE_VIOLATED,
             detected_at=datetime.now(),
             turn_index=3,
             session_id="test",
@@ -2073,6 +2055,7 @@ class TestNudgeInjector:
             duration_seconds=10.0,
             model_name="gemini-2.5-flash",
             severity=PatternSeverity.SEVERE,
+            policy_id="template_check",
         )
         injector.on_pattern_detected(severe_pattern)
 

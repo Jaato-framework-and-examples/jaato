@@ -508,13 +508,12 @@ class ToolPlugin(Protocol):
     #
     #     Example:
     #         from shared.plugins.reliability.types import (
-    #             PrerequisitePolicy, BehavioralPatternType, PatternSeverity, NudgeType
+    #             PrerequisitePolicy, PatternSeverity, NudgeType
     #         )
     #         return [PrerequisitePolicy(
     #             policy_id="template_check",
     #             prerequisite_tool="listAvailableTemplates",
     #             gated_tools={"writeNewFile", "updateFile"},
-    #             pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
     #             nudge_templates={...},
     #         )]
     #     """

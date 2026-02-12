@@ -134,31 +134,31 @@ class NudgeStrategy:
 
     def __init__(self):
         # Templates registered by plugins via PrerequisitePolicy.nudge_templates.
-        # Maps pattern_type → severity → (nudge_type, template_str).
-        self._policy_templates: Dict[BehavioralPatternType, Dict[PatternSeverity, tuple]] = {}
+        # Maps policy_id → severity → (nudge_type, template_str).
+        self._policy_templates: Dict[str, Dict[PatternSeverity, tuple]] = {}
 
     def register_policy_templates(
         self,
-        pattern_type: BehavioralPatternType,
+        policy_id: str,
         nudge_templates: Dict[PatternSeverity, tuple],
     ) -> None:
         """Register nudge templates declared by a plugin's PrerequisitePolicy.
 
         These templates take precedence over the built-in NUDGE_TEMPLATES
-        and DEFAULT_TEMPLATES for the given pattern type.
+        and DEFAULT_TEMPLATES when the pattern carries a matching ``policy_id``.
 
         Args:
-            pattern_type: The pattern type these templates apply to.
+            policy_id: The policy identifier (e.g., "template_check").
             nudge_templates: Map of severity → (NudgeType, template_str).
         """
-        self._policy_templates[pattern_type] = nudge_templates
+        self._policy_templates[policy_id] = nudge_templates
 
     def create_nudge(self, pattern: BehavioralPattern) -> Nudge:
         """Create appropriate nudge for detected pattern.
 
         Template lookup order:
-        1. Policy-declared templates (from ``register_policy_templates()``)
-        2. Built-in ``NUDGE_TEMPLATES`` for well-known patterns
+        1. Policy-declared templates keyed by ``policy_id``
+        2. Built-in ``NUDGE_TEMPLATES`` for well-known pattern types
         3. ``DEFAULT_TEMPLATES`` as fallback
 
         Args:
@@ -167,11 +167,12 @@ class NudgeStrategy:
         Returns:
             A Nudge with appropriate type and message
         """
-        # Policy-declared templates take priority
-        templates = self._policy_templates.get(
-            pattern.pattern_type,
-            self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
-        )
+        # Policy-declared templates (keyed by policy_id) take priority
+        templates = None
+        if pattern.policy_id:
+            templates = self._policy_templates.get(pattern.policy_id)
+        if templates is None:
+            templates = self.NUDGE_TEMPLATES.get(pattern.pattern_type, self.DEFAULT_TEMPLATES)
         nudge_type, template = templates.get(
             pattern.severity,
             self.DEFAULT_TEMPLATES[pattern.severity]
