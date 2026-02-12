@@ -1624,6 +1624,33 @@ Template rendering requires approval since it writes files."""
 
     # ==================== Tool Executors ====================
 
+    @staticmethod
+    def _coerce_variables(raw: Any) -> Dict[str, Any]:
+        """Coerce a ``variables`` argument into a dict.
+
+        LLMs sometimes serialise the JSON object as a string instead of
+        passing a proper dict.  This helper transparently handles that
+        (and other common mis-shapes) so tool executors never crash on
+        ``variables.keys()``.
+
+        Coercion rules:
+        - ``dict`` → returned as-is.
+        - ``str``  → decoded via ``json.loads``; must produce a dict.
+        - ``None`` / missing → empty dict.
+        - Anything else        → empty dict (best-effort).
+        """
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return {}
+        return {} if raw is None else {}
+
     def _execute_render_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute renderTemplate tool.
 
@@ -1631,7 +1658,7 @@ Template rendering requires approval since it writes files."""
         """
         template = args.get("template")
         template_name_arg = args.get("template_name")
-        variables = args.get("variables", {})
+        variables = self._coerce_variables(args.get("variables"))
         output_path = args.get("output_path", "")
 
         # Validation
@@ -1748,7 +1775,7 @@ Template rendering requires approval since it writes files."""
         output_path = args.get("output_path", "")
         template = args.get("template")
         template_name_arg = args.get("template_name")
-        variables = args.get("variables", {})
+        variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
 
         # Validation
