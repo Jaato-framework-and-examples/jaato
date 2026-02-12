@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
-from ..model_provider.types import EditableContent, ToolSchema
+from ..model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
 from shared.trace import trace as _trace_write
 
 
@@ -303,6 +303,7 @@ class TemplatePlugin:
                 },
                 category="code",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
                 name="listAvailableTemplates",
@@ -363,6 +364,7 @@ class TemplatePlugin:
                     format="yaml",
                     template="# Edit the template content and/or variables below. Save and exit to continue.\n",
                 ),
+                traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
                 name="validateTemplateIndex",
@@ -449,11 +451,11 @@ invent variable names - use the ones shown in the annotation.
   - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
-  - Returns: {"success": true, "output_path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
+  - Returns: {"success": true, "path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
 
 **renderTemplate(template_name, variables, output_path)** - Alternative (same functionality)
   - Also creates parent directories automatically
-  - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
+  - Returns: {"success": true, "path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
 
 **listAvailableTemplates()** - List all available templates
   - Shows all templates discovered in this session (embedded + standalone)
@@ -1587,7 +1589,7 @@ Template rendering requires approval since it writes files."""
 
         return {
             "success": True,
-            "output_path": str(out_path),
+            "path": str(out_path),
             "size": len(rendered),
             "lines": rendered.count('\n') + 1,
             "variables_used": list(variables.keys()),
@@ -1735,7 +1737,7 @@ Template rendering requires approval since it writes files."""
 
         return {
             "success": True,
-            "output_path": str(out_path),
+            "path": str(out_path),
             "bytes_written": bytes_written,
             "variables_used": sorted(variables.keys()),
             "template_source": template_source,

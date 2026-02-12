@@ -777,6 +777,29 @@ class PluginRegistry:
                 _trace(f" Error getting tool names from '{name}': {exc}", include_traceback=True)
         return names
 
+    def get_tool_traits(self, tool_name: str) -> "FrozenSet[str]":
+        """Return the trait set declared on a tool's schema.
+
+        Iterates exposed plugins to find the matching tool name and returns
+        its ``traits`` frozenset.  Returns an empty frozenset when the tool
+        is not found or the schema has no traits.
+
+        Args:
+            tool_name: Name of the tool to look up.
+
+        Returns:
+            The tool's declared traits, or ``frozenset()`` if not found.
+        """
+        for name in self._exposed:
+            try:
+                schemas = self._plugins[name].get_tool_schemas()
+                for schema in schemas:
+                    if schema.name == tool_name:
+                        return schema.traits
+            except Exception:
+                continue
+        return frozenset()
+
     def disable_tool(self, tool_name: str) -> bool:
         """Disable a specific tool by name.
 

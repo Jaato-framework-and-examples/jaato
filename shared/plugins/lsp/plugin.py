@@ -14,7 +14,7 @@ from ..base import (
     UserCommand, CommandParameter, CommandCompletion,
     ToolResultEnrichmentResult, HelpLines
 )
-from ..model_provider.types import ToolSchema
+from ..model_provider.types import ToolSchema, TRAIT_FILE_WRITER
 from ..subagent.config import expand_variables
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
@@ -23,14 +23,6 @@ from .lsp_client import (
 
 from shared.trace import trace as _trace_write
 
-
-# Tools that write/modify files and should trigger LSP diagnostics
-FILE_WRITING_TOOLS = {
-    'updateFile',
-    'writeNewFile',
-    'lsp_rename_symbol',
-    'lsp_apply_code_action',
-}
 
 # Symbol kinds that represent exportable/referenceable entities
 # Used by get_file_dependents() to find symbols worth checking for external references
@@ -642,6 +634,7 @@ class LSPToolPlugin:
                 },
                 category="code",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
                 name="lsp_get_code_actions",
@@ -724,6 +717,7 @@ class LSPToolPlugin:
                 },
                 category="code",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_FILE_WRITER}),
             ),
         ]
 
@@ -849,10 +843,6 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         Returns:
             ToolResultEnrichmentResult with diagnostics appended if applicable.
         """
-        # Only process file-writing tools
-        if tool_name not in FILE_WRITING_TOOLS:
-            return ToolResultEnrichmentResult(result=result)
-
         self._trace(f"enrich_tool_result: checking {tool_name}")
 
         # Skip if no LSP servers are connected
@@ -909,13 +899,16 @@ Use 'lsp status' to see connected language servers and their capabilities."""
     ) -> List[str]:
         """Extract file paths from a tool result.
 
-        Different tools return file paths in different formats:
-        - updateFile/writeNewFile: {"path": "...", "success": true}
-        - lsp_rename_symbol: {"files_modified": [...], "changes": [...]}
-        - lsp_apply_code_action: {"files_modified": [...], "changes": [...]}
+        Uses generic key inspection that matches the ``file_writer`` trait
+        contract (see :data:`TRAIT_FILE_WRITER`):
+
+        - ``"path"``  — single-file operations.
+        - ``"files_modified"`` — multi-file operations.
+        - ``"changes"[].file`` — detailed change records.
 
         Args:
-            tool_name: The tool that produced the result.
+            tool_name: The tool that produced the result (unused, kept for
+                signature compatibility with enrichment callers).
             result: The JSON-serialized result string.
 
         Returns:
@@ -926,28 +919,25 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         except (json.JSONDecodeError, TypeError):
             return []
 
-        # Check for error result
-        if isinstance(data, dict) and data.get("error"):
+        if not isinstance(data, dict) or data.get("error"):
             return []
 
         file_paths = []
 
-        if tool_name in ('updateFile', 'writeNewFile'):
-            # Single file operations
-            path = data.get("path")
-            if path:
-                file_paths.append(path)
+        # Single-file key
+        path = data.get("path")
+        if path:
+            file_paths.append(path)
 
-        elif tool_name in ('lsp_rename_symbol', 'lsp_apply_code_action'):
-            # Workspace edit operations - multiple files
-            files_modified = data.get("files_modified", [])
-            file_paths.extend(files_modified)
+        # Multi-file key
+        files_modified = data.get("files_modified", [])
+        file_paths.extend(files_modified)
 
-            # Also check changes array for file paths
-            changes = data.get("changes", [])
-            for change in changes:
-                if isinstance(change, dict) and change.get("file"):
-                    file_paths.append(change["file"])
+        # Detailed changes array
+        changes = data.get("changes", [])
+        for change in changes:
+            if isinstance(change, dict) and change.get("file"):
+                file_paths.append(change["file"])
 
         return file_paths
 

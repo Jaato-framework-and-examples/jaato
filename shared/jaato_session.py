@@ -4352,10 +4352,12 @@ NOTES
         """
         enriched_dict = result_dict.copy()
 
-        # Tools that write files - pass full JSON for LSP diagnostics enrichment
-        file_writing_tools = {'writeNewFile', 'updateFile', 'lsp_rename_symbol', 'lsp_apply_code_action'}
+        # Tools declaring the file_writer trait get full-JSON enrichment
+        # (LSP diagnostics, artifact tracking, etc.)
+        from shared.plugins.model_provider.types import TRAIT_FILE_WRITER
+        tool_traits = self._runtime.registry.get_tool_traits(tool_name)
 
-        if tool_name in file_writing_tools:
+        if TRAIT_FILE_WRITER in tool_traits:
             # Pass full result as JSON so LSP can extract file paths
             import json
             result_json = json.dumps(result_dict)

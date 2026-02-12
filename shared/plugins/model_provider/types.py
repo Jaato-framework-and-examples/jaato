@@ -11,7 +11,36 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Union
+
+
+TRAIT_FILE_WRITER = "file_writer"
+"""Trait for tools that write or modify files on disk.
+
+Tools declaring this trait participate in the file-enrichment pipeline:
+the session passes their full JSON result through all enrichment plugins
+(LSP diagnostics, artifact tracking, etc.) instead of treating the result
+as plain text.
+
+**Result format contract** — tools with this trait MUST include at least one
+of the following keys in their result dict so enrichment plugins can discover
+which files were affected:
+
+- ``"path"`` (str): path of the single file written/modified.
+- ``"files_modified"`` (list[str]): paths when multiple files are affected.
+- ``"changes"`` (list[dict]): detailed per-file change records, each
+  containing a ``"file"`` key with the affected path.
+
+Usage::
+
+    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+
+    ToolSchema(
+        name="myWriteTool",
+        ...,
+        traits=frozenset({TRAIT_FILE_WRITER}),
+    )
+"""
 
 
 class Role(str, Enum):
@@ -87,6 +116,9 @@ class ToolSchema:
         editable: Optional EditableContent declaring which parameters are
             user-editable at permission time. When set, the permission prompt
             includes an "Edit" option that opens an external editor.
+        traits: Semantic capability tags that drive cross-cutting behavior
+            (e.g., enrichment routing).  Use the ``TRAIT_*`` constants defined
+            in this module.  See :data:`TRAIT_FILE_WRITER` for an example.
     """
     name: str
     description: str
@@ -94,6 +126,7 @@ class ToolSchema:
     category: Optional[str] = None
     discoverability: str = "discoverable"
     editable: Optional[EditableContent] = None
+    traits: FrozenSet[str] = field(default_factory=frozenset)
 
 
 @dataclass
