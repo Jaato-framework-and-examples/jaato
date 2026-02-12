@@ -997,6 +997,10 @@ class PermissionPlugin:
                 was_edited = False
 
                 # Edit loop - user can edit multiple times before final decision
+                # Track the request_id of the last prompt sent to the client
+                # so that pre-validation can reference it when resolving.
+                last_prompted_request_id: str | None = None
+
                 while True:
                     # Get custom display info from source plugin if available
                     channel_type = channel.name if channel else "console"
@@ -1010,7 +1014,10 @@ class PermissionPlugin:
                         self._trace(f"check_permission: pre-validation failed for {tool_name}: {display_info.pre_validation_error}")
                         self._log_decision(tool_name, current_args, "allow", f"Pre-validation error (skipping prompt): {display_info.pre_validation_error}")
                         if self._on_permission_resolved and not is_subagent_mode:
-                            self._on_permission_resolved(tool_name, "", True, "pre_validation")
+                            # Use last_prompted_request_id so the client can
+                            # match this resolution to its pending prompt and
+                            # clear the permission input mode.
+                            self._on_permission_resolved(tool_name, last_prompted_request_id or "", True, "pre_validation")
                         return True, {'reason': 'Pre-validation error, skipping prompt', 'method': 'pre_validation'}
 
                     # Build context with display info
@@ -1039,6 +1046,7 @@ class PermissionPlugin:
                         self._on_permission_requested(
                             tool_name, request.request_id, current_args, request.response_options, call_id
                         )
+                    last_prompted_request_id = request.request_id
 
                     response = channel.request_permission(request)
 
