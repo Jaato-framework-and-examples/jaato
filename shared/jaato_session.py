@@ -3750,6 +3750,14 @@ NOTES
         This is called when the model rejects a request due to context limit exceeded.
         The GC plugin decides whether it's feasible to collect anything at this point.
 
+        During context limit recovery from send_tool_results, the provider has already
+        rolled back the tool result messages, leaving the trailing MODEL message (with
+        function_calls) without matching tool results. This MODEL message must be
+        preserved through GC because the caller will retry sending the tool results.
+        Without this preservation, ensure_tool_call_integrity() would remove the
+        "unpaired" MODEL message, and the retry would fail because the tool results
+        would reference tool_call_ids absent from the history.
+
         Args:
             on_output: Optional callback for UI notifications.
 
@@ -3764,6 +3772,21 @@ NOTES
 
         context_usage = self.get_context_usage()
         history = self.get_history()
+
+        # Save trailing MODEL message with pending tool calls before GC.
+        # When send_tool_results fails with context limit, the provider rolls back
+        # the tool result messages but the MODEL message (with function_calls) remains
+        # at the end of history without matching responses. ensure_tool_call_integrity()
+        # would remove this as "unpaired", but we need it for the retry.
+        trailing_model_msg = None
+        if (history and history[-1].role == Role.MODEL
+                and history[-1].function_calls):
+            trailing_model_msg = history.pop()
+            self._trace(
+                f"CONTEXT_LIMIT_RECOVERY: Saved trailing MODEL message with "
+                f"{len(trailing_model_msg.function_calls)} pending tool call(s) "
+                f"before GC"
+            )
 
         new_history, result = self._gc_plugin.collect(
             history,
@@ -3782,6 +3805,16 @@ NOTES
                 new_history,
                 trace_fn=lambda m: self._trace(f"CONTEXT_LIMIT_RECOVERY: {m}"),
             )
+
+            # Re-append the trailing MODEL message with pending tool calls.
+            # This ensures the retry's tool results have a matching assistant message.
+            if trailing_model_msg is not None:
+                new_history.append(trailing_model_msg)
+                self._trace(
+                    "CONTEXT_LIMIT_RECOVERY: Re-appended trailing MODEL message "
+                    "with pending tool calls after GC"
+                )
+
             self.reset_session(new_history)
             self._gc_history.append(result)
 
