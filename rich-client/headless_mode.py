@@ -370,8 +370,8 @@ async def run_headless_mode(
                 renderer.on_retry(
                     attempt=event.attempt,
                     max_attempts=event.max_attempts,
-                    reason=event.reason,
-                    delay_seconds=event.delay_seconds,
+                    reason=event.message,
+                    delay_seconds=event.delay,
                 )
 
             # ==================== System Messages ====================
