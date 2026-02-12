@@ -155,6 +155,47 @@ class MyAuthPlugin:
         ])
 ```
 
+## Tool Traits
+
+Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field
+(`FrozenSet[str]`). Traits drive cross-cutting behavior (enrichment routing,
+permission defaults, etc.) without hardcoding tool names in session or plugin code.
+
+### Currently Defined Traits
+
+| Constant | Value | Contract |
+|----------|-------|----------|
+| `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
+
+### How to Declare Traits
+
+```python
+from ..model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+
+ToolSchema(
+    name="myWriteTool",
+    description="...",
+    parameters={...},
+    traits=frozenset({TRAIT_FILE_WRITER}),
+)
+```
+
+### How Traits Are Consumed
+
+- **Session** (`jaato_session.py`): Calls `registry.get_tool_traits(tool_name)` to
+  decide enrichment strategy. Tools with `TRAIT_FILE_WRITER` get full-JSON
+  enrichment (LSP diagnostics, artifact tracking).
+- **Enrichment plugins** (LSP, artifact_tracker): Receive all tool results that the
+  session routes to them. They extract file paths generically from the result dict
+  using the standard keys (`path`, `files_modified`, `changes[].file`).
+
+### Adding a New Trait
+
+1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a
+   docstring documenting the contract.
+2. Update consumers (session, plugins) to query `registry.get_tool_traits()` for
+   the new trait.
+
 ## Checklist for New Plugins
 
 1. `__init__.py` has `PLUGIN_KIND = "tool"` (or appropriate kind)
@@ -166,6 +207,7 @@ class MyAuthPlugin:
 7. Help command returns `HelpLines` (not `str`) for pager display
 8. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
 9. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
+10. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
 
 ## Critical: `verify_auth()` in Model Provider Plugins
 

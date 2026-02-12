@@ -194,6 +194,30 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 - Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
 - Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
 
+### Tool Traits
+
+Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.
+
+**Currently defined traits:**
+
+| Constant | Value | Contract |
+|----------|-------|----------|
+| `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
+
+**How it works:**
+1. Tool schemas declare traits: `traits=frozenset({TRAIT_FILE_WRITER})`
+2. Session queries `registry.get_tool_traits(tool_name)` to decide enrichment strategy
+3. Enrichment plugins (LSP, artifact_tracker) extract file paths generically from the result dict
+
+**Adding a trait to a new tool:**
+1. Import the constant: `from ..model_provider.types import TRAIT_FILE_WRITER`
+2. Add to the `ToolSchema`: `traits=frozenset({TRAIT_FILE_WRITER})`
+3. Ensure the tool result dict includes the required keys (`path`, `files_modified`, or `changes`)
+
+**Defining a new trait:**
+1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
+2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.

@@ -453,14 +453,34 @@ def create_plugin() -> ExamplePlugin:
    )
    ```
 
-4. **Executor Signature**: Each executor must accept a `Dict[str, Any]` and return a JSON-serializable result:
+4. **Tool Traits**: Tools that write or modify files must declare the `file_writer` trait so the session routes their results through the enrichment pipeline (LSP diagnostics, artifact tracking). Import the constant and add it to the schema:
+
+   ```python
+   from shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+
+   ToolSchema(
+       name='my_write_tool',
+       description='...',
+       parameters={...},
+       traits=frozenset({TRAIT_FILE_WRITER}),
+   )
+   ```
+
+   Tools with this trait **must** include at least one of these keys in their result dict:
+   - `"path"` (str) — single-file operations
+   - `"files_modified"` (list[str]) — multi-file operations
+   - `"changes"` (list[dict]) — each with a `"file"` key
+
+   See `TRAIT_FILE_WRITER` in `shared/plugins/model_provider/types.py` for the full contract. Additional traits may be defined in the future using the same pattern.
+
+5. **Executor Signature**: Each executor must accept a `Dict[str, Any]` and return a JSON-serializable result:
    ```python
    def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
        # args contains the parameters from the AI model
        return {'result': 'some value'}
    ```
 
-5. **Executor Metadata** (optional): Executors can return a `(result_dict, metadata_dict)` tuple to pass UI hints to the presentation layer. The metadata dict is merged into the result by `ToolExecutor` before being forwarded to the session.
+6. **Executor Metadata** (optional): Executors can return a `(result_dict, metadata_dict)` tuple to pass UI hints to the presentation layer. The metadata dict is merged into the result by `ToolExecutor` before being forwarded to the session.
 
    | Key | Type | Default | Description |
    |-----|------|---------|-------------|

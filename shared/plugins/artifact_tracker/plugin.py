@@ -34,15 +34,6 @@ from shared.trace import trace as _trace_write
 # Default storage location (inside .jaato directory)
 DEFAULT_STORAGE_PATH = ".jaato/.artifact_tracker.json"
 
-# Tools that write/modify files - same as LSP plugin for consistency
-FILE_WRITING_TOOLS = {
-    'updateFile',
-    'writeNewFile',
-    'lsp_rename_symbol',
-    'lsp_apply_code_action',
-}
-
-
 def _normalize_path_standalone(path: str) -> str:
     """Normalize a path to absolute path (standalone version for module-level use).
 
@@ -1148,10 +1139,6 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         Returns:
             ToolResultEnrichmentResult with dependency info appended if applicable.
         """
-        # Only process file-writing tools
-        if tool_name not in FILE_WRITING_TOOLS:
-            return ToolResultEnrichmentResult(result=result)
-
         self._trace(f"enrich_tool_result: processing {tool_name}")
 
         # Need both registries to work
