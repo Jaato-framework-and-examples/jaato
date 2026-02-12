@@ -75,12 +75,18 @@ class WorkspacePanel:
         Escape     – close the panel.
     """
 
-    def __init__(self, toggle_key: Optional[KeyBinding] = None):
+    def __init__(
+        self,
+        toggle_key: Optional[KeyBinding] = None,
+        open_file_key: Optional[KeyBinding] = None,
+    ):
         """Initialize the workspace panel.
 
         Args:
             toggle_key: Keybinding used to toggle the panel.  Shown in the
                         footer hint.
+            open_file_key: Keybinding used to open the selected file in an
+                          external editor.  Shown in the footer hint.
         """
         # File state: {relative_path: status_string}
         self._files: Dict[str, str] = {}
@@ -101,6 +107,7 @@ class WorkspacePanel:
         self._highlights: Dict[str, float] = {}
 
         self._toggle_key = toggle_key or "c-w"
+        self._open_file_key = open_file_key or "enter"
         self._theme: Optional["ThemeConfig"] = None
         self._tree_dirty: bool = True  # Rebuild tree before next render
 
@@ -296,6 +303,27 @@ class WorkspacePanel:
             self._tree_dirty = True
             return True
         return False
+
+    def get_selected_file_path(self) -> Optional[str]:
+        """Return the relative path of the file at the current cursor position.
+
+        Reconstructs the full relative path by combining the parent directory
+        prefix with the file name.  Returns ``None`` if the cursor is on a
+        directory or the list is empty.
+
+        Returns:
+            Relative file path (e.g. ``"server/core.py"``), or None.
+        """
+        flat = self._get_flat_entries()
+        if not flat or self._cursor_index >= len(flat):
+            return None
+
+        entry = flat[self._cursor_index]
+        if entry["is_dir"]:
+            return None
+
+        parent = entry.get("parent_dir", "")
+        return f"{parent}{entry['name']}"
 
     def set_max_visible_lines(self, n: int) -> None:
         """Set maximum visible lines in the popup.
@@ -519,7 +547,8 @@ class WorkspacePanel:
         footer.append(f" {count} file{'s' if count != 1 else ''}", style="dim")
         # Right-align close hint
         close_hint = f"[{format_key_for_display(self._toggle_key)} close]"
-        nav_hint = "↑↓ navigate · ◂▸ fold · "
+        open_hint = f"{format_key_for_display(self._open_file_key)} open · "
+        nav_hint = f"↑↓ navigate · ◂▸ fold · {open_hint}"
         right_content = nav_hint + close_hint
         padding = max(1, width - 4 - len(f" {count} files") - len(right_content))
         footer.append(" " * padding)

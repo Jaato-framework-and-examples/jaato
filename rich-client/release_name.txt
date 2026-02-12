@@ -1,1 +1,1 @@
-Waypoints all the way
+We now can edit files from the workspace panel

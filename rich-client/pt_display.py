@@ -468,7 +468,10 @@ class PTDisplay:
         self._budget_panel.set_theme(self._theme)
         self._tool_output_popup = ToolOutputPopup(tab_key=self._keybinding_config.tool_output_popup_tab)
         self._tool_output_popup.set_theme(self._theme)
-        self._workspace_panel = WorkspacePanel(toggle_key=self._keybinding_config.toggle_workspace)
+        self._workspace_panel = WorkspacePanel(
+            toggle_key=self._keybinding_config.toggle_workspace,
+            open_file_key=self._keybinding_config.workspace_open_file,
+        )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
@@ -1107,6 +1110,43 @@ class PTDisplay:
             and not self._waiting_for_channel_input
         )
 
+    def _open_workspace_file(self) -> None:
+        """Open the workspace panel's selected file in the external editor.
+
+        Resolves the relative file path shown in the workspace panel against
+        the session workspace root, then launches ``$EDITOR`` (or ``$VISUAL``,
+        falling back to ``vi``) via ``run_in_terminal`` so the TUI is properly
+        suspended and restored.  Does nothing if the cursor is on a directory
+        or the file doesn't exist on disk.
+        """
+        import os
+        import subprocess
+        from editor_utils import get_editor
+        from prompt_toolkit.application import run_in_terminal
+
+        rel_path = self._workspace_panel.get_selected_file_path()
+        if not rel_path:
+            return
+
+        workspace = (
+            os.path.expanduser(self._session_workspace)
+            if self._session_workspace
+            else os.getcwd()
+        )
+        abs_path = os.path.join(workspace, rel_path)
+
+        if not os.path.isfile(abs_path):
+            return
+
+        editor = get_editor()
+
+        async def _open():
+            def _run():
+                subprocess.call([editor, abs_path])
+            await run_in_terminal(_run, in_executor=False)
+
+        self._app.create_background_task(_open())
+
     def _get_active_buffer(self):
         """Get the active output buffer (selected agent's or main)."""
         if self._agent_registry:
@@ -1563,6 +1603,10 @@ class PTDisplay:
                 self._permission_response_options):
                 self._select_focused_permission_option()
                 return
+            # Workspace panel: open selected file when input is empty
+            if not text and self._workspace_captures_keys():
+                self._open_workspace_file()
+                return
             # Normal mode - submit input
             # Expand paste placeholders BEFORE stripping to preserve line feeds in pasted content
             expanded_text = self._expand_paste_placeholders(raw_text)
@@ -1894,6 +1938,18 @@ class PTDisplay:
             if self._workspace_panel.has_files:
                 self._workspace_panel.toggle_popup()
                 self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_open_file"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_open_file(event):
+            """Open the selected workspace file in the external editor.
+
+            This handler exists for custom keybindings (non-Enter).  When the
+            default Enter key is used, the submit handler delegates to
+            ``_open_workspace_file`` directly so that the input line always
+            has priority.
+            """
+            self._open_workspace_file()
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
         def handle_ctrl_b(event):
