@@ -2241,20 +2241,11 @@ class PTDisplay:
             filter=Condition(lambda: self._budget_panel.is_visible),
         )
 
-        # Agent details popup (floating overlay, shown on agent cycle)
-        def get_agent_popup_height():
-            """Calculate popup height based on content."""
-            content = self._get_agent_popup_content()
-            if not content:
-                return 1
-            # Count newlines in content
-            line_count = sum(1 for _, text in content if '\n' in text)
-            return max(8, line_count + 2)  # At least 8 lines
-
+        # Agent tooltip (floating overlay, shown on agent cycle)
         agent_popup_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_agent_popup_content),
-                height=get_agent_popup_height,
+                height=1,
             ),
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
