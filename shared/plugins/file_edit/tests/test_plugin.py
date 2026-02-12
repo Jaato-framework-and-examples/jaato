@@ -101,8 +101,11 @@ class TestFileEditPluginFunctionDeclarations:
         assert schema["type"] == "object"
         assert "path" in schema["properties"]
         assert "new_content" in schema["properties"]
-        assert "path" in schema["required"]
-        assert "new_content" in schema["required"]
+        assert "old" in schema["properties"]
+        assert "new" in schema["properties"]
+        assert "prologue" in schema["properties"]
+        assert "epilogue" in schema["properties"]
+        assert schema["required"] == ["path"]
 
 
 class TestFileEditPluginExecutors:
@@ -262,6 +265,187 @@ class TestUpdateFileExecution:
         assert result["success"] is True
         assert test_file.read_text() == "Updated via content param"
         assert result["size"] == len("Updated via content param")
+
+
+class TestUpdateFileTargetedEdit:
+    """Tests for updateFile targeted edit mode (old + new)."""
+
+    def test_targeted_edit_replaces_fragment(self, tmp_path):
+        """Test that old+new replaces only the matched fragment."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def foo():\n    pass\n\ndef bar():\n    pass\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "def foo():\n    pass",
+            "new": "def foo():\n    return 42",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        content = test_file.read_text()
+        assert "def foo():\n    return 42" in content
+        # bar should be untouched
+        assert "def bar():\n    pass" in content
+
+    def test_targeted_edit_with_prologue(self, tmp_path):
+        """Test disambiguation via prologue."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("class A:\n    x = 1\n\nclass B:\n    x = 1\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "x = 1",
+            "new": "x = 2",
+            "prologue": "class B:\n    ",
+        })
+
+        assert "error" not in result
+        content = test_file.read_text()
+        assert "class A:\n    x = 1" in content
+        assert "class B:\n    x = 2" in content
+
+    def test_targeted_edit_not_found_returns_error(self, tmp_path):
+        """Test error when old text is not in file."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello, World!\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "nonexistent text",
+            "new": "replacement",
+        })
+
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+        # File should be unchanged
+        assert test_file.read_text() == "Hello, World!\n"
+
+    def test_targeted_edit_ambiguous_returns_error(self, tmp_path):
+        """Test error when old text appears multiple times."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("x = 1\nx = 1\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "x = 1",
+            "new": "x = 2",
+        })
+
+        assert "error" in result
+        assert "matched 2 times" in result["error"].lower()
+        # File should be unchanged
+        assert test_file.read_text() == "x = 1\nx = 1\n"
+
+    def test_targeted_edit_requires_new_when_old_provided(self, tmp_path):
+        """Test error when old is provided without new."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "content",
+        })
+
+        assert "error" in result
+        assert "'new' is required" in result["error"]
+
+    def test_targeted_edit_creates_backup(self, tmp_path):
+        """Test that targeted edit creates a backup."""
+        plugin = FileEditPlugin()
+        backup_dir = tmp_path / "backups"
+        plugin.initialize({"backup_dir": str(backup_dir)})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("original content\n")
+
+        plugin._execute_update_file({
+            "path": str(test_file),
+            "old": "original",
+            "new": "modified",
+        })
+
+        backups = list(backup_dir.glob("*.bak"))
+        assert len(backups) == 1
+        assert backups[0].read_text() == "original content\n"
+
+    def test_full_replacement_still_works(self, tmp_path):
+        """Test backward compatibility: new_content still works."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("old content\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "new_content": "entirely new content\n",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        assert test_file.read_text() == "entirely new content\n"
+
+    def test_format_targeted_edit_shows_diff(self, tmp_path):
+        """Test that permission display shows correct diff for targeted mode."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def foo():\n    pass\n\ndef bar():\n    pass\n")
+
+        display_info = plugin.format_permission_request(
+            "updateFile",
+            {
+                "path": str(test_file),
+                "old": "def foo():\n    pass",
+                "new": "def foo():\n    return 42",
+            },
+            "console"
+        )
+
+        assert display_info is not None
+        assert display_info.format_hint == "diff"
+        # The diff should show the change
+        assert "-    pass" in display_info.details
+        assert "+    return 42" in display_info.details
+
+    def test_format_targeted_edit_error(self, tmp_path):
+        """Test permission display when targeted edit can't find text."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Hello\n")
+
+        display_info = plugin.format_permission_request(
+            "updateFile",
+            {
+                "path": str(test_file),
+                "old": "nonexistent",
+                "new": "replacement",
+            },
+            "console"
+        )
+
+        assert display_info is not None
+        assert "error" in display_info.summary.lower()
+        assert display_info.format_hint == "text"
 
 
 class TestWriteNewFileExecution:

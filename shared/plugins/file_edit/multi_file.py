@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
+from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
 
 # Default maximum width for file paths in multi-file previews
 DEFAULT_MAX_PATH_WIDTH = 50
@@ -44,7 +45,13 @@ class OperationType(Enum):
 
 @dataclass
 class FileOperation:
-    """Represents a single file operation in a transaction."""
+    """Represents a single file operation in a transaction.
+
+    For edit operations, ``old_content`` and ``new_content`` are treated as
+    targeted search-and-replace fragments (not full-file content).  Optional
+    ``prologue`` and ``epilogue`` fields provide disambiguation context
+    around the search text.
+    """
     action: OperationType
     path: Optional[str] = None
     old_content: Optional[str] = None
@@ -52,6 +59,8 @@ class FileOperation:
     source_path: Optional[str] = None
     dest_path: Optional[str] = None
     content: Optional[str] = None
+    prologue: Optional[str] = None
+    epilogue: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FileOperation":
@@ -77,14 +86,20 @@ class FileOperation:
             path = data.get("path")
             if not path:
                 raise ValueError("'path' is required for edit operation")
-            # 'old' and 'new' are the expected keys for edit
+            # 'old' and 'new' are targeted search-and-replace fragments
             old_content = data.get("old")
             new_content = data.get("new")
             if old_content is None:
                 raise ValueError("'old' content is required for edit operation")
             if new_content is None:
                 raise ValueError("'new' content is required for edit operation")
-            return cls(action=action, path=path, old_content=old_content, new_content=new_content)
+            prologue = data.get("prologue")
+            epilogue = data.get("epilogue")
+            return cls(
+                action=action, path=path,
+                old_content=old_content, new_content=new_content,
+                prologue=prologue, epilogue=epilogue,
+            )
 
         elif action == OperationType.CREATE:
             path = data.get("path")
@@ -222,9 +237,13 @@ class MultiFileExecutor:
         - Files exist (for edit/delete)
         - Files don't exist (for create)
         - Source files exist (for rename)
-        - Content matches (for edit)
+        - Targeted edit anchor found exactly once (for edit)
         - No conflicting operations (e.g., edit + delete same file)
         - Circular renames are detected and handled
+
+        Multiple targeted edits on the same file are allowed and validated
+        sequentially (each edit is checked against the result of applying
+        all previous edits to that file).
 
         Args:
             operations: List of operations to validate
@@ -233,11 +252,14 @@ class MultiFileExecutor:
             Tuple of (valid, error_message, failed_operation_index)
         """
         # Track what files will be affected
-        files_to_edit: Dict[str, int] = {}  # path -> operation index
+        files_to_edit: Dict[str, List[int]] = {}  # path -> list of operation indices
         files_to_create: Dict[str, int] = {}
         files_to_delete: Dict[str, int] = {}
         files_to_rename_from: Dict[str, int] = {}  # source -> operation index
         files_to_rename_to: Dict[str, int] = {}  # dest -> operation index
+        # Cache of "working" file content for sequential validation of
+        # multiple edits on the same file.
+        working_content: Dict[str, str] = {}
 
         for i, op in enumerate(operations):
             if op.action == OperationType.EDIT:
@@ -254,25 +276,32 @@ class MultiFileExecutor:
                     if resolved_str not in files_to_rename_to:
                         return False, f"File not found: {op.path}", i
 
-                # Check for duplicate edit
-                if resolved_str in files_to_edit:
-                    return False, f"Duplicate edit for: {op.path} (operations {files_to_edit[resolved_str]} and {i})", i
-
                 # Check for conflict with delete
                 if resolved_str in files_to_delete:
                     return False, f"Cannot edit file that is being deleted: {op.path}", i
 
-                # Verify content matches (for existing files not being created/renamed-to)
+                # Validate that the targeted edit can be applied.
+                # For multiple edits on the same file, validate sequentially
+                # against the running "working content".
                 if resolved.exists():
-                    try:
-                        current_content = resolved.read_text()
-                        if current_content != op.old_content:
-                            # Provide a helpful error with context
-                            return False, f"Content mismatch for {op.path}: file has been modified", i
-                    except OSError as e:
-                        return False, f"Cannot read file {op.path}: {e}", i
+                    if resolved_str not in working_content:
+                        try:
+                            working_content[resolved_str] = resolved.read_text()
+                        except OSError as e:
+                            return False, f"Cannot read file {op.path}: {e}", i
 
-                files_to_edit[resolved_str] = i
+                    try:
+                        working_content[resolved_str] = apply_edit(
+                            working_content[resolved_str],
+                            op.old_content, op.new_content,
+                            op.prologue, op.epilogue,
+                        )
+                    except EditNotFoundError:
+                        return False, f"Edit target not found in {op.path}: {_truncate_for_msg(op.old_content, 80)}", i
+                    except AmbiguousEditError:
+                        return False, f"Edit target is ambiguous in {op.path} (matched multiple times). Use prologue/epilogue to disambiguate.", i
+
+                files_to_edit.setdefault(resolved_str, []).append(i)
 
             elif op.action == OperationType.CREATE:
                 resolved = self._resolve_path(op.path)
@@ -485,12 +514,17 @@ class MultiFileExecutor:
         index: int,
         rollback_stack: List[RollbackState]
     ) -> OperationResult:
-        """Execute an edit operation."""
+        """Execute an edit operation using targeted search-and-replace.
+
+        Reads the current file content, applies ``apply_edit()`` to find and
+        replace the ``old`` fragment with ``new``, then writes the result.
+        """
         resolved = self._resolve_path(op.path)
 
         # Read original content for rollback
         try:
-            original_content = resolved.read_bytes()
+            original_bytes = resolved.read_bytes()
+            current_content = original_bytes.decode()
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -500,9 +534,24 @@ class MultiFileExecutor:
                 error=f"Failed to read file: {e}"
             )
 
-        # Write new content
+        # Apply targeted edit
         try:
-            resolved.write_text(op.new_content)
+            new_content = apply_edit(
+                current_content, op.old_content, op.new_content,
+                op.prologue, op.epilogue,
+            )
+        except (EditNotFoundError, AmbiguousEditError) as e:
+            return OperationResult(
+                success=False,
+                operation_index=index,
+                action="edit",
+                path=op.path,
+                error=f"Targeted edit failed: {e}"
+            )
+
+        # Write result
+        try:
+            resolved.write_text(new_content)
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -516,7 +565,7 @@ class MultiFileExecutor:
         rollback_stack.append(RollbackState(
             operation_index=index,
             operation_type=OperationType.EDIT,
-            original_content=original_content,
+            original_content=original_bytes,
             original_path=resolved
         ))
 
@@ -525,7 +574,7 @@ class MultiFileExecutor:
             operation_index=index,
             action="edit",
             path=op.path,
-            details={"size": len(op.new_content)}
+            details={"size": len(new_content)}
         )
 
     def _execute_create(
@@ -747,12 +796,22 @@ class MultiFileExecutor:
         return all_succeeded
 
 
+def _truncate_for_msg(text: str, max_len: int) -> str:
+    """Truncate *text* for use in error/log messages."""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
 def generate_multi_file_diff_preview(
     operations: List[Dict[str, Any]],
     resolve_path_fn: Callable[[str], Path],
     max_lines_per_file: int = 30
 ) -> Tuple[str, bool]:
     """Generate a preview diff for multiple file operations.
+
+    For edit operations the actual file is read from disk and the targeted
+    edit is applied so the diff shows the real before/after content.
 
     Args:
         operations: List of operation dictionaries
@@ -766,18 +825,46 @@ def generate_multi_file_diff_preview(
 
     lines = []
     truncated = False
+    # Track working content for sequential edits on the same file
+    working_content: Dict[str, str] = {}
 
     for i, op in enumerate(operations):
         action = op.get("action", "").lower()
 
         if action == "edit":
             path = op.get("path", "unknown")
-            old = op.get("old", "")
-            new = op.get("new", "")
+            old_text = op.get("old", "")
+            new_text = op.get("new", "")
+            prologue = op.get("prologue")
+            epilogue = op.get("epilogue")
+
+            # Read file content and apply targeted edit for accurate diff
+            resolved = resolve_path_fn(path)
+            resolved_str = str(resolved)
+
+            if resolved_str not in working_content and resolved.exists():
+                try:
+                    working_content[resolved_str] = resolved.read_text()
+                except OSError:
+                    pass
+
+            if resolved_str in working_content:
+                before = working_content[resolved_str]
+                try:
+                    after = apply_edit(before, old_text, new_text, prologue, epilogue)
+                    working_content[resolved_str] = after
+                except (EditNotFoundError, AmbiguousEditError):
+                    # Fall through to simple fragment diff below
+                    before = old_text
+                    after = new_text
+            else:
+                # File not readable; show fragment diff
+                before = old_text
+                after = new_text
 
             diff = list(difflib.unified_diff(
-                old.splitlines(keepends=True),
-                new.splitlines(keepends=True),
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
                 fromfile=f"a/{path}",
                 tofile=f"b/{path}"
             ))
