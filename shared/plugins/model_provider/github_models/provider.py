@@ -1399,8 +1399,11 @@ class GitHubModelsProvider:
                 original_error=str(error),
             ) from error
 
-        # Check for model not found (various formats)
-        if any(x in error_str for x in ("404", "not found", "unknown_model", "unknown model")):
+        # Check for model not found (various formats).
+        # Exclude "tool_call_id ... not found" which is a different error
+        # (orphaned tool results referencing non-existent tool calls).
+        if (any(x in error_str for x in ("404", "not found", "unknown_model", "unknown model"))
+                and "tool_call_id" not in error_str):
             raise ModelNotFoundError(
                 model=self._model_name or "unknown",
                 available_models=self.list_models(),
