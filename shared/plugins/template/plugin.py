@@ -449,11 +449,34 @@ renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/service
 renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
 ```
 
-### Template Priority Rule
-1. ALWAYS check if a template exists before writing code
-2. If a template matches your task, USE IT via template tools
-3. ONLY write code manually if NO suitable template exists
-4. When in doubt, use `listAvailableTemplates` to see available templates
+### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
+
+**MANDATORY PREREQUISITE**: Before calling ANY of these file-writing tools, you MUST
+call `listAvailableTemplates` at least once in the current or recent turns:
+- `writeNewFile` — creating new files
+- `updateFile` — modifying existing files
+- `multiFileEdit` — batch file operations
+- `findAndReplace` — regex-based replacements across files
+
+**The workflow is always:**
+1. Call `listAvailableTemplates` to check what templates are available
+2. If a template matches your task **directly** → use `renderTemplateToFile`
+3. If a template matches your task **indirectly** (the template provides content
+   that should be layered onto an existing file) → render it mentally, then apply
+   the relevant sections via `updateFile` or `multiFileEdit` as a patch
+4. If NO template matches → proceed freely with file-writing tools
+
+**Direct vs. Indirect Template Usage:**
+- **Direct**: Template produces a complete new file → `renderTemplateToFile`
+- **Indirect**: Template provides a pattern or code fragment that must be merged
+  into an existing file (e.g., adding resilience annotations to a Java class).
+  The template is the **source of truth** for the new code — render it to
+  understand the pattern, then apply the relevant portions as a patch using
+  `updateFile` or `multiFileEdit`.
+
+**Enforcement:** The reliability plugin monitors for file-writing tool calls without
+a recent `listAvailableTemplates` check and will inject a nudge. Treat nudges as
+mandatory corrections — call `listAvailableTemplates` and re-evaluate before proceeding.
 
 ### Non-Compliance Policy
 

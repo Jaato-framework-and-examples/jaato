@@ -27,6 +27,14 @@ class PatternDetector:
 
     This class tracks tool calls and model outputs within a turn to detect
     stall patterns that indicate the model is stuck in an unproductive loop.
+
+    Cross-turn tracking:
+        Some patterns require looking beyond the current turn. The
+        ``_last_template_check_turn`` field records the most recent turn in
+        which ``listAvailableTemplates`` (or the configured template check
+        tool) was called. When a template-gated file-writing tool is invoked,
+        the detector compares the current turn index against this value using
+        the ``template_check_lookback_turns`` window from the config.
     """
 
     def __init__(
@@ -48,6 +56,10 @@ class PatternDetector:
         self._last_action_index: int = -1
         self._announced_actions: List[str] = []
         self._consecutive_reads: int = 0
+
+        # Cross-turn tracking: last turn that called the template check tool.
+        # None means it has never been called in this session.
+        self._last_template_check_turn: Optional[int] = None
 
         # Pattern history (for reporting)
         self._detected_patterns: List[BehavioralPattern] = []
@@ -132,11 +144,21 @@ class PatternDetector:
         call = ToolCall(tool_name=tool_name, args=args, timestamp=datetime.now())
         self._turn_history.append(call)
 
+        # Track cross-turn template check calls
+        if tool_name == self._config.template_check_tool:
+            self._last_template_check_turn = self._turn_index
+
         # Track read vs action tools
         if tool_name in self._config.read_only_tools:
             self._consecutive_reads += 1
         elif tool_name in self._config.action_tools:
             self._consecutive_reads = 0
+
+        # Check for template prerequisite violation
+        pattern = self._check_template_prerequisite(tool_name)
+        if pattern:
+            self._emit_pattern(pattern)
+            return pattern
 
         # Check for repetitive calls
         pattern = self._check_repetitive_calls(tool_name)
@@ -218,6 +240,65 @@ class PatternDetector:
     # -------------------------------------------------------------------------
     # Pattern Detection Logic
     # -------------------------------------------------------------------------
+
+    def _check_template_prerequisite(self, tool_name: str) -> Optional[BehavioralPattern]:
+        """Check if a template-gated file tool was called without a recent template check.
+
+        File-writing tools (writeNewFile, updateFile, multiFileEdit, findAndReplace)
+        require ``listAvailableTemplates`` to have been called in the current turn
+        or within the configured lookback window (default: previous 2 turns).
+
+        Returns:
+            BehavioralPattern if the prerequisite was violated, None if satisfied
+            or the tool is not gated.
+        """
+        if tool_name not in self._config.template_gated_tools:
+            return None
+
+        lookback = self._config.template_check_lookback_turns
+
+        # Check if template check was called recently enough
+        if self._last_template_check_turn is not None:
+            turns_since_check = self._turn_index - self._last_template_check_turn
+            if turns_since_check <= lookback:
+                return None  # Prerequisite satisfied
+
+        # Also check the current turn's history (the check tool may have been
+        # called earlier in this same turn, before the turn index was bumped).
+        for call in self._turn_history:
+            if call.tool_name == self._config.template_check_tool:
+                return None  # Prerequisite satisfied within this turn
+
+        # Determine severity based on how many gated tools were called
+        # without a template check in the session
+        gated_count = sum(
+            1 for p in self._detected_patterns
+            if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED
+        )
+        if gated_count >= 2:
+            severity = PatternSeverity.SEVERE
+        elif gated_count >= 1:
+            severity = PatternSeverity.MODERATE
+        else:
+            severity = PatternSeverity.MINOR
+
+        duration = self._calculate_duration()
+
+        return BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=self._turn_index,
+            session_id=self._session_id,
+            tool_sequence=[tool_name],
+            repetition_count=gated_count + 1,
+            duration_seconds=duration,
+            model_name=self._model_name,
+            severity=severity,
+            expected_action=(
+                f"Call {self._config.template_check_tool} before using {tool_name} "
+                f"to check if a template can produce or contribute to the target file"
+            ),
+        )
 
     def _check_repetitive_calls(self, tool_name: str) -> Optional[BehavioralPattern]:
         """Check for same tool called repeatedly."""
@@ -493,11 +574,12 @@ class PatternDetector:
         self._detected_patterns = []
 
     def reset(self) -> None:
-        """Reset all state."""
+        """Reset all state, including cross-turn tracking."""
         self._turn_history = []
         self._turn_start = None
         self._turn_index = 0
         self._last_action_index = -1
         self._announced_actions = []
         self._consecutive_reads = 0
+        self._last_template_check_turn = None
         self._detected_patterns = []

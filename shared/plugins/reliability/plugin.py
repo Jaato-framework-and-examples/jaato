@@ -781,22 +781,29 @@ class ReliabilityPlugin:
         inject_system_guidance: Optional[Callable[[str], None]] = None,
         inject_context_hint: Optional[Callable[[str], None]] = None,
         request_pause: Optional[Callable[[str], None]] = None,
+        notify_user: Optional[Callable[[str, str, str], None]] = None,
     ) -> None:
         """Set callbacks for injecting nudges into the session.
 
         These callbacks allow the plugin to inject messages into the
-        model's context when patterns are detected.
+        model's context when patterns are detected, and optionally emit
+        user-visible notifications.
 
         Args:
             inject_system_guidance: Inject as high-priority system message
             inject_context_hint: Inject as lower-priority context hint
             request_pause: Request user intervention (highest priority)
+            notify_user: Emit a user-visible notification via the output
+                callback (source, text, mode). Uses source="enrichment"
+                to match the rendering pipeline used by template/memory/
+                reference enrichment notifications.
         """
         if self._nudge_injector:
             self._nudge_injector.set_injection_callbacks(
                 inject_system_guidance=inject_system_guidance,
                 inject_context_hint=inject_context_hint,
                 request_pause=request_pause,
+                notify_user=notify_user,
             )
 
     def inject_nudge_for_pattern(self, pattern: BehavioralPattern) -> Optional[Nudge]:

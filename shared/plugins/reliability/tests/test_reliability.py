@@ -1366,6 +1366,229 @@ class TestPatternDetection:
         assert plugin.get_pattern_detector() is not None
 
 
+class TestTemplatePrerequisiteDetection:
+    """Tests for template prerequisite pattern detection.
+
+    Verifies that the TEMPLATE_CHECK_SKIPPED pattern fires when a
+    template-gated file-writing tool is called without a recent
+    listAvailableTemplates call, and that the pattern is suppressed
+    when the prerequisite is satisfied.
+    """
+
+    @pytest.fixture
+    def plugin(self):
+        """Create a plugin with pattern detection and template gating enabled."""
+        from ..types import PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            enabled=True,
+            repetitive_call_threshold=100,  # High to avoid interference
+            introspection_loop_threshold=100,
+            max_reads_before_action=100,
+        ))
+        plugin.enable_pattern_detection(True)
+        return plugin
+
+    def test_writeNewFile_without_template_check_triggers_pattern(self, plugin):
+        """Calling writeNewFile without prior listAvailableTemplates triggers detection."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
+
+        assert len(patterns) == 1
+        assert patterns[0].pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED
+        assert "writeNewFile" in patterns[0].tool_sequence
+        assert "listAvailableTemplates" in patterns[0].expected_action
+
+    def test_updateFile_without_template_check_triggers_pattern(self, plugin):
+        """Calling updateFile without prior listAvailableTemplates triggers detection."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        plugin.on_tool_called("updateFile", {"path": "/tmp/Foo.java", "content": "updated"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 1
+
+    def test_multiFileEdit_without_template_check_triggers_pattern(self, plugin):
+        """Calling multiFileEdit without prior listAvailableTemplates triggers detection."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        plugin.on_tool_called("multiFileEdit", {"operations": []})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 1
+
+    def test_findAndReplace_without_template_check_triggers_pattern(self, plugin):
+        """Calling findAndReplace without prior listAvailableTemplates triggers detection."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        plugin.on_tool_called("findAndReplace", {"pattern": "foo", "replacement": "bar"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 1
+
+    def test_template_check_in_same_turn_suppresses_pattern(self, plugin):
+        """listAvailableTemplates called earlier in same turn satisfies prerequisite."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        # Call the template check tool first
+        plugin.on_tool_called("listAvailableTemplates", {})
+        # Then call a gated tool
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 0
+
+    def test_template_check_in_previous_turn_suppresses_pattern(self, plugin):
+        """listAvailableTemplates called in previous turn within lookback window satisfies prerequisite."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        # Turn 1: call listAvailableTemplates
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("listAvailableTemplates", {})
+
+        # Turn 2: call a gated tool (1 turn away, within default lookback of 2)
+        plugin.on_turn_start(2)
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 0
+
+    def test_template_check_two_turns_ago_suppresses_pattern(self, plugin):
+        """listAvailableTemplates called 2 turns ago (at lookback boundary) still satisfies prerequisite."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        # Turn 1: call listAvailableTemplates
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("listAvailableTemplates", {})
+
+        # Turn 2: no template check
+        plugin.on_turn_start(2)
+        plugin.on_tool_called("readFile", {"path": "/tmp/other.txt"})
+
+        # Turn 3: call a gated tool (2 turns away = exactly at boundary)
+        plugin.on_turn_start(3)
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 0
+
+    def test_template_check_beyond_lookback_triggers_pattern(self, plugin):
+        """listAvailableTemplates called more than lookback turns ago does NOT satisfy prerequisite."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        # Turn 1: call listAvailableTemplates
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("listAvailableTemplates", {})
+
+        # Turns 2, 3: no template check
+        plugin.on_turn_start(2)
+        plugin.on_turn_start(3)
+
+        # Turn 4: call a gated tool (3 turns away, beyond default lookback of 2)
+        plugin.on_turn_start(4)
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java", "content": "class Foo {}"})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 1
+
+    def test_non_gated_tools_not_affected(self, plugin):
+        """Tools not in the gated set do not trigger the template check pattern."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+        plugin.on_turn_start(1)
+
+        # readFile is not gated — should not trigger
+        plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
+        # renderTemplateToFile is not gated — it IS a template tool
+        plugin.on_tool_called("renderTemplateToFile", {"template_name": "Foo.tpl", "output_path": "/tmp/Foo.java", "variables": {}})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 0
+
+    def test_severity_escalates_on_repeated_violations(self, plugin):
+        """Severity escalates from MINOR to MODERATE to SEVERE on repeated violations."""
+        from ..types import BehavioralPatternType, PatternSeverity
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        # First violation: MINOR
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("writeNewFile", {"path": "/tmp/a.java", "content": ""})
+
+        # Second violation: MODERATE (1 prior pattern in history)
+        plugin.on_turn_start(2)
+        plugin.on_tool_called("updateFile", {"path": "/tmp/b.java", "content": ""})
+
+        # Third violation: SEVERE (2 prior patterns in history)
+        plugin.on_turn_start(3)
+        plugin.on_tool_called("multiFileEdit", {"operations": []})
+
+        template_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 3
+        assert template_patterns[0].severity == PatternSeverity.MINOR
+        assert template_patterns[1].severity == PatternSeverity.MODERATE
+        assert template_patterns[2].severity == PatternSeverity.SEVERE
+
+    def test_reset_clears_template_check_state(self, plugin):
+        """reset() clears cross-turn template check tracking."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        # Establish a template check
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("listAvailableTemplates", {})
+
+        # Reset the detector
+        detector = plugin.get_pattern_detector()
+        detector.reset()
+
+        # Now a gated tool should trigger since the check was cleared
+        detector.on_turn_start(1)
+        detector.on_tool_called("writeNewFile", {"path": "/tmp/Foo.java"})
+
+        # The hook is on the plugin, but we called the detector directly;
+        # check patterns via the detector.
+        detected = detector.get_detected_patterns()
+        template_patterns = [p for p in detected if p.pattern_type == BehavioralPatternType.TEMPLATE_CHECK_SKIPPED]
+        assert len(template_patterns) == 1
+
+
 class TestNudgeTypes:
     """Tests for nudge type definitions."""
 
@@ -1565,6 +1788,50 @@ class TestNudgeStrategy:
         full_config = NudgeConfig(level=NudgeLevel.FULL)
         assert strategy.should_inject(interrupt_nudge, full_config) is True
 
+    def test_create_nudge_for_template_check_skipped(self):
+        """Test creating nudge for template check skipped pattern."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeType
+        from ..nudge import NudgeStrategy
+
+        strategy = NudgeStrategy()
+
+        # MINOR severity — first violation
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["writeNewFile"],
+            repetition_count=1,
+            duration_seconds=2.0,
+            model_name="gemini-2.5-flash",
+            severity=PatternSeverity.MINOR,
+            expected_action="Call listAvailableTemplates before using writeNewFile",
+        )
+
+        nudge = strategy.create_nudge(pattern)
+        assert nudge is not None
+        assert nudge.nudge_type == NudgeType.DIRECT_INSTRUCTION
+        assert "listAvailableTemplates" in nudge.message
+        assert "writeNewFile" in nudge.message
+
+        # SEVERE severity — repeated violations
+        severe_pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=3,
+            session_id="test",
+            tool_sequence=["multiFileEdit"],
+            repetition_count=3,
+            duration_seconds=30.0,
+            model_name="gemini-2.5-flash",
+            severity=PatternSeverity.SEVERE,
+        )
+
+        severe_nudge = strategy.create_nudge(severe_pattern)
+        assert severe_nudge.nudge_type == NudgeType.INTERRUPT
+        assert "listAvailableTemplates" in severe_nudge.message
+
 
 class TestNudgeInjector:
     """Tests for NudgeInjector class."""
@@ -1659,6 +1926,86 @@ class TestNudgeInjector:
         injector.on_pattern_detected(pattern)
 
         assert len(injected_messages) >= 1
+
+    def test_notify_user_callback_called(self):
+        """Test that notify_user callback emits user-visible notification."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        user_notifications = []
+
+        def mock_notify(source, text, mode):
+            user_notifications.append((source, text, mode))
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL))
+        injector.set_injection_callbacks(notify_user=mock_notify)
+
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=1,
+            session_id="test",
+            tool_sequence=["writeNewFile"],
+            repetition_count=1,
+            duration_seconds=2.0,
+            model_name="gemini-2.5-flash",
+            severity=PatternSeverity.MINOR,
+        )
+
+        injector.on_pattern_detected(pattern)
+
+        assert len(user_notifications) == 1
+        source, text, mode = user_notifications[0]
+        assert source == "enrichment"
+        assert mode == "write"
+        assert "reliability" in text
+        assert "template check skipped" in text
+        assert "writeNewFile" in text
+
+    def test_notify_user_severity_prefix(self):
+        """Test that severity escalation appears in user notification."""
+        from ..types import BehavioralPattern, BehavioralPatternType, PatternSeverity, NudgeConfig, NudgeLevel
+        from ..nudge import NudgeInjector
+
+        user_notifications = []
+
+        def mock_notify(source, text, mode):
+            user_notifications.append(text)
+
+        injector = NudgeInjector(config=NudgeConfig(level=NudgeLevel.FULL, cooldown_seconds=0))
+        injector.set_injection_callbacks(notify_user=mock_notify)
+
+        # MODERATE severity
+        pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=2,
+            session_id="test",
+            tool_sequence=["updateFile"],
+            repetition_count=2,
+            duration_seconds=5.0,
+            model_name="gemini-2.5-flash",
+            severity=PatternSeverity.MODERATE,
+        )
+        injector.on_pattern_detected(pattern)
+
+        assert "[repeated]" in user_notifications[0]
+
+        # SEVERE severity
+        severe_pattern = BehavioralPattern(
+            pattern_type=BehavioralPatternType.TEMPLATE_CHECK_SKIPPED,
+            detected_at=datetime.now(),
+            turn_index=3,
+            session_id="test",
+            tool_sequence=["multiFileEdit"],
+            repetition_count=3,
+            duration_seconds=10.0,
+            model_name="gemini-2.5-flash",
+            severity=PatternSeverity.SEVERE,
+        )
+        injector.on_pattern_detected(severe_pattern)
+
+        assert "[blocked]" in user_notifications[1]
 
     def test_nudge_summary(self):
         """Test nudge summary statistics."""

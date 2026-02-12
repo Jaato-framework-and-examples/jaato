@@ -601,6 +601,9 @@ class BehavioralPatternType(Enum):
     TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
     ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
 
+    # Prerequisite violations
+    TEMPLATE_CHECK_SKIPPED = "template_check_skipped"  # File-writing tool called without prior listAvailableTemplates
+
 
 class PatternSeverity(Enum):
     """Severity levels for detected patterns."""
@@ -730,6 +733,15 @@ class PatternDetectionConfig:
 
     # Time-based
     max_turn_duration_seconds: float = 120.0  # Turn taking too long = possible stall
+
+    # Template prerequisite enforcement
+    template_gated_tools: Set[str] = field(
+        default_factory=lambda: {
+            "writeNewFile", "updateFile", "multiFileEdit", "findAndReplace",
+        }
+    )
+    template_check_tool: str = "listAvailableTemplates"  # Tool that satisfies the prerequisite
+    template_check_lookback_turns: int = 2  # Check current + N previous turns
 
     # Announce detection (requires text analysis)
     announce_phrases: List[str] = field(
