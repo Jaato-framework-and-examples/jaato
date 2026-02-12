@@ -804,7 +804,8 @@ will show you a preview and require approval before execution. Backups are autom
                 return PermissionDisplayInfo(
                     summary=f"Update file: {display_path} (edit error)",
                     details=str(e),
-                    format_hint="text"
+                    format_hint="text",
+                    pre_validation_error=str(e),
                 )
         else:
             # Full replacement mode

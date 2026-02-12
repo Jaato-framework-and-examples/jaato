@@ -1002,6 +1002,17 @@ class PermissionPlugin:
                     channel_type = channel.name if channel else "console"
                     display_info = self._get_display_info(tool_name, current_args, channel_type)
 
+                    # Pre-validation: if the plugin already knows the operation
+                    # will fail (e.g., targeted edit anchor not found), skip the
+                    # permission prompt and let the executor return the error
+                    # directly so the model can retry.
+                    if display_info and display_info.pre_validation_error:
+                        self._trace(f"check_permission: pre-validation failed for {tool_name}: {display_info.pre_validation_error}")
+                        self._log_decision(tool_name, current_args, "allow", f"Pre-validation error (skipping prompt): {display_info.pre_validation_error}")
+                        if self._on_permission_resolved and not is_subagent_mode:
+                            self._on_permission_resolved(tool_name, "", True, "pre_validation")
+                        return True, {'reason': 'Pre-validation error, skipping prompt', 'method': 'pre_validation'}
+
                     # Build context with display info
                     request_context = dict(context) if context else {}
                     if display_info:
