@@ -208,7 +208,103 @@ Any text that isn't a recognized command is sent as a new user message:
 --cmd "model gemini-2.5-pro"
 ```
 
-## 5. Complete Example: Headless with Remote Control
+**Workspace Monitoring:**
+
+```bash
+# Show file changes as a tree (default)
+--cmd "workspace tree"
+
+# Flat list, JSON, or CSV format
+--cmd "workspace list"
+--cmd "workspace json"
+--cmd "workspace csv"
+```
+
+## 5. Workspace Monitoring
+
+The `workspace` command lets you inspect which files the agent has created, modified, or deleted during a session. This is especially useful for headless runs where you can't see the workspace panel.
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `workspace tree` | Indented directory tree grouped by directory (default) |
+| `workspace list` | Flat file list, one path per line with status indicator |
+| `workspace json` | Machine-readable JSON output |
+| `workspace csv`  | CSV output (`path,status`) |
+
+### Usage
+
+```bash
+# Tree view (default if no subcommand given)
+--cmd "workspace tree"
+
+# Example output:
+# Workspace changes (4 files), 1 deleted
+# ├── docs/
+# │   └── guide.md  [~]
+# ├── src/
+# │   ├── main.py  [~]
+# │   └── utils/
+# │       ├── constants.py  [+]
+# │       └── helper.py  [+]
+# └── README.md  [-]
+```
+
+Status symbols: `[+]` created, `[~]` modified, `[-]` deleted.
+
+```bash
+# Flat list
+--cmd "workspace list"
+
+# Example output:
+# [~] docs/guide.md
+# [+] src/utils/constants.py
+# [+] src/utils/helper.py
+# [~] src/main.py
+# [-] README.md
+#
+# 5 files (4 active, 1 deleted)
+```
+
+```bash
+# JSON for scripting / CI pipelines
+--cmd "workspace json"
+
+# Example output:
+# {
+#   "files": [
+#     {"path": "src/main.py", "status": "modified"},
+#     {"path": "src/utils/helper.py", "status": "created"},
+#     ...
+#   ],
+#   "summary": {"total": 5, "created": 2, "modified": 2, "deleted": 1}
+# }
+```
+
+```bash
+# CSV for spreadsheet / data processing
+--cmd "workspace csv"
+
+# Example output:
+# path,status
+# docs/guide.md,modified
+# src/main.py,modified
+# src/utils/constants.py,created
+# ...
+```
+
+### CI Example: Capture Changed Files
+
+```bash
+# Get list of files the agent touched, as JSON
+.venv/bin/python rich-client/rich_client.py \
+    --connect /tmp/jaato.sock \
+    --session "$SESSION_ID" \
+    --cmd "workspace json" > workspace-changes.json
+```
+
+## 6. Complete Example: Headless with Remote Control
 
 **Terminal 1** -- Start server and headless session:
 
@@ -254,7 +350,7 @@ tail -f jaato-headless-client-agents/main.log
     --cmd "stop"
 ```
 
-## 6. CI/CD Integration
+## 7. CI/CD Integration
 
 Headless mode works in non-TTY environments like CI pipelines:
 
@@ -289,7 +385,7 @@ jobs:
           path: jaato-headless-client-agents/
 ```
 
-## 7. Environment Variables
+## 8. Environment Variables
 
 These variables are relevant to headless operation:
 
