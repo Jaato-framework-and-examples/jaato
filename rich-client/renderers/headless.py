@@ -379,7 +379,13 @@ class HeadlessFileRenderer(Renderer):
         agent_id: Optional[str],
         plan_data: Dict[str, Any],
     ) -> None:
-        """Handle plan update - print full plan inline."""
+        """Handle plan update - print full plan inline.
+
+        Renders a table with sequence number, status symbol, and description
+        for each step. For steps with cross-agent dependencies, adds an
+        indented line showing blocked-by references (when blocked) or
+        received outputs (when dependencies have been resolved).
+        """
         agent_id = agent_id or "main"
         console = self._get_console(agent_id)
 
@@ -413,6 +419,9 @@ class HeadlessFileRenderer(Renderer):
             seq = str(step.get("sequence", ""))
             status = step.get("status", "pending")
             desc = step.get("description", "")
+            blocked_by = step.get("blocked_by", [])
+            depends_on = step.get("depends_on", [])
+            received_outputs = step.get("received_outputs", {})
 
             # Get status symbol and style
             symbol, style = STATUS_SYMBOLS.get(status, ("?", "dim"))
@@ -422,6 +431,31 @@ class HeadlessFileRenderer(Renderer):
                 desc = step["active_form"]
 
             table.add_row(seq, f"[{style}]{symbol}[/{style}]", desc)
+
+            # Cross-agent dependency info
+            if status == "blocked" and blocked_by:
+                refs = []
+                for d in blocked_by:
+                    agent_display = d.get('agent_name') or d.get('agent_id', '?')
+                    if d.get('step_sequence') is not None:
+                        step_display = f"#{d['step_sequence']}"
+                    else:
+                        step_display = d.get('step_id', '?')[:8]
+                    ref_text = f"{agent_display} {step_display}"
+                    if d.get('step_description'):
+                        desc_snippet = d['step_description'][:30]
+                        if len(d['step_description']) > 30:
+                            desc_snippet += "..."
+                        ref_text += f" ({desc_snippet})"
+                    refs.append(ref_text)
+                dep_text = f"├─ waiting: {', '.join(refs)}"
+                table.add_row("", "", f"[dim magenta]{dep_text}[/dim magenta]")
+            elif depends_on and received_outputs:
+                output_keys = list(received_outputs.keys())[:3]
+                dep_text = "└─ received: " + ", ".join(output_keys)
+                if len(received_outputs) > 3:
+                    dep_text += f" (+{len(received_outputs) - 3} more)"
+                table.add_row("", "", f"[dim cyan]{dep_text}[/dim cyan]")
 
         # Progress info
         total = progress.get("total", 0)
