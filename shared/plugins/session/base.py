@@ -67,6 +67,15 @@ class SessionState:
     interrupted_turn: Optional[Dict[str, Any]] = None
     """State of an interrupted turn for recovery on restart."""
 
+    workspace_files: Optional[Dict[str, str]] = None
+    """Tracked workspace file changes since session start.
+
+    Maps relative file paths to status strings (``"created"``,
+    ``"modified"``, ``"deleted"``).  Persisted so the monitor can be
+    restored on session reload and the full delta replayed to
+    reconnecting clients.
+    """
+
 
 @dataclass
 class SessionInfo:

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from agent_registry import AgentRegistry
 
 from plan_panel import PlanPanel
+from workspace_panel import WorkspacePanel
 from budget_panel import BudgetPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
@@ -467,6 +468,8 @@ class PTDisplay:
         self._budget_panel.set_theme(self._theme)
         self._tool_output_popup = ToolOutputPopup(tab_key=self._keybinding_config.tool_output_popup_tab)
         self._tool_output_popup.set_theme(self._theme)
+        self._workspace_panel = WorkspacePanel(toggle_key=self._keybinding_config.toggle_workspace)
+        self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
@@ -1081,6 +1084,29 @@ class PTDisplay:
 
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
+    def _get_workspace_popup_content(self):
+        """Get rendered workspace popup content as ANSI for prompt_toolkit."""
+        popup_width = max(40, min(70, int(self._width * 0.4)))
+        available_height = self._height - 9
+        max_lines = max(5, min(30, available_height))
+        self._workspace_panel.set_max_visible_lines(max_lines)
+        rendered = self._workspace_panel.render_popup(width=popup_width)
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
+
+    def _workspace_captures_keys(self) -> bool:
+        """Check if workspace panel should capture navigation keys.
+
+        Workspace panel captures keys only when visible AND input buffer
+        is empty AND no permission/clarification request is pending.
+        Same guard pattern as budget and plan panels.
+        """
+        return (
+            self._workspace_panel.is_visible
+            and self._workspace_panel.has_files
+            and not self._input_buffer.text.strip()
+            and not self._waiting_for_channel_input
+        )
+
     def _get_active_buffer(self):
         """Get the active output buffer (selected agent's or main)."""
         if self._agent_registry:
@@ -1687,7 +1713,11 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("scroll_up"))
         def handle_page_up(event):
-            """Handle Page-Up - scroll output up."""
+            """Handle Page-Up - scroll output up (or workspace panel page up)."""
+            if self._workspace_captures_keys():
+                if self._workspace_panel.scroll_page_up():
+                    self._app.invalidate()
+                return
             # Use selected agent's buffer if registry present
             if self._agent_registry:
                 buffer = self._agent_registry.get_selected_buffer()
@@ -1702,7 +1732,11 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("scroll_down"))
         def handle_page_down(event):
-            """Handle Page-Down - scroll output down."""
+            """Handle Page-Down - scroll output down (or workspace panel page down)."""
+            if self._workspace_captures_keys():
+                if self._workspace_panel.scroll_page_down():
+                    self._app.invalidate()
+                return
             # Use selected agent's buffer if registry present
             if self._agent_registry:
                 buffer = self._agent_registry.get_selected_buffer()
@@ -1790,6 +1824,11 @@ class PTDisplay:
                 if self._plan_panel.scroll_popup_up(plan_data):
                     self._app.invalidate()
                 return
+            # Workspace panel takes priority when visible and capturing keys
+            if self._workspace_captures_keys():
+                if self._workspace_panel.scroll_up():
+                    self._app.invalidate()
+                return
             # Tool navigation mode
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
@@ -1820,6 +1859,11 @@ class PTDisplay:
                 if self._plan_panel.scroll_popup_down(plan_data):
                     self._app.invalidate()
                 return
+            # Workspace panel takes priority when visible and capturing keys
+            if self._workspace_captures_keys():
+                if self._workspace_panel.scroll_down():
+                    self._app.invalidate()
+                return
             # Tool navigation mode
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
@@ -1842,6 +1886,13 @@ class PTDisplay:
             # Check if current agent has a plan (registry or fallback)
             if self._current_plan_has_data():
                 self._plan_panel.toggle_popup()
+                self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("toggle_workspace"), filter=not_in_search_mode)
+        def handle_toggle_workspace(event):
+            """Handle Ctrl+W - toggle workspace file panel visibility."""
+            if self._workspace_panel.has_files:
+                self._workspace_panel.toggle_popup()
                 self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
@@ -1969,7 +2020,12 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("tool_expand"), eager=True, filter=not_in_search_mode)
         def handle_tool_expand(event):
-            """Handle right arrow - expand selected tool's output or move cursor."""
+            """Handle right arrow - expand dir in workspace panel, or tool output."""
+            # Workspace panel: expand directory at cursor
+            if self._workspace_captures_keys():
+                if self._workspace_panel.expand_at_cursor():
+                    self._app.invalidate()
+                return
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 buffer.expand_selected_tool()
@@ -1982,7 +2038,12 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("tool_collapse"), eager=True, filter=not_in_search_mode)
         def handle_tool_collapse(event):
-            """Handle left arrow - collapse selected tool's output or move cursor."""
+            """Handle left arrow - collapse dir in workspace panel, or tool output."""
+            # Workspace panel: collapse directory at cursor
+            if self._workspace_captures_keys():
+                if self._workspace_panel.collapse_at_cursor():
+                    self._app.invalidate()
+                return
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 buffer.collapse_selected_tool()
@@ -2264,6 +2325,23 @@ class PTDisplay:
             filter=Condition(_tool_output_popup_filter),
         )
 
+        # Workspace file popup (floating overlay, toggled with Ctrl+W)
+        def get_workspace_popup_height():
+            """Calculate workspace popup height by rendering content and counting lines."""
+            popup_width = max(40, min(70, int(self._width * 0.4)))
+            rendered = self._workspace_panel.render_popup(width=popup_width)
+            rendered_str = self._renderer.render(rendered)
+            line_count = rendered_str.count('\n') + 1
+            return min(line_count, self._height - 4)
+
+        workspace_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_workspace_popup_content),
+                height=get_workspace_popup_height,
+            ),
+            filter=Condition(lambda: self._workspace_panel.is_visible and self._workspace_panel.has_files),
+        )
+
         # Root layout with session bar at top, then tab bar, status bar, output, bars, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
@@ -2298,6 +2376,12 @@ class PTDisplay:
                     right=1,  # Right-aligned
                     content=tool_output_popup_window,
                     z_index=75,  # Above budget/agent, below plan
+                ),
+                Float(
+                    top=3,  # Below session bar, tab bar, and status bar
+                    right=2,  # Right-aligned, same side as tool output
+                    content=workspace_popup_window,
+                    z_index=55,  # Above budget (50), below tool output (75)
                 ),
                 # Plan popup LAST so it renders on top of everything
                 Float(
@@ -2607,6 +2691,30 @@ class PTDisplay:
         else:
             # Fallback to global plan panel
             self._plan_panel.update_plan(plan_data)
+        self.refresh()
+
+    def update_workspace_files(self, changes: List[Dict[str, str]]) -> None:
+        """Apply incremental workspace file changes.
+
+        Called by the event handler when a ``WorkspaceFilesChangedEvent``
+        is received.
+
+        Args:
+            changes: List of ``{"path": str, "status": str}`` dicts.
+        """
+        self._workspace_panel.apply_changes(changes)
+        self.refresh()
+
+    def set_workspace_snapshot(self, files: List[Dict[str, str]]) -> None:
+        """Replace workspace file state from a snapshot event.
+
+        Called by the event handler when a ``WorkspaceFilesSnapshotEvent``
+        is received (on reconnect / initial attach).
+
+        Args:
+            files: List of ``{"path": str, "status": str}`` dicts.
+        """
+        self._workspace_panel.apply_snapshot(files)
         self.refresh()
 
     def clear_plan(self, agent_id: Optional[str] = None) -> None:

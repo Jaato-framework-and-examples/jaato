@@ -87,89 +87,9 @@ class FindReplaceResult:
         return result
 
 
-class GitignoreParser:
-    """Simple .gitignore pattern parser."""
-
-    def __init__(self, workspace_root: Path):
-        """Initialize with workspace root.
-
-        Args:
-            workspace_root: Root directory for finding .gitignore files
-        """
-        self._workspace_root = workspace_root
-        self._patterns: List[Tuple[str, bool]] = []  # (pattern, is_negation)
-        self._load_gitignore()
-
-    def _load_gitignore(self) -> None:
-        """Load patterns from .gitignore file."""
-        gitignore_path = self._workspace_root / ".gitignore"
-        if not gitignore_path.exists():
-            return
-
-        try:
-            content = gitignore_path.read_text()
-            for line in content.splitlines():
-                line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith("#"):
-                    continue
-
-                # Handle negation
-                is_negation = line.startswith("!")
-                if is_negation:
-                    line = line[1:]
-
-                self._patterns.append((line, is_negation))
-        except OSError:
-            pass
-
-    def is_ignored(self, path: Path) -> bool:
-        """Check if a path should be ignored.
-
-        Args:
-            path: Path to check (relative to workspace_root)
-
-        Returns:
-            True if the path should be ignored
-        """
-        # Make path relative to workspace
-        try:
-            rel_path = path.relative_to(self._workspace_root)
-        except ValueError:
-            rel_path = path
-
-        path_str = str(rel_path)
-        path_parts = path_str.split(os.sep)
-
-        ignored = False
-        for pattern, is_negation in self._patterns:
-            # Handle directory-only patterns (ending with /)
-            if pattern.endswith("/"):
-                pattern = pattern[:-1]
-                # Only match if it's a directory
-                if not path.is_dir():
-                    # Check if any parent matches
-                    matches = any(
-                        fnmatch.fnmatch(part, pattern)
-                        for part in path_parts[:-1]
-                    )
-                else:
-                    matches = fnmatch.fnmatch(path_parts[-1], pattern)
-            else:
-                # Match against full path or just filename
-                if "/" in pattern or "\\" in pattern:
-                    matches = fnmatch.fnmatch(path_str, pattern)
-                else:
-                    matches = (
-                        fnmatch.fnmatch(path_str, pattern) or
-                        fnmatch.fnmatch(path_parts[-1], pattern) or
-                        any(fnmatch.fnmatch(part, pattern) for part in path_parts)
-                    )
-
-            if matches:
-                ignored = not is_negation
-
-        return ignored
+# Re-export for backwards compatibility. The canonical location is
+# shared.utils.gitignore – new code should import from there.
+from shared.utils.gitignore import GitignoreParser  # noqa: F401
 
 
 class FindReplaceExecutor:
