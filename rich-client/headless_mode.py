@@ -116,7 +116,6 @@ async def run_headless_mode(
     turn_completed = False
     turn_count = 0
     active_subagents: set = set()  # Track running subagent IDs
-    main_agent_done = False  # Track if main agent has reached terminal state
 
     # Budget tracking per agent (agent_id -> snapshot)
     budget_snapshots: dict = {}
@@ -159,7 +158,7 @@ async def run_headless_mode(
 
     async def handle_events():
         """Handle events from the server."""
-        nonlocal model_running, should_exit, turn_completed, turn_count, session_id_printed, main_agent_activated, active_subagents, main_agent_done
+        nonlocal model_running, should_exit, turn_completed, turn_count, session_id_printed, main_agent_activated, active_subagents
 
         async for event in client.events():
             if should_exit:
@@ -222,37 +221,18 @@ async def run_headless_mode(
                             style="system_info",
                             agent_id=agent_id,
                         )
-                # Exit when main agent finishes and no subagents are running.
-                # AgentCompletedEvent is only emitted when the model calls
-                # close_subagent, which doesn't always happen.  Subagents
-                # that finish naturally only emit status="idle", so we also
-                # treat subagent "idle"/"done" as completion below.
+                # Exit when main agent is truly finished.
+                # The server emits "done" only when there is nothing left
+                # to do (no pending channel input, no active subagents).
+                # While subagents are still running or the agent awaits
+                # user input, the server emits "idle" instead.
                 if event.agent_id == "main" and event.status == "done":
-                    main_agent_done = True
-                    if not active_subagents:
-                        should_exit = True
-                        break
-                # Subagents: treat "idle" or "done" as effectively completed.
-                # AgentCompletedEvent is only emitted on explicit
-                # close_subagent calls — if the model never calls it, the
-                # subagent stays in active_subagents forever.  In headless
-                # mode there is no user to provide further input, so a
-                # subagent entering "idle" means it has finished its work.
-                if event.agent_id != "main" and event.status in ("idle", "done"):
-                    active_subagents.discard(event.agent_id)
-                    if main_agent_done and not active_subagents:
-                        should_exit = True
-                        break
+                    should_exit = True
+                    break
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
                 active_subagents.discard(event.agent_id)
-                # If main agent already done and this was the last subagent,
-                # exit now — the subagent result was already injected and
-                # processed by the main agent before it entered "done".
-                if main_agent_done and not active_subagents:
-                    should_exit = True
-                    break
 
             elif isinstance(event, AgentOutputEvent):
                 renderer.on_agent_output(
