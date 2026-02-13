@@ -42,6 +42,8 @@ async def run_command_mode(
         ToolStatusEvent,
         HelpTextEvent,
         SessionListEvent,
+        WorkspaceMismatchRequestedEvent,
+        WorkspaceMismatchResponseRequest,
     )
     from shared.client_commands import parse_user_input, CommandAction
 
@@ -65,15 +67,25 @@ async def run_command_mode(
             await client.disconnect()
             return
 
-        # Wait for server to confirm attachment before sending messages
-        # This ensures the server has registered us with the session
+        # Wait for server to confirm attachment before sending messages.
+        # This ensures the server has registered us with the session.
+        # In command mode we auto-accept workspace mismatches (switch to the
+        # session's workspace) because the user explicitly targeted --session.
         timeout = 5.0
         start = asyncio.get_event_loop().time()
         async for event in client.events():
             if asyncio.get_event_loop().time() - start > timeout:
                 print("Warning: Attach confirmation timeout", file=sys.stderr)
                 break
-            if isinstance(event, SystemMessageEvent):
+            if isinstance(event, WorkspaceMismatchRequestedEvent):
+                # Auto-switch to session workspace in command mode
+                await client._client._send_event(WorkspaceMismatchResponseRequest(
+                    request_id=event.request_id,
+                    response="switch",
+                ))
+                # Reset timeout — server will now proceed with the attach
+                start = asyncio.get_event_loop().time()
+            elif isinstance(event, SystemMessageEvent):
                 # Server sends "Attached to session: <id>" on successful attach
                 if "Attached to session" in event.message:
                     break
