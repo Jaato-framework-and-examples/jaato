@@ -227,7 +227,13 @@ async def run_headless_mode(
                 # must wait for all subagents to complete first — subagent
                 # results are injected back into the parent session, which
                 # triggers new turns on the main agent.
-                if event.agent_id == "main" and event.status == "done" and not active_subagents:
+                #
+                # Also exit on "idle" — in headless mode there is no user to
+                # provide channel input, so "idle" (waiting for input) is
+                # effectively the same as "done". This handles edge cases
+                # where _waiting_for_channel_input is unexpectedly True
+                # (e.g., references plugin channel still wired).
+                if event.agent_id == "main" and event.status in ("done", "idle") and not active_subagents:
                     should_exit = True
                     break
 
@@ -402,6 +408,16 @@ async def run_headless_mode(
         pass
     except Exception as e:
         print(f"[headless] Error: {e}", file=sys.stderr)
+
+    # Terminate the session — the "exit" command. This stops the agent
+    # (if still running) and signals any other attached clients to exit
+    # via the [SESSION_TERMINATED] broadcast.
+    try:
+        await client.execute_command("session.end", [])
+        print("[headless] Session ended", file=sys.stderr)
+    except Exception as e:
+        # Best-effort: connection may already be closing
+        logger.debug(f"session.end failed (non-fatal): {e}")
 
     # Cleanup - use close() for permanent shutdown (stops event stream)
     renderer.shutdown()
