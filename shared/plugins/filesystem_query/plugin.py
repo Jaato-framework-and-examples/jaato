@@ -38,6 +38,24 @@ from .config_loader import (
 logger = logging.getLogger(__name__)
 
 
+def _is_relative_pattern(pattern: str) -> bool:
+    """Check whether a glob pattern is relative (not an absolute path).
+
+    Detects POSIX absolute paths (``/foo``), Windows drive-letter paths
+    (``C:\\foo``, ``C:/foo``), and UNC paths (``\\\\server``).
+
+    Returns:
+        True if the pattern is relative and safe for ``Path.glob()``.
+    """
+    if os.path.isabs(pattern):
+        return False
+    # os.path.isabs on POSIX won't flag Windows drive letters — check
+    # explicitly so cross-platform tool calls are handled.
+    if len(pattern) >= 2 and pattern[0].isalpha() and pattern[1] == ':':
+        return False
+    return True
+
+
 def _detect_workspace_root() -> Optional[str]:
     """Auto-detect workspace root from environment variables.
 
@@ -235,17 +253,21 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                         "pattern": {
                             "type": "string",
                             "description": (
-                                "Glob pattern to match files. Examples: "
+                                "Relative glob pattern to match files. "
+                                "Must be relative, NOT an absolute path. "
+                                "Examples: "
                                 "'**/*.py' (all Python files), "
                                 "'src/**/*.ts' (TypeScript in src), "
                                 "'*.json' (JSON in current dir), "
-                                "'**/test_*.py' (test files)"
+                                "'**/test_*.py' (test files). "
+                                "To search a specific directory, set 'root' "
+                                "to that directory and use a relative pattern."
                             ),
                         },
                         "root": {
                             "type": "string",
                             "description": (
-                                "Root directory to search from. "
+                                "Root directory to search from (can be absolute). "
                                 "Defaults to current working directory."
                             ),
                         },
@@ -292,7 +314,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                         "path": {
                             "type": "string",
                             "description": (
-                                "File or directory to search in. "
+                                "File or directory to search in (can be absolute). "
                                 "Defaults to current working directory."
                             ),
                         },
@@ -300,8 +322,11 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Only search files matching these glob patterns. "
-                                "Examples: ['*.py'], ['**/*.java', '**/*.kt', '**/*.scala']"
+                                "Only search files matching these relative glob patterns. "
+                                "Must be relative, NOT absolute paths. "
+                                "Examples: ['*.py'], ['**/*.java', '**/*.kt', '**/*.scala']. "
+                                "To search a specific directory, set 'path' to that "
+                                "directory and use relative patterns here."
                             ),
                         },
                         "context_lines": {
@@ -362,6 +387,9 @@ Find files by name pattern. Use glob syntax:
 - `**/test_*.py` - test files anywhere
 - `*.json` - JSON files in current directory
 
+The `pattern` must always be **relative** (e.g. `**/*.py`), never an absolute path.
+To search a specific directory, set `root` to that absolute path and use a relative `pattern`.
+
 ## grep_content
 Search file contents with regex:
 - `def\\s+function_name` - find function definitions
@@ -369,9 +397,12 @@ Search file contents with regex:
 - `import\\s+module` - find imports
 - `TODO|FIXME|HACK` - find code comments
 
-The file_glob parameter accepts an array of glob patterns:
+The file_glob parameter accepts an array of **relative** glob patterns:
 - Single type: `file_glob=["*.py"]`
 - Multiple types: `file_glob=["**/*.java", "**/*.kt", "**/*.scala"]`
+
+IMPORTANT: `file_glob` patterns must be relative, never absolute paths.
+To search a specific directory, set `path` to that absolute directory and keep `file_glob` relative.
 
 Tips:
 - Use glob_files first to locate files, then grep_content to search within them
@@ -460,6 +491,20 @@ Tips:
                 "total": 0,
             }
 
+        if not _is_relative_pattern(pattern):
+            return {
+                "error": (
+                    f"Absolute patterns are not supported in glob_files. "
+                    f"The pattern must be relative to the root directory. "
+                    f"Got pattern: '{pattern}'. "
+                    f"Instead, set root to the absolute directory and use "
+                    f"a relative pattern (e.g., root='{pattern.split('**')[0].rstrip('/')}', "
+                    f"pattern='**/*')."
+                ),
+                "files": [],
+                "total": 0,
+            }
+
         try:
             files: List[Dict[str, Any]] = []
             total_found = 0
@@ -527,6 +572,19 @@ Tips:
                 "pattern": pattern,
             }
 
+        except NotImplementedError:
+            return {
+                "error": (
+                    f"Absolute patterns are not supported in glob_files. "
+                    f"The pattern must be relative to the root directory. "
+                    f"Got pattern: '{pattern}'. "
+                    f"Instead, set root to the absolute directory and use "
+                    f"a relative pattern (e.g., root='{pattern.split('**')[0].rstrip('/')}', "
+                    f"pattern='**/*')."
+                ),
+                "files": [],
+                "total": 0,
+            }
         except Exception as e:
             logger.exception("Error in glob_files: %s", e)
             return {
@@ -596,6 +654,20 @@ Tips:
             seen_files: set = set()
 
             for glob_pattern in glob_patterns:
+                if not _is_relative_pattern(glob_pattern):
+                    bad = [p for p in glob_patterns if not _is_relative_pattern(p)]
+                    return {
+                        "error": (
+                            f"file_glob patterns must be relative, not absolute paths. "
+                            f"Got absolute pattern(s): {bad}. "
+                            f"Use the 'path' parameter for the search directory and "
+                            f"keep file_glob as relative patterns "
+                            f"(e.g., path='{glob_pattern.split('**')[0].rstrip('/')}', "
+                            f"file_glob=['**/*'])."
+                        ),
+                        "matches": [],
+                        "total_matches": 0,
+                    }
                 for match in search_path.glob(glob_pattern):
                     if match.is_file() and match not in seen_files:
                         seen_files.add(match)
