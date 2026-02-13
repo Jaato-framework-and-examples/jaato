@@ -13,6 +13,7 @@ import os
 import tempfile
 import pytest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import Mock, MagicMock
 
 from shared.plugins.sandbox_manager import (
@@ -1097,3 +1098,323 @@ class TestProgrammaticAPI:
 
         # Pending list should be cleared
         assert len(plugin._pending_programmatic_paths) == 0
+
+
+class TestMSYS2PathConversion:
+    """Tests for MSYS2 path conversion in sandbox commands.
+
+    Verifies that MSYS2-style paths (/c/Users/...) are correctly converted
+    to Windows paths (C:/Users/...) at the input boundary, and that display
+    output is converted back to MSYS2 format when running under MSYS2.
+
+    Since tests run on Linux where C:/... is not recognized as absolute by
+    os.path.isabs(), tests that involve full path processing mock isabs
+    to simulate Windows behavior. Tests that only verify conversion happened
+    check for the C: drive letter in the stored path.
+    """
+
+    @pytest.fixture
+    def initialized_plugin(self, tmp_path):
+        """Create fully initialized plugin with mock registry."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        plugin.set_workspace_path(str(workspace))
+
+        return plugin, workspace
+
+    @staticmethod
+    def _win_isabs(path):
+        """Simulate Windows os.path.isabs: C:/ and C:\\ are absolute."""
+        import re
+        if re.match(r'^[a-zA-Z]:[\\/]', path):
+            return True
+        return os.path.isabs(path)
+
+    def test_cmd_add_converts_msys2_drive_letter(self, initialized_plugin):
+        """Test that _cmd_add converts /c/... drive prefix to C:/... for storage.
+
+        On Linux, C:/... is not absolute so it gets joined with workspace.
+        We verify the conversion happened by checking the stored path contains
+        'C:/' (the converted drive letter) and not '/c/' (the raw MSYS2 prefix).
+        """
+        plugin, workspace = initialized_plugin
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/external"
+        })
+
+        assert result["status"] == "added"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        # The MSYS2 conversion should have turned /c/ into C:/
+        assert "C:/" in stored_path or "C:\\" in stored_path
+        assert "Users/testuser/external" in stored_path.replace("\\", "/")
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_add_msys2_path_absolute_on_windows(self, mock_isabs, initialized_plugin):
+        """Test full path processing with Windows-like isabs behavior.
+
+        Simulates Windows where C:/Users/... is recognized as absolute.
+        """
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/external"
+        })
+
+        assert result["status"] == "added"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        # Should be C:/Users/... (absolute, not joined with workspace)
+        assert stored_path.startswith("C:/")
+        assert "Users/testuser/external" in stored_path
+
+    def test_cmd_add_msys2_path_not_stored_as_backslash_c(self, initialized_plugin):
+        """Test that /c/Users/... is NOT stored as \\c\\Users\\... (the bug).
+
+        The original bug was that /c/Users/... was stored as \\c\\Users\\...
+        because the MSYS2 conversion was missing. After the fix, the path
+        should contain C: (converted drive letter).
+        """
+        plugin, workspace = initialized_plugin
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/data"
+        })
+
+        assert result["status"] == "added"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        norm = stored_path.replace("\\", "/")
+        # Must NOT have the raw /c/ prefix (the unconverted MSYS2 path)
+        # It should be C:/Users/... (possibly joined with workspace on Linux)
+        assert "/c/Users" not in norm
+
+    def test_cmd_add_already_allowed_with_msys2_path(self, initialized_plugin):
+        """Test that duplicate detection works with MSYS2 paths."""
+        plugin, workspace = initialized_plugin
+
+        # Add first time
+        result1 = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/data"
+        })
+        assert result1["status"] == "added"
+
+        # Add again with same MSYS2 path
+        result2 = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/data"
+        })
+        assert result2["status"] == "already_allowed"
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_remove_converts_msys2_path(self, mock_isabs, initialized_plugin):
+        """Test that _cmd_remove converts /c/Users/... to C:/Users/... for storage."""
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "/c/Users/testuser/blocked"
+        })
+
+        assert result["status"] == "denied"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["denied_paths"][0]["path"]
+        assert stored_path.startswith("C:/")
+        assert "Users/testuser/blocked" in stored_path
+
+    def test_cmd_remove_symmetric_with_msys2_add(self, initialized_plugin):
+        """Test that remove works symmetrically with add when using MSYS2 paths."""
+        plugin, workspace = initialized_plugin
+
+        # Add with MSYS2 path
+        plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/project"
+        })
+
+        # Remove with same MSYS2 path - should find and remove
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "/c/Users/testuser/project"
+        })
+        assert result["status"] == "removed"  # Not "denied" - symmetric undo
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    @mock.patch(
+        "shared.plugins.sandbox_manager.plugin.normalize_result_path",
+        side_effect=lambda p: p.replace("\\", "/").replace("C:/", "/c/")
+        if (p.startswith("C:/") or p.startswith("C:\\")) else p,
+    )
+    def test_cmd_add_returns_msys2_display_path(self, _mock_normalize, mock_isabs, initialized_plugin):
+        """Test that return value uses MSYS2-friendly display path."""
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /c/Users/testuser/data"
+        })
+
+        assert result["status"] == "added"
+        # Display path should be in MSYS2 format
+        assert result["path"].startswith("/c/")
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    @mock.patch(
+        "shared.plugins.sandbox_manager.plugin.normalize_result_path",
+        side_effect=lambda p: p.replace("\\", "/").replace("C:/", "/c/")
+        if (p.startswith("C:/") or p.startswith("C:\\")) else p,
+    )
+    def test_cmd_remove_returns_msys2_display_path(self, _mock_normalize, mock_isabs, initialized_plugin):
+        """Test that remove return value uses MSYS2-friendly display path."""
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "/c/Users/testuser/blocked"
+        })
+
+        assert result["status"] == "denied"
+        assert result["path"].startswith("/c/")
+
+    def test_load_config_converts_msys2_paths(self, tmp_path):
+        """Test that config files with MSYS2 paths are converted on load."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        # Write config with MSYS2-format paths (simulating hand-edited config)
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config_path.write_text(json.dumps({
+            "allowed_paths": [
+                {"path": "/c/Users/testuser/docs", "access": "readonly"},
+                "/d/shared/data",
+            ],
+            "denied_paths": [
+                {"path": "/c/Windows/System32"},
+            ]
+        }))
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        plugin.set_workspace_path(str(workspace))
+
+        # Verify paths are converted from MSYS2 format
+        allowed_paths = [p.path for p in plugin._config.allowed_paths if p.source == "session"]
+        denied_paths = [p.path for p in plugin._config.denied_paths if p.source == "session"]
+
+        # Converted paths should contain C: or D: drive letter
+        assert any("C:" in p for p in allowed_paths), \
+            f"Expected C: in allowed paths, got {allowed_paths}"
+        assert any("D:" in p for p in allowed_paths), \
+            f"Expected D: in allowed paths, got {allowed_paths}"
+        assert any("C:" in p for p in denied_paths), \
+            f"Expected C: in denied paths, got {denied_paths}"
+
+    def test_cmd_add_non_msys2_path_unchanged(self, initialized_plugin):
+        """Test that regular absolute paths are not modified by MSYS2 conversion."""
+        plugin, workspace = initialized_plugin
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /tmp/regular/path"
+        })
+
+        assert result["status"] == "added"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        # /tmp/regular/path should NOT be treated as an MSYS2 drive path
+        # (/t is not a valid single-letter drive prefix pattern)
+        assert "/tmp/" in stored_path or "\\tmp\\" in stored_path
+
+    def test_cmd_add_multichar_prefix_not_converted(self, initialized_plugin):
+        """Test that /config/... is not misidentified as MSYS2 drive path."""
+        plugin, workspace = initialized_plugin
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite /config/settings"
+        })
+
+        assert result["status"] == "added"
+
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        # /config should NOT be converted - it's a multi-letter directory, not a drive
+        assert "/config/" in stored_path or "\\config\\" in stored_path
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_list_displays_msys2_paths(self, mock_isabs, tmp_path):
+        """Test that _cmd_list output uses normalize_result_path for display."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".jaato" / "sessions" / "test-session").mkdir(parents=True)
+
+        mock_isabs.side_effect = self._win_isabs
+
+        # Write config with a Windows-format path (as stored after conversion)
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config_path.write_text(json.dumps({
+            "allowed_paths": [
+                {"path": "C:/Users/testuser/data", "access": "readwrite"},
+            ]
+        }))
+
+        plugin = create_plugin()
+        mock_registry = Mock()
+        mock_registry.clear_authorized_paths = Mock()
+        mock_registry.clear_denied_paths = Mock()
+        mock_registry.authorize_external_path = Mock()
+        mock_registry.deny_external_path = Mock()
+
+        plugin.set_plugin_registry(mock_registry)
+        plugin.initialize({"session_id": "test-session"})
+        plugin.set_workspace_path(str(workspace))
+
+        with mock.patch(
+            "shared.plugins.sandbox_manager.plugin.normalize_result_path",
+            side_effect=lambda p: "/c" + p[2:].replace("\\", "/")
+            if (p.startswith("C:/") or p.startswith("C:\\")) else p,
+        ):
+            result = plugin._cmd_list()
+
+        # The displayed path should be MSYS2-formatted
+        assert len(result["effective_paths"]) == 1
+        assert result["effective_paths"][0]["path"].startswith("/c/")
