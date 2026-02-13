@@ -610,3 +610,150 @@ class TestSystemInstructionsDisplayPaths:
         # Should contain relative path, not absolute
         assert os.path.join("docs", "api.md") in instructions
         assert workspace not in instructions
+
+
+class TestInitializationClearsStaleState:
+    """Tests that initialization removes stale .artifact_tracker.json from previous sessions."""
+
+    def test_stale_state_file_removed_on_init(self, monkeypatch, tmp_path):
+        """Initializing a new session removes any existing state file."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        storage_path = str(tmp_path / ".jaato" / ".artifact_tracker.json")
+        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+
+        # Simulate leftover state from a previous session
+        stale_data = {
+            "artifacts": {
+                "stale-id": {
+                    "artifact_id": "stale-id",
+                    "path": "/old/file.md",
+                    "artifact_type": "document",
+                    "description": "Leftover from last session",
+                    "created_at": "2025-01-01T00:00:00",
+                    "updated_at": "2025-01-01T00:00:00",
+                    "review_status": "current",
+                    "tags": [],
+                    "related_to": [],
+                }
+            }
+        }
+        with open(storage_path, "w") as f:
+            json.dump(stale_data, f)
+
+        # Default init (auto_load=False by default) should remove the file
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": storage_path,
+        })
+
+        # File should be removed
+        assert not os.path.exists(storage_path)
+        # Registry should be empty
+        result = plugin._execute_list_artifacts({})
+        assert result["total"] == 0
+
+    def test_auto_load_true_preserves_state(self, monkeypatch, tmp_path):
+        """When auto_load=True, existing state is loaded instead of cleared."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        storage_path = str(tmp_path / ".jaato" / ".artifact_tracker.json")
+        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+
+        # Write state that should be loaded
+        state_data = {
+            "artifacts": {
+                "existing-id": {
+                    "artifact_id": "existing-id",
+                    "path": os.path.join(workspace, "docs", "readme.md"),
+                    "artifact_type": "document",
+                    "description": "Preserved artifact",
+                    "created_at": "2025-01-01T00:00:00",
+                    "updated_at": "2025-01-01T00:00:00",
+                    "review_status": "current",
+                    "tags": [],
+                    "related_to": [],
+                }
+            }
+        }
+        with open(storage_path, "w") as f:
+            json.dump(state_data, f)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": storage_path,
+            "auto_load": True,
+        })
+
+        # State should be loaded
+        result = plugin._execute_list_artifacts({})
+        assert result["total"] == 1
+
+    def test_init_no_file_does_not_error(self, monkeypatch, tmp_path):
+        """Initialization succeeds when there is no existing state file."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        storage_path = str(tmp_path / ".jaato" / ".artifact_tracker.json")
+        # Deliberately do NOT create the file
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": storage_path,
+        })
+
+        # Should start with an empty registry
+        result = plugin._execute_list_artifacts({})
+        assert result["total"] == 0
+
+    def test_reinit_clears_previous_session_artifacts(self, monkeypatch, tmp_path):
+        """Re-initializing the plugin clears artifacts tracked in the prior session."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        storage_path = str(tmp_path / ".jaato" / ".artifact_tracker.json")
+
+        # First session: track an artifact
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": storage_path,
+        })
+        plugin._execute_track_artifact({
+            "path": os.path.join(workspace, "docs", "api.md"),
+            "artifact_type": "document",
+            "description": "API docs",
+        })
+        result = plugin._execute_list_artifacts({})
+        assert result["total"] == 1
+
+        # Simulate session end
+        plugin.shutdown()
+
+        # Second session: re-initialize (simulates new session on same workspace)
+        plugin2 = create_plugin()
+        plugin2.initialize({
+            "workspace_root": workspace,
+            "storage_path": storage_path,
+        })
+
+        # Should start clean — no artifacts from previous session
+        result2 = plugin2._execute_list_artifacts({})
+        assert result2["total"] == 0
