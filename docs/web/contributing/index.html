@@ -201,11 +201,17 @@ pytest -k "test_plugin"</code></pre>
             make changes.
           </p>
 
-          <h3>Core Components</h3>
+          <h3>Package Structure</h3>
+          <p>jaato consists of three packages:</p>
+          <ul>
+            <li><strong>jaato-sdk/</strong> - Lightweight SDK (events, types, IPC client)</li>
+            <li><strong>. (root)</strong> - Server daemon with all runtime plugins</li>
+            <li><strong>rich-client/</strong> - Terminal user interface client</li>
+          </ul>
+          <h3>Core Directories</h3>
           <ul>
             <li><strong>shared/</strong> - Framework internals and plugin system</li>
-            <li><strong>jaato/</strong> - Public API exports for external use</li>
-            <li><strong>simple-client/</strong> - Reference client implementation</li>
+            <li><strong>server/</strong> - Daemon, IPC, WebSocket, session management</li>
             <li><strong>docs/</strong> - Documentation and guides</li>
           </ul>
 
@@ -226,7 +232,14 @@ pytest -k "test_plugin"</code></pre>
           <div class="code-label">Key directories</div>
           <div class="code-block">
             <pre><code class="language-bash">jaato/
-├── shared/                    # Core framework
+├── jaato-sdk/                 # Lightweight SDK package
+│   ├── jaato_sdk/
+│   │   ├── events.py         # Event protocol types
+│   │   ├── ipc_client.py     # IPC client
+│   │   └── types.py          # Shared types
+│   └── pyproject.toml
+│
+├── shared/                    # Core framework (server pkg)
 │   ├── jaato_client.py       # Main client
 │   ├── ai_tool_runner.py     # Tool executor
 │   ├── token_accounting.py   # Token tracking
@@ -236,14 +249,17 @@ pytest -k "test_plugin"</code></pre>
 │       ├── gc*/              # GC strategies
 │       └── model_provider/   # Provider abstraction
 │
-├── jaato/                     # Public API
-│   └── __init__.py           # Exports
+├── server/                    # Daemon and IPC/WS
+│   ├── __main__.py           # Entry point
+│   ├── core.py               # JaatoServer
+│   ├── ipc.py                # Unix socket server
+│   └── websocket.py          # WebSocket server
 │
-├── simple-client/            # Reference client
-│   └── interactive_client.py
+├── rich-client/              # TUI package
+│   ├── rich_client.py        # Main TUI
+│   └── pyproject.toml
 │
 └── docs/                     # Documentation
-    ├── api/                  # API docs (HTML)
     └── architecture.md       # Architecture guide</code></pre>
           </div>
         </div>

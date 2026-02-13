@@ -463,32 +463,30 @@
       <!-- User installation -->
       <div id="install-user" class="install-content active">
         <p>
-          <strong>Application developers</strong> use jaato as a library.
+          <strong>Application developers</strong> can choose between the full server or just the lightweight SDK.
         </p>
         <div class="callout callout-warning" style="margin-bottom: 16px; padding: 12px 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
           <strong>⚠️ Pre-release:</strong> jaato is currently in alpha. Install from GitHub until the first official PyPI release.
         </div>
         <div class="code-block">
-          <pre><code class="language-bash"># Install latest from GitHub (recommended)
-pip install git+https://github.com/apanoia/jaato.git
-
-# Or install a specific commit
-pip install git+https://github.com/apanoia/jaato.git@abc1234
-
-# For development/editable install
+          <pre><code class="language-bash"># Option 1: Full server with all plugins (most users)
 git clone https://github.com/apanoia/jaato.git
 cd jaato
-pip install -e .
+pip install -e .                    # Server + all runtime plugins
+pip install -e rich-client/         # Optional: TUI client
+
+# Option 2: SDK only (for building custom clients)
+pip install -e jaato-sdk/           # Lightweight: events, types, IPC client
 
 # With optional extras
 pip install -e ".[vision]"    # PNG screenshots (requires libcairo2-dev on Linux)
 pip install -e ".[all]"       # all optional dependencies</code></pre>
         </div>
         <p style="margin-top: 16px;">
-          Once released to PyPI, you'll be able to install with: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">pip install jaato</code>
-        </p>
-        <p style="margin-top: 8px;">
-          Then follow the <a href="getting-started/quickstart.html">Quickstart Guide</a> to build your first application.
+          <strong>SDK-only</strong> is ideal for building custom clients against a running jaato server.
+          See the <a href="getting-started/quickstart.html">Quickstart Guide</a> or the
+          <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">jaato-sdk/README.md</code>
+          for example code.
         </p>
       </div>
 
