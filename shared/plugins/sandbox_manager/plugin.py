@@ -27,6 +27,11 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from ..model_provider.types import ToolSchema
 
+from shared.path_utils import (
+    msys2_to_windows_path,
+    normalize_result_path,
+    normalized_equals,
+)
 from shared.trace import trace as _trace_write
 
 
@@ -217,15 +222,20 @@ class SandboxManagerPlugin:
             return allowed, denied
 
         # Parse allowed_paths
+        # Convert MSYS2 paths at the config-loading boundary to handle
+        # hand-edited configs or paths saved before the MSYS2 fix.
         for item in data.get("allowed_paths", []):
             if isinstance(item, str):
-                allowed.append(SandboxPath(path=item, source=source, action="allow"))
+                allowed.append(SandboxPath(
+                    path=msys2_to_windows_path(item),
+                    source=source, action="allow",
+                ))
             elif isinstance(item, dict) and "path" in item:
                 access = item.get("access", "readwrite")
                 if access not in ("readonly", "readwrite"):
                     access = "readwrite"
                 allowed.append(SandboxPath(
-                    path=item["path"],
+                    path=msys2_to_windows_path(item["path"]),
                     source=source,
                     action="allow",
                     access=access,
@@ -235,10 +245,13 @@ class SandboxManagerPlugin:
         # Parse denied_paths
         for item in data.get("denied_paths", []):
             if isinstance(item, str):
-                denied.append(SandboxPath(path=item, source=source, action="deny"))
+                denied.append(SandboxPath(
+                    path=msys2_to_windows_path(item),
+                    source=source, action="deny",
+                ))
             elif isinstance(item, dict) and "path" in item:
                 denied.append(SandboxPath(
-                    path=item["path"],
+                    path=msys2_to_windows_path(item["path"]),
                     source=source,
                     action="deny",
                     added_at=item.get("added_at")
@@ -790,10 +803,10 @@ class SandboxManagerPlugin:
         for entry in self._config.denied_paths:
             all_paths[entry.path] = ("deny", entry.source, None, entry.added_at)
 
-        # Build output
+        # Build output (normalize paths for MSYS2 display)
         for path, (action, source, access, added_at) in sorted(all_paths.items()):
             entry_dict = {
-                "path": path,
+                "path": normalize_result_path(path),
                 "action": action,
                 "source": source,
                 "added_at": added_at,
@@ -828,11 +841,17 @@ class SandboxManagerPlugin:
         if path.startswith("@"):
             path = path[1:]
 
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
+
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
             # Resolve relative to client workspace, not server CWD
             path = os.path.normpath(os.path.join(self._workspace_path, path))
+
+        # Display path for returning to user (MSYS2-friendly)
+        display_path = normalize_result_path(path)
 
         # Load current session config
         session_config = self._load_session_config()
@@ -840,25 +859,27 @@ class SandboxManagerPlugin:
         # Check if already in allowed_paths (with same or broader access)
         for item in session_config.get("allowed_paths", []):
             existing_path = item["path"] if isinstance(item, dict) else item
-            if existing_path == path:
+            if normalized_equals(existing_path, path):
                 existing_access = item.get("access", "readwrite") if isinstance(item, dict) else "readwrite"
                 if existing_access == access:
-                    return {"status": "already_allowed", "path": path, "access": access}
+                    return {"status": "already_allowed", "path": display_path, "access": access}
                 # Update access mode for existing entry
                 if isinstance(item, dict):
                     item["access"] = access
                     if not self._save_session_config(session_config):
                         return {"error": "Failed to save session config"}
                     self._load_all_configs()
-                    return {"status": "updated", "path": path, "access": access, "source": "session"}
+                    return {"status": "updated", "path": display_path, "access": access, "source": "session"}
 
         # Remove from denied_paths if present
         session_config["denied_paths"] = [
             p for p in session_config.get("denied_paths", [])
-            if (p["path"] if isinstance(p, dict) else p) != path
+            if not normalized_equals(
+                p["path"] if isinstance(p, dict) else p, path
+            )
         ]
 
-        # Add to allowed_paths
+        # Add to allowed_paths (store in native Windows format for Python APIs)
         session_config.setdefault("allowed_paths", []).append({
             "path": path,
             "access": access,
@@ -872,7 +893,7 @@ class SandboxManagerPlugin:
         # Reload and sync
         self._load_all_configs()
 
-        return {"status": "added", "path": path, "access": access, "source": "session"}
+        return {"status": "added", "path": display_path, "access": access, "source": "session"}
 
     def _cmd_remove(self, path: str) -> Dict[str, Any]:
         """Execute 'sandbox remove <path>' command.
@@ -891,11 +912,17 @@ class SandboxManagerPlugin:
         if path.startswith("@"):
             path = path[1:]
 
+        # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
+        path = msys2_to_windows_path(path)
+
         # Normalize path (expand ~ and make absolute)
         path = os.path.expanduser(path)
         if not os.path.isabs(path):
             # Resolve relative to client workspace, not server CWD
             path = os.path.normpath(os.path.join(self._workspace_path, path))
+
+        # Display path for returning to user (MSYS2-friendly)
+        display_path = normalize_result_path(path)
 
         # Load current session config
         session_config = self._load_session_config()
@@ -905,21 +932,23 @@ class SandboxManagerPlugin:
             p["path"] if isinstance(p, dict) else p
             for p in session_config.get("denied_paths", [])
         ]
-        if path in existing_denied:
-            return {"status": "already_denied", "path": path}
+        if any(normalized_equals(d, path) for d in existing_denied):
+            return {"status": "already_denied", "path": display_path}
 
         # Check if path was added to session's allowed_paths
         existing_allowed = [
             p["path"] if isinstance(p, dict) else p
             for p in session_config.get("allowed_paths", [])
         ]
-        was_session_allowed = path in existing_allowed
+        was_session_allowed = any(normalized_equals(a, path) for a in existing_allowed)
 
         if was_session_allowed:
             # Symmetric undo: just remove from allowed_paths, don't add to denied
             session_config["allowed_paths"] = [
                 p for p in session_config.get("allowed_paths", [])
-                if (p["path"] if isinstance(p, dict) else p) != path
+                if not normalized_equals(
+                    p["path"] if isinstance(p, dict) else p, path
+                )
             ]
             status = "removed"
         else:
@@ -937,7 +966,7 @@ class SandboxManagerPlugin:
         # Reload and sync
         self._load_all_configs()
 
-        return {"status": status, "path": path, "source": "session"}
+        return {"status": status, "path": display_path, "source": "session"}
 
 
 def create_plugin() -> SandboxManagerPlugin:
