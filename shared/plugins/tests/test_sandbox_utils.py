@@ -1,10 +1,13 @@
-"""Tests for sandbox_utils module - .jaato contained symlink escape.
+"""Tests for sandbox_utils module - .jaato access restriction.
 
-These tests verify the security behavior of the .jaato containment feature:
-- .jaato can be a symlink to an external directory (allowed)
-- Paths under .jaato must stay within the resolved .jaato boundary
-- Path traversal attacks (.jaato/../secret) are blocked
-- Nested symlinks inside .jaato are blocked
+These tests verify the security behavior of .jaato access control:
+- .jaato paths are DENIED BY DEFAULT for model tool calls
+- .jaato paths can be allowed via explicit registry authorization (sandbox add)
+- Even when authorized, containment rules still apply:
+  - .jaato can be a symlink to an external directory (allowed)
+  - Paths under .jaato must stay within the resolved .jaato boundary
+  - Path traversal attacks (.jaato/../secret) are blocked
+  - Nested symlinks inside .jaato are blocked
 """
 
 import os
@@ -276,7 +279,11 @@ class TestIsPathWithinJaatoBoundary:
 
 
 class TestCheckPathWithJaatoContainment:
-    """Integration tests for check_path_with_jaato_containment."""
+    """Integration tests for check_path_with_jaato_containment.
+
+    .jaato paths are denied by default and require explicit authorization
+    via the plugin registry (populated by 'sandbox add').
+    """
 
     def test_no_workspace_root_allows_all(self):
         """Test that missing workspace_root allows all paths."""
@@ -313,8 +320,24 @@ class TestCheckPathWithJaatoContainment:
         )
         assert result is False
 
-    def test_jaato_symlink_allowed(self, tmp_path):
-        """Test that .jaato symlink to external is allowed."""
+    def test_jaato_denied_by_default(self, tmp_path):
+        """Test that .jaato paths are denied without registry authorization."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        # No registry provided - .jaato is denied
+        result = check_path_with_jaato_containment(
+            str(config),
+            str(workspace)
+        )
+        assert result is False
+
+    def test_jaato_denied_by_default_no_registry(self, tmp_path):
+        """Test that .jaato paths via symlink are denied without registry."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         external_jaato = tmp_path / "external_jaato"
@@ -326,17 +349,91 @@ class TestCheckPathWithJaatoContainment:
         jaato_link = workspace / JAATO_CONFIG_DIR
         jaato_link.symlink_to(external_jaato)
 
-        # Access through symlink
+        # No registry provided - .jaato is denied
+        result = check_path_with_jaato_containment(
+            str(workspace / JAATO_CONFIG_DIR / "config.json"),
+            str(workspace)
+        )
+        assert result is False
+
+    def test_jaato_denied_with_empty_registry(self, tmp_path):
+        """Test that .jaato is denied when registry has no authorization."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return False
+
+        result = check_path_with_jaato_containment(
+            str(config),
+            str(workspace),
+            MockRegistry()
+        )
+        assert result is False
+
+    def test_jaato_allowed_when_authorized(self, tmp_path):
+        """Test that .jaato is allowed when explicitly authorized via registry."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        jaato_real = str(jaato_dir.resolve())
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(jaato_real)
+
+        result = check_path_with_jaato_containment(
+            str(config),
+            str(workspace),
+            MockRegistry()
+        )
+        assert result is True
+
+    def test_jaato_symlink_allowed_when_authorized(self, tmp_path):
+        """Test that .jaato symlink to external is allowed when authorized."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external_jaato = tmp_path / "external_jaato"
+        external_jaato.mkdir()
+        config = external_jaato / "config.json"
+        config.touch()
+
+        # Symlink .jaato to external
+        jaato_link = workspace / JAATO_CONFIG_DIR
+        jaato_link.symlink_to(external_jaato)
+
+        external_real = str(external_jaato.resolve())
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(external_real)
+
         path = str(workspace / JAATO_CONFIG_DIR / "config.json")
 
         result = check_path_with_jaato_containment(
             path,
-            str(workspace)
+            str(workspace),
+            MockRegistry()
         )
         assert result is True
 
     def test_jaato_traversal_blocked(self, tmp_path):
-        """Test that .jaato/../escape is blocked."""
+        """Test that .jaato/../escape is blocked even when authorized."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         external_jaato = tmp_path / "external_jaato"
@@ -348,17 +445,25 @@ class TestCheckPathWithJaatoContainment:
         jaato_link = workspace / JAATO_CONFIG_DIR
         jaato_link.symlink_to(external_jaato)
 
+        # Authorize everything
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return True
+
         # Try to escape
         escape_path = str(workspace / JAATO_CONFIG_DIR / ".." / "secret.txt")
 
         result = check_path_with_jaato_containment(
             escape_path,
-            str(workspace)
+            str(workspace),
+            MockRegistry()
         )
         assert result is False
 
     def test_jaato_nested_symlink_blocked(self, tmp_path):
-        """Test that nested symlinks inside .jaato are blocked."""
+        """Test that nested symlinks inside .jaato are blocked even when authorized."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         external_jaato = tmp_path / "external_jaato"
@@ -376,12 +481,20 @@ class TestCheckPathWithJaatoContainment:
         jaato_link = workspace / JAATO_CONFIG_DIR
         jaato_link.symlink_to(external_jaato)
 
+        # Authorize everything
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return True
+
         # Try to access through nested symlink
         attack_path = str(workspace / JAATO_CONFIG_DIR / "etc" / "passwd")
 
         result = check_path_with_jaato_containment(
             attack_path,
-            str(workspace)
+            str(workspace),
+            MockRegistry()
         )
         assert result is False
 
@@ -421,8 +534,8 @@ class TestCheckPathWithJaatoContainment:
         )
         assert result is False
 
-    def test_deep_nested_path_in_jaato(self, tmp_path):
-        """Test deeply nested paths in .jaato are allowed."""
+    def test_deep_nested_path_in_jaato_denied_by_default(self, tmp_path):
+        """Test deeply nested .jaato paths are denied without authorization."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         external_jaato = tmp_path / "external_jaato"
@@ -443,6 +556,40 @@ class TestCheckPathWithJaatoContainment:
         result = check_path_with_jaato_containment(
             path,
             str(workspace)
+        )
+        assert result is False
+
+    def test_deep_nested_path_in_jaato_allowed_when_authorized(self, tmp_path):
+        """Test deeply nested .jaato paths are allowed when authorized."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        external_jaato = tmp_path / "external_jaato"
+        external_jaato.mkdir()
+
+        # Create deep directory structure
+        deep_dir = external_jaato / "level1" / "level2" / "level3"
+        deep_dir.mkdir(parents=True)
+        deep_file = deep_dir / "config.yaml"
+        deep_file.touch()
+
+        # Symlink .jaato to external
+        jaato_link = workspace / JAATO_CONFIG_DIR
+        jaato_link.symlink_to(external_jaato)
+
+        external_real = str(external_jaato.resolve())
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(external_real)
+
+        path = str(workspace / JAATO_CONFIG_DIR / "level1" / "level2" / "level3" / "config.yaml")
+
+        result = check_path_with_jaato_containment(
+            path,
+            str(workspace),
+            MockRegistry()
         )
         assert result is True
 
@@ -471,11 +618,54 @@ class TestPluginRegistryIntegration:
         )
         assert result is True
 
-    def test_registry_does_not_override_jaato_blocking(self, tmp_path):
+    def test_registry_authorization_required_for_jaato(self, tmp_path):
+        """Test that .jaato paths require explicit registry authorization.
+
+        Even though .jaato is within the workspace, it is denied by default
+        and only accessible when the registry authorizes it (via sandbox add).
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        # Registry that does NOT authorize .jaato
+        class MockRegistryDeny:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return False
+
+        result = check_path_with_jaato_containment(
+            str(config),
+            str(workspace),
+            MockRegistryDeny()
+        )
+        assert result is False
+
+        # Registry that DOES authorize .jaato
+        jaato_real = str(jaato_dir.resolve())
+
+        class MockRegistryAllow:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(jaato_real)
+
+        result = check_path_with_jaato_containment(
+            str(config),
+            str(workspace),
+            MockRegistryAllow()
+        )
+        assert result is True
+
+    def test_registry_does_not_override_jaato_containment(self, tmp_path):
         """Test that registry auth doesn't bypass jaato containment checks.
 
-        Note: The current implementation checks jaato paths first, before
-        checking registry authorization. This test verifies that behavior.
+        Even when the registry authorizes everything, containment rules
+        (traversal escape, nested symlinks) are still enforced for .jaato paths.
         """
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -494,6 +684,8 @@ class TestPluginRegistryIntegration:
 
         # Mock registry that would authorize the path
         class MockRegistry:
+            def is_path_denied(self, path):
+                return False
             def is_path_authorized(self, path, mode="read"):
                 return True  # Authorize everything
 
@@ -652,6 +844,88 @@ class TestAccessMode:
         check_path_with_jaato_containment(
             str(ext_file), str(workspace), MockRegistry(),
             allow_tmp=False, mode="write"
+        )
+
+        assert received_modes == ["read", "write"]
+
+    def test_jaato_readonly_blocks_write(self, tmp_path):
+        """Test that .jaato authorized as readonly blocks write access."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        jaato_real = str(jaato_dir.resolve())
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                if not path.startswith(jaato_real):
+                    return False
+                # Only allow reads
+                return mode == "read"
+
+        # Read should be allowed
+        result = check_path_with_jaato_containment(
+            str(config), str(workspace), MockRegistry(), mode="read"
+        )
+        assert result is True
+
+        # Write should be blocked
+        result = check_path_with_jaato_containment(
+            str(config), str(workspace), MockRegistry(), mode="write"
+        )
+        assert result is False
+
+    def test_jaato_readwrite_allows_both(self, tmp_path):
+        """Test that .jaato authorized as readwrite allows both modes."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        jaato_real = str(jaato_dir.resolve())
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                return path.startswith(jaato_real)
+
+        for m in ("read", "write"):
+            result = check_path_with_jaato_containment(
+                str(config), str(workspace), MockRegistry(), mode=m
+            )
+            assert result is True, f"mode={m} should be allowed for readwrite .jaato"
+
+    def test_jaato_mode_passed_to_registry(self, tmp_path):
+        """Test that the mode parameter is passed to registry for .jaato paths."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        jaato_dir = workspace / JAATO_CONFIG_DIR
+        jaato_dir.mkdir()
+        config = jaato_dir / "config.json"
+        config.touch()
+
+        received_modes = []
+
+        class MockRegistry:
+            def is_path_denied(self, path):
+                return False
+            def is_path_authorized(self, path, mode="read"):
+                received_modes.append(mode)
+                return True
+
+        check_path_with_jaato_containment(
+            str(config), str(workspace), MockRegistry(), mode="read"
+        )
+        check_path_with_jaato_containment(
+            str(config), str(workspace), MockRegistry(), mode="write"
         )
 
         assert received_modes == ["read", "write"]
