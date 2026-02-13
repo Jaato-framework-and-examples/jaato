@@ -49,6 +49,7 @@ Thumbs.db
 !.jaato/prompts/
 !.jaato/skills/
 !.jaato/templates/
+.jaato/templates/index.json
 !.jaato/system_instructions.md
 
 # Test folders
