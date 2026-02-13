@@ -438,12 +438,20 @@ class JaatoServer:
                 created_at=agent.created_at,
             ))
 
-            # If agent has a non-idle status, emit that too
-            if agent.status != "idle":
-                emit(AgentStatusChangedEvent(
-                    agent_id=agent.agent_id,
-                    status=agent.status,
-                ))
+        # Replay conversation history as output events so reconnecting clients
+        # can populate their output panels with the conversation content.
+        # This must happen after AgentCreatedEvent (so client buffers exist)
+        # and before status events (so tool trees get finalized properly).
+        self._emit_conversation_replay(emit)
+
+        # Emit agent status. For idle agents, this triggers stop_spinner() on
+        # the client which finalizes any replayed tool trees. For non-idle
+        # agents, the client knows tools may still be running.
+        for agent_id, agent in self._agents.items():
+            emit(AgentStatusChangedEvent(
+                agent_id=agent.agent_id,
+                status=agent.status,
+            ))
 
         # Emit instruction budget for main agent
         if self._jaato:
@@ -524,6 +532,94 @@ class JaatoServer:
                         agent_id=agent_id,
                         budget_snapshot=session.instruction_budget.snapshot(),
                     ))
+
+    def _emit_conversation_replay(self, emit: EventCallback) -> None:
+        """Replay conversation history as output events for reconnecting clients.
+
+        Iterates over stored conversation history for each agent and emits
+        AgentOutputEvent, ToolCallStartEvent, and ToolCallEndEvent events so
+        the client's output buffer gets populated with the full conversation
+        content from before the reconnect.
+
+        The events are emitted in chronological order matching the original
+        conversation flow:
+        - User messages → AgentOutputEvent(source="user")
+        - Model text → AgentOutputEvent(source="model")
+        - Model thinking → AgentOutputEvent(source="thinking")
+        - Tool calls → ToolCallStartEvent (all) then ToolCallEndEvent (all)
+        - Tool response messages are skipped (shown via tool tree)
+
+        Args:
+            emit: Event callback to use for emission.
+        """
+        for agent_id, agent in self._agents.items():
+            if not agent.history:
+                continue
+
+            logger.info(
+                f"  replaying {len(agent.history)} history messages "
+                f"for agent {agent_id}"
+            )
+
+            for msg in agent.history:
+                role = msg.role
+                # Compare by value to avoid import dependency on Role enum
+                role_value = role.value if hasattr(role, 'value') else str(role)
+
+                if role_value == "user":
+                    # Emit user prompt text
+                    text = msg.text  # Message.text property concatenates text parts
+                    if text:
+                        emit(AgentOutputEvent(
+                            agent_id=agent_id,
+                            source="user",
+                            text=text,
+                            mode="write",
+                        ))
+
+                elif role_value == "model":
+                    # Emit text and thinking parts first
+                    for part in (msg.parts or []):
+                        if part.thought:
+                            emit(AgentOutputEvent(
+                                agent_id=agent_id,
+                                source="thinking",
+                                text=part.thought,
+                                mode="write",
+                            ))
+                        elif part.text:
+                            emit(AgentOutputEvent(
+                                agent_id=agent_id,
+                                source="model",
+                                text=part.text,
+                                mode="write",
+                            ))
+
+                    # Emit tool calls as start+end pairs (they're already completed)
+                    function_calls = [
+                        p.function_call
+                        for p in (msg.parts or [])
+                        if p.function_call
+                    ]
+                    if function_calls:
+                        # Start all tools first (mirrors parallel execution)
+                        for fc in function_calls:
+                            emit(ToolCallStartEvent(
+                                agent_id=agent_id,
+                                tool_name=fc.name,
+                                tool_args=fc.args or {},
+                                call_id=fc.id,
+                            ))
+                        # Then complete all tools
+                        for fc in function_calls:
+                            emit(ToolCallEndEvent(
+                                agent_id=agent_id,
+                                tool_name=fc.name,
+                                call_id=fc.id,
+                                success=True,
+                            ))
+
+                # Skip "tool" role messages — their content is shown via tool tree
 
     def _emit_clear_stale_requests(self, emit: EventCallback) -> None:
         """Emit "resolved" events to clear stale pending requests on clients.

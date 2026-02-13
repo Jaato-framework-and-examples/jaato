@@ -777,6 +777,13 @@ class SessionManager:
             server._jaato.reset_session(state.history)
             logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
+            # Also populate AgentState.history so emit_current_state() can
+            # replay conversation content for reconnecting clients.
+            # on_agent_history_updated is only called during send_message(),
+            # so we must set it explicitly after disk load.
+            if "main" in server._agents:
+                server._agents["main"].history = list(state.history)
+
             # Restore turn accounting (reset_session clears it, so we restore after)
             if state.turn_accounting:
                 jaato_session = server._jaato.get_session()
