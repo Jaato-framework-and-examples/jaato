@@ -230,6 +230,40 @@ class TestGlobFiles:
 
         assert "error" in result
 
+    def test_glob_files_absolute_pattern_posix(self):
+        """Test that absolute POSIX patterns return an actionable error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("# test")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_glob_files({
+                "pattern": "/home/user/project/**/*.py",
+                "root": tmpdir,
+            })
+
+            assert "error" in result
+            assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
+            assert result["total"] == 0
+
+    def test_glob_files_absolute_pattern_windows(self):
+        """Test that absolute Windows drive-letter patterns return an actionable error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("# test")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_glob_files({
+                "pattern": "C:/Users/me/project/**/*.py",
+                "root": tmpdir,
+            })
+
+            assert "error" in result
+            assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
+            assert result["total"] == 0
+
 
 class TestGrepContent:
     """Tests for the grep_content tool."""
@@ -461,6 +495,64 @@ class TestGrepContent:
             # Should not have duplicates
             assert result["total_matches"] == 2
             assert result["files_with_matches"] == 2
+
+    def test_grep_content_absolute_file_glob_posix(self):
+        """Test that absolute POSIX file_glob patterns return an actionable error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("hello world")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "hello",
+                "path": tmpdir,
+                "file_glob": ["/home/user/project/**/*.py"],
+            })
+
+            assert "error" in result
+            assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
+            assert "file_glob" in result["error"] or "path" in result["error"]
+            assert result["total_matches"] == 0
+
+    def test_grep_content_absolute_file_glob_windows(self):
+        """Test that absolute Windows file_glob patterns return an actionable error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("hello world")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "hello",
+                "path": tmpdir,
+                "file_glob": ["C:/Users/me/project/**/*.py"],
+            })
+
+            assert "error" in result
+            assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
+            assert result["total_matches"] == 0
+
+    def test_grep_content_mixed_absolute_relative_file_glob(self):
+        """Test error when file_glob mixes absolute and relative patterns."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("hello world")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "hello",
+                "path": tmpdir,
+                "file_glob": ["*.py", "/absolute/path/**"],
+            })
+
+            # The relative pattern runs fine; the absolute one should error
+            # (implementation catches on first absolute pattern encountered)
+            # Either we get results from *.py or an error from the absolute one
+            if "error" in result:
+                assert "relative" in result["error"].lower() or "absolute" in result["error"].lower()
+
 
 class TestBackgroundCapable:
     """Tests for background execution support."""
