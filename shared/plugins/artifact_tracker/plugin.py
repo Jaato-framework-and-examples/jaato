@@ -11,7 +11,9 @@ Example workflow:
 3. Model modifies src/api.py -> plugin reminds to check test_api.py
 4. Model reviews and updates test_api.py -> marks as reviewed
 
-The plugin persists state to a JSON file so artifacts survive session restarts.
+The plugin persists state to a JSON file during a session. On new session
+initialization, any existing state file is cleared to prevent stale artifacts
+from a previous session from leaking into the new one.
 """
 
 import json
@@ -152,10 +154,15 @@ class ArtifactTrackerPlugin:
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the artifact tracker plugin.
 
+        Each new session starts with a clean artifact registry. Any existing
+        state file from a previous session is removed on initialization to
+        prevent stale artifacts from leaking across sessions.
+
         Args:
             config: Optional configuration dict:
                 - storage_path: Path to JSON file for persistence
-                - auto_load: Whether to load existing state (default: True)
+                - auto_load: Whether to load existing state (default: False).
+                    Kept for testing; production sessions always start fresh.
                 - workspace_root: Root directory for displaying relative paths.
                     If not provided, auto-detects from JAATO_WORKSPACE_ROOT or
                     workspaceRoot environment variables.
@@ -172,12 +179,15 @@ class ArtifactTrackerPlugin:
         else:
             self._workspace_root = _detect_workspace_root()
 
-        # Initialize registry
+        # Initialize a fresh registry for this session
         self._registry = ArtifactRegistry()
 
-        # Load existing state if available
-        if config.get("auto_load", True):
+        if config.get("auto_load", False):
+            # Explicit opt-in: load existing state (useful for tests or resumed sessions)
             self._load_state()
+        else:
+            # Default: clear any stale state file from a previous session
+            self._clear_state_file()
 
         self._initialized = True
         self._trace(f"initialize: storage_path={self._storage_path}, workspace_root={self._workspace_root}")
@@ -225,6 +235,24 @@ class ArtifactTrackerPlugin:
     def _to_display_paths(self, paths: List[str]) -> List[str]:
         """Convert a list of paths to display paths."""
         return [self._to_display_path(p) for p in paths]
+
+    def _clear_state_file(self) -> None:
+        """Remove any existing state file from a previous session.
+
+        Called during initialization to ensure each new session starts with a
+        clean artifact registry, preventing stale artifacts from leaking across
+        sessions on the same workspace.
+        """
+        if not self._storage_path:
+            return
+
+        try:
+            storage_path = os.path.abspath(self._storage_path)
+            if os.path.exists(storage_path):
+                os.remove(storage_path)
+                self._trace(f"_clear_state_file: removed stale state file {storage_path}")
+        except OSError as e:
+            self._trace(f"_clear_state_file: failed to remove {self._storage_path}: {e}")
 
     def _load_state(self) -> None:
         """Load state from storage file."""
