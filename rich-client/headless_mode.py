@@ -221,22 +221,18 @@ async def run_headless_mode(
                             style="system_info",
                             agent_id=agent_id,
                         )
-                # Exit when main agent finishes and no subagents are running.
-                # AgentCompletedEvent is only emitted for subagents, so the
-                # main agent's "done" status is the real exit signal. But we
-                # must wait for all subagents to complete first — subagent
-                # results are injected back into the parent session, which
-                # triggers new turns on the main agent.
-                if event.agent_id == "main" and event.status == "done" and not active_subagents:
+                # Exit when main agent is truly finished.
+                # The server emits "done" only when there is nothing left
+                # to do (no pending channel input, no active subagents).
+                # While subagents are still running or the agent awaits
+                # user input, the server emits "idle" instead.
+                if event.agent_id == "main" and event.status == "done":
                     should_exit = True
                     break
 
             elif isinstance(event, AgentCompletedEvent):
                 renderer.on_agent_completed(event.agent_id)
                 active_subagents.discard(event.agent_id)
-                # If main agent already finished and this was the last subagent,
-                # the main agent will get a new turn from the injected result.
-                # So we don't exit here — we wait for the next main "done".
 
             elif isinstance(event, AgentOutputEvent):
                 renderer.on_agent_output(
@@ -402,6 +398,16 @@ async def run_headless_mode(
         pass
     except Exception as e:
         print(f"[headless] Error: {e}", file=sys.stderr)
+
+    # Terminate the session — the "exit" command. This stops the agent
+    # (if still running) and signals any other attached clients to exit
+    # via the [SESSION_TERMINATED] broadcast.
+    try:
+        await client.execute_command("session.end", [])
+        print("[headless] Session ended", file=sys.stderr)
+    except Exception as e:
+        # Best-effort: connection may already be closing
+        logger.debug(f"session.end failed (non-fatal): {e}")
 
     # Cleanup - use close() for permanent shutdown (stops event stream)
     renderer.shutdown()

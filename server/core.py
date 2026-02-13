@@ -2089,8 +2089,18 @@ class JaatoServer:
             finally:
                 server._model_running = False
                 server._model_thread = None
-                # Emit "idle" if waiting for user input, "done" if truly finished
-                status = "idle" if server._waiting_for_channel_input else "done"
+                # Determine whether the main agent is truly finished or just
+                # paused waiting for external input.
+                #   "idle"  – waiting for user input or subagent results
+                #   "done"  – nothing left to do, session can exit
+                has_active_subagents = any(
+                    info.agent_id != "main" and info.completed_at is None
+                    for info in server._agents.values()
+                )
+                if server._waiting_for_channel_input or has_active_subagents:
+                    status = "idle"
+                else:
+                    status = "done"
                 server.emit(AgentStatusChangedEvent(
                     agent_id="main",
                     status=status,
