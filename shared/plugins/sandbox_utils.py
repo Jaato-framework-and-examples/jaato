@@ -4,21 +4,27 @@ This module provides common path validation logic used by multiple plugins
 (file_edit, cli, etc.) to enforce workspace sandboxing with special handling
 for the .jaato configuration directory.
 
-Key feature: .jaato Contained Symlink Escape
-============================================
-The .jaato directory is allowed to be a symlink pointing outside the workspace,
-but once inside .jaato, paths cannot escape that boundary. Nested symlinks
-inside .jaato are NOT allowed.
+Key feature: .jaato Access Restriction
+=======================================
+The .jaato directory is **denied by default** for model tool calls. The model
+cannot access any files under .jaato unless the user explicitly grants access
+via the ``sandbox add`` command (which registers the path in the plugin
+registry's authorized paths).
+
+Even when explicitly authorized, containment rules still apply:
+- .jaato can be a symlink pointing outside the workspace (allowed)
+- Once inside .jaato, paths cannot escape that boundary
+- Nested symlinks inside .jaato are NOT allowed
 
 Example:
     Workspace: /home/user/project/
     .jaato symlink: /home/user/project/.jaato -> /home/user/.jaato (external)
 
-    ALLOWED:
+    DENIED BY DEFAULT (requires ``sandbox add``):
         .jaato/config.json     -> /home/user/.jaato/config.json
         .jaato/vision/img.png  -> /home/user/.jaato/vision/img.png
 
-    BLOCKED:
+    ALWAYS BLOCKED (even with ``sandbox add``):
         .jaato/../secret.txt   -> /home/user/secret.txt (escapes boundary)
         .jaato/plugins -> /opt  (nested symlink, not allowed)
 
@@ -231,10 +237,13 @@ def check_path_with_jaato_containment(
 
     This is the main entry point for path validation that respects:
     1. Denied paths (checked first, takes precedence over all other rules)
-    2. Standard workspace sandboxing (paths must be within workspace)
-    3. Special .jaato handling (symlink allowed, but contained)
-    4. Plugin registry authorization (for external paths, respects access mode)
-    5. System temp directories (/tmp) when allow_tmp=True
+    2. .jaato restriction: denied by default, requires explicit authorization
+       via ``sandbox add`` (registered in plugin registry). Even when authorized,
+       containment checks still apply (no traversal escapes, no nested symlinks).
+       This takes precedence over /tmp allowance.
+    3. System temp directories (/tmp) when allow_tmp=True
+    4. Standard workspace sandboxing (paths must be within workspace)
+    5. Plugin registry authorization (for external paths, respects access mode)
 
     Args:
         path: Path to check (absolute or will be made absolute).
@@ -264,14 +273,12 @@ def check_path_with_jaato_containment(
         if plugin_registry.is_path_denied(abs_path):
             return False
 
-    # Check if path is under /tmp (allowed by default)
-    if allow_tmp and is_under_temp_path(abs_path):
-        return True
-
-    # IMPORTANT: Check if path references .jaato BEFORE normalizing
-    # This catches traversal attacks like .jaato/../secret.txt
+    # IMPORTANT: Check if path references .jaato BEFORE /tmp or workspace checks.
+    # .jaato is denied by default and this takes precedence over /tmp allowance.
+    # This also catches traversal attacks like .jaato/../secret.txt
     if is_jaato_path(path, workspace_root):
-        # Special .jaato handling
+        # .jaato is DENIED BY DEFAULT. The model cannot access .jaato unless
+        # the user explicitly authorizes it via "sandbox add".
         jaato_boundary = get_jaato_boundary(workspace_root)
         if jaato_boundary is None:
             # .jaato doesn't exist - path can't exist either
@@ -283,7 +290,23 @@ def check_path_with_jaato_containment(
         else:
             abs_path = path
 
-        return is_path_within_jaato_boundary(abs_path, workspace_root, jaato_boundary)
+        # Security: containment must pass even if authorized
+        if not is_path_within_jaato_boundary(abs_path, workspace_root, jaato_boundary):
+            return False
+
+        # Only allow if explicitly authorized via plugin registry
+        # (populated by "sandbox add" command)
+        if plugin_registry and hasattr(plugin_registry, 'is_path_authorized'):
+            real_path = os.path.realpath(abs_path)
+            if plugin_registry.is_path_authorized(real_path, mode=mode):
+                return True
+
+        # Not authorized - denied by default
+        return False
+
+    # Check if path is under /tmp (allowed by default)
+    if allow_tmp and is_under_temp_path(abs_path):
+        return True
 
     # Standard workspace check - resolve symlinks
     # Use normalized comparison to handle mixed separators (MSYS2/Windows)
