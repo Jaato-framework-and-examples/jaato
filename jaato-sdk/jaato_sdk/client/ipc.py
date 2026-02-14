@@ -476,7 +476,7 @@ class IPCClient:
         ]
 
         try:
-            subprocess.run(cmd, check=True, cwd=str(ROOT))
+            subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             print(f"Failed to start server: {e}")
             return False
