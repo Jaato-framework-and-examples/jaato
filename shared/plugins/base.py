@@ -2,9 +2,43 @@
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, runtime_checkable
+from typing import Protocol, List, Dict, Any, Callable, FrozenSet, Optional, NamedTuple, runtime_checkable
 
 from .model_provider.types import ToolSchema
+
+
+# ---------------------------------------------------------------------------
+# Plugin-level traits
+#
+# Analogous to the tool-level ``TRAIT_*`` constants in
+# ``model_provider.types``, but apply to **plugins** rather than individual
+# tool schemas.  Plugins declare traits via a ``plugin_traits`` attribute
+# (a ``FrozenSet[str]``) and consumers discover capabilities through
+# trait membership.
+# ---------------------------------------------------------------------------
+
+TRAIT_AUTH_PROVIDER = "auth_provider"
+"""Plugin-level trait identifying authentication plugins.
+
+Plugins declaring this trait provide interactive authentication for a
+model provider.  They MUST also expose a ``provider_name`` property
+(``str``) returning the provider identifier they authenticate for
+(e.g. ``"anthropic"``, ``"zhipuai"``, ``"github_models"``).
+
+The server uses this trait to find all auth plugins, then matches
+``provider_name`` to select the right one — no hardcoded mapping needed.
+
+Usage::
+
+    from shared.plugins.base import TRAIT_AUTH_PROVIDER
+
+    class MyAuthPlugin:
+        plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})
+
+        @property
+        def provider_name(self) -> str:
+            return "my_provider"
+"""
 
 
 # Output callback type for real-time output from model and plugins

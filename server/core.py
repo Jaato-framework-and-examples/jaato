@@ -2554,25 +2554,38 @@ class JaatoServer:
         logger.debug(msg)
 
     def _get_auth_plugin_for_provider(self, provider_name: str):
-        """Get the authentication plugin for a provider, if available.
+        """Get the authentication plugin for a provider via trait-based discovery.
+
+        Discovery uses the plugin-level trait system:
+
+        1. Filter plugins that declare ``TRAIT_AUTH_PROVIDER`` in their
+           ``plugin_traits`` — this identifies them as auth plugins.
+        2. Among those, match by ``provider_name`` property to find the
+           one serving the requested provider.
+
+        This avoids a hardcoded provider-to-plugin mapping, so adding a new
+        auth plugin never requires editing server code.
 
         Args:
-            provider_name: Provider name (e.g., 'anthropic', 'google_genai')
+            provider_name: Provider name (e.g., 'anthropic', 'zhipuai')
 
         Returns:
-            The auth plugin instance, or None if not available.
+            The auth plugin instance, or None if no matching plugin found.
         """
-        # Map provider names to their auth plugin names
-        auth_plugin_map = {
-            "anthropic": "anthropic_auth",
-            "github_models": "github_auth",
-        }
+        from shared.plugins.base import TRAIT_AUTH_PROVIDER
 
-        plugin_name = auth_plugin_map.get(provider_name)
-        if not plugin_name:
+        if not self.registry:
             return None
 
-        return self.registry.get_plugin(plugin_name)
+        for name in self.registry.list_available():
+            plugin = self.registry.get_plugin(name)
+            if plugin is None:
+                continue
+            traits = getattr(plugin, 'plugin_traits', frozenset())
+            if TRAIT_AUTH_PROVIDER in traits and getattr(plugin, 'provider_name', None) == provider_name:
+                return plugin
+
+        return None
 
     def _check_auth_completion(self) -> None:
         """Check if auth has been completed and finish initialization if so."""
