@@ -64,6 +64,14 @@ class AntigravityAuthPlugin:
         """Return human-readable provider name."""
         return "Google Antigravity"
 
+    @property
+    def credential_env_vars(self) -> List[str]:
+        """Return env var names used for credentials by this provider.
+
+        Antigravity uses OAuth only — no env var for credentials.
+        """
+        return []
+
     def get_default_models(self) -> List[Dict[str, str]]:
         """Return default models available for this provider."""
         return [

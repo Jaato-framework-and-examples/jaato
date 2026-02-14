@@ -40,7 +40,7 @@ import signal
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parents[1]
@@ -913,6 +913,7 @@ class JaatoDaemon:
         self._pending_post_auth[client_id] = {
             "request_id": request_id,
             "provider_name": provider_name,
+            "credential_env_vars": getattr(plugin, 'credential_env_vars', []),
         }
 
         self._route_event(client_id, PostAuthSetupEvent(
@@ -961,7 +962,8 @@ class JaatoDaemon:
 
         # Persist to .env if requested
         if event.persist_env and workspace_path:
-            self._persist_env(workspace_path, provider_name, model_name)
+            credential_env_vars = pending.get("credential_env_vars", [])
+            self._persist_env(workspace_path, provider_name, model_name, credential_env_vars)
             self._route_event(client_id, SystemMessageEvent(
                 message=f"Saved JAATO_PROVIDER={provider_name} and MODEL_NAME={model_name} to .env",
                 style="info",
@@ -1002,16 +1004,24 @@ class JaatoDaemon:
         workspace_path: str,
         provider_name: str,
         model_name: str,
+        credential_env_vars: Optional[List[str]] = None,
     ) -> None:
         """Write or update JAATO_PROVIDER and MODEL_NAME in workspace .env file.
 
         Only replaces active (uncommented) lines. Commented-out lines like
         ``#JAATO_PROVIDER=...`` are preserved untouched.
+
+        When *credential_env_vars* is provided (from the auth plugin), any
+        commented-out lines for those vars are annotated to indicate that
+        credentials are stored securely in ``.jaato/`` and managed by the
+        auth command — so users know auth is configured even though the
+        key doesn't appear in ``.env``.
         """
         env_path = os.path.join(workspace_path, '.env')
         lines = []
         seen_provider = False
         seen_model = False
+        cred_vars = set(credential_env_vars or [])
 
         # Read existing .env if it exists
         if os.path.exists(env_path):
@@ -1024,6 +1034,12 @@ class JaatoDaemon:
                     elif stripped.startswith('MODEL_NAME='):
                         lines.append(f'MODEL_NAME={model_name}\n')
                         seen_model = True
+                    elif cred_vars and self._is_commented_credential(stripped, cred_vars):
+                        # Annotate commented credential line to indicate
+                        # it's managed by the auth plugin
+                        var_name = self._extract_var_name(stripped)
+                        lines.append(f'# {var_name}=<stored in .jaato/ — use {provider_name}-auth>\n')
+                        cred_vars.discard(var_name)
                     else:
                         lines.append(line)
 
@@ -1035,6 +1051,21 @@ class JaatoDaemon:
 
         with open(env_path, 'w') as f:
             f.writelines(lines)
+
+    @staticmethod
+    def _is_commented_credential(stripped: str, cred_vars: set) -> bool:
+        """Check if a stripped line is a commented-out credential env var."""
+        if not stripped.startswith('#'):
+            return False
+        # Strip leading # and whitespace: "# ZHIPUAI_API_KEY=..." -> "ZHIPUAI_API_KEY=..."
+        uncommented = stripped.lstrip('#').lstrip()
+        return any(uncommented.startswith(f'{var}=') for var in cred_vars)
+
+    @staticmethod
+    def _extract_var_name(stripped: str) -> str:
+        """Extract the env var name from a commented line like '# ZHIPUAI_API_KEY=...'."""
+        uncommented = stripped.lstrip('#').lstrip()
+        return uncommented.split('=', 1)[0]
 
     def _get_command_list(self) -> list:
         """Get list of available commands for clients.

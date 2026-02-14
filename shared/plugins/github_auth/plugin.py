@@ -61,6 +61,11 @@ class GitHubAuthPlugin:
         """Return human-readable provider name."""
         return "GitHub Models"
 
+    @property
+    def credential_env_vars(self) -> List[str]:
+        """Return env var names used for credentials by this provider."""
+        return ["GITHUB_TOKEN"]
+
     def get_default_models(self) -> List[Dict[str, str]]:
         """Return default models available for this provider."""
         return [
