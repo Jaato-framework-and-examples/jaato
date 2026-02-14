@@ -2,6 +2,8 @@
 
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
@@ -17,12 +19,21 @@ DEFAULT_TIMEOUT = 10  # seconds
 class WebSearchPlugin:
     """Plugin that provides web search capability using DuckDuckGo.
 
+    Searches are serialized via a class-level lock because DuckDuckGo
+    rate-limits concurrent requests from the same IP, causing the ``ddgs``
+    library to hang indefinitely.  Each call is also wrapped in a timeout
+    so that a stalled request fails gracefully instead of blocking the
+    tool executor forever.
+
     Configuration:
         max_results: Maximum number of search results to return (default: 10).
         timeout: Request timeout in seconds (default: 10).
         region: Region for search results (default: 'wt-wt' for no region).
         safesearch: Safe search level - 'off', 'moderate', 'strict' (default: 'moderate').
     """
+
+    # Class-level lock: only one DDGS request at a time across all instances.
+    _search_lock = threading.Lock()
 
     def __init__(self):
         self._max_results: int = DEFAULT_MAX_RESULTS
@@ -158,14 +169,28 @@ Tips for effective searches:
                     'hint': 'Install with: pip install ddgs'
                 }
 
-            # Perform the search
-            with DDGS() as ddgs:
-                results = list(ddgs.text(
-                    query,
-                    region=self._region,
-                    safesearch=self._safesearch,
-                    max_results=max_results
-                ))
+            # Serialize searches to avoid DuckDuckGo rate-limiting on
+            # concurrent requests, and enforce a timeout as safety net.
+            def _do_search():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(
+                        query,
+                        region=self._region,
+                        safesearch=self._safesearch,
+                        max_results=max_results,
+                    ))
+
+            with self._search_lock:
+                self._trace(f"web_search: lock acquired for query={query!r}")
+                executor = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = executor.submit(_do_search)
+                    results = future.result(timeout=self._timeout)
+                except FuturesTimeoutError:
+                    self._trace(f"web_search: timed out after {self._timeout}s for query={query!r}")
+                    return {'error': f'web_search timed out after {self._timeout}s', 'query': query}
+                finally:
+                    executor.shutdown(wait=False)
 
             if not results:
                 return {
