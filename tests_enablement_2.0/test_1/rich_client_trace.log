@@ -1,4 +1,0 @@
-[08:42:51.464] [SUBAGENT] 'skill-code-020-generate-microservice-java-spring' tools=['cli', 'file_edit', 'references']
-[08:42:51.464] [SUBAGENT] plugin_configs={'references': {'preselected': ['adr-003-microservice-structure', 'adr-006-logging-observability', 'eri-003-spring-boot-microservice'], 'exclude_tools': ['selectReferences']}}
-[09:05:45.415] [SUBAGENT] 'skill-code-020-generate-microservice-java-spring' tools=['cli', 'file_edit', 'references']
-[09:05:45.415] [SUBAGENT] plugin_configs={'references': {'preselected': ['adr-003-microservice-structure', 'adr-006-logging-observability', 'eri-003-spring-boot-microservice'], 'exclude_tools': ['selectReferences']}}
