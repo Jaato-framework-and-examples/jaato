@@ -1,7 +1,3 @@
----
-render_with_liquid: false
----
-
 # JAATO Knowledge Management
 
 ## Executive Summary
@@ -394,7 +390,7 @@ The template plugin runs after references, processing the content that reference
 │  │  1. EMBEDDED TEMPLATE EXTRACTION                              │    │
 │  │                                                               │    │
 │  │  Scan code blocks for template syntax:                        │    │
-│  │  • Jinja2: {{ variable }}, {% if %}, {% for %}                │    │
+│  │  • Jinja2: {% raw %}{{ variable }}, {% if %}, {% for %}{% endraw %}                │    │
 │  │  • Mustache: {{#section}}...{{/section}}, {{^inverted}}       │    │
 │  │                                                               │    │
 │  │  Extract to .jaato/templates/ with auto-generated names:      │    │
@@ -591,7 +587,7 @@ The plugin auto-detects which template engine to use:
 | `{{#section}}...{{/section}}` | Mustache section/loop | Mustache |
 | `{{^inverted}}` | Mustache inverted section | Mustache |
 | `{{.}}` | Mustache current item | Mustache |
-| `{% if %}`, `{% for %}` | Jinja2 control | Jinja2 |
+| {% raw %}`{% if %}`, `{% for %}`{% endraw %} | Jinja2 control | Jinja2 |
 | `{{ var \| filter }}` | Jinja2 pipe filter | Jinja2 |
 | `{{ variable }}` only | Ambiguous -- defaults to Jinja2 | Jinja2 |
 
