@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 from ..base import UserCommand
+from ..background import BackgroundCapableMixin
 from ..model_provider.types import ToolSchema
 from shared.trace import trace as _trace_write
 
@@ -16,14 +17,33 @@ DEFAULT_TIMEOUT = 30  # seconds
 DEFAULT_MAX_LENGTH = 100000  # max characters to return
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; JaatoBot/1.0; +https://github.com/apanoia/jaato)"
 
+# Auto-background threshold for web_fetch (covers PDF download + conversion).
+# Regular HTML fetches complete well within this; only PDFs are likely to exceed it.
+DEFAULT_WEB_FETCH_AUTO_BACKGROUND_THRESHOLD = 10.0
 
-class WebFetchPlugin:
+# Content types that can be converted to markdown (not treated as opaque binary).
+PDF_CONTENT_TYPES = {'application/pdf'}
+PDF_EXTENSIONS = {'.pdf'}
+
+# Maximum PDF file size to attempt conversion (50 MB)
+MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024
+
+
+class WebFetchPlugin(BackgroundCapableMixin):
     """Plugin that fetches and parses web page content.
 
     Supports multiple output modes:
         - markdown: Clean markdown conversion (default, best for reading)
         - structured: JSON with extracted components (links, images, tables, etc.)
         - raw: Raw HTML content
+
+    PDF support:
+        When the URL points to a PDF, the plugin downloads the file and converts
+        it to markdown using pymupdf4llm (if installed). Falls back to returning
+        binary metadata when the library is unavailable.
+
+    Inherits from BackgroundCapableMixin so that slow fetches (e.g. large PDFs)
+    are automatically backgrounded by the ToolExecutor after a threshold.
 
     Configuration:
         timeout: Request timeout in seconds (default: 30).
@@ -33,11 +53,15 @@ class WebFetchPlugin:
     """
 
     def __init__(self):
+        # Initialize BackgroundCapableMixin for auto-background support
+        super().__init__(max_workers=2)
+
         self._timeout: int = DEFAULT_TIMEOUT
         self._max_length: int = DEFAULT_MAX_LENGTH
         self._user_agent: str = DEFAULT_USER_AGENT
         self._follow_redirects: bool = True
         self._initialized = False
+        self._auto_background_threshold: float = DEFAULT_WEB_FETCH_AUTO_BACKGROUND_THRESHOLD
         # Cache for recently fetched pages (simple in-memory cache)
         self._cache: Dict[str, tuple] = {}  # url -> (content, timestamp)
         self._cache_ttl: int = 300  # 5 minutes
@@ -51,6 +75,22 @@ class WebFetchPlugin:
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("WEB_FETCH", msg)
+
+    # --- BackgroundCapableMixin overrides ---
+
+    def supports_background(self, tool_name: str) -> bool:
+        """web_fetch supports background execution for slow fetches (e.g. PDFs)."""
+        return tool_name == 'web_fetch'
+
+    def get_auto_background_threshold(self, tool_name: str) -> Optional[float]:
+        """Return threshold in seconds before auto-backgrounding web_fetch.
+
+        Regular HTML fetches complete well within this window; only large
+        PDF downloads + conversion are likely to exceed it.
+        """
+        if tool_name == 'web_fetch':
+            return self._auto_background_threshold
+        return None
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the web fetch plugin.
@@ -88,8 +128,9 @@ class WebFetchPlugin:
         """Return the ToolSchema for the web fetch tool."""
         return [ToolSchema(
             name='web_fetch',
-            description='Fetch a web page and return its content in a readable format. '
-                       'Supports markdown conversion, structured data extraction, and CSS selectors.',
+            description='Fetch a web page or PDF and return its content in a readable format. '
+                       'Supports markdown conversion (including PDF-to-markdown), '
+                       'structured data extraction, and CSS selectors.',
             parameters={
                 "type": "object",
                 "properties": {
@@ -168,15 +209,25 @@ class WebFetchPlugin:
 - `structured`: Returns JSON with extracted components (links, images, tables, etc.) or parsed JSON data
 - `raw`: Returns the raw content (use sparingly, token-heavy)
 
-**Content-Type Detection:** The tool automatically detects JSON, XML, and plain text content:
+**Content-Type Detection:** The tool automatically detects JSON, XML, PDF, and plain text content:
 - JSON APIs return pretty-printed JSON (markdown mode) or parsed data (structured mode)
 - XML feeds are returned as-is in readable format
+- PDF documents are downloaded and converted to markdown (requires pymupdf4llm)
 - HTML is converted to clean markdown
+
+**PDF Support:**
+- PDF URLs are automatically detected and converted to markdown
+- Tables, headers, bold/italic formatting are preserved
+- Large PDFs may be auto-backgrounded; use `getBackgroundTask()` to retrieve the result
+- If pymupdf4llm is not installed, returns binary metadata with an install hint
 
 **Examples:**
 ```
 # Read an article as markdown
 web_fetch(url="https://example.com/article")
+
+# Read a PDF document
+web_fetch(url="https://example.com/document.pdf")
 
 # Extract just the main content area
 web_fetch(url="https://example.com", selector=".main-content")
@@ -202,7 +253,8 @@ web_fetch(url="https://example.com", include_headers=true)
 - Use `structured` mode when you need to analyze page components or JSON API data
 - The tool follows redirects and handles common encodings
 - Results are cached briefly; use `no_cache=true` to bypass
-- Binary content (images, PDFs, etc.) returns metadata instead of garbled text
+- PDF URLs are converted to markdown when pymupdf4llm is installed
+- Binary content (images, archives, etc.) returns metadata instead of garbled text
 - Use `headers` parameter for authentication (Bearer tokens, API keys, etc.)
 - Use `include_headers=true` to see response headers like Last-Modified, ETag, Cache-Control
 
@@ -244,28 +296,30 @@ web_fetch(url="https://example.com", include_headers=true)
             del self._cache[oldest_url]
         self._cache[url] = (content, datetime.now())
 
-    # Content types that should be treated as binary (return metadata only)
+    # Content types that should be treated as binary (return metadata only).
+    # Note: application/pdf is NOT here — PDFs are handled separately for conversion.
     BINARY_CONTENT_TYPES = {
         'image/', 'audio/', 'video/', 'application/octet-stream',
-        'application/pdf', 'application/zip', 'application/gzip',
+        'application/zip', 'application/gzip',
         'application/x-tar', 'application/x-rar', 'application/x-7z',
         'application/vnd.', 'application/x-executable',
         'font/', 'model/',
     }
 
-    # File extensions that indicate binary content
+    # File extensions that indicate binary content.
+    # Note: .pdf is NOT here — PDFs are handled separately for conversion.
     BINARY_EXTENSIONS = {
         '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg',
         '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
         '.mp4', '.webm', '.avi', '.mov', '.mkv',
-        '.pdf', '.zip', '.gz', '.tar', '.rar', '.7z',
+        '.zip', '.gz', '.tar', '.rar', '.7z',
         '.exe', '.dll', '.so', '.dylib',
         '.woff', '.woff2', '.ttf', '.otf', '.eot',
         '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
     }
 
     def _is_binary_content_type(self, content_type: str) -> bool:
-        """Check if content type indicates binary content."""
+        """Check if content type indicates binary content (excluding PDFs)."""
         if not content_type:
             return False
         content_type = content_type.lower().split(';')[0].strip()
@@ -275,13 +329,48 @@ web_fetch(url="https://example.com", include_headers=true)
         return False
 
     def _is_binary_url(self, url: str) -> bool:
-        """Check if URL extension indicates binary content."""
+        """Check if URL extension indicates binary content (excluding PDFs)."""
         parsed = urlparse(url)
         path = parsed.path.lower()
         for ext in self.BINARY_EXTENSIONS:
             if path.endswith(ext):
                 return True
         return False
+
+    @staticmethod
+    def _is_pdf_content_type(content_type: str) -> bool:
+        """Check if content type indicates a PDF document."""
+        if not content_type:
+            return False
+        ct = content_type.lower().split(';')[0].strip()
+        return ct in PDF_CONTENT_TYPES
+
+    @staticmethod
+    def _is_pdf_url(url: str) -> bool:
+        """Check if URL extension indicates a PDF document."""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        return any(path.endswith(ext) for ext in PDF_EXTENSIONS)
+
+    def _save_pdf_to_temp(self, content: bytes, size_limit: int = MAX_PDF_SIZE_BYTES) -> tuple[Optional[str], Optional[str]]:
+        """Save PDF bytes to a temporary file.
+
+        Args:
+            content: Raw PDF bytes.
+            size_limit: Maximum size in bytes to accept.
+
+        Returns:
+            Tuple of (temp_file_path, error_message).
+        """
+        if len(content) > size_limit:
+            return None, f"PDF too large ({len(content)} bytes, limit {size_limit} bytes)"
+        try:
+            fd, path = tempfile.mkstemp(suffix='.pdf', prefix='jaato_web_fetch_')
+            with os.fdopen(fd, 'wb') as f:
+                f.write(content)
+            return path, None
+        except Exception as e:
+            return None, f"Failed to save PDF: {e}"
 
     def _fetch_url(
         self,
@@ -305,6 +394,7 @@ web_fetch(url="https://example.com", include_headers=true)
         Returns:
             Tuple of (content, final_url, error_message, metadata)
             - For text content: (html_content, final_url, None, {"response_content_type": "...", "response_headers": {...}})
+            - For PDF content: ("", final_url, None, {"is_pdf": True, "pdf_path": "/tmp/...", ...})
             - For binary content: ("", final_url, None, {"is_binary": True, ...})
             - On error: ("", url, error_message, None)
         """
@@ -343,6 +433,21 @@ web_fetch(url="https://example.com", include_headers=true)
                 content_type = response.headers.get('Content-Type', '')
                 content_length = response.headers.get('Content-Length')
                 final_url = response.url
+
+                # Check for PDF content — download and save to temp file
+                if self._is_pdf_content_type(content_type) or self._is_pdf_url(str(final_url)):
+                    pdf_bytes = response.content  # Download full body
+                    pdf_path, pdf_err = self._save_pdf_to_temp(pdf_bytes)
+                    if pdf_err:
+                        response.close()
+                        return "", str(final_url), pdf_err, None
+                    self._trace(f"PDF saved to {pdf_path} ({len(pdf_bytes)} bytes)")
+                    return "", str(final_url), None, {
+                        'is_pdf': True,
+                        'pdf_path': pdf_path,
+                        'content_type': content_type,
+                        'size_bytes': len(pdf_bytes),
+                    }
 
                 # Check for binary content
                 if self._is_binary_content_type(content_type) or self._is_binary_url(str(final_url)):
@@ -385,19 +490,27 @@ web_fetch(url="https://example.com", include_headers=true)
             ) as client:
                 # First, do a HEAD request to check content type (if supported)
                 # Fall back to GET with stream if HEAD fails
+                head_content_type = None
+                head_content_length = None
+                head_final_url = None
                 try:
                     head_response = client.head(url)
-                    content_type = head_response.headers.get('Content-Type', '')
-                    content_length = head_response.headers.get('Content-Length')
-                    final_url = str(head_response.url)
+                    head_content_type = head_response.headers.get('Content-Type', '')
+                    head_content_length = head_response.headers.get('Content-Length')
+                    head_final_url = str(head_response.url)
 
-                    if self._is_binary_content_type(content_type) or self._is_binary_url(final_url):
+                    # For non-PDF binary: early return without downloading body
+                    if self._is_binary_content_type(head_content_type) or (
+                        self._is_binary_url(head_final_url)
+                        and not self._is_pdf_content_type(head_content_type)
+                        and not self._is_pdf_url(head_final_url)
+                    ):
                         metadata = {
                             'is_binary': True,
-                            'content_type': content_type,
-                            'size_bytes': int(content_length) if content_length else None,
+                            'content_type': head_content_type,
+                            'size_bytes': int(head_content_length) if head_content_length else None,
                         }
-                        return "", final_url, None, metadata
+                        return "", head_final_url, None, metadata
                 except httpx.HTTPStatusError:
                     # HEAD not supported, continue with GET
                     pass
@@ -409,6 +522,20 @@ web_fetch(url="https://example.com", include_headers=true)
                 content_type = response.headers.get('Content-Type', '')
                 content_length = response.headers.get('Content-Length')
                 final_url = str(response.url)
+
+                # Check for PDF content — save to temp file for conversion
+                if self._is_pdf_content_type(content_type) or self._is_pdf_url(final_url):
+                    pdf_bytes = response.content
+                    pdf_path, pdf_err = self._save_pdf_to_temp(pdf_bytes)
+                    if pdf_err:
+                        return "", final_url, pdf_err, None
+                    self._trace(f"PDF saved to {pdf_path} ({len(pdf_bytes)} bytes)")
+                    return "", final_url, None, {
+                        'is_pdf': True,
+                        'pdf_path': pdf_path,
+                        'content_type': content_type,
+                        'size_bytes': len(pdf_bytes),
+                    }
 
                 # Check for binary content
                 if self._is_binary_content_type(content_type) or self._is_binary_url(final_url):
@@ -431,6 +558,32 @@ web_fetch(url="https://example.com", include_headers=true)
             return "", url, f"HTTP {e.response.status_code}: {e.response.reason_phrase}", None
         except Exception as e:
             return "", url, f"Request failed: {str(e)}", None
+
+    def _pdf_to_markdown(self, pdf_path: str) -> tuple[Optional[str], Optional[str]]:
+        """Convert a PDF file to markdown using pymupdf4llm.
+
+        Args:
+            pdf_path: Path to the PDF file on disk.
+
+        Returns:
+            Tuple of (markdown_text, error_message). On success error is None;
+            on failure markdown_text is None.
+        """
+        try:
+            import pymupdf4llm
+        except ImportError:
+            return None, (
+                "pymupdf4llm is not installed. "
+                "Install with: pip install pymupdf4llm"
+            )
+
+        try:
+            self._trace(f"pdf_to_markdown: converting {pdf_path}")
+            md_text = pymupdf4llm.to_markdown(pdf_path)
+            self._trace(f"pdf_to_markdown: converted {len(md_text)} chars")
+            return md_text, None
+        except Exception as e:
+            return None, f"PDF conversion failed: {e}"
 
     def _html_to_markdown(self, html: str, base_url: str) -> str:
         """Convert HTML to clean markdown.
@@ -968,6 +1121,45 @@ web_fetch(url="https://example.com", include_headers=true)
                     )
                 return result
 
+            # Handle PDF content — convert to markdown
+            if fetch_metadata and fetch_metadata.get('is_pdf'):
+                pdf_path = fetch_metadata.get('pdf_path')
+                try:
+                    md_text, conv_error = self._pdf_to_markdown(pdf_path)
+                    if conv_error:
+                        # Conversion failed — fall back to binary metadata
+                        self._trace(f"PDF conversion failed: {conv_error}")
+                        return {
+                            'url': final_url,
+                            'is_binary': True,
+                            'content_type': fetch_metadata.get('content_type', 'application/pdf'),
+                            'size_bytes': fetch_metadata.get('size_bytes'),
+                            'message': f'PDF detected but conversion failed: {conv_error}',
+                            'hint': 'Install pymupdf4llm (pip install pymupdf4llm) to '
+                                    'enable PDF-to-markdown conversion.',
+                        }
+
+                    # Truncate if needed
+                    result: Dict[str, Any] = {'url': final_url}
+                    if final_url != url:
+                        result['original_url'] = url
+                        result['redirected'] = True
+                    if len(md_text) > self._max_length:
+                        md_text = md_text[:self._max_length]
+                        result['truncated'] = True
+                    result['content'] = md_text
+                    result['content_type'] = 'markdown'
+                    result['source_type'] = 'pdf'
+                    result['size_bytes'] = fetch_metadata.get('size_bytes')
+                    return result
+                finally:
+                    # Always clean up the temp file
+                    if pdf_path:
+                        try:
+                            os.unlink(pdf_path)
+                        except OSError:
+                            pass
+
             # Handle binary content - return metadata instead of garbled text
             if fetch_metadata and fetch_metadata.get('is_binary'):
                 return {
@@ -976,7 +1168,7 @@ web_fetch(url="https://example.com", include_headers=true)
                     'content_type': fetch_metadata.get('content_type', 'unknown'),
                     'size_bytes': fetch_metadata.get('size_bytes'),
                     'message': 'Binary content detected. Cannot parse as text.',
-                    'hint': 'This URL points to a binary file (image, PDF, etc.). '
+                    'hint': 'This URL points to a binary file (image, etc.). '
                            'Use a download tool or check the content_type for more info.'
                 }
 

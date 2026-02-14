@@ -75,8 +75,11 @@ mermaid = [
     "mermaid-py>=0.5.0",  # Mermaid diagram parsing (fallback when mmdc unavailable)
     "cairosvg>=2.7.0",  # SVG to PNG conversion (for mermaid-py SVG output)
 ]
+pdf = [
+    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
+]
 all = [
-    "jaato[dev,ast,kaggle,vision,mermaid]",
+    "jaato[dev,ast,kaggle,vision,mermaid,pdf]",
 ]
 
 # Entry points for plugin discovery
