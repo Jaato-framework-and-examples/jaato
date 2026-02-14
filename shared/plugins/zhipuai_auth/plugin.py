@@ -11,13 +11,14 @@ Commands:
 """
 
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from ..base import (
     CommandCompletion,
     CommandParameter,
     HelpLines,
     ToolPlugin,
+    TRAIT_AUTH_PROVIDER,
     UserCommand,
 )
 from ..model_provider.types import ToolSchema
@@ -27,7 +28,15 @@ OutputCallback = Callable[[str, str, str], None]
 
 
 class ZhipuAIAuthPlugin:
-    """Plugin for Zhipu AI API key authentication."""
+    """Plugin for Zhipu AI API key authentication.
+
+    Declares the ``TRAIT_AUTH_PROVIDER`` trait so the server can
+    auto-discover this plugin when the zhipuai provider needs credentials.
+    The ``provider_name`` property identifies which provider this plugin
+    authenticates for.
+    """
+
+    plugin_traits: FrozenSet[str] = frozenset({TRAIT_AUTH_PROVIDER})
 
     def __init__(self):
         """Initialize the plugin."""

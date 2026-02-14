@@ -214,9 +214,33 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 2. Add to the `ToolSchema`: `traits=frozenset({TRAIT_FILE_WRITER})`
 3. Ensure the tool result dict includes the required keys (`path`, `files_modified`, or `changes`)
 
-**Defining a new trait:**
+**Defining a new tool trait:**
 1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
 2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
+
+### Plugin-Level Traits
+
+Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
+
+**Currently defined plugin traits:**
+
+| Constant | Value | Contract |
+|----------|-------|----------|
+| `TRAIT_AUTH_PROVIDER` | `"auth_provider"` | Plugin provides interactive authentication for a model provider. Must also expose `provider_name` property identifying which provider. |
+
+**How it works:**
+1. Plugin declares: `plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})`
+2. Server filters plugins by trait: `TRAIT_AUTH_PROVIDER in plugin.plugin_traits`
+3. Among matching plugins, server reads `provider_name` to select the right one
+
+**Adding a plugin trait to a new plugin:**
+1. Import the constant: `from shared.plugins.base import TRAIT_AUTH_PROVIDER`
+2. Add class attribute: `plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})`
+3. Implement the contract (e.g., `provider_name` property for auth plugins)
+
+**Defining a new plugin trait:**
+1. Add a `TRAIT_*` constant in `shared/plugins/base.py` with a docstring documenting the contract
+2. Update consumers (server, daemon) to query `getattr(plugin, 'plugin_traits', frozenset())`
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
