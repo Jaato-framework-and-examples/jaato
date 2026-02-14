@@ -1202,21 +1202,27 @@ class PTDisplay:
     # Paste handling
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _register_paste(self, content: str) -> int:
-        """Register a large paste and return its ID.
+    def _register_paste(self, content: str) -> tuple:
+        """Register a large paste and return its ID and line count.
+
+        Normalizes line endings (``\\r\\n`` → ``\\n``, ``\\r`` → ``\\n``)
+        before storing, and counts lines on the normalized content so that
+        the placeholder always reflects the actual stored data.
 
         Args:
             content: The pasted content to store.
 
         Returns:
-            Unique paste ID for the placeholder.
+            ``(paste_id, line_count)`` where *paste_id* is a unique int and
+            *line_count* is the number of lines in the normalized content.
         """
         # Normalize line endings: \r\n -> \n, then \r -> \n
         # Terminal pastes often use \r (carriage return) instead of \n
         normalized = content.replace('\r\n', '\n').replace('\r', '\n')
         self._paste_counter += 1
         self._paste_registry[self._paste_counter] = normalized
-        return self._paste_counter
+        line_count = len(normalized.splitlines()) if normalized else 0
+        return self._paste_counter, line_count
 
     def _get_paste(self, paste_id: int) -> Optional[str]:
         """Get and remove a registered paste by ID.
@@ -1326,8 +1332,7 @@ class PTDisplay:
 
         # The newly arrived content exceeds paste thresholds — collapse it.
         prefix = text[:old_len]
-        line_count = len(new_content.splitlines()) if new_content else 0
-        paste_id = self._register_paste(new_content)
+        paste_id, line_count = self._register_paste(new_content)
         placeholder = f"[paste #{paste_id}: +{line_count} lines]"
         new_text = prefix + placeholder
 
@@ -2122,8 +2127,7 @@ class PTDisplay:
             data = event.data
             if self._is_large_paste(data):
                 # Register the paste and insert placeholder
-                line_count = len(data.splitlines()) if data else 0
-                paste_id = self._register_paste(data)
+                paste_id, line_count = self._register_paste(data)
                 placeholder = f"[paste #{paste_id}: +{line_count} lines]"
                 event.current_buffer.insert_text(placeholder)
             else:
