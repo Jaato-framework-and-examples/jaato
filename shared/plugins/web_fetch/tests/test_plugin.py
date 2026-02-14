@@ -1,5 +1,6 @@
 """Tests for the web_fetch plugin."""
 
+import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -620,3 +621,263 @@ class TestContentTypeDetection:
         plugin = WebFetchPlugin()
 
         assert plugin._detect_content_type('', 'Some random text') == 'html'
+
+
+class TestPdfDetection:
+    """Test PDF-specific content detection."""
+
+    def test_pdf_content_type_detection(self):
+        """Test that application/pdf is detected as PDF, not generic binary."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._is_pdf_content_type('application/pdf')
+        assert plugin._is_pdf_content_type('application/pdf; charset=binary')
+        assert not plugin._is_pdf_content_type('text/html')
+        assert not plugin._is_pdf_content_type('application/zip')
+        assert not plugin._is_pdf_content_type('')
+
+    def test_pdf_url_detection(self):
+        """Test that .pdf URLs are detected."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._is_pdf_url('https://example.com/doc.pdf')
+        assert plugin._is_pdf_url('https://example.com/path/doc.PDF')
+        assert not plugin._is_pdf_url('https://example.com/page.html')
+        assert not plugin._is_pdf_url('https://example.com/image.png')
+
+    def test_pdf_not_in_binary_sets(self):
+        """Test that PDF is excluded from generic binary detection."""
+        plugin = WebFetchPlugin()
+
+        # PDF should NOT be detected as generic binary
+        assert not plugin._is_binary_content_type('application/pdf')
+        assert not plugin._is_binary_url('https://example.com/doc.pdf')
+
+    def test_other_binary_still_detected(self):
+        """Test that non-PDF binaries are still detected."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._is_binary_content_type('image/png')
+        assert plugin._is_binary_content_type('application/zip')
+        assert plugin._is_binary_url('https://example.com/image.png')
+        assert plugin._is_binary_url('https://example.com/archive.zip')
+
+
+class TestPdfConversion:
+    """Test PDF-to-markdown conversion flow."""
+
+    def test_pdf_url_returns_markdown_content(self):
+        """Test that PDF URLs return markdown content when conversion succeeds."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://example.com/doc.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/test.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 1024,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = ("# Document Title\n\nSome content here.", None)
+                with patch('os.unlink'):  # Don't actually delete
+                    result = plugin._execute({"url": "https://example.com/doc.pdf"})
+
+                assert result['content_type'] == 'markdown'
+                assert result['source_type'] == 'pdf'
+                assert '# Document Title' in result['content']
+                assert result['size_bytes'] == 1024
+                mock_convert.assert_called_once_with('/tmp/test.pdf')
+
+    def test_pdf_conversion_failure_returns_binary_metadata(self):
+        """Test that failed PDF conversion falls back to binary metadata."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://example.com/doc.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/test.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 2048,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = (None, "pymupdf4llm is not installed. Install with: pip install pymupdf4llm")
+                with patch('os.unlink'):
+                    result = plugin._execute({"url": "https://example.com/doc.pdf"})
+
+                assert result.get('is_binary') is True
+                assert 'pymupdf4llm' in result.get('hint', '')
+
+    def test_pdf_temp_file_cleanup(self):
+        """Test that temp PDF files are cleaned up after conversion."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://example.com/doc.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/test_cleanup.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 512,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = ("Some text", None)
+                with patch('os.unlink') as mock_unlink:
+                    plugin._execute({"url": "https://example.com/doc.pdf"})
+                    mock_unlink.assert_called_once_with('/tmp/test_cleanup.pdf')
+
+    def test_pdf_temp_file_cleanup_on_error(self):
+        """Test that temp PDF files are cleaned up even when conversion fails."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://example.com/doc.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/test_cleanup_err.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 512,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = (None, "Conversion failed")
+                with patch('os.unlink') as mock_unlink:
+                    plugin._execute({"url": "https://example.com/doc.pdf"})
+                    mock_unlink.assert_called_once_with('/tmp/test_cleanup_err.pdf')
+
+    def test_pdf_truncation(self):
+        """Test that large PDF markdown output is truncated."""
+        plugin = WebFetchPlugin()
+        plugin.initialize({"max_length": 100})
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://example.com/big.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/big.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 10000,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = ("x" * 200, None)
+                with patch('os.unlink'):
+                    result = plugin._execute({"url": "https://example.com/big.pdf"})
+
+                assert result.get('truncated') is True
+                assert len(result['content']) == 100
+
+    def test_pdf_redirect_tracking(self):
+        """Test that redirected PDF URLs track original URL."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("", "https://cdn.example.com/doc.pdf", None, {
+                'is_pdf': True,
+                'pdf_path': '/tmp/redir.pdf',
+                'content_type': 'application/pdf',
+                'size_bytes': 512,
+            })
+            with patch.object(plugin, '_pdf_to_markdown') as mock_convert:
+                mock_convert.return_value = ("Content", None)
+                with patch('os.unlink'):
+                    result = plugin._execute({"url": "https://example.com/doc.pdf"})
+
+                assert result['url'] == "https://cdn.example.com/doc.pdf"
+                assert result['original_url'] == "https://example.com/doc.pdf"
+                assert result['redirected'] is True
+
+
+class TestPdfToMarkdownMethod:
+    """Test the _pdf_to_markdown method directly."""
+
+    def test_returns_error_when_pymupdf4llm_not_installed(self):
+        """Test graceful fallback when pymupdf4llm is not installed."""
+        plugin = WebFetchPlugin()
+
+        with patch.dict('sys.modules', {'pymupdf4llm': None}):
+            md, err = plugin._pdf_to_markdown('/tmp/test.pdf')
+            assert md is None
+            assert 'pymupdf4llm is not installed' in err
+
+    def test_returns_markdown_on_success(self):
+        """Test successful conversion."""
+        plugin = WebFetchPlugin()
+
+        mock_pymupdf4llm = MagicMock()
+        mock_pymupdf4llm.to_markdown.return_value = "# Title\n\nParagraph text."
+
+        with patch.dict('sys.modules', {'pymupdf4llm': mock_pymupdf4llm}):
+            md, err = plugin._pdf_to_markdown('/tmp/test.pdf')
+            assert err is None
+            assert md == "# Title\n\nParagraph text."
+            mock_pymupdf4llm.to_markdown.assert_called_once_with('/tmp/test.pdf')
+
+    def test_returns_error_on_exception(self):
+        """Test error handling when conversion raises."""
+        plugin = WebFetchPlugin()
+
+        mock_pymupdf4llm = MagicMock()
+        mock_pymupdf4llm.to_markdown.side_effect = RuntimeError("corrupt PDF")
+
+        with patch.dict('sys.modules', {'pymupdf4llm': mock_pymupdf4llm}):
+            md, err = plugin._pdf_to_markdown('/tmp/corrupt.pdf')
+            assert md is None
+            assert 'corrupt PDF' in err
+
+
+class TestBackgroundSupport:
+    """Test BackgroundCapableMixin integration."""
+
+    def test_supports_background(self):
+        """Test that web_fetch declares background support."""
+        plugin = WebFetchPlugin()
+
+        assert plugin.supports_background('web_fetch') is True
+        assert plugin.supports_background('other_tool') is False
+
+    def test_auto_background_threshold(self):
+        """Test auto-background threshold for web_fetch."""
+        plugin = WebFetchPlugin()
+
+        assert plugin.get_auto_background_threshold('web_fetch') == 10.0
+        assert plugin.get_auto_background_threshold('other_tool') is None
+
+    def test_custom_threshold_via_config(self):
+        """Test that threshold can be configured."""
+        plugin = WebFetchPlugin()
+        plugin._auto_background_threshold = 5.0
+
+        assert plugin.get_auto_background_threshold('web_fetch') == 5.0
+
+
+class TestSavePdfToTemp:
+    """Test the _save_pdf_to_temp helper."""
+
+    def test_saves_to_temp_file(self):
+        """Test that PDF bytes are saved to a temp file."""
+        import os
+        plugin = WebFetchPlugin()
+
+        pdf_bytes = b'%PDF-1.4 fake content'
+        path, err = plugin._save_pdf_to_temp(pdf_bytes)
+
+        assert err is None
+        assert path is not None
+        assert path.endswith('.pdf')
+        assert os.path.exists(path)
+
+        # Read back and verify
+        with open(path, 'rb') as f:
+            assert f.read() == pdf_bytes
+
+        os.unlink(path)
+
+    def test_rejects_oversized_pdf(self):
+        """Test that oversized PDFs are rejected."""
+        plugin = WebFetchPlugin()
+
+        large_bytes = b'x' * 100
+        path, err = plugin._save_pdf_to_temp(large_bytes, size_limit=50)
+
+        assert path is None
+        assert 'too large' in err
