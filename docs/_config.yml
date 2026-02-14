@@ -1,0 +1,16 @@
+# Only process the web/ subdirectory for GitHub Pages.
+# Everything else in docs/ is internal documentation, not part of the site.
+exclude:
+  - "*.md"
+  - "*.py"
+  - "*.txt"
+  - "*.pdf"
+  - "*.pptx"
+  - "*.png"
+  - "*.jpg"
+  - api/
+  - design/
+  - docs/
+  - roadmap/
+include:
+  - web/
