@@ -57,6 +57,11 @@ class ZhipuAIAuthPlugin:
         """Return human-readable provider name."""
         return "Zhipu AI (Z.AI)"
 
+    @property
+    def credential_env_vars(self) -> List[str]:
+        """Return env var names used for credentials by this provider."""
+        return ["ZHIPUAI_API_KEY"]
+
     def get_default_models(self) -> List[Dict[str, str]]:
         """Return default models available for this provider."""
         from ..model_provider.zhipuai.provider import MODEL_CONTEXT_LIMITS
