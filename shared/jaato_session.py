@@ -4553,6 +4553,11 @@ NOTES
     def reset_session(self, history: Optional[List[Message]] = None) -> None:
         """Reset the chat session.
 
+        When history is provided (e.g. after GC), the token count cache is
+        preserved because restored Message objects keep their original
+        message_id, so cached counts remain valid.  The cache is only
+        cleared on a true fresh reset (no history).
+
         Args:
             history: Optional initial history for the new session.
         """
@@ -4561,7 +4566,8 @@ NOTES
         else:
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
         self._turn_accounting = []
-        self._msg_token_cache.clear()
+        if not history:
+            self._msg_token_cache.clear()
         self._create_provider_session(history)
 
     def get_turn_boundaries(self) -> List[int]:
