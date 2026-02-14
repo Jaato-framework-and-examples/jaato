@@ -1,3 +1,0 @@
-# NEVER DO THIS - mkdir with template notation creates literal garbage directories
-cli_based_tool: mkdir -p src/main/java/com.bank.customer/domain/{model,service}
-renderTemplate: ...
