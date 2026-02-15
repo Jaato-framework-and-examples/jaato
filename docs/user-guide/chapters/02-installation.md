@@ -125,8 +125,8 @@ When Jaato is published to PyPI, installation is straightforward:
 pip install jaato-server jaato-tui
 
 # Or install with optional features
-pip install "jaato-server[vision]" jaato-tui  # PNG screenshot support
-pip install "jaato-server[all]" jaato-tui     # All optional dependencies
+pip install jaato-server "jaato-tui[vision]"  # PNG screenshot support
+pip install "jaato-server[pdf]" jaato-tui     # PDF document processing
 ```
 
 #### Method 2: Install from Source (Required for Contributors)
@@ -146,38 +146,39 @@ The `-e` flag installs packages in "editable" mode, allowing code changes to tak
 
 #### Method 3: Install with Optional Extras
 
-Jaato supports optional feature groups for extended functionality:
+Both packages support optional feature groups:
 
-```bash
-# Core installation (no extras)
-pip install -e jaato-sdk/ -e . -e rich-client/
+**Server extras (`jaato-server`):**
 
-# Development tools (pytest, testing)
-pip install -e ".[dev]"
+| Group | Description |
+|-------|-------------|
+| `dev` | pytest and development tools |
+| `ast` | AST-based code search (ast-grep-py) |
+| `kaggle` | Kaggle dataset integration |
+| `mermaid` | Mermaid diagram parsing |
+| `pdf` | PDF to markdown conversion |
+| `all` | All server optional dependencies |
 
-# Vision capture (PNG screenshots, requires libcairo2-dev on Linux)
-pip install -e ".[vision]"
-
-# All optional dependencies
-pip install -e ".[all]"
-```
-
-**Optional dependency groups:**
+**TUI extras (`jaato-tui`):**
 
 | Group | Description |
 |-------|-------------|
 | `dev` | pytest and development tools |
 | `vision` | CairoSVG for PNG screenshot conversion |
-| `ast` | AST-based code search (ast-grep-py) |
-| `kaggle` | Kaggle dataset integration |
-| `mermaid` | Mermaid diagram parsing |
-| `pdf` | PDF to markdown conversion |
-| `all` | All optional dependencies combined |
+| `all` | All TUI optional dependencies |
+
+```bash
+# From source with extras
+pip install -e ".[pdf]" -e "rich-client/[vision]"
+
+# From PyPI with extras
+pip install "jaato-server[pdf]" "jaato-tui[vision]"
+```
 
 > **Tip:** If you only need the client library for building your own interface, install just the SDK:
 >
 > ```bash
-> pip install jaato-sdk/
+> pip install jaato-sdk
 > ```
 
 ### System-Specific Dependencies

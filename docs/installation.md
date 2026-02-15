@@ -35,16 +35,13 @@ pip install jaato-sdk
 
 This gives you `JaatoClient` and the IPC protocol — no server, no TUI, no plugins.
 
-## Optional Extras (jaato-server)
+## Optional Extras
 
-The `jaato-server` package supports optional feature groups:
+### jaato-server extras
 
 ```bash
 # AST-based code search
 pip install "jaato-server[ast]"
-
-# Vision support (SVG to PNG conversion for screenshots)
-pip install "jaato-server[vision]"
 
 # Mermaid diagram rendering
 pip install "jaato-server[mermaid]"
@@ -55,8 +52,18 @@ pip install "jaato-server[pdf]"
 # Kaggle dataset integration
 pip install "jaato-server[kaggle]"
 
-# All optional features
+# All server optional features
 pip install "jaato-server[all]"
+```
+
+### jaato-tui extras
+
+```bash
+# Vision support (SVG to PNG conversion for TUI screenshots)
+pip install "jaato-tui[vision]"
+
+# All TUI optional features
+pip install "jaato-tui[all]"
 ```
 
 ## Optional: OpenTelemetry
