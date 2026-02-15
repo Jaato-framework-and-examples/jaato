@@ -23,6 +23,8 @@ REPO_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from shared.jaato_client import JaatoClient
+from shared.plugins.registry import PluginRegistry
+from shared.plugins.permission.plugin import PermissionPlugin
 
 
 @dataclass
@@ -106,8 +108,9 @@ class AutoDocGenerator:
                 number="02",
                 filename="02-installation.md",
                 title="Installation",
-                description="Installing dependencies and setting up Jaato",
-                depends_on=["requirements.txt", "CLAUDE.md"],
+                description="Installing Jaato from PyPI packages",
+                depends_on=["docs/installation.md", "pyproject.toml", "jaato-sdk/pyproject.toml", "rich-client/pyproject.toml", "CLAUDE.md"],
+                prompt_template=None,  # Uses default prompt; content guided by docs/installation.md
             ),
             Chapter(
                 number="03",
@@ -263,8 +266,17 @@ class AutoDocGenerator:
             # Connect - framework handles all configuration from environment
             client.connect()
 
-            # Don't configure tools - we want pure text generation
-            # client.configure_tools() is NOT called
+            # Configure with tools so the model can read the codebase and coordinate
+            registry = PluginRegistry()
+            registry.discover()
+            for tool in ['filesystem_query', 'cli', 'todo', 'subagent']:
+                registry.expose_tool(tool)
+
+            # Pre-approve all tool calls (headless, no interactive prompts)
+            permission = PermissionPlugin()
+            permission._allow_all = True
+
+            client.configure_tools(registry, permission_plugin=permission)
 
             # Send message and collect response
             print("  Waiting for AI response...")
@@ -347,9 +359,38 @@ class AutoDocGenerator:
             pass
 
     def _build_creation_prompt(self, chapter: Chapter) -> str:
-        """Build prompt for creating a new chapter."""
+        """Build prompt for creating a new chapter.
+
+        Inlines the content of dependency files directly into the prompt so the
+        model has authoritative context without needing tool calls. Directories
+        are listed for the model to explore via tools.
+        """
         if chapter.prompt_template:
             return chapter.prompt_template
+
+        # Inline file contents and list directories
+        inlined_files = []
+        directories = []
+        for dep in (chapter.depends_on or []):
+            dep_path = self.repo_root / dep
+            if dep_path.is_file():
+                try:
+                    content = dep_path.read_text()
+                    inlined_files.append(f"### {dep}\n```\n{content}\n```")
+                except Exception:
+                    inlined_files.append(f"### {dep}\n(could not read)")
+            elif dep_path.is_dir():
+                directories.append(dep)
+
+        context_section = ""
+        if inlined_files:
+            context_section += "**Reference files (use these as authoritative sources):**\n\n"
+            context_section += "\n\n".join(inlined_files)
+            context_section += "\n\n"
+        if directories:
+            context_section += "**Directories to explore using your tools:**\n"
+            context_section += chr(10).join(f"- {d}" for d in directories)
+            context_section += "\n\n"
 
         return f"""You are writing a chapter for the Jaato Rich Client User Guide.
 
@@ -370,11 +411,7 @@ class AutoDocGenerator:
 6. Include code examples in appropriate language code blocks
 7. Add tip/warning boxes where helpful (we'll convert these to LaTeX boxes)
 
-**Context:**
-Analyze the following files/directories to understand what to document:
-{chr(10).join(f"- {dep}" for dep in (chapter.depends_on or []))}
-
-Read the codebase using your tools to understand the implementation, then write comprehensive user-facing documentation.
+{context_section}Read the codebase using your tools to understand the implementation, then write comprehensive user-facing documentation. The reference files above are authoritative — follow them closely.
 
 **Target Audience:** Both beginners and advanced users
 
@@ -420,18 +457,27 @@ Generate the COMPLETE updated chapter as markdown. Output pure markdown that can
 """
 
     def _extract_markdown(self, content: str) -> str:
-        """Extract markdown from AI response (remove code block wrappers if present)."""
+        """Extract markdown from AI response.
+
+        Strips code block wrappers and any preamble text before the first
+        markdown heading (models sometimes emit reasoning before the content).
+        """
         content = content.strip()
 
         # Remove markdown code block wrappers
         if content.startswith("```markdown") or content.startswith("```md"):
             lines = content.split('\n')
-            # Remove first and last lines (```markdown and ```)
             content = '\n'.join(lines[1:-1])
-
         elif content.startswith("```"):
             lines = content.split('\n')
             content = '\n'.join(lines[1:-1])
+
+        # Strip preamble before first heading (model reasoning/thinking)
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            if line.startswith('# '):
+                content = '\n'.join(lines[i:])
+                break
 
         return content.strip()
 
