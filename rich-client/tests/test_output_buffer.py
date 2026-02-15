@@ -618,11 +618,13 @@ class TestEdgeCases:
         assert source == "model", "Current block should be model"
         assert is_new_turn is False, "Continuation should NOT be a new turn"
 
-        # Also verify the first model text in _lines has is_turn_start=True
+        # Verify exactly one model line in _lines has is_turn_start=True
+        # (tool finalization adds a trailing blank model line with is_turn_start=False)
         model_lines = [item for item in self.buffer._lines
                        if isinstance(item, OutputLine) and item.source == "model"]
-        assert len(model_lines) == 1, f"Expected 1 model line in _lines, got {len(model_lines)}"
-        assert model_lines[0].is_turn_start is True, "First model line should be turn start"
+        turn_starts = [l for l in model_lines if l.is_turn_start]
+        assert len(turn_starts) == 1, f"Expected 1 turn start, got {len(turn_starts)}"
+        assert turn_starts[0].text == "Starting", "Turn start should be the first model text"
 
 
 class TestToolBlockExpansionPersistence:

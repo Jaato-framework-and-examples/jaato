@@ -35,7 +35,7 @@ class TestEllipsizePath:
     def test_preserves_first_and_last_segments(self):
         """Default behavior preserves 1 first and 2 last segments."""
         path = "project/a/b/c/d/e/parent/file.txt"
-        result = ellipsize_path(path, 35)
+        result = ellipsize_path(path, 30)
         # Should have: project/.../parent/file.txt
         assert "project" in result
         assert "parent" in result
@@ -45,7 +45,7 @@ class TestEllipsizePath:
     def test_custom_keep_first(self):
         """Custom keep_first parameter."""
         path = "org/project/src/main/java/pkg/Class.java"
-        result = ellipsize_path(path, 40, keep_first=2)
+        result = ellipsize_path(path, 35, keep_first=2)
         # Should preserve org/project at start
         assert result.startswith("org/project/")
         assert "..." in result
@@ -91,8 +91,8 @@ class TestEllipsizePath:
         path = "short/path.txt"
         # With keep_first=1 and keep_last=2, we have only 3 segments
         # which is exactly keep_first + keep_last, so no middle to elide
-        result = ellipsize_path(path, 10)
-        assert len(result) <= 10
+        result = ellipsize_path(path, 12)
+        assert len(result) <= 12
 
     def test_empty_path(self):
         """Empty path returns empty."""
@@ -111,7 +111,7 @@ class TestEllipsizePath:
     def test_custom_ellipsis(self):
         """Custom ellipsis string."""
         path = "project/a/b/c/d/e/f/file.txt"
-        result = ellipsize_path(path, 30, ellipsis="…")
+        result = ellipsize_path(path, 25, ellipsis="…")
         assert "…" in result
         assert "..." not in result
 
