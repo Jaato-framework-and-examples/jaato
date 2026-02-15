@@ -229,7 +229,8 @@ class CodeBlockFormatterPlugin:
                     self._buffer = ""
             else:
                 # In code block, look for closing ```
-                end_match = re.search(r'\n```', self._buffer)
+                # Match ``` at start of buffer OR preceded by newline
+                end_match = re.search(r'(?:^|\n)```', self._buffer)
                 if end_match:
                     # Extract code block content
                     code = self._buffer[:end_match.start()]
