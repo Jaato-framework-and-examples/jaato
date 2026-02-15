@@ -82,6 +82,9 @@ all = [
     "jaato[dev,ast,kaggle,vision,mermaid,pdf]",
 ]
 
+[project.scripts]
+jaato-server = "server.__main__:main"
+
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
 [project.entry-points."jaato.plugins"]
