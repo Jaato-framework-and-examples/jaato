@@ -4,10 +4,11 @@
 % PACKAGES
 % ============================================================================
 
-% Font and encoding
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{lmodern}
+% Font and encoding (XeLaTeX — native Unicode support)
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setsansfont{Latin Modern Sans}
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
 \usepackage{microtype}
 
 % Layout
@@ -41,7 +42,6 @@
 
 % Code listings
 \usepackage{listings}
-\usepackage{courier}
 
 % Hyperlinks
 \usepackage{hyperref}
@@ -55,10 +55,9 @@
     pdfsubject={User Guide},
     pdfkeywords={Jaato, AI, Documentation}
 }
-\usepackage[nameinlink]{cleveref}
-
 % Better references
 \usepackage{varioref}
+\usepackage[nameinlink]{cleveref}
 
 % Captions
 \usepackage{caption}
@@ -127,11 +126,14 @@
 % CUSTOM COMMANDS
 % ============================================================================
 
+% Pandoc tight list support
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
 % Keyboard shortcuts
 \newcommand{\keys}[1]{\texttt{\textbf{#1}}}
 
 % Environment variables
-\newcommand{\envvar}[1]{\texttt{\$#1}}
+\newcommand{\envvar}[1]{\texttt{\textdollar #1}}
 
 % File paths
 \newcommand{\filepath}[1]{\texttt{#1}}
@@ -186,6 +188,7 @@
 % HEADER/FOOTER SETUP
 % ============================================================================
 
+\setlength{\headheight}{14pt}
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[LE,RO]{\thepage}
@@ -264,9 +267,10 @@ $if(title)$
 \vfill
 {\large \today\par}
 
+$if(logo)$
 \vspace{1cm}
-
-\includegraphics[width=0.3\textwidth]{$if(logo)$$logo$$endif$}
+\includegraphics[width=0.3\textwidth]{$logo$}
+$endif$
 
 \end{titlepage}
 $endif$
@@ -293,7 +297,7 @@ Throughout this guide, we use the following conventions:
 \begin{itemize}
     \item \cmd{Commands} are shown in monospaced font
     \item \keys{Ctrl+C} represents keyboard shortcuts
-    \item \envvar{ENVIRONMENT\_VARIABLES} are prefixed with \$
+    \item \envvar{ENVIRONMENT\_VARIABLES} are prefixed with \textdollar
     \item \filepath{/file/paths} are shown in monospaced font
 \end{itemize}
 

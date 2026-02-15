@@ -144,7 +144,7 @@ for file in "$DOCS_DIR"/chapters/*.md; do
     if [ -f "$file" ]; then
         echo "Adding: $(basename "$file")"
         cat "$file" >> "$BUILD_DIR/user-guide-combined.md"
-        echo -e "\n\\newpage\n" >> "$BUILD_DIR/user-guide-combined.md"
+        echo "" >> "$BUILD_DIR/user-guide-combined.md"
     fi
 done
 
@@ -154,7 +154,7 @@ for file in "$GENERATED_DIR"/*.md; do
     if [ -f "$file" ]; then
         echo "  - $(basename "$file")"
         cat "$file" >> "$BUILD_DIR/user-guide-combined.md"
-        echo -e "\n\\newpage\n" >> "$BUILD_DIR/user-guide-combined.md"
+        echo "" >> "$BUILD_DIR/user-guide-combined.md"
     fi
 done
 
@@ -168,7 +168,6 @@ pandoc "$BUILD_DIR/user-guide-combined.md" \
     --to latex \
     --output "$BUILD_DIR/user-guide.tex" \
     --template="$DOCS_DIR/latex/template.tex" \
-    --listings \
     --number-sections \
     --toc \
     --variable=geometry:margin=1in \
@@ -177,7 +176,7 @@ pandoc "$BUILD_DIR/user-guide-combined.md" \
     --variable=papersize:letter \
     --variable=classoption:openany \
     --highlight-style=tango \
-    --pdf-engine=pdflatex
+    --pdf-engine=xelatex
 
 echo -e "${GREEN}✓${NC} LaTeX generated"
 
@@ -188,17 +187,17 @@ cd "$BUILD_DIR"
 
 # Run pdflatex multiple times for references
 echo "  Running pdflatex (1/3)..."
-pdflatex -interaction=nonstopmode user-guide.tex > pdflatex.log 2>&1 || {
-    echo -e "${RED}✗${NC} First pass failed, check build/pdflatex.log"
-    tail -n 50 pdflatex.log
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1 || {
+    echo -e "${RED}✗${NC} First pass failed, check build/xelatex.log"
+    tail -n 50 xelatex.log
     exit 1
 }
 
 echo "  Running pdflatex (2/3)..."
-pdflatex -interaction=nonstopmode user-guide.tex > pdflatex.log 2>&1
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1
 
 echo "  Running pdflatex (3/3)..."
-pdflatex -interaction=nonstopmode user-guide.tex > pdflatex.log 2>&1
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1
 
 if [ -f "user-guide.pdf" ]; then
     echo -e "${GREEN}✓${NC} PDF built successfully"
