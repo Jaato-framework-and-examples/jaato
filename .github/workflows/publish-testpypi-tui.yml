@@ -1,0 +1,64 @@
+name: "Publish jaato-tui to TestPyPI"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e jaato-sdk/ && pip install -e "rich-client/[dev]"
+
+      - name: Run tests
+        run: pytest rich-client/tests/
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: testpypi-tui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build
+
+      - name: Check version not already on TestPyPI
+        run: |
+          version=$(python -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          echo "Package version: $version"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://test.pypi.org/pypi/jaato-tui/${version}/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of jaato-tui already exists on TestPyPI"
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+        working-directory: rich-client
+
+      - name: Build package
+        # Wheel-only: the ../shared package-dir breaks sdist→wheel rebuild
+        run: python -m build --wheel .
+        working-directory: rich-client
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: rich-client/dist/

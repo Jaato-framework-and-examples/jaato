@@ -425,12 +425,13 @@ class TestLoadTheme:
         """Test unknown JAATO_THEME falls through to file lookup."""
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {"JAATO_THEME": "unknown"}):
-                # Should fall back to default since no files exist
-                config = load_theme(
-                    project_path=str(Path(temp_dir) / "project.json"),
-                    user_path=str(Path(temp_dir) / "user.json"),
-                )
-                assert config.name == "dark"  # Default
+                with patch("theme.load_theme_preference", return_value=None):
+                    # Should fall back to default since no files exist
+                    config = load_theme(
+                        project_path=str(Path(temp_dir) / "project.json"),
+                        user_path=str(Path(temp_dir) / "user.json"),
+                    )
+                    assert config.name == "dark"  # Default
 
     def test_project_config_priority(self):
         """Test project config takes priority over user config."""
@@ -447,13 +448,14 @@ class TestLoadTheme:
             with open(user_path, "w") as f:
                 json.dump({"name": "user-theme"}, f)
 
-            # Clear env var
+            # Clear env var and mock preference
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop("JAATO_THEME", None)
-                config = load_theme(
-                    project_path=str(project_path),
-                    user_path=str(user_path),
-                )
+                with patch("theme.load_theme_preference", return_value=None):
+                    config = load_theme(
+                        project_path=str(project_path),
+                        user_path=str(user_path),
+                    )
 
             assert config.name == "project-theme"
 
@@ -470,10 +472,11 @@ class TestLoadTheme:
 
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop("JAATO_THEME", None)
-                config = load_theme(
-                    project_path=str(Path(temp_dir) / "nonexistent.json"),
-                    user_path=str(user_path),
-                )
+                with patch("theme.load_theme_preference", return_value=None):
+                    config = load_theme(
+                        project_path=str(Path(temp_dir) / "nonexistent.json"),
+                        user_path=str(user_path),
+                    )
 
             assert config.name == "user-theme"
 
@@ -482,10 +485,11 @@ class TestLoadTheme:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop("JAATO_THEME", None)
-                config = load_theme(
-                    project_path=str(Path(temp_dir) / "project.json"),
-                    user_path=str(Path(temp_dir) / "user.json"),
-                )
+                with patch("theme.load_theme_preference", return_value=None):
+                    config = load_theme(
+                        project_path=str(Path(temp_dir) / "project.json"),
+                        user_path=str(Path(temp_dir) / "user.json"),
+                    )
 
             assert config.name == "dark"
 
@@ -714,10 +718,11 @@ class TestJSONThemeLoading:
                 assert theme.colors["primary"] == "#123456"
             finally:
                 Path.home = original_home
-                # Restore cached themes
+                # Restore cached themes — use dict.pop to avoid KeyError
+                # since _BuiltinThemesDict.__contains__ checks theme names,
+                # not whether the key is actually stored in the dict
                 BUILTIN_THEMES._loaded.discard("dark")
-                if "dark" in BUILTIN_THEMES:
-                    del BUILTIN_THEMES["dark"]
+                dict.pop(BUILTIN_THEMES, "dark", None)
 
     def test_builtin_themes_source_path(self):
         """Test built-in themes report correct source path."""

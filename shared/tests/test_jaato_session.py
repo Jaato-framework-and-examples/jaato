@@ -65,7 +65,9 @@ class TestJaatoSessionConfigure:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
         session.configure()
 
-        mock_runtime.create_provider.assert_called_once_with("gemini-2.5-flash")
+        mock_runtime.create_provider.assert_called_once_with(
+            "gemini-2.5-flash", provider_name=None
+        )
         assert session.is_configured
 
     def test_configure_with_tools_subset(self):

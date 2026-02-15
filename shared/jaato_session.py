@@ -987,7 +987,7 @@ class JaatoSession:
             self._executor.set_reliability_plugin(self._runtime.reliability_plugin)
             # Set session context for pattern tracking
             self._runtime.reliability_plugin.set_session_context(
-                session_id=self._session_id,
+                session_id=self._agent_id,
             )
             # Set model context
             if self._model_name:
