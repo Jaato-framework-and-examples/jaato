@@ -139,6 +139,7 @@ class JaatoDaemon:
         pid_file: str = DEFAULT_PID_FILE,
         config_file: str = DEFAULT_CONFIG_FILE,
         log_file: str = DEFAULT_LOG_FILE,
+        socket_mode: int = 0o660,
     ):
         """Initialize the daemon.
 
@@ -148,9 +149,11 @@ class JaatoDaemon:
             pid_file: Path to PID file for daemon mode.
             config_file: Path to config file for restart support.
             log_file: Path to log file for daemon mode.
+            socket_mode: Unix file permissions for the IPC socket (default: 0o660).
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
+        self.socket_mode = socket_mode
         self.pid_file = pid_file
         self.config_file = config_file
         self.log_file = log_file
@@ -202,6 +205,7 @@ class JaatoDaemon:
 
             self._ipc_server = JaatoIPCServer(
                 socket_path=self.ipc_socket,
+                socket_mode=self.socket_mode,
                 on_session_request=self._handle_session_request,
                 on_command_list_request=self._get_command_list,
             )
@@ -300,6 +304,7 @@ class JaatoDaemon:
             "web_socket": self.web_socket,
             "pid_file": self.pid_file,
             "log_file": self.log_file,
+            "socket_mode": self.socket_mode,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -1574,6 +1579,13 @@ Examples:
         metavar="[HOST:]PORT",
         help="WebSocket address for remote clients (e.g., :8080 or 0.0.0.0:8080)",
     )
+    parser.add_argument(
+        "--socket-mode",
+        metavar="MODE",
+        default="660",
+        help="Unix file permissions for the IPC socket in octal (default: 660). "
+             "Use 666 to allow any local user to connect.",
+    )
 
     # Daemon control
     parser.add_argument(
@@ -1664,6 +1676,7 @@ Examples:
         args.ipc_socket = config.get("ipc_socket")
         args.web_socket = config.get("web_socket")
         args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
+        args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "660"
 
         # Always restart as daemon
         args.daemon = True
@@ -1707,11 +1720,13 @@ Examples:
         configure_logging(log_file=args.log_file, verbose=args.verbose)
 
     # Create and run daemon
+    socket_mode = int(args.socket_mode, 8)
     daemon = JaatoDaemon(
         ipc_socket=args.ipc_socket,
         web_socket=args.web_socket,
         pid_file=args.pid_file,
         log_file=args.log_file,
+        socket_mode=socket_mode,
     )
 
     try:
