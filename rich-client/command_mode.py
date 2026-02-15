@@ -45,7 +45,7 @@ async def run_command_mode(
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
     )
-    from shared.client_commands import parse_user_input, CommandAction
+    from client_commands import parse_user_input, CommandAction
 
     client = IPCRecoveryClient(
         socket_path=socket_path,

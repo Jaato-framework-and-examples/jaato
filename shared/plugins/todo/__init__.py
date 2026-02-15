@@ -31,42 +31,57 @@ Example usage:
         title="Deploy feature",
         steps=["Run tests", "Build", "Deploy", "Verify"]
     )
+
+Lazy loading: All imports are deferred via __getattr__ to allow partial
+installation (e.g., TUI distribution only needs models and channels).
 """
 
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
-from .models import (
-    StepStatus,
-    PlanStatus,
-    TodoStep,
-    TodoPlan,
-    ProgressEvent,
-)
-from .storage import (
-    TodoStorage,
-    InMemoryStorage,
-    FileStorage,
-    HybridStorage,
-    create_storage,
-)
-from .channels import (
-    TodoReporter,
-    ConsoleReporter,
-    WebhookReporter,
-    FileReporter,
-    MemoryReporter,
-    MultiReporter,
-    create_reporter,
-)
-from .config_loader import (
-    TodoConfig,
-    ConfigValidationError,
-    load_config,
-    validate_config,
-    create_default_config,
-)
-from .plugin import TodoPlugin, create_plugin
+_LAZY_IMPORTS = {
+    # Models
+    "StepStatus": (".models", "StepStatus"),
+    "PlanStatus": (".models", "PlanStatus"),
+    "TodoStep": (".models", "TodoStep"),
+    "TodoPlan": (".models", "TodoPlan"),
+    "ProgressEvent": (".models", "ProgressEvent"),
+    # Storage
+    "TodoStorage": (".storage", "TodoStorage"),
+    "InMemoryStorage": (".storage", "InMemoryStorage"),
+    "FileStorage": (".storage", "FileStorage"),
+    "HybridStorage": (".storage", "HybridStorage"),
+    "create_storage": (".storage", "create_storage"),
+    # Reporters (Channels)
+    "TodoReporter": (".channels", "TodoReporter"),
+    "ConsoleReporter": (".channels", "ConsoleReporter"),
+    "WebhookReporter": (".channels", "WebhookReporter"),
+    "FileReporter": (".channels", "FileReporter"),
+    "MemoryReporter": (".channels", "MemoryReporter"),
+    "MultiReporter": (".channels", "MultiReporter"),
+    "create_reporter": (".channels", "create_reporter"),
+    # Config
+    "TodoConfig": (".config_loader", "TodoConfig"),
+    "ConfigValidationError": (".config_loader", "ConfigValidationError"),
+    "load_config": (".config_loader", "load_config"),
+    "validate_config": (".config_loader", "validate_config"),
+    "create_default_config": (".config_loader", "create_default_config"),
+    # Plugin
+    "TodoPlugin": (".plugin", "TodoPlugin"),
+    "create_plugin": (".plugin", "create_plugin"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_IMPORTS:
+        module_path, attr_name = _LAZY_IMPORTS[name]
+        import importlib
+        module = importlib.import_module(module_path, __name__)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Models

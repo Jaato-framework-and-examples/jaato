@@ -24,11 +24,11 @@ classifiers = [
 ]
 dependencies = [
     "jaato-sdk",
-    "jaato-server",  # For shared.* modules (formatters, ui_utils, client_commands)
     "prompt_toolkit>=3.0.0",
     "rich>=13.0.0",
     "python-dotenv",
     "pyte>=0.8.0",  # Terminal emulator for tool output processing
+    "wcwidth",  # For table_formatter display width
 ]
 
 [project.optional-dependencies]
@@ -41,7 +41,27 @@ dev = [
 jaato = "rich_client:main"
 
 [tool.setuptools]
-packages = ["rich_client", "rich_client.clipboard", "rich_client.renderers", "rich_client.themes"]
+packages = [
+    "rich_client",
+    "rich_client.clipboard",
+    "rich_client.renderers",
+    "rich_client.renderers.vision_capture",
+    "rich_client.themes",
+    # Shared modules included in TUI distribution (source stays in shared/ in repo).
+    # Lazy __init__.py files prevent heavy server-only imports from triggering.
+    "shared",
+    "shared.plugins",
+    "shared.plugins.formatter_pipeline",
+    "shared.plugins.code_block_formatter",
+    "shared.plugins.diff_formatter",
+    "shared.plugins.diff_formatter.renderers",
+    "shared.plugins.table_formatter",
+    "shared.plugins.inline_markdown_formatter",
+    "shared.plugins.hidden_content_filter",
+    "shared.plugins.code_validation_formatter",
+    "shared.plugins.todo",
+]
 
 [tool.setuptools.package-dir]
 rich_client = "."
+"shared" = "../shared"

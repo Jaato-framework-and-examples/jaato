@@ -23,20 +23,20 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
-    from shared.trace import trace
+    from jaato_sdk.trace import trace
     trace("OutputBuffer", msg)
 
 
 def _get_buffer_trace_path() -> Optional[str]:
     """Get the buffer trace file path from environment variable."""
-    from shared.trace import resolve_trace_path
+    from jaato_sdk.trace import resolve_trace_path
     return resolve_trace_path("RICH_BUFFER_TRACE",
                               default_filename="rich_render_trace.log")
 
 
 def _buffer_trace(msg: str) -> None:
     """Write trace message to buffer trace log."""
-    from shared.trace import trace_write
+    from jaato_sdk.trace import trace_write
     trace_write("OutputBuffer", msg, _get_buffer_trace_path())
 
 
@@ -50,7 +50,7 @@ from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
 from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
-from shared.ui_utils import format_tool_arg_value, format_tool_args_summary
+from ui_utils import format_tool_arg_value, format_tool_args_summary
 from terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
