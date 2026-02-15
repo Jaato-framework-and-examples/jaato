@@ -27,6 +27,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Add package directory to path for bare sibling imports (e.g. pt_display, backend)
+PKG_DIR = str(pathlib.Path(__file__).resolve().parent)
+if PKG_DIR not in sys.path:
+    sys.path.insert(0, PKG_DIR)
+
 # Add simple-client to path for reusable components
 SIMPLE_CLIENT = ROOT / "simple-client"
 if str(SIMPLE_CLIENT) not in sys.path:
