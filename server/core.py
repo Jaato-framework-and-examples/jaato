@@ -318,39 +318,44 @@ class JaatoServer:
     def _with_session_env(self):
         """Context manager to apply session environment variables.
 
-        Applies session-specific environment variables to os.environ for the
-        duration of the context. This is necessary for components that read
-        from os.environ (like provider SDKs, telemetry, etc.).
+        Temporarily applies session-specific environment variables to
+        os.environ for the duration of the context, then restores the
+        previous values on exit. This is necessary for components that
+        read from os.environ directly (provider SDKs, telemetry, etc.).
 
-        Since all env-dependent operations happen within session contexts,
-        we simply apply the session's env vars without restoration - the next
-        session will apply its own env vars when needed.
-
-        LIMITATION: This only overlays vars present in the session's .env file.
-        Variables set by the server at startup or other sessions are NOT cleared.
-        If a user comments out a variable (e.g., REQUESTS_CA_BUNDLE), the stale
-        value persists. Workaround: set vars to empty string instead of commenting.
-        See docs/architecture.md "Environment Variable Isolation" for details.
+        On exit, each key that was set is either restored to its previous
+        value or removed from os.environ if it wasn't present before.
+        This prevents env vars from leaking between sessions.
         """
-        # Apply session env vars (no restoration needed - next session will
-        # apply its own env vars anyway)
+        saved: dict[str, str | None] = {}
         for key, value in self._session_env.items():
             if value is not None:
+                saved[key] = os.environ.get(key)  # None if absent
                 os.environ[key] = value
-        yield
+        try:
+            yield
+        finally:
+            for key, previous in saved.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
 
     def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Get an environment variable, checking session env first.
+        """Get a session-specific environment variable.
+
+        Only reads from the session's own env dict (populated from its
+        .env file). Does NOT fall back to os.environ — env vars are
+        per-session exclusively.
 
         Args:
             key: Environment variable name.
-            default: Default value if not found.
+            default: Default value if not found in session env.
 
         Returns:
-            Value from session env, falling back to global os.environ,
-            then to the default value.
+            Value from session env, or the default value.
         """
-        return self._session_env.get(key) or os.environ.get(key) or default
+        return self._session_env.get(key) or default
 
     def get_all_session_env(self) -> Dict[str, str]:
         """Get all session-specific environment variables.
@@ -708,8 +713,8 @@ class JaatoServer:
             self._session_env.update(self._env_overrides)
 
         def get_config(key: str) -> Optional[str]:
-            """Get config value from session env, falling back to global env."""
-            return self._session_env.get(key) or os.environ.get(key)
+            """Get config value from session env only (no os.environ fallback)."""
+            return self._session_env.get(key)
 
         try:
             active_bundle = active_cert_bundle(verbose=False)
