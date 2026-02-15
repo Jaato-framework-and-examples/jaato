@@ -511,6 +511,11 @@ class JaatoDaemon:
                         )
                     if self._ipc_server:
                         self._ipc_server.set_client_session(client_id, default_session_id)
+                else:
+                    # Session creation failed (e.g., missing MODEL_NAME).
+                    # List available auth providers so the user knows how to
+                    # configure a provider for this workspace.
+                    self._hint_available_auth_providers(client_id)
                 return
 
             elif cmd == "session.end":
@@ -880,6 +885,33 @@ class JaatoDaemon:
         finally:
             if hasattr(plugin, 'set_output_callback'):
                 plugin.set_output_callback(None)
+
+    def _hint_available_auth_providers(self, client_id: str) -> None:
+        """Send a hint listing available auth providers after session creation fails.
+
+        Iterates daemon-level plugins with the TRAIT_AUTH_PROVIDER trait and
+        emits a message showing their login commands so the user knows how to
+        configure a provider for this workspace.
+        """
+        from shared.plugins.base import TRAIT_AUTH_PROVIDER
+
+        hints: list[str] = []
+        for plugin in self._daemon_plugins.values():
+            traits = getattr(plugin, 'plugin_traits', frozenset())
+            if TRAIT_AUTH_PROVIDER not in traits:
+                continue
+            display_name = getattr(plugin, 'provider_display_name', plugin.name)
+            commands = plugin.get_user_commands() if hasattr(plugin, 'get_user_commands') else []
+            cmd_name = commands[0].name if commands else plugin.name
+            hints.append(f"  {cmd_name} login  — {display_name}")
+
+        if hints:
+            from jaato_sdk.events import SystemMessageEvent
+            msg = "Available providers:\n" + "\n".join(hints)
+            self._route_event(client_id, SystemMessageEvent(
+                message=msg,
+                style="dim",
+            ))
 
     def _offer_post_auth_setup(self, client_id: str, plugin) -> None:
         """Emit PostAuthSetupEvent to offer session creation after auth success."""

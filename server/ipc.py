@@ -88,6 +88,7 @@ from jaato_sdk.events import (
     CommandRequest,
     CommandListRequest,
     ClientConfigRequest,
+    PostAuthSetupResponse,
 )
 
 
@@ -508,9 +509,10 @@ class JaatoIPCServer:
                     client.session_id = session_id
 
         # Route to session handler
-        # CommandRequest and ClientConfigRequest are allowed without session_id
+        # CommandRequest, ClientConfigRequest, and PostAuthSetupResponse are
+        # allowed without session_id — they are handled at daemon level.
         if self._on_session_request:
-            if session_id or isinstance(event, (CommandRequest, ClientConfigRequest)):
+            if session_id or isinstance(event, (CommandRequest, ClientConfigRequest, PostAuthSetupResponse)):
                 # ClientConfigRequest must be processed synchronously to ensure
                 # client's env_file is registered before session creation
                 if isinstance(event, ClientConfigRequest):

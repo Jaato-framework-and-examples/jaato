@@ -189,28 +189,13 @@ python rich_client.py --connect /tmp/jaato.sock
 | **Resource sharing** | N/A | Shared sessions, single model connection |
 | **Client types** | TUI only | TUI, Web, IDE extensions, mobile |
 
-### Environment Variable Isolation (Known Limitation)
+### Environment Variable Isolation
 
-In server mode, all sessions share the same Python process and therefore the same `os.environ`. Session-specific `.env` files only **overlay** variables onto the global environment—they do not clear variables that were set by the server at startup or by previous sessions.
+Each session's environment is fully isolated. Session-specific `.env` files are read into a per-session dict (`_session_env`) via `dotenv_values()` — they never pollute `os.environ` permanently.
 
-**Impact:** If you change or remove environment variables in your workspace `.env` file after the server has started, sessions may still see stale values from:
-- The server's initial startup environment
-- Other sessions that previously set those variables
+When a session needs to call into provider SDKs or other components that read `os.environ` directly, the `_with_session_env()` context manager temporarily applies the session's vars to `os.environ` and restores previous values on exit. Session configuration lookups (`get_config()`, `get_session_env()`) read exclusively from the session's own env dict with no `os.environ` fallback.
 
-**Affected variables include:** `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, proxy settings, and any SDK-specific configuration read from `os.environ`.
-
-**Workaround:** To clear a variable for a specific session, set it to an empty value instead of commenting it out:
-
-```bash
-# This does NOT work - server retains the original value:
-#REQUESTS_CA_BUNDLE=./certs/corp_bundle.pem
-
-# This works - empty value overrides the stale path:
-REQUESTS_CA_BUNDLE=
-SSL_CERT_FILE=
-```
-
-**Alternative:** Restart the server daemon to reload environment from scratch.
+This means sessions cannot inherit env vars from other sessions or from the server's startup environment.
 
 ---
 
