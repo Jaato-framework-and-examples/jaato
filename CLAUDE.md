@@ -59,7 +59,7 @@ The framework uses a server-first architecture where the server runs as a daemon
 - **`server/__main__.py`**: Entry point with daemon mode, PID management
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
-  - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`). Use `666` to allow any local user to connect.
+  - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `666`). Use `660` to restrict to owner and group only.
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
 

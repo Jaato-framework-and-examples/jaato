@@ -184,7 +184,7 @@ class JaatoIPCServer:
     def __init__(
         self,
         socket_path: Optional[str] = None,
-        socket_mode: int = 0o660,
+        socket_mode: int = 0o666,
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
         on_command_list_request: Optional[Callable[[], list]] = None,
     ):
@@ -193,9 +193,8 @@ class JaatoIPCServer:
         Args:
             socket_path: Path to the Unix domain socket or Windows pipe name.
                 Defaults to platform-appropriate path.
-            socket_mode: Unix file permissions for the socket (default: 0o660,
-                owner+group read/write). Use 0o666 to allow any local user
-                to connect.
+            socket_mode: Unix file permissions for the socket (default: 0o666,
+                world read/write). Use 0o660 to restrict to owner and group.
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
