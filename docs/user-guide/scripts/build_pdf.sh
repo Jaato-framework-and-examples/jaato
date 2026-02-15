@@ -5,8 +5,8 @@
 # This script:
 # 1. Extracts content from codebase (commands, env vars, keybindings)
 # 2. Generates screenshots (optional)
-# 3. Converts markdown to LaTeX
-# 4. Builds PDF with pdflatex
+# 3. Converts each chapter markdown to LaTeX individually
+# 4. Assembles master document and builds PDF with xelatex
 #
 
 set -e  # Exit on error
@@ -74,7 +74,7 @@ mkdir -p "$BUILD_DIR" "$GENERATED_DIR" "$ASSETS_DIR/screenshots"
 
 # Step 0: Auto-generate/update documentation using AI
 if [ "$SKIP_AUTODOC" = false ]; then
-    echo -e "${YELLOW}[0/6]${NC} Auto-generating documentation with AI..."
+    echo -e "${YELLOW}[0/5]${NC} Auto-generating documentation with AI..."
 
     AUTODOC_ARGS=""
     if [ "$FORCE_AUTODOC" = true ]; then
@@ -89,21 +89,21 @@ if [ "$SKIP_AUTODOC" = false ]; then
         echo -e "${YELLOW}⚠${NC} Auto-generation had issues, continuing with existing content"
     fi
 else
-    echo -e "${YELLOW}[0/6]${NC} Skipping auto-documentation"
+    echo -e "${YELLOW}[0/5]${NC} Skipping auto-documentation"
 fi
 
 # Step 1: Extract content from codebase
 if [ "$SKIP_EXTRACTION" = false ]; then
-    echo -e "${YELLOW}[1/6]${NC} Extracting content from codebase..."
+    echo -e "${YELLOW}[1/5]${NC} Extracting content from codebase..."
     "$VENV_PYTHON" "$SCRIPT_DIR/generate_docs.py"
     echo -e "${GREEN}✓${NC} Content extracted"
 else
-    echo -e "${YELLOW}[1/6]${NC} Skipping content extraction"
+    echo -e "${YELLOW}[1/5]${NC} Skipping content extraction"
 fi
 
 # Step 2: Generate screenshots
 if [ "$SKIP_SCREENSHOTS" = false ]; then
-    echo -e "${YELLOW}[2/6]${NC} Generating screenshots..."
+    echo -e "${YELLOW}[2/5]${NC} Generating screenshots..."
     if command -v pexpect &> /dev/null; then
         "$VENV_PYTHON" "$SCRIPT_DIR/generate_screenshots.py" \
             --output-dir "$ASSETS_DIR/screenshots" \
@@ -113,91 +113,86 @@ if [ "$SKIP_SCREENSHOTS" = false ]; then
         echo -e "${YELLOW}⚠${NC} pexpect not available, skipping screenshots"
     fi
 else
-    echo -e "${YELLOW}[2/6]${NC} Skipping screenshot generation"
+    echo -e "${YELLOW}[2/5]${NC} Skipping screenshot generation"
 fi
 
-# Step 3: Combine markdown files
-echo -e "${YELLOW}[3/6]${NC} Combining markdown files..."
+# Step 3: Convert each chapter to LaTeX individually
+echo -e "${YELLOW}[3/5]${NC} Converting chapters to LaTeX..."
 
-# Concatenate all markdown in order
-cat > "$BUILD_DIR/user-guide-combined.md" << 'EOF'
----
-title: "Jaato Rich Client User Guide"
-author: "Jaato Development Team"
-date: \today
-documentclass: book
-geometry: margin=1in
-fontsize: 11pt
-colorlinks: true
-linkcolor: blue
-urlcolor: blue
-toccolor: black
-toc: true
-toc-depth: 3
-numbersections: true
----
+# Generate pandoc highlighting macros (needed by master.tex)
+TMPL=$(mktemp --suffix=.latex)
+echo '$highlighting-macros$' > "$TMPL"
+echo '```python
+x=1
+```' | pandoc --from markdown --to latex --highlight-style=tango \
+    --template "$TMPL" \
+    > "$BUILD_DIR/highlighting-macros.tex" 2>/dev/null
+rm -f "$TMPL"
 
-EOF
+echo "  Generated highlighting-macros.tex"
 
-# Add each section
+# Convert each chapter markdown to a .tex fragment (body only, no standalone)
+CHAPTER_INPUTS=""
 for file in "$DOCS_DIR"/chapters/*.md; do
     if [ -f "$file" ]; then
-        echo "Adding: $(basename "$file")"
-        cat "$file" >> "$BUILD_DIR/user-guide-combined.md"
-        echo "" >> "$BUILD_DIR/user-guide-combined.md"
+        basename=$(basename "$file" .md)
+        texfile="$BUILD_DIR/${basename}.tex"
+        echo "  Converting: $(basename "$file") → ${basename}.tex"
+        pandoc "$file" \
+            --from markdown \
+            --to latex \
+            --number-sections \
+            --highlight-style=tango \
+            --output "$texfile"
+        CHAPTER_INPUTS="${CHAPTER_INPUTS}\\input{${basename}}\n"
     fi
 done
 
-# Add generated content
-echo "Adding generated content..."
+# Convert generated content
 for file in "$GENERATED_DIR"/*.md; do
     if [ -f "$file" ]; then
-        echo "  - $(basename "$file")"
-        cat "$file" >> "$BUILD_DIR/user-guide-combined.md"
-        echo "" >> "$BUILD_DIR/user-guide-combined.md"
+        basename=$(basename "$file" .md)
+        texfile="$BUILD_DIR/${basename}.tex"
+        echo "  Converting: $(basename "$file") → ${basename}.tex"
+        pandoc "$file" \
+            --from markdown \
+            --to latex \
+            --number-sections \
+            --highlight-style=tango \
+            --output "$texfile"
+        CHAPTER_INPUTS="${CHAPTER_INPUTS}\\input{${basename}}\n"
     fi
 done
 
-echo -e "${GREEN}✓${NC} Markdown combined"
+# Write chapters.tex with all \input lines
+echo -e "$CHAPTER_INPUTS" > "$BUILD_DIR/chapters.tex"
+echo "  Generated chapters.tex"
 
-# Step 4: Convert to LaTeX
-echo -e "${YELLOW}[4/6]${NC} Converting to LaTeX..."
+echo -e "${GREEN}✓${NC} Chapters converted"
 
-pandoc "$BUILD_DIR/user-guide-combined.md" \
-    --from markdown \
-    --to latex \
-    --output "$BUILD_DIR/user-guide.tex" \
-    --template="$DOCS_DIR/latex/template.tex" \
-    --number-sections \
-    --toc \
-    --variable=geometry:margin=1in \
-    --variable=fontsize:11pt \
-    --variable=documentclass:book \
-    --variable=papersize:letter \
-    --variable=classoption:openany \
-    --highlight-style=tango \
-    --pdf-engine=xelatex
+# Step 4: Build PDF
+echo -e "${YELLOW}[4/5]${NC} Building PDF..."
 
-echo -e "${GREEN}✓${NC} LaTeX generated"
-
-# Step 5: Build PDF
-echo -e "${YELLOW}[5/6]${NC} Building PDF..."
+# Copy master.tex to build directory
+cp "$DOCS_DIR/latex/master.tex" "$BUILD_DIR/user-guide.tex"
 
 cd "$BUILD_DIR"
 
-# Run pdflatex multiple times for references
-echo "  Running pdflatex (1/3)..."
-xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1 || {
-    echo -e "${RED}✗${NC} First pass failed, check build/xelatex.log"
+# Run xelatex multiple times for TOC and cross-references
+# xelatex returns non-zero for warnings, so check PDF output instead of exit code
+echo "  Running xelatex (1/3)..."
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1 || true
+if [ ! -f "user-guide.pdf" ]; then
+    echo -e "${RED}✗${NC} First pass produced no PDF, check build/xelatex.log"
     tail -n 50 xelatex.log
     exit 1
-}
+fi
 
-echo "  Running pdflatex (2/3)..."
-xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1
+echo "  Running xelatex (2/3)..."
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1 || true
 
-echo "  Running pdflatex (3/3)..."
-xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1
+echo "  Running xelatex (3/3)..."
+xelatex -interaction=nonstopmode user-guide.tex > xelatex.log 2>&1 || true
 
 if [ -f "user-guide.pdf" ]; then
     echo -e "${GREEN}✓${NC} PDF built successfully"
@@ -217,12 +212,28 @@ else
     exit 1
 fi
 
-# Step 6: Optional: Generate HTML
+# Step 5: Optional: Generate HTML
 if [ "$OUTPUT_HTML" = true ]; then
     echo ""
-    echo -e "${YELLOW}[6/6]${NC} Generating HTML version..."
+    echo -e "${YELLOW}[5/5]${NC} Generating HTML version..."
 
-    pandoc "$BUILD_DIR/user-guide-combined.md" \
+    # Combine markdown for HTML (HTML doesn't need per-chapter splitting)
+    COMBINED_MD="$BUILD_DIR/user-guide-combined.md"
+    > "$COMBINED_MD"
+    for file in "$DOCS_DIR"/chapters/*.md; do
+        if [ -f "$file" ]; then
+            cat "$file" >> "$COMBINED_MD"
+            echo "" >> "$COMBINED_MD"
+        fi
+    done
+    for file in "$GENERATED_DIR"/*.md; do
+        if [ -f "$file" ]; then
+            cat "$file" >> "$COMBINED_MD"
+            echo "" >> "$COMBINED_MD"
+        fi
+    done
+
+    pandoc "$COMBINED_MD" \
         --from markdown \
         --to html5 \
         --output "$BUILD_DIR/user-guide.html" \
