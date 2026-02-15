@@ -37,6 +37,9 @@ dev = [
     "pytest-asyncio",
 ]
 
+[project.scripts]
+jaato = "rich_client:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["*"]
