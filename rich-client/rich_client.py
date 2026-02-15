@@ -6,9 +6,7 @@ This client provides a terminal UI experience with:
 - Scrolling output panel below for model responses and tool output
 - Full-screen alternate buffer for immersive experience
 
-Supports two modes via Backend abstraction:
-- Direct mode: Local JaatoClient (non-IPC)
-- IPC mode: Connection to jaato server daemon
+Connects to a jaato server daemon via IPC (auto-starting it if needed).
 
 Requires an interactive TTY. For non-TTY environments, use simple-client.
 """
@@ -39,19 +37,9 @@ if str(SIMPLE_CLIENT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from shared import (
-    JaatoClient,
-    TokenLedger,
-    PluginRegistry,
-    PermissionPlugin,
-    TodoPlugin,
-    active_cert_bundle,
-)
-from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
-from shared.plugins.base import parse_command_args, HelpLines
-from shared.plugins.gc import load_gc_from_file
+from command_types import parse_command_args, HelpLines
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
-from shared.plugins.vision_capture import (
+from renderers.vision_capture import (
     VisionCapture,
     VisionCaptureFormatter,
     CaptureConfig,
@@ -132,18 +120,12 @@ class RichClient:
         self.env_file = env_file
         self._provider = provider  # CLI override for provider
 
-        # Backend abstraction - supports both direct and IPC modes
+        # Backend abstraction (IPC mode only — direct mode removed)
         self._backend: Optional[Backend] = backend
-        self._jaato: Optional[JaatoClient] = None  # For direct mode compatibility
         self._is_ipc_mode = backend is not None and isinstance(backend, IPCBackend)
 
         # Async event loop for backend calls from threads
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
-
-        self.registry: Optional[PluginRegistry] = None
-        self.permission_plugin: Optional[PermissionPlugin] = None
-        self.todo_plugin: Optional[TodoPlugin] = None
-        self.ledger = TokenLedger()
 
         # Agent registry for tracking agents and their state
         self._agent_registry = AgentRegistry()
@@ -483,14 +465,12 @@ class RichClient:
     def initialize(self) -> bool:
         """Initialize the client.
 
-        IPC mode only: Uses provided backend (server handles plugins).
-        Direct/embedded mode has been removed - use server daemon instead.
+        Requires an IPC backend (connection to a running server daemon).
         """
         if not self._is_ipc_mode:
             raise RuntimeError(
-                "Direct mode is no longer supported. "
-                "Use 'python -m server --daemon' to start the server, "
-                "then connect with '--connect <socket>'."
+                "RichClient requires an IPC backend. "
+                "Use run_ipc_mode() or pass an IPCBackend to the constructor."
             )
         return self._initialize_ipc_mode()
 
@@ -582,7 +562,7 @@ class RichClient:
 
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
-        from shared.trace import trace
+        from jaato_sdk.trace import trace
         trace("rich_client", msg)
 
     def _setup_queue_channels(self) -> None:
@@ -751,7 +731,7 @@ class RichClient:
             return
 
         # Import the protocol
-        from shared.plugins.subagent.ui_hooks import AgentUIHooks
+        from command_types import AgentUIHooks
 
         # Create hooks implementation
         registry = self._agent_registry
@@ -953,7 +933,7 @@ class RichClient:
 
             # Fallback to basic formatting if plugin formatting failed
             if not prompt_lines:
-                from shared.ui_utils import build_permission_prompt_lines
+                from ui_utils import build_permission_prompt_lines
                 prompt_lines = build_permission_prompt_lines(
                     tool_args=tool_args,
                     response_options=response_options,
@@ -1053,28 +1033,6 @@ class RichClient:
             on_question_displayed=on_question_displayed,
             on_question_answered=on_question_answered
         )
-
-    def _setup_session_plugin(self) -> None:
-        """Set up session persistence plugin."""
-        if not self._backend:
-            return
-
-        try:
-            session_config = load_session_config()
-            session_plugin = create_session_plugin()
-            session_plugin.initialize({'storage_path': session_config.storage_path})
-            self._backend.set_session_plugin(session_plugin, session_config)
-
-            if self.registry:
-                self.registry.register_plugin(session_plugin, enrichment_only=True)
-
-            if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
-                auto_approved = session_plugin.get_auto_approved_tools()
-                if auto_approved:
-                    self.permission_plugin.add_whitelist_tools(auto_approved)
-
-        except Exception as e:
-            pass  # Session plugin is optional
 
     def _get_plugin_commands_by_plugin(self) -> Dict[str, list]:
         """Collect plugin commands grouped by plugin name."""
@@ -1357,7 +1315,7 @@ class RichClient:
                 return
 
             # Write to provider trace for debugging (same file as provider uses)
-            from shared.trace import provider_trace as _provider_trace
+            from jaato_sdk.trace import provider_trace as _provider_trace
             _provider_trace("rich_client_callback", f"received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
             self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
 
@@ -1881,7 +1839,7 @@ class RichClient:
         Args:
             user_input: The full user input string starting with 'keybindings'.
         """
-        from shared.ui_utils import handle_keybindings_command
+        from ui_utils import handle_keybindings_command
         handle_keybindings_command(user_input, self._display)
 
     def _init_vision_capture(self) -> None:
@@ -2080,7 +2038,7 @@ class RichClient:
                 self._display.add_system_message("  Available: svg, png, html", "dim")
                 return
 
-            from shared.plugins.vision_capture.protocol import CaptureFormat
+            from renderers.vision_capture.protocol import CaptureFormat
             format_map = {
                 'svg': CaptureFormat.SVG,
                 'png': CaptureFormat.PNG,
@@ -2155,7 +2113,7 @@ class RichClient:
                     return
 
                 import threading
-                from shared.plugins.vision_capture.protocol import CaptureContext
+                from renderers.vision_capture.protocol import CaptureContext
 
                 def delayed_capture():
                     result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
@@ -2186,7 +2144,7 @@ class RichClient:
 
         if subcommand == 'copy':
             # Capture and copy to clipboard (requires PNG format)
-            from shared.plugins.vision_capture.protocol import CaptureFormat
+            from renderers.vision_capture.protocol import CaptureFormat
             from clipboard import copy_image_to_clipboard
 
             self._init_vision_capture()
@@ -2813,8 +2771,8 @@ class RichClient:
         if not self._display:
             return
 
-        # Import shared help builders
-        from shared.client_commands import (
+        # Import help builders
+        from client_commands import (
             build_permission_help_text,
             build_file_reference_help_text,
             build_slash_command_help_text,
@@ -2909,8 +2867,8 @@ def _get_ipc_vision_state(display):
     Output directory: {cwd}/.jaato/vision
     """
     import os
-    from shared.plugins.vision_capture import VisionCapture, VisionCaptureFormatter
-    from shared.plugins.vision_capture.protocol import CaptureConfig, CaptureFormat
+    from renderers.vision_capture import VisionCapture, VisionCaptureFormatter
+    from renderers.vision_capture.protocol import CaptureConfig, CaptureFormat
 
     if not hasattr(display, '_vision_capture'):
         # Use current working directory as workspace (same as what client sends to server)
@@ -2976,7 +2934,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         agent_registry: The AgentRegistry for getting output buffer.
         ipc_client: The IPCClient for sending hints to model.
     """
-    from shared.plugins.vision_capture.protocol import CaptureContext
+    from renderers.vision_capture.protocol import CaptureContext
 
     parts = user_input.lower().split()
     subcommand = parts[1] if len(parts) > 1 else ""
@@ -3053,7 +3011,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             display.add_system_message("  Available: svg, png, html", "dim")
             return
 
-        from shared.plugins.vision_capture.protocol import CaptureFormat
+        from renderers.vision_capture.protocol import CaptureFormat
         format_map = {
             'svg': CaptureFormat.SVG,
             'png': CaptureFormat.PNG,
@@ -3168,7 +3126,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
 
     if subcommand == 'copy':
         # Capture and copy to clipboard (requires PNG format)
-        from shared.plugins.vision_capture.protocol import CaptureFormat
+        from renderers.vision_capture.protocol import CaptureFormat
         from clipboard import copy_image_to_clipboard
 
         vision_capture, _ = _get_ipc_vision_state(display)
@@ -4215,6 +4173,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 elif style == "info":
                     style = "system_highlight"
                 display.add_system_message(event.message, style=style)
+                display.refresh()
 
             elif isinstance(event, HelpTextEvent):
                 # Display help text using the pager
@@ -4782,7 +4741,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     continue
 
                 # Handle commands using shared parser
-                from shared.client_commands import parse_user_input, CommandAction
+                from client_commands import parse_user_input, CommandAction
 
                 text_lower = text.lower()
                 cmd_parts = text.split()
@@ -4843,7 +4802,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # ==================== TUI-specific commands (not in shared parser) ====================
                 # Keybindings command - handle locally using shared function
                 if cmd == "keybindings":
-                    from shared.ui_utils import handle_keybindings_command
+                    from ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
                     continue
 
@@ -4982,7 +4941,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.clear_output()
 
                 elif parsed.action == CommandAction.HELP:
-                    from shared.client_commands import build_full_help_text
+                    from client_commands import build_full_help_text
                     help_lines = build_full_help_text(server_commands)
                     display.show_lines(help_lines)
 
@@ -5075,21 +5034,16 @@ def main():
     import argparse
 
     # Configure UTF-8 encoding for Windows console (before any output)
-    from shared.console_encoding import configure_utf8_output
+    from console_encoding import configure_utf8_output
     configure_utf8_output()
 
     parser = argparse.ArgumentParser(
         description="Rich TUI client for Jaato AI assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Server Mode:
-  To run the server separately, use:
-    python -m server --ipc-socket /tmp/jaato.sock
-
-  Then connect with:
-    python rich_client.py --connect /tmp/jaato.sock
-
-  Or let the client auto-start the server (default behavior).
+The client auto-starts the server daemon if not already running.
+To run the server separately: python -m server --ipc-socket /tmp/jaato.sock
+To connect to a specific server: jaato --connect /path/to/socket
         """,
     )
     parser.add_argument(
@@ -5124,23 +5078,22 @@ Server Mode:
         "--connect",
         metavar="SOCKET_PATH",
         type=str,
-        help="Connect to an existing server via IPC socket. "
-             "If not specified, runs in legacy mode (embedded client)."
+        help="Connect to server via IPC socket (default: auto-detect)."
     )
     parser.add_argument(
         "--no-auto-start",
         action="store_true",
-        help="Don't auto-start server if not running (only with --connect)"
+        help="Don't auto-start server if not running"
     )
     parser.add_argument(
         "--new-session",
         action="store_true",
-        help="Start with a new session instead of resuming the default (only with --connect)"
+        help="Start with a new session instead of resuming the default"
     )
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Run in headless mode with file output (requires --connect and --prompt). "
+        help="Run in headless mode with file output (requires --prompt). "
              "Output goes to {workspace}/jaato-headless-client-agents/"
     )
     parser.add_argument(
@@ -5159,22 +5112,22 @@ Server Mode:
         type=str,
         metavar="COMMAND",
         help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
-             "Requires --connect and --session."
+             "Requires --session."
     )
 
     args = parser.parse_args()
 
+    # Resolve socket path: explicit --connect or default
+    from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
+    socket_path = args.connect or DEFAULT_SOCKET_PATH
+
     # Validate --cmd requirements
     if args.cmd:
-        if not args.connect:
-            sys.exit("Error: --cmd requires --connect")
         if not args.session:
             sys.exit("Error: --cmd requires --session to specify which session to send the command to")
 
     # Validate headless mode requirements
     if args.headless:
-        if not args.connect:
-            sys.exit("Error: --headless requires --connect")
         if not args.prompt and not args.initial_prompt:
             sys.exit("Error: --headless requires --prompt or --initial-prompt")
 
@@ -5183,7 +5136,7 @@ Server Mode:
         import asyncio
         from command_mode import run_command_mode
         asyncio.run(run_command_mode(
-            socket_path=args.connect,
+            socket_path=socket_path,
             session_id=args.session,
             command=args.cmd,
             auto_start=not args.no_auto_start,
@@ -5204,7 +5157,7 @@ Server Mode:
         from headless_mode import run_headless_mode
         workspace = pathlib.Path(args.workspace) if args.workspace else pathlib.Path.cwd()
         asyncio.run(run_headless_mode(
-            socket_path=args.connect,
+            socket_path=socket_path,
             prompt=args.prompt or args.initial_prompt,
             workspace=workspace,
             auto_start=not args.no_auto_start,
@@ -5213,42 +5166,15 @@ Server Mode:
         ))
         return
 
-    # Connection mode: connect to server via IPC
-    if args.connect:
-        import asyncio
-        asyncio.run(run_ipc_mode(
-            socket_path=args.connect,
-            auto_start=not args.no_auto_start,
-            env_file=args.env_file,
-            initial_prompt=args.initial_prompt,
-            single_prompt=args.prompt,
-            new_session=args.new_session,
-        ))
-        return
-
-    # Legacy mode: embedded JaatoClient (current behavior)
-    client = RichClient(
+    import asyncio
+    asyncio.run(run_ipc_mode(
+        socket_path=socket_path,
+        auto_start=not args.no_auto_start,
         env_file=args.env_file,
-        verbose=not args.quiet,
-        provider=args.provider
-    )
-
-    if not client.initialize():
-        sys.exit(1)
-
-    try:
-        if args.prompt:
-            # Single prompt mode - run and exit (no TUI)
-            response = client.run_prompt(args.prompt)
-            print(response)
-        elif args.initial_prompt:
-            # Initial prompt mode - run prompt first, then continue interactively
-            client.run_interactive(initial_prompt=args.initial_prompt)
-        else:
-            # Interactive mode
-            client.run_interactive()
-    finally:
-        client.shutdown()
+        initial_prompt=args.initial_prompt,
+        single_prompt=args.prompt,
+        new_session=args.new_session,
+    ))
 
 
 if __name__ == "__main__":

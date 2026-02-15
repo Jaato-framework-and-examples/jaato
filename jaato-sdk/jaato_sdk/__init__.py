@@ -17,6 +17,12 @@ from jaato_sdk.events import (
     serialize_event,
     deserialize_event,
 )
+from jaato_sdk.trace import (
+    trace,
+    provider_trace,
+    trace_write,
+    resolve_trace_path,
+)
 
 __all__ = [
     # Client
@@ -29,4 +35,9 @@ __all__ = [
     "EventType",
     "serialize_event",
     "deserialize_event",
+    # Trace
+    "trace",
+    "provider_trace",
+    "trace_write",
+    "resolve_trace_path",
 ]
