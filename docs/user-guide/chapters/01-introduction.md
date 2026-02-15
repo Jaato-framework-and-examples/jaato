@@ -73,7 +73,7 @@ By the end of this guide, you'll be able to effectively use the rich client for 
 To use the Jaato rich client, you should have:
 
 - **Basic terminal knowledge**: Comfort with command-line interfaces
-- **Python 3.9+**: Required for running Jaato
+- **Python 3.10+**: Required for running Jaato
 - **AI provider access**: At least one configured provider (Google, Anthropic, etc.)
 - **Development environment**: For file editing and tool execution features
 
@@ -90,9 +90,9 @@ Throughout this guide, you'll find:
 
 If you encounter issues:
 
-1. Check the **Troubleshooting** appendix (Appendix E)
-2. Review the **Common Issues** section (Chapter 22)
-3. Consult the **Environment Variables** reference (Appendix C)
-4. Report issues at: <https://github.com/anthropics/claude-code/issues>
+1. Check the **Troubleshooting** chapter (Chapter 18)
+2. Consult the **Environment Variables** reference (Appendix C)
+3. Review the **Glossary** (Appendix E)
+4. Report issues at: <https://github.com/apanoia/jaato/issues>
 
 Let's get started!
