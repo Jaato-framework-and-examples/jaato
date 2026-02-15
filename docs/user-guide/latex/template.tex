@@ -40,6 +40,11 @@
 % Lists
 \usepackage{enumitem}
 
+% Environment hooks (keep verbatim blocks on one page)
+\usepackage{etoolbox}
+\BeforeBeginEnvironment{verbatim}{\begin{minipage}{\linewidth}}
+\AfterEndEnvironment{verbatim}{\end{minipage}}
+
 % Code listings
 \usepackage{listings}
 
