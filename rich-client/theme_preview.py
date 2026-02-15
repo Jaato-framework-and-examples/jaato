@@ -5,7 +5,7 @@ Renders mock UI elements to preview theme changes in real-time.
 
 from rich.text import Text
 
-from theme import ThemeConfig
+from .theme import ThemeConfig
 
 
 class ThemePreview:

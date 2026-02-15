@@ -1,12 +1,6 @@
 """Tests for PercentPromptCompleter and PromptReferenceProcessor."""
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from file_completer import PercentPromptCompleter, PromptReferenceProcessor
+from rich_client.file_completer import PercentPromptCompleter, PromptReferenceProcessor
 from prompt_toolkit.document import Document
 
 

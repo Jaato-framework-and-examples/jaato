@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.console import Group
 
-from keybindings import KeyBinding, format_key_for_display
+from .keybindings import KeyBinding, format_key_for_display
 
 logger = logging.getLogger(__name__)
 

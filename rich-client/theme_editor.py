@@ -12,15 +12,15 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from color_picker import ColorPicker
-from theme import (
+from .color_picker import ColorPicker
+from .theme import (
     BUILTIN_THEMES,
     StyleSpec,
     ThemeConfig,
     get_palette_color_names,
     get_semantic_style_names,
 )
-from theme_preview import ThemePreview
+from .theme_preview import ThemePreview
 
 logger = logging.getLogger(__name__)
 

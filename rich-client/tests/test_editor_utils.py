@@ -8,7 +8,7 @@ import textwrap
 
 import pytest
 
-from editor_utils import (
+from rich_client.editor_utils import (
     DiffParseError,
     _format_as_unified_diff,
     _looks_like_unified_diff,

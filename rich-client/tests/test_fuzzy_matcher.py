@@ -1,14 +1,9 @@
 """Tests for FuzzyMatcher and fuzzy completion in completers."""
 
 import os
-import sys
 import tempfile
-from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from file_completer import FuzzyMatcher, AtFileCompleter, PercentPromptCompleter
+from rich_client.file_completer import FuzzyMatcher, AtFileCompleter, PercentPromptCompleter
 from prompt_toolkit.document import Document
 
 

@@ -56,17 +56,17 @@ from shared.plugins.vision_capture import (
 )
 
 # Reuse input handling from simple-client
-from input_handler import InputHandler
+from .input_handler import InputHandler
 
 # Rich TUI components
-from pt_display import PTDisplay
-from plan_reporter import create_live_reporter
-from agent_registry import AgentRegistry
-from keybindings import load_keybindings, detect_terminal, list_available_profiles
-from theme import load_theme, list_available_themes
+from .pt_display import PTDisplay
+from .plan_reporter import create_live_reporter
+from .agent_registry import AgentRegistry
+from .keybindings import load_keybindings, detect_terminal, list_available_profiles
+from .theme import load_theme, list_available_themes
 
 # Backend abstraction for mode-agnostic operation
-from backend import Backend, IPCBackend
+from .backend import Backend, IPCBackend
 
 
 def _capture_vision(

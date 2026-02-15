@@ -51,12 +51,12 @@ from rich import box
 from shared.plugins.table_formatter.plugin import _display_width
 from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
 from shared.ui_utils import format_tool_arg_value, format_tool_args_summary
-from terminal_emulator import TerminalEmulator
+from .terminal_emulator import TerminalEmulator
 
 # Type checking import for ThemeConfig
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from theme import ThemeConfig
+    from .theme import ThemeConfig
 
 
 # Pattern to strip ANSI escape codes for visible length calculation

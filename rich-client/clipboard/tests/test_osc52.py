@@ -1,16 +1,10 @@
 """Tests for OSC 52 clipboard provider."""
 
 import base64
-import sys
-from pathlib import Path
 
 import pytest
 
-# Add parent directories to path for imports
-_repo_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(_repo_root / "rich-client"))
-
-from clipboard.osc52 import (
+from rich_client.clipboard.osc52 import (
     OSC52_MAX_BYTES,
     OSC52_TMUX_MAX_BYTES,
     OSC52_SCREEN_MAX_BYTES,

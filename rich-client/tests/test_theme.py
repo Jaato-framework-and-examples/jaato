@@ -8,11 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-# Adjust path for imports when running from project root
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from theme import (
+from rich_client.theme import (
     StyleSpec,
     ThemeConfig,
     load_theme,

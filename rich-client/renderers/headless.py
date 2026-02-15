@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from terminal_emulator import TerminalEmulator
+from ..terminal_emulator import TerminalEmulator
 from .base import Renderer
 
 # Pattern to strip ANSI escape codes for clean log output

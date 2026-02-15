@@ -9,25 +9,7 @@ move above the model header.
 import pytest
 from unittest.mock import MagicMock
 
-# Import the output buffer module - need to handle the path carefully
-import sys
-import os
-
-# Add the rich-client directory to the path
-rich_client_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if rich_client_dir not in sys.path:
-    sys.path.insert(0, rich_client_dir)
-
-# Now import directly from the module file
-from importlib.util import spec_from_file_location, module_from_spec
-spec = spec_from_file_location("output_buffer", os.path.join(rich_client_dir, "output_buffer.py"))
-output_buffer_module = module_from_spec(spec)
-spec.loader.exec_module(output_buffer_module)
-
-OutputBuffer = output_buffer_module.OutputBuffer
-OutputLine = output_buffer_module.OutputLine
-ToolBlock = output_buffer_module.ToolBlock
-ActiveToolCall = output_buffer_module.ActiveToolCall
+from rich_client.output_buffer import OutputBuffer, OutputLine, ToolBlock, ActiveToolCall
 
 
 class TestToolTreePositioning:

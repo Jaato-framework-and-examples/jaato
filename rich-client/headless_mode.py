@@ -15,7 +15,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from renderers.headless import HeadlessFileRenderer
+from .renderers.headless import HeadlessFileRenderer
 
 logger = logging.getLogger(__name__)
 

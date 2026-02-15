@@ -9,9 +9,9 @@ import time
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agent_registry import AgentRegistry, AgentInfo
+    from .agent_registry import AgentRegistry, AgentInfo
 
-from keybindings import KeyBinding, format_key_for_display
+from .keybindings import KeyBinding, format_key_for_display
 
 
 # Spinner frames for processing status (same as output panel)

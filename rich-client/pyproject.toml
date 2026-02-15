@@ -40,7 +40,8 @@ dev = [
 [project.scripts]
 jaato = "rich_client:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["*"]
-exclude = ["tests*"]
+[tool.setuptools.package-dir]
+rich_client = "."
+
+[tool.setuptools]
+packages = ["rich_client", "rich_client.clipboard", "rich_client.renderers"]

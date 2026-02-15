@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 import threading
 
-from output_buffer import OutputBuffer
-from agent_icons import get_icon
+from .output_buffer import OutputBuffer
+from .agent_icons import get_icon
 
 
 @dataclass

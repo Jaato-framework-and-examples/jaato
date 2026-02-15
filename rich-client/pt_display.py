@@ -34,19 +34,19 @@ from rich.console import Console
 # Type checking import for InputHandler
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from input_handler import InputHandler
-    from agent_registry import AgentRegistry
+    from .input_handler import InputHandler
+    from .agent_registry import AgentRegistry
 
-from plan_panel import PlanPanel
-from workspace_panel import WorkspacePanel
-from budget_panel import BudgetPanel
-from output_buffer import OutputBuffer
-from agent_panel import AgentPanel
-from agent_tab_bar import AgentTabBar
-from tool_output_popup import ToolOutputPopup
-from clipboard import ClipboardConfig, ClipboardProvider, create_provider
-from keybindings import KeybindingConfig, load_keybindings, format_key_for_display
-from theme import ThemeConfig, load_theme
+from .plan_panel import PlanPanel
+from .workspace_panel import WorkspacePanel
+from .budget_panel import BudgetPanel
+from .output_buffer import OutputBuffer
+from .agent_panel import AgentPanel
+from .agent_tab_bar import AgentTabBar
+from .tool_output_popup import ToolOutputPopup
+from .clipboard import ClipboardConfig, ClipboardProvider, create_provider
+from .keybindings import KeybindingConfig, load_keybindings, format_key_for_display
+from .theme import ThemeConfig, load_theme
 from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter

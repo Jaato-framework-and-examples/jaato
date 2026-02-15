@@ -10,8 +10,8 @@ from rich.console import Group
 from rich.text import Text
 from rich.style import Style
 
-from agent_registry import AgentRegistry, AgentInfo
-from keybindings import KeyBinding, format_key_for_display
+from .agent_registry import AgentRegistry, AgentInfo
+from .keybindings import KeyBinding, format_key_for_display
 
 
 class AgentPanel:
