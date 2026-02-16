@@ -279,9 +279,47 @@ class AnthropicProvider:
         # Verify connectivity with a lightweight call
         self._verify_connectivity()
 
+    def _create_http_client(self) -> Optional[Any]:
+        """Create a custom httpx client if proxy or SSL configuration is needed.
+
+        Returns an httpx.Client configured with:
+        - Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
+        - Kerberos/SPNEGO proxy authentication (via JAATO_KERBEROS_PROXY)
+        - Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY)
+
+        Returns None if no custom configuration is needed, letting the
+        Anthropic SDK create its own default client.
+        """
+        from shared.ssl_helper import active_cert_bundle
+        from shared.http.proxy import get_httpx_client, is_kerberos_proxy_enabled
+
+        ca_bundle = active_cert_bundle()
+        kerberos_enabled = is_kerberos_proxy_enabled()
+
+        if not ca_bundle and not kerberos_enabled:
+            return None  # Let SDK create its own client with default settings
+
+        kwargs = {}
+        if ca_bundle:
+            kwargs["verify"] = ca_bundle
+
+        return get_httpx_client(**kwargs)
+
     def _create_client(self):
-        """Create Anthropic client with appropriate auth method."""
+        """Create Anthropic client with appropriate auth method.
+
+        Configures proxy and SSL settings when corporate CA certificates
+        (REQUESTS_CA_BUNDLE / SSL_CERT_FILE) or Kerberos proxy authentication
+        (JAATO_KERBEROS_PROXY) are detected. Otherwise lets the Anthropic SDK
+        create its own default httpx client.
+        """
         import anthropic
+
+        # Build custom httpx client for proxy/SSL if needed
+        http_client = self._create_http_client()
+        client_kwargs: Dict[str, Any] = {}
+        if http_client:
+            client_kwargs["http_client"] = http_client
 
         # Headers for OAuth authentication
         # Must match Claude Code CLI headers for OAuth tokens to work
@@ -300,16 +338,18 @@ class AnthropicProvider:
             return anthropic.Anthropic(
                 auth_token=self._pkce_access_token,
                 default_headers=oauth_headers,
+                **client_kwargs,
             )
         elif self._oauth_token:
             # Env var OAuth - uses token from claude setup-token
             return anthropic.Anthropic(
                 auth_token=self._oauth_token,
                 default_headers=oauth_headers,
+                **client_kwargs,
             )
         else:
             # API key - standard authentication
-            return anthropic.Anthropic(api_key=self._api_key)
+            return anthropic.Anthropic(api_key=self._api_key, **client_kwargs)
 
     def _refresh_pkce_token_if_needed(self) -> None:
         """Refresh PKCE access token if expired."""
@@ -917,9 +957,25 @@ class AnthropicProvider:
             self._history.append(Message(role=Role.MODEL, parts=history_parts))
 
     def _handle_api_error(self, error: Exception) -> None:
-        """Handle API errors and convert to appropriate exceptions."""
+        """Handle API errors and convert to appropriate exceptions.
+
+        Detects SSL/TLS errors (common with corporate proxies) and provides
+        actionable guidance via shared.ssl_helper.
+        """
+        import ssl as _ssl
+
         error_str = str(error).lower()
         error_type = type(error).__name__
+
+        # Check for SSL/TLS errors (corporate proxy TLS inspection, missing CA certs)
+        ssl_keywords = ("ssl", "handshake_failure", "certificate_verify_failed", "sslv3")
+        is_ssl_error = (
+            isinstance(error, _ssl.SSLError)
+            or any(kw in error_str for kw in ssl_keywords)
+        )
+        if is_ssl_error:
+            from shared.ssl_helper import log_ssl_guidance
+            log_ssl_guidance("Anthropic API", error)
 
         # Check for authentication errors
         if "authentication" in error_str or "invalid api key" in error_str or "401" in error_str:
