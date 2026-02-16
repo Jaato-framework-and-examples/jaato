@@ -721,10 +721,8 @@ class JaatoServer:
 
             model_name = get_config("MODEL_NAME")
             if not model_name:
-                self._emit_init_progress("Loading configuration", "error", 1, total_steps,
-                                         "Missing MODEL_NAME")
                 self.emit(ErrorEvent(
-                    error="Missing required environment variable: MODEL_NAME",
+                    error="Missing required environment variables: JAATO_PROVIDER and MODEL_NAME",
                     error_type="ConfigurationError",
                     recoverable=False,
                 ))
