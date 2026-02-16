@@ -442,7 +442,7 @@ export JAATO_KERBEROS_PROXY=true
 # Ensure you have valid Kerberos tickets (kinit on Linux/Mac, Windows domain login)
 ```
 
-Requires `pyspnego` package: `pip install pyspnego`
+Requires `pyspnego` package (`pip install pyspnego`) on Linux/macOS. On Windows, a native SSPI fallback via `secur32.dll` is used automatically when `pyspnego` is not installed.
 
 ## Rich Client Commands
 

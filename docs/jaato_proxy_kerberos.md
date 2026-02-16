@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-JAATO provides unified proxy support and **Kerberos/SPNEGO authentication** for enterprise environments where outbound traffic must traverse HTTP proxies. The `shared/http/` module abstracts proxy configuration across three HTTP libraries (urllib, requests, httpx) and provides two key improvements over standard proxy handling: **exact host matching** via `JAATO_NO_PROXY` (compared to the standard `NO_PROXY` suffix matching) and **transparent Kerberos token generation** via `pyspnego` for corporate proxies requiring SPNEGO/Negotiate authentication.
+JAATO provides unified proxy support and **Kerberos/SPNEGO authentication** for enterprise environments where outbound traffic must traverse HTTP proxies. The `shared/http/` module abstracts proxy configuration across three HTTP libraries (urllib, requests, httpx) and provides two key improvements over standard proxy handling: **exact host matching** via `JAATO_NO_PROXY` (compared to the standard `NO_PROXY` suffix matching) and **transparent Kerberos token generation** for corporate proxies requiring SPNEGO/Negotiate authentication (via `pyspnego`, or a native Windows SSPI fallback when `pyspnego` is unavailable).
 
 ---
 
@@ -117,16 +117,17 @@ When `JAATO_KERBEROS_PROXY=true`, JAATO generates SPNEGO tokens using the system
 │  │  JAATO   │ ── call ──────────► │  pyspnego    │                  │
 │  │  Client  │                     │  library     │                  │
 │  │          │ ◄── SPNEGO token ── │              │                  │
-│  └──────────┘                     └──────┬───────┘                  │
-│                                          │                           │
-│                                   ┌──────┴───────┐                  │
-│                                   │  Platform    │                  │
-│                                   │  Kerberos    │                  │
-│                                   │              │                  │
-│                                   │  Windows:SSPI│                  │
-│                                   │  macOS:GSS   │                  │
-│                                   │  Linux:MIT   │                  │
-│                                   └──────────────┘                  │
+│  └──────┬───┘                     └──────┬───────┘                  │
+│         │ (fallback if pyspnego          │                           │
+│         │  not installed)         ┌──────┴───────┐                  │
+│         │                         │  Platform    │                  │
+│         ▼                         │  Kerberos    │                  │
+│  ┌──────────────┐                 │              │                  │
+│  │ ctypes SSPI  │                 │  Windows:SSPI│                  │
+│  │ secur32.dll  │                 │  macOS:GSS   │                  │
+│  │ (Windows     │                 │  Linux:MIT   │                  │
+│  │  only)       │                 └──────────────┘                  │
+│  └──────────────┘                                                   │
 │                                                                      │
 │  3. Authenticated Request                                            │
 │  ┌──────────┐                     ┌──────────────┐    ┌──────────┐ │
@@ -136,7 +137,7 @@ When `JAATO_KERBEROS_PROXY=true`, JAATO generates SPNEGO tokens using the system
 │  │          │ ◄── 200 OK ─────────│              │◄───│          │ │
 │  └──────────┘                     └──────────────┘    └──────────┘ │
 │                                                                      │
-│  pyspnego creates a context for HTTP/<proxy_host> service principal  │
+│  pyspnego (or SSPI fallback) creates a context for HTTP/<proxy_host>│
 │  The SPNEGO token is base64-encoded and added to Proxy-Authorization│
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -146,14 +147,15 @@ When `JAATO_KERBEROS_PROXY=true`, JAATO generates SPNEGO tokens using the system
 
 | Platform | Kerberos Backend | Credential Source |
 |----------|-----------------|-------------------|
-| **Windows** | SSPI (native) | Domain login (automatic) |
-| **macOS** | GSS.framework | `kinit` or Kerberos ticket cache |
-| **Linux** | MIT Kerberos | `kinit` (must have valid ticket) |
+| **Windows** | SSPI via pyspnego, or ctypes secur32.dll fallback | Domain login (automatic) |
+| **Windows MSYS2** | ctypes SSPI fallback (pyspnego typically unavailable) | Domain login (automatic) |
+| **macOS** | GSS.framework via pyspnego | `kinit` or Kerberos ticket cache |
+| **Linux** | MIT Kerberos via pyspnego | `kinit` (must have valid ticket) |
 
 ### Prerequisites
 
 ```bash
-# Install pyspnego
+# Install pyspnego (optional on Windows — native SSPI fallback available)
 pip install pyspnego
 
 # Linux: obtain Kerberos ticket
