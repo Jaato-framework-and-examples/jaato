@@ -165,21 +165,19 @@ class IPCClient:
         Returns:
             Tuple of (reader, writer) for the pipe connection.
         """
-        # Log both the original configured socket_path and the resolved pipe_path
-        try:
-            original = self.socket_path
-        except Exception:
-            original = str(self.socket_path)
-        print(f"DEBUG: Connecting to Windows pipe. original socket_path={original!r}, resolved pipe_path={pipe_path}")
+        logger.debug(
+            "Connecting to Windows pipe. socket_path=%r, resolved pipe_path=%s",
+            self.socket_path, pipe_path,
+        )
         loop = asyncio.get_running_loop()
-        print(f"DEBUG: Client event loop type: {type(loop).__name__}")
+        logger.debug("Client event loop type: %s", type(loop).__name__)
 
         # Use a Future to capture the reader/writer from the protocol callback
         connected_future: asyncio.Future = loop.create_future()
 
         def client_connected_cb(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             """Called when the protocol is ready with properly initialized streams."""
-            print("DEBUG: Client protocol callback called, streams ready")
+            logger.debug("Client protocol callback called, streams ready")
             connected_future.set_result((reader, writer))
 
         # Create a protocol with callback to get properly initialized writer
@@ -187,16 +185,16 @@ class IPCClient:
         protocol = asyncio.StreamReaderProtocol(reader, client_connected_cb)
 
         # Connect to the named pipe - this triggers connection_made -> callback
-        print("DEBUG: Client calling create_pipe_connection...")
+        logger.debug("Client calling create_pipe_connection...")
         transport, _ = await loop.create_pipe_connection(
             lambda: protocol,
             pipe_path,
         )
-        print(f"DEBUG: Client create_pipe_connection returned, transport={transport}")
+        logger.debug("Client create_pipe_connection returned, transport=%s", transport)
 
         # Wait for the callback to provide the reader/writer
         result = await connected_future
-        print("DEBUG: Client got reader/writer from callback")
+        logger.debug("Client got reader/writer from callback")
         return result
 
     @property
