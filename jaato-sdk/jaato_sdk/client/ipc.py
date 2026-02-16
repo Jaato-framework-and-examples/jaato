@@ -119,6 +119,12 @@ class IPCClient:
         # events() can yield them later without data loss).
         self._buffered_events: list[Event] = []
 
+        # True while events() is actively iterating.  When set,
+        # create_session() must NOT read from the socket (concurrent
+        # readers on a StreamReader is a RuntimeError).  It falls back
+        # to fire-and-forget and lets events() pick up the response.
+        self._events_active: bool = False
+
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
         # Accept a variety of user inputs and normalize to the canonical
@@ -652,19 +658,25 @@ class IPCClient:
     ) -> Optional[str]:
         """Create a new session on the server.
 
-        Sends a ``session.new`` command and reads events from the socket
-        until a ``SessionInfoEvent`` confirms the session was created.
-        Events received while waiting (e.g. init-progress, system messages)
-        are buffered internally so that ``events()`` can yield them later.
+        Sends a ``session.new`` command and, when no other coroutine is
+        reading from the socket (i.e. ``events()`` is not active), waits
+        for the server's ``SessionInfoEvent`` confirmation.
+
+        When ``events()`` IS already active (e.g. the TUI starts its
+        event loop before requesting a session), we cannot read from the
+        same socket — that would be a concurrent-reader race.  In that
+        case the command is fire-and-forget: the ``SessionInfoEvent``
+        will arrive via ``events()`` and update ``_session_id`` there.
 
         Args:
             name: Optional session name.
-            timeout: Maximum seconds to wait for session creation.  The
-                server may need time to initialise the provider, so the
-                default is generous.
+            timeout: Maximum seconds to wait for session creation when
+                blocking.  The server may need time to initialise the
+                provider, so the default is generous.
 
         Returns:
-            The new session ID, or None if creation failed or timed out.
+            The new session ID, or None if fire-and-forget / failed /
+            timed out.
         """
         args = [name] if name else []
         await self._send_event(CommandRequest(
@@ -672,10 +684,14 @@ class IPCClient:
             args=args,
         ))
 
-        # Read events until we receive a SessionInfoEvent (success) or
-        # an ErrorEvent / timeout (failure).  Any intermediate events
-        # (init progress, system messages, …) are buffered so they are
-        # not lost for callers that consume events() afterwards.
+        # If events() is already consuming the socket, we must not read
+        # here — the SessionInfoEvent will be picked up by events().
+        if self._events_active:
+            return None
+
+        # No active event consumer — read events until we receive a
+        # SessionInfoEvent (success) or an ErrorEvent / timeout (failure).
+        # Intermediate events are buffered for events() to yield later.
         try:
             return await asyncio.wait_for(
                 self._await_session_info(), timeout=timeout
@@ -891,61 +907,65 @@ class IPCClient:
             Events from the server.
         """
         logger.debug("events(): starting event loop")
+        self._events_active = True
 
-        # Drain events that were buffered during request-response
-        # operations (e.g. create_session consuming init-progress events).
-        while self._buffered_events:
-            event = self._buffered_events.pop(0)
-            logger.debug(f"events(): yielding buffered {type(event).__name__}")
-            if self._on_event:
-                self._on_event(event)
-            yield event
+        try:
+            # Drain events that were buffered during request-response
+            # operations (e.g. create_session consuming init-progress events).
+            while self._buffered_events:
+                event = self._buffered_events.pop(0)
+                logger.debug(f"events(): yielding buffered {type(event).__name__}")
+                if self._on_event:
+                    self._on_event(event)
+                yield event
 
-        while self._connected:
-            try:
-                message = await self._read_message()
-                if message is None:
-                    # Connection closed cleanly (server shutdown, network loss)
-                    logger.debug("events(): connection closed (received None)")
+            while self._connected:
+                try:
+                    message = await self._read_message()
+                    if message is None:
+                        # Connection closed cleanly (server shutdown, network loss)
+                        logger.debug("events(): connection closed (received None)")
+                        self._connected = False
+                        break
+
+                    event = deserialize_event(message)
+                    logger.debug(f"events(): received {type(event).__name__}")
+
+                    # Auto-update session_id when receiving SessionInfoEvent
+                    if isinstance(event, SessionInfoEvent) and event.session_id:
+                        self._session_id = event.session_id
+                        logger.debug(f"events(): session_id updated to {event.session_id}")
+
+                    # Call callback if set
+                    if self._on_event:
+                        self._on_event(event)
+
+                    yield event
+
+                except asyncio.IncompleteReadError:
+                    # Connection lost mid-message
+                    logger.debug("events(): incomplete read, connection lost")
                     self._connected = False
                     break
 
-                event = deserialize_event(message)
-                logger.debug(f"events(): received {type(event).__name__}")
+                except ConnectionResetError:
+                    # Connection reset by peer
+                    logger.debug("events(): connection reset by peer")
+                    self._connected = False
+                    break
 
-                # Auto-update session_id when receiving SessionInfoEvent
-                if isinstance(event, SessionInfoEvent) and event.session_id:
-                    self._session_id = event.session_id
-                    logger.debug(f"events(): session_id updated to {event.session_id}")
+                except asyncio.CancelledError:
+                    logger.debug("events(): cancelled")
+                    raise
 
-                # Call callback if set
-                if self._on_event:
-                    self._on_event(event)
-
-                yield event
-
-            except asyncio.IncompleteReadError:
-                # Connection lost mid-message
-                logger.debug("events(): incomplete read, connection lost")
-                self._connected = False
-                break
-
-            except ConnectionResetError:
-                # Connection reset by peer
-                logger.debug("events(): connection reset by peer")
-                self._connected = False
-                break
-
-            except asyncio.CancelledError:
-                logger.debug("events(): cancelled")
-                raise
-
-            except Exception as e:
-                logger.error(f"events(): error: {e}")
-                yield ErrorEvent(
-                    error=str(e),
-                    error_type=type(e).__name__,
-                )
+                except Exception as e:
+                    logger.error(f"events(): error: {e}")
+                    yield ErrorEvent(
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+        finally:
+            self._events_active = False
 
     async def receive_events(self) -> None:
         """Receive events and call the callback.
