@@ -6,7 +6,8 @@ Provides unified proxy support for urllib, requests, and httpx with:
 - JAATO_KERBEROS_PROXY for Kerberos/SPNEGO proxy authentication
 
 Platform Support for Kerberos:
-- Windows: Native SSPI via pyspnego
+- Windows: Native SSPI via pyspnego, or ctypes secur32.dll fallback
+- Windows MSYS2: ctypes SSPI fallback (pyspnego typically unavailable)
 - macOS: GSS.framework via pyspnego
 - Linux: MIT Kerberos via pyspnego
 """
@@ -203,11 +204,197 @@ def should_bypass_proxy(url: str) -> bool:
 # Kerberos/SPNEGO Support
 # ============================================================
 
+def _generate_spnego_token_sspi(proxy_host: str) -> Optional[str]:
+    """Generate SPNEGO token using Windows SSPI via ctypes.
+
+    Fallback for when pyspnego is not available but we're on Windows
+    (including MSYS2).  Uses secur32.dll's AcquireCredentialsHandleW and
+    InitializeSecurityContextW to produce a Negotiate token from the
+    current user's domain credentials.
+
+    The SSPI flow:
+    1. AcquireCredentialsHandleW — get handle to current user's credentials
+    2. InitializeSecurityContextW — generate SPNEGO token for HTTP/<proxy_host>
+    3. Extract token bytes from output SecBuffer
+    4. Clean up: FreeCredentialsHandle, DeleteSecurityContext
+
+    Args:
+        proxy_host: Proxy server hostname for the service principal.
+
+    Returns:
+        Base64-encoded SPNEGO token, or None if SSPI is unavailable or fails.
+    """
+    try:
+        import ctypes
+        # Check that secur32.dll is accessible (Windows or MSYS2 with
+        # native Windows Python).  On non-Windows ctypes has no windll
+        # attribute; on Cygwin Python secur32.dll may not load.
+        secur32 = ctypes.windll.secur32  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+
+    from ctypes import (
+        POINTER,
+        Structure,
+        byref,
+        c_ulong,
+        c_ulonglong,
+        c_void_p,
+        c_wchar_p,
+        pointer,
+        string_at,
+    )
+
+    # -- Constants from Windows SDK Sspi.h ---------------------------------
+    SECPKG_CRED_OUTBOUND = 0x00000002
+    ISC_REQ_DELEGATE = 0x00000001
+    ISC_REQ_MUTUAL_AUTH = 0x00000002
+    ISC_REQ_CONNECTION = 0x00000800
+    SECURITY_NETWORK_DREP = 0x00000000
+    SECBUFFER_TOKEN = 2
+    SECBUFFER_VERSION = 0
+    SEC_E_OK = 0x00000000
+    SEC_I_CONTINUE_NEEDED = 0x00090312
+    MAX_TOKEN_SIZE = 12288  # 12 KiB — generous for Negotiate tokens
+
+    # -- ctypes structure definitions --------------------------------------
+
+    class SecHandle(Structure):
+        """SSPI credential / context handle (CredHandle, CtxtHandle)."""
+
+        _fields_ = [("dwLower", c_void_p), ("dwUpper", c_void_p)]
+
+    class SecBuffer(Structure):
+        """Single SSPI security buffer."""
+
+        _fields_ = [
+            ("cbBuffer", c_ulong),
+            ("BufferType", c_ulong),
+            ("pvBuffer", c_void_p),
+        ]
+
+    class SecBufferDesc(Structure):
+        """Descriptor for an array of SecBuffer structures."""
+
+        _fields_ = [
+            ("ulVersion", c_ulong),
+            ("cBuffers", c_ulong),
+            ("pBuffers", POINTER(SecBuffer)),
+        ]
+
+    # -- Bind function signatures ------------------------------------------
+    secur32.AcquireCredentialsHandleW.argtypes = [
+        c_wchar_p, c_wchar_p, c_ulong, c_void_p, c_void_p,
+        c_void_p, c_void_p, POINTER(SecHandle), POINTER(c_ulonglong),
+    ]
+    secur32.AcquireCredentialsHandleW.restype = c_ulong
+
+    secur32.InitializeSecurityContextW.argtypes = [
+        POINTER(SecHandle), POINTER(SecHandle), c_wchar_p,
+        c_ulong, c_ulong, c_ulong,
+        POINTER(SecBufferDesc), c_ulong,
+        POINTER(SecHandle), POINTER(SecBufferDesc),
+        POINTER(c_ulong), POINTER(c_ulonglong),
+    ]
+    secur32.InitializeSecurityContextW.restype = c_ulong
+
+    secur32.FreeCredentialsHandle.argtypes = [POINTER(SecHandle)]
+    secur32.FreeCredentialsHandle.restype = c_ulong
+    secur32.DeleteSecurityContext.argtypes = [POINTER(SecHandle)]
+    secur32.DeleteSecurityContext.restype = c_ulong
+
+    # -- Acquire credentials -----------------------------------------------
+    cred_handle = SecHandle()
+    expiry = c_ulonglong()
+    cred_acquired = False
+    ctx_initialized = False
+
+    try:
+        status = secur32.AcquireCredentialsHandleW(
+            None,                   # pszPrincipal (NULL → current user)
+            "Negotiate",            # pszPackage
+            SECPKG_CRED_OUTBOUND,   # fCredentialUse
+            None, None, None, None, # pvLogonId, pAuthData, pGetKeyFn, pvArg
+            byref(cred_handle),
+            byref(expiry),
+        )
+        if status != SEC_E_OK:
+            logger.debug(
+                "SSPI AcquireCredentialsHandleW failed: 0x%08X", status,
+            )
+            return None
+        cred_acquired = True
+
+        # -- Prepare output buffer -----------------------------------------
+        token_buf = ctypes.create_string_buffer(MAX_TOKEN_SIZE)
+        out_buf = SecBuffer(
+            cbBuffer=MAX_TOKEN_SIZE,
+            BufferType=SECBUFFER_TOKEN,
+            pvBuffer=ctypes.cast(token_buf, c_void_p),
+        )
+        out_buf_desc = SecBufferDesc(
+            ulVersion=SECBUFFER_VERSION,
+            cBuffers=1,
+            pBuffers=pointer(out_buf),
+        )
+
+        # -- Initialize security context -----------------------------------
+        ctx_handle = SecHandle()
+        ctx_attrs = c_ulong()
+        ctx_expiry = c_ulonglong()
+        target_name = f"HTTP/{proxy_host}"
+
+        status = secur32.InitializeSecurityContextW(
+            byref(cred_handle),
+            None,                   # phContext (NULL → first call)
+            target_name,
+            ISC_REQ_DELEGATE | ISC_REQ_MUTUAL_AUTH | ISC_REQ_CONNECTION,
+            0,                      # Reserved1
+            SECURITY_NETWORK_DREP,
+            None,                   # pInput (NULL → first call)
+            0,                      # Reserved2
+            byref(ctx_handle),
+            byref(out_buf_desc),
+            byref(ctx_attrs),
+            byref(ctx_expiry),
+        )
+
+        if status not in (SEC_E_OK, SEC_I_CONTINUE_NEEDED):
+            logger.debug(
+                "SSPI InitializeSecurityContextW failed: 0x%08X", status,
+            )
+            return None
+        ctx_initialized = True
+
+        # -- Extract token bytes -------------------------------------------
+        token_size = out_buf_desc.pBuffers[0].cbBuffer
+        if token_size == 0:
+            logger.debug("SSPI produced empty token")
+            return None
+
+        token_bytes = string_at(out_buf_desc.pBuffers[0].pvBuffer, token_size)
+        return base64.b64encode(token_bytes).decode("ascii")
+
+    except Exception as e:
+        logger.debug("SSPI token generation failed: %s", e)
+        return None
+
+    finally:
+        if ctx_initialized:
+            secur32.DeleteSecurityContext(byref(ctx_handle))
+        if cred_acquired:
+            secur32.FreeCredentialsHandle(byref(cred_handle))
+
+
 def generate_spnego_token(proxy_host: str) -> Optional[str]:
     """Generate SPNEGO token for proxy authentication.
 
     Uses the system's Kerberos credentials to generate a Negotiate token
     for the HTTP/<proxy_host> service principal.
+
+    Token generation strategy (in priority order):
+    1. pyspnego library (cross-platform, most robust)
+    2. Windows SSPI via ctypes (fallback when pyspnego unavailable)
 
     Args:
         proxy_host: Proxy server hostname.
@@ -218,8 +405,10 @@ def generate_spnego_token(proxy_host: str) -> Optional[str]:
     try:
         import spnego
     except ImportError:
-        logger.debug("pyspnego not installed, Kerberos proxy auth unavailable")
-        return None
+        logger.debug(
+            "pyspnego not installed, trying native SSPI fallback",
+        )
+        return _generate_spnego_token_sspi(proxy_host)
 
     try:
         # Create SPNEGO client context for HTTP service on proxy

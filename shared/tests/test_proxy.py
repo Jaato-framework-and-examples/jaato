@@ -1,4 +1,4 @@
-"""Tests for shared.http.proxy — NO_PROXY / JAATO_NO_PROXY handling."""
+"""Tests for shared.http.proxy — NO_PROXY / JAATO_NO_PROXY handling and SPNEGO."""
 
 import os
 from unittest import mock
@@ -6,8 +6,10 @@ from unittest import mock
 import pytest
 
 from shared.http.proxy import (
+    _generate_spnego_token_sspi,
     _get_no_proxy_entries,
     _matches_no_proxy,
+    generate_spnego_token,
     should_bypass_proxy,
 )
 
@@ -164,3 +166,53 @@ class TestShouldBypassProxy:
             assert should_bypass_proxy("https://svc.internal.com/api") is True
             assert should_bypass_proxy("https://special.host/") is True
             assert should_bypass_proxy("https://external.com/") is False
+
+
+# ============================================================
+# SPNEGO / SSPI fallback tests
+# ============================================================
+
+
+class TestGenerateSpnegoTokenFallback:
+    """Test that generate_spnego_token falls back to SSPI when pyspnego is missing."""
+
+    def test_fallback_to_sspi_when_spnego_unavailable(self):
+        """When pyspnego import fails, _generate_spnego_token_sspi is called."""
+        with mock.patch.dict("sys.modules", {"spnego": None}):
+            with mock.patch(
+                "shared.http.proxy._generate_spnego_token_sspi",
+                return_value="fake_b64_token",
+            ) as mock_sspi:
+                result = generate_spnego_token("proxy.corp.com")
+                mock_sspi.assert_called_once_with("proxy.corp.com")
+                assert result == "fake_b64_token"
+
+    def test_pyspnego_preferred_over_sspi(self):
+        """When pyspnego is available, SSPI fallback is not called."""
+        mock_spnego = mock.MagicMock()
+        mock_ctx = mock.MagicMock()
+        mock_ctx.step.return_value = b"\x01\x02\x03"
+        mock_spnego.client.return_value = mock_ctx
+
+        with mock.patch.dict("sys.modules", {"spnego": mock_spnego}):
+            with mock.patch(
+                "shared.http.proxy._generate_spnego_token_sspi",
+            ) as mock_sspi:
+                result = generate_spnego_token("proxy.corp.com")
+                mock_sspi.assert_not_called()
+                assert result is not None
+
+    def test_sspi_fallback_returns_none_when_no_sspi(self):
+        """_generate_spnego_token_sspi returns None on non-Windows (no windll)."""
+        # Hide ctypes.windll by patching the ctypes module
+        fake_ctypes = mock.MagicMock(spec=["__name__"])
+        del fake_ctypes.windll  # ensure AttributeError on access
+        with mock.patch.dict("sys.modules", {"ctypes": fake_ctypes}):
+            # Call the real function — it will import the mocked ctypes
+            # and fail on windll access, returning None.
+            from importlib import reload
+            import shared.http.proxy as proxy_mod
+
+            # Directly test: no windll → None
+            result = _generate_spnego_token_sspi("proxy.corp.com")
+            assert result is None
