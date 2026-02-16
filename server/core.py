@@ -797,7 +797,12 @@ class JaatoServer:
                 "session_id": self._session_id,
             },
         }
-        self.registry.expose_all(plugin_configs)
+        def _on_plugin_progress(plugin_name: str) -> None:
+            self._emit_init_progress(
+                "Loading plugins", "running", 3, total_steps, message=plugin_name
+            )
+
+        self.registry.expose_all(plugin_configs, on_progress=_on_plugin_progress)
         self.todo_plugin = self.registry.get_plugin("todo")
 
         # Broadcast workspace path to all plugins implementing set_workspace_path()

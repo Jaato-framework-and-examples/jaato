@@ -3715,8 +3715,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 step_prefix = f"   {padded_name}"
 
                 if status == "running":
-                    # Show step in progress
-                    display.add_system_message(f"{step_prefix} ...", style="system_progress")
+                    # Sub-step detail (e.g., plugin name) shown inline
+                    detail = f" ({event.message})" if event.message else ""
+                    line_text = f"{step_prefix} ...{detail}"
+                    if init_current_step == step_name:
+                        # Same step firing again — update line in-place
+                        display.update_last_system_message(
+                            line_text, style="system_progress", prefix=step_prefix
+                        )
+                    else:
+                        # First "running" for this step — add new line
+                        display.add_system_message(line_text, style="system_progress")
                     init_current_step = step_name
                 elif status == "done":
                     # Update the same line to show completion

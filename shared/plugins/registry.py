@@ -656,14 +656,23 @@ class PluginRegistry:
             self._exposed.discard(name)
             self._configs.pop(name, None)
 
-    def expose_all(self, config: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+    def expose_all(
+        self,
+        config: Optional[Dict[str, Dict[str, Any]]] = None,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> None:
         """Expose all discovered plugins' tools.
 
         Args:
             config: Optional dict mapping plugin names to their configs.
+            on_progress: Optional callback invoked with each plugin name
+                before it is exposed.  Used by the server to emit
+                per-plugin init progress events.
         """
         config = config or {}
         for name in self._plugins:
+            if on_progress:
+                on_progress(name)
             self.expose_tool(name, config.get(name))
 
     def unexpose_all(self) -> None:
