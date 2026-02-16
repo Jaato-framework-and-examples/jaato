@@ -55,7 +55,7 @@ Jaato runs as a daemon with clients connecting via IPC or WebSocket. This enable
 | Layer | Responsibility |
 |-------|----------------|
 | **Pipeline** (`shared/plugins/`, `server/`) | Emit semantic events with structured data |
-| **Client** (`rich-client/`) | Choose UX presentation based on context |
+| **Client** (`jaato-tui/`) | Choose UX presentation based on context |
 
 **Example - Clarification Plugin**:
 ```

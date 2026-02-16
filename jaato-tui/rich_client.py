@@ -5147,7 +5147,7 @@ To connect to a specific server: jaato --connect /path/to/socket
     # Check TTY before proceeding (except for single prompt mode, headless, or command mode)
     if not sys.stdout.isatty() and not args.prompt and not args.headless and not args.cmd:
         sys.exit(
-            "Error: rich-client requires an interactive terminal.\n"
+            "Error: jaato-tui requires an interactive terminal.\n"
             "Use --headless for non-TTY environments."
         )
 

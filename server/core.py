@@ -29,7 +29,7 @@ SIMPLE_CLIENT = ROOT / "simple-client"
 if str(SIMPLE_CLIENT) not in sys.path:
     sys.path.insert(0, str(SIMPLE_CLIENT))
 
-RICH_CLIENT = ROOT / "rich-client"
+RICH_CLIENT = ROOT / "jaato-tui"
 if str(RICH_CLIENT) not in sys.path:
     sys.path.insert(0, str(RICH_CLIENT))
 
@@ -54,7 +54,7 @@ from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
 # Reuse input handling from simple-client
 from input_handler import InputHandler
 
-# Reuse plan reporter from rich-client (already generic with callbacks)
+# Reuse plan reporter from jaato-tui (already generic with callbacks)
 from plan_reporter import create_live_reporter
 
 # Import events from SDK
@@ -1842,7 +1842,7 @@ class JaatoServer:
                 mode=mode,
             ))
 
-        # Reuse LivePlanReporter from rich-client with event-emitting callbacks
+        # Reuse LivePlanReporter from jaato-tui with event-emitting callbacks
         reporter = create_live_reporter(
             update_callback=update_callback,
             clear_callback=clear_callback,

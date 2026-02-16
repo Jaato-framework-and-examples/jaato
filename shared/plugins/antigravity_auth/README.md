@@ -49,7 +49,7 @@ After successful authentication, the daemon detects valid credentials via
 
 This flow is handled by `PostAuthSetupEvent` / `PostAuthSetupResponse` events
 between the daemon and the rich client. See `server/__main__.py` for the daemon
-side and `rich-client/rich_client.py` for the client-side wizard.
+side and `jaato-tui/rich_client.py` for the client-side wizard.
 
 ## Plugin Protocol
 

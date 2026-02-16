@@ -1,4 +1,4 @@
-# rich-client/renderers/headless.py
+# jaato-tui/renderers/headless.py
 """Headless file-based renderer for jaato client.
 
 Writes output to per-agent files with ANSI formatting (viewable with `less -R`).

@@ -2,11 +2,11 @@
 
 ## Overview
 
-This document outlines the design for a web-based client for jaato that connects via WebSockets, providing feature parity with the existing rich-client TUI.
+This document outlines the design for a web-based client for jaato that connects via WebSockets, providing feature parity with the existing TUI client TUI.
 
 ## Goals
 
-1. **Feature parity** with rich-client for core functionality
+1. **Feature parity** with TUI client for core functionality
 2. **Responsive design** for desktop and tablet use
 3. **Accessibility** compliant (WCAG 2.1 AA)
 4. **Low latency** real-time streaming experience
@@ -91,11 +91,11 @@ This document outlines the design for a web-based client for jaato that connects
 
 ## Workspace-First Architecture
 
-Unlike the rich-client which runs locally and uses the current directory as its workspace, the web client connects to a remote server and must first select a workspace before starting a session.
+Unlike the TUI client which runs locally and uses the current directory as its workspace, the web client connects to a remote server and must first select a workspace before starting a session.
 
 ### The Problem
 
-- The rich-client runs in a terminal with `cwd` as the implicit workspace
+- The TUI client runs in a terminal with `cwd` as the implicit workspace
 - `.env` files containing provider credentials are workspace-specific
 - The web client has no concept of "current directory"
 - Without a workspace, there's no `.env`, no provider, no session
@@ -800,7 +800,7 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 
 ### Phase 2: Feature Parity
 
-**Goal:** Match rich-client capabilities
+**Goal:** Match TUI client capabilities
 
 **Features:**
 - [ ] Plan panel (sticky + expanded)
@@ -1019,5 +1019,5 @@ All messages are JSON with required fields:
 
 - [Server Events Protocol](../server/events.py)
 - [WebSocket Server](../server/websocket.py)
-- [Rich Client Implementation](../rich-client/)
+- [Rich Client Implementation](../TUI client/)
 - [Architecture Overview](./architecture.md)

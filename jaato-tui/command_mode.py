@@ -1,4 +1,4 @@
-# rich-client/command_mode.py
+# jaato-tui/command_mode.py
 """Command mode for sending commands/messages to jaato sessions.
 
 Allows controlling headless sessions from another terminal:

@@ -52,12 +52,12 @@ Track token consumption by instruction source to help users understand where the
 
 | Component | File | Status |
 |-----------|------|--------|
-| Token usage panel widget | `rich-client/budget_panel.py` | Done |
-| Drill-down navigation | `rich-client/budget_panel.py:158-179` | Done |
-| Multi-agent view tabs | `rich-client/budget_panel.py:142-156, 423-446` | Done |
-| Keybinding for panel toggle | `rich-client/keybindings.py:149, 322` | Done |
-| Event handling | `rich-client/rich_client.py:3554-3557` | Done |
-| PTDisplay integration | `rich-client/pt_display.py:462-463, 1426-1451, 1680-1696` | Done |
+| Token usage panel widget | `jaato-tui/budget_panel.py` | Done |
+| Drill-down navigation | `jaato-tui/budget_panel.py:158-179` | Done |
+| Multi-agent view tabs | `jaato-tui/budget_panel.py:142-156, 423-446` | Done |
+| Keybinding for panel toggle | `jaato-tui/keybindings.py:149, 322` | Done |
+| Event handling | `jaato-tui/rich_client.py:3554-3557` | Done |
+| PTDisplay integration | `jaato-tui/pt_display.py:462-463, 1426-1451, 1680-1696` | Done |
 
 ### Decisions Made
 

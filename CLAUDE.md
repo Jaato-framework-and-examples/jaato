@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Environment Setup
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e jaato-sdk/ -e . -e rich-client/
+.venv/bin/pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ```
 
 ### Running the Server (Multi-Client Mode)
@@ -32,7 +32,7 @@ python3 -m venv .venv
 .venv/bin/python -m server --stop
 
 # Connect TUI client to running server
-.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock
+.venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
 ```
 
 ### Running Tests
@@ -280,7 +280,7 @@ The UI rendering follows a strict separation between data production and present
 - Emits **lifecycle events** with semantic content
 - Is UI-agnostic - no formatting, colors, or layout decisions
 
-**Client Presentation Layer** (`rich-client/output_buffer.py`):
+**Client Presentation Layer** (`jaato-tui/output_buffer.py`):
 - Receives structured data from pipeline
 - Chooses **optimal UX presentation** based on terminal size, theme, context
 - Handles formatting, truncation, tables, colors, layout
