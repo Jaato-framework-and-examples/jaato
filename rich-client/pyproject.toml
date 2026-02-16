@@ -35,6 +35,12 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+vision = [
+    "cairosvg>=2.7.0",  # SVG to PNG conversion for screenshots
+]
+all = [
+    "jaato-tui[dev,vision]",
+]
 
 [project.scripts]
 jaato = "rich_client.rich_client:main"
