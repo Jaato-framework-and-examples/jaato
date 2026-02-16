@@ -1386,11 +1386,22 @@ class JaatoDaemon:
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
-    """Daemonize the process (double-fork method on Unix, subprocess on Windows)."""
+    """Daemonize the process (double-fork method on Unix, subprocess on Windows).
+
+    On Windows, re-execs as ``python -m server`` so the daemon starts
+    correctly regardless of whether the caller used ``python -m server``
+    or the ``jaato-server`` console-script entry point.  The entry-point
+    launcher (``.exe``) is not a valid Python script, so passing
+    ``sys.argv[0]`` to the subprocess would fail.
+    """
     if sys.platform == "win32":
         # Windows: use subprocess to start detached process
         import subprocess
-        args = [sys.executable] + sys.argv
+        # Always re-exec via ``-m server`` so it works whether the caller
+        # invoked ``python -m server --daemon`` or ``jaato-server --daemon``.
+        # The console-script .exe is not a Python file, so we cannot just
+        # re-use sys.argv[0].
+        args = [sys.executable, "-m", "server"] + sys.argv[1:]
         # Remove --daemon from args to avoid infinite recursion
         args = [a for a in args if a not in ("--daemon", "-d")]
         # Add a marker to indicate we're already daemonized
