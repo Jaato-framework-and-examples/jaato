@@ -40,11 +40,11 @@ Without recovery, the client would lose its connection and require manual reconn
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `IPCRecoveryClient` | `rich-client/ipc_recovery.py` | Wraps IPCClient with reconnection logic |
-| `RecoveryConfig` | `rich-client/client_config.py` | Configuration dataclass |
-| `load_client_config()` | `rich-client/client_config.py` | Loads config from files + env |
-| `ConnectionState` | `rich-client/ipc_recovery.py` | State machine enum |
-| `ConnectionStatus` | `rich-client/ipc_recovery.py` | Status for UI display |
+| `IPCRecoveryClient` | `jaato-tui/ipc_recovery.py` | Wraps IPCClient with reconnection logic |
+| `RecoveryConfig` | `jaato-tui/client_config.py` | Configuration dataclass |
+| `load_client_config()` | `jaato-tui/client_config.py` | Loads config from files + env |
+| `ConnectionState` | `jaato-tui/ipc_recovery.py` | State machine enum |
+| `ConnectionStatus` | `jaato-tui/ipc_recovery.py` | Status for UI display |
 
 ## Connection State Machine
 

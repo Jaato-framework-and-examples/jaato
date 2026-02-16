@@ -913,10 +913,10 @@ opentelemetry-exporter-otlp>=1.20.0
 
 ```bash
 # Install all packages in development mode
-pip install -e jaato-sdk/ -e . -e rich-client/
+pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 
 # Install with telemetry extras
-pip install -e ".[telemetry]"
+pip install -e "jaato-server/.[telemetry]"
 ```
 
 ## 12. Backend-Specific Notes

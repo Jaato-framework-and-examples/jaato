@@ -2544,7 +2544,7 @@ class PTDisplay:
         """
         if not sys.stdout.isatty():
             sys.exit(
-                "Error: rich-client requires an interactive terminal.\n"
+                "Error: jaato-tui requires an interactive terminal.\n"
                 "Use simple-client for non-TTY environments."
             )
 

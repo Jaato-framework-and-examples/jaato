@@ -21,7 +21,7 @@ First, determine what files to analyze:
 - If no branch: Check `git status` for modified files and `git log --oneline -20` for recent commits
 
 Focus on files in:
-- `rich-client/`
+- `jaato-tui/`
 - `shared/`
 - Any new client implementations
 
@@ -47,7 +47,7 @@ Report each occurrence with file path and line number.
 
 Look for patterns that bypass the server architecture:
 
-- `JaatoClient()` instantiation in `rich-client/` files (should use `IPCClient` or `JaatoServer`)
+- `JaatoClient()` instantiation in `jaato-tui/` files (should use `IPCClient` or `JaatoServer`)
 - `from shared.jaato_client import` in client code
 - Direct `jaato.send_message()` calls in UI code (should send via IPC/events)
 
@@ -95,7 +95,7 @@ Generate a structured report:
 ### Legacy Callbacks (High Priority)
 These callback patterns should be migrated to event handlers:
 
-1. `rich-client/foo.py:123` - `on_output=` callback
+1. `jaato-tui/foo.py:123` - `on_output=` callback
    → Migrate to handle `AgentOutputEvent` from event stream
 
 ### Direct Client Usage (Medium Priority)
@@ -143,4 +143,4 @@ async for event in ipc.events():
 Key files for reference:
 - `server/events.py` - All event types
 - `server/core.py` - JaatoServer (replaces direct JaatoClient in server context)
-- `rich-client/ipc_client.py` - Client connection pattern
+- `jaato-tui/ipc_client.py` - Client connection pattern

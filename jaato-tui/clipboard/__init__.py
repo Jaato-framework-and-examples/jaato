@@ -1,4 +1,4 @@
-"""Clipboard module for rich-client.
+"""Clipboard module for jaato-tui.
 
 Provides configurable clipboard mechanisms with chrome-free copy support.
 """

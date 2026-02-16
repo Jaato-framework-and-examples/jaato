@@ -1,6 +1,6 @@
 # Jaato Web Client
 
-A web-based client for jaato that connects via WebSockets, providing an alternative to the TUI rich-client.
+A web-based client for jaato that connects via WebSockets, providing an alternative to the TUI client (jaato-tui).
 
 ## Features
 

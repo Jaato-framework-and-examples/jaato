@@ -1,7 +1,7 @@
 r"""IPC Server using Unix Domain Sockets or Windows Named Pipes.
 
 This module provides a local IPC server for fast, secure communication
-with local clients (rich-client, IDE extensions, etc.).
+with local clients (jaato-tui, IDE extensions, etc.).
 
 On Unix/Linux/macOS:
 - Uses Unix domain sockets
@@ -166,7 +166,7 @@ class JaatoIPCServer:
     r"""IPC server using Unix domain sockets or Windows named pipes.
 
     Provides fast local communication for:
-    - rich-client TUI
+    - jaato-tui TUI
     - IDE extensions
     - CLI tools
     - Local scripts

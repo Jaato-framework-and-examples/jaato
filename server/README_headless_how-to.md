@@ -40,7 +40,7 @@ tail -f /tmp/jaato.log
 Headless mode requires three flags: `--connect`, `--headless`, and `--prompt`.
 
 ```bash
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --headless \
     --prompt "Analyze the code in src/ for security issues"
@@ -74,7 +74,7 @@ Headless mode requires three flags: `--connect`, `--headless`, and `--prompt`.
 By default, a headless client attaches to the default session, which means sequential headless runs share conversation history and permission state. Use `--new-session` to start a fresh, isolated session:
 
 ```bash
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --headless \
     --new-session \
@@ -112,7 +112,7 @@ Progress messages are also printed to **stderr** during execution:
 You can redirect stderr to capture these status lines separately:
 
 ```bash
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --headless \
     --prompt "Refactor the database layer" \
@@ -128,7 +128,7 @@ While a headless session is running, you can interact with it from another termi
 The headless client prints the session ID to stderr on startup (`Session ID: ...`). You can also list sessions:
 
 ```bash
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session any \
     --cmd "session list"
@@ -137,7 +137,7 @@ The headless client prints the session ID to stderr on startup (`Session ID: ...
 ### Send a Command
 
 ```bash
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session <SESSION_ID> \
     --cmd "<COMMAND>"
@@ -159,7 +159,7 @@ Any text that isn't a recognized command is sent as a new user message:
 
 ```bash
 # Send a follow-up instruction to the running session
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session <SESSION_ID> \
     --cmd "Now also add integration tests"
@@ -298,7 +298,7 @@ Status symbols: `[+]` created, `[~]` modified, `[-]` deleted.
 
 ```bash
 # Get list of files the agent touched, as JSON
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session "$SESSION_ID" \
     --cmd "workspace json" > workspace-changes.json
@@ -313,7 +313,7 @@ Status symbols: `[+]` created, `[~]` modified, `[-]` deleted.
 .venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
 
 # Run a headless session with a long task
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --headless \
     --new-session \
@@ -332,19 +332,19 @@ grep "Session ID" review-status.log
 tail -f jaato-headless-client-agents/main.log
 
 # Check tool activity
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session a1b2c3d4 \
     --cmd "tools list"
 
 # Send a follow-up instruction
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session a1b2c3d4 \
     --cmd "Focus on the authentication module next"
 
 # Stop the agent if needed
-.venv/bin/python rich-client/rich_client.py \
+.venv/bin/python jaato-tui/rich_client.py \
     --connect /tmp/jaato.sock \
     --session a1b2c3d4 \
     --cmd "stop"
@@ -372,7 +372,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           .venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
-          .venv/bin/python rich-client/rich_client.py \
+          .venv/bin/python jaato-tui/rich_client.py \
               --connect /tmp/jaato.sock \
               --headless \
               --new-session \

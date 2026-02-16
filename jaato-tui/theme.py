@@ -25,7 +25,7 @@ Theme file discovery order (first found wins):
 4. User custom theme (~/.jaato/theme.json)
 5. User override of built-in theme (~/.jaato/themes/<name>.json)
 6. Project override of built-in theme (.jaato/themes/<name>.json)
-7. Built-in theme from package (rich-client/themes/<name>.json)
+7. Built-in theme from package (jaato-tui/themes/<name>.json)
 8. Hardcoded fallback (if all else fails)
 """
 
@@ -471,7 +471,7 @@ def _get_theme_search_paths(theme_name: str) -> List[Path]:
         List of paths in priority order (first found wins):
         1. User override: ~/.jaato/themes/<name>.json
         2. Project override: .jaato/themes/<name>.json
-        3. Built-in: rich-client/themes/<name>.json
+        3. Built-in: jaato-tui/themes/<name>.json
     """
     filename = f"{theme_name}.json"
     return [
@@ -487,7 +487,7 @@ def _load_theme_from_json(theme_name: str) -> Optional["ThemeConfig"]:
     Searches for the theme in this order:
     1. ~/.jaato/themes/<name>.json (user override)
     2. .jaato/themes/<name>.json (project override)
-    3. rich-client/themes/<name>.json (built-in)
+    3. jaato-tui/themes/<name>.json (built-in)
 
     Args:
         theme_name: Name of the theme to load.
@@ -1124,7 +1124,7 @@ def load_theme(
     the system checks for overrides in this order:
     - ~/.jaato/themes/<name>.json (user override)
     - .jaato/themes/<name>.json (project override)
-    - rich-client/themes/<name>.json (built-in)
+    - jaato-tui/themes/<name>.json (built-in)
     - Hardcoded fallback (if all JSON files unavailable)
 
     Args:
