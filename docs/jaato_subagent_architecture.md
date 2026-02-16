@@ -24,7 +24,7 @@ JAATO's architecture is founded on a clean separation between two layers:
 │  │   • PermissionPlugin (whitelist/blacklist/approval)           │    │
 │  │   • TokenLedger (aggregated accounting)                      │    │
 │  │   • TelemetryPlugin (traces)                                 │    │
-│  │   • Base system instructions (.jaato/system_instructions.md) │    │
+│  │   • Base system instructions (.jaato/instructions/*.md)      │    │
 │  │                                                              │    │
 │  └────────────────────────┬─────────────────────────────────────┘    │
 │                            │                                          │
