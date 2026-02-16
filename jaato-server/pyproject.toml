@@ -56,6 +56,7 @@ dependencies = [
     "rich>=13.0.0",  # Used by shared plugins for formatting
     "ast-grep-py>=0.30.0",  # AST-based code search
     "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
+    "pyspnego>=0.10.0",  # Kerberos/SPNEGO proxy authentication
 ]
 
 [project.optional-dependencies]
