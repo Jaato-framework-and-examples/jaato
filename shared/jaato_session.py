@@ -1120,10 +1120,15 @@ class JaatoSession:
         Args:
             session_instructions: The user-provided system_instructions from configure().
         """
-        # Get context limit from provider if available
+        # Get context limit from provider.  By this point the provider has
+        # already connect()'ed and resolved the limit (e.g. from model metadata
+        # or a static lookup), so this is a cheap in-memory read.
         context_limit = 128_000  # Default
         if self._provider and hasattr(self._provider, 'get_context_limit'):
-            context_limit = self._provider.get_context_limit()
+            try:
+                context_limit = self._provider.get_context_limit()
+            except Exception:
+                pass  # keep default
 
         # Get session_id - use runtime's session ID or generate placeholder
         # The server will assign proper session_id when session is registered
