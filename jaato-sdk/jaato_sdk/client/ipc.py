@@ -92,6 +92,7 @@ class IPCClient:
         socket_path: str = DEFAULT_SOCKET_PATH,
         auto_start: bool = True,
         env_file: str = ".env",
+        workspace_path: Optional[str] = None,
     ):
         """Initialize the IPC client.
 
@@ -99,10 +100,14 @@ class IPCClient:
             socket_path: Path to Unix domain socket or Windows pipe name.
             auto_start: Whether to auto-start server if not running.
             env_file: Path to .env file for auto-started server.
+            workspace_path: Working directory sent to the server for file
+                operations and sandbox scoping.  Falls back to
+                ``os.getcwd()`` when not provided.
         """
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
+        self.workspace_path = workspace_path
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -349,7 +354,7 @@ class IPCClient:
                     self._client_id = event.server_info.get("client_id")
                     # Send our working directory to the server
                     import os
-                    cwd = os.getcwd()
+                    cwd = self.workspace_path or os.getcwd()
                     await self._send_event(CommandRequest(
                         command="set_workspace",
                         args=[cwd],

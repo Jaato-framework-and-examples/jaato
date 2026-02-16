@@ -269,6 +269,7 @@ class IPCRecoveryClient:
                 socket_path=self._socket_path,
                 auto_start=self._auto_start,
                 env_file=self._env_file,
+                workspace_path=str(self._workspace_path) if self._workspace_path else None,
             )
 
             # When auto-start is enabled, the inner connect() may need to:
@@ -834,6 +835,7 @@ class IPCRecoveryClient:
             socket_path=self._socket_path,
             auto_start=False,  # Don't auto-start during reconnection
             env_file=self._env_file,
+            workspace_path=str(self._workspace_path) if self._workspace_path else None,
         )
 
         # Connect with timeout
