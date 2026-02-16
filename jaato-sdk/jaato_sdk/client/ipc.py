@@ -113,6 +113,12 @@ class IPCClient:
         # Event callback
         self._on_event: Optional[Callable[[Event], None]] = None
 
+        # Buffer for events consumed during request-response operations
+        # (e.g. create_session reads events until SessionInfoEvent; any
+        # other events received in the meantime are buffered here so that
+        # events() can yield them later without data loss).
+        self._buffered_events: list[Event] = []
+
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
         # Accept a variety of user inputs and normalize to the canonical
@@ -639,14 +645,26 @@ class IPCClient:
     # Session Management
     # =========================================================================
 
-    async def create_session(self, name: Optional[str] = None) -> Optional[str]:
-        """Create a new session.
+    async def create_session(
+        self,
+        name: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> Optional[str]:
+        """Create a new session on the server.
+
+        Sends a ``session.new`` command and reads events from the socket
+        until a ``SessionInfoEvent`` confirms the session was created.
+        Events received while waiting (e.g. init-progress, system messages)
+        are buffered internally so that ``events()`` can yield them later.
 
         Args:
             name: Optional session name.
+            timeout: Maximum seconds to wait for session creation.  The
+                server may need time to initialise the provider, so the
+                default is generous.
 
         Returns:
-            The session ID, or None on failure.
+            The new session ID, or None if creation failed or timed out.
         """
         args = [name] if name else []
         await self._send_event(CommandRequest(
@@ -654,9 +672,50 @@ class IPCClient:
             args=args,
         ))
 
-        # Wait for session created confirmation
-        # The session ID will be sent in a system message
-        # For now, return None and let events handle it
+        # Read events until we receive a SessionInfoEvent (success) or
+        # an ErrorEvent / timeout (failure).  Any intermediate events
+        # (init progress, system messages, …) are buffered so they are
+        # not lost for callers that consume events() afterwards.
+        try:
+            return await asyncio.wait_for(
+                self._await_session_info(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("create_session: timed out waiting for SessionInfoEvent")
+            return None
+
+    async def _await_session_info(self) -> Optional[str]:
+        """Read events until a SessionInfoEvent arrives.
+
+        Buffers any non-target events in ``_buffered_events`` so they
+        can be replayed by ``events()`` later.
+
+        Returns:
+            The session ID from the SessionInfoEvent, or None on error.
+        """
+        while self._connected:
+            message = await self._read_message()
+            if message is None:
+                self._connected = False
+                return None
+
+            event = deserialize_event(message)
+
+            if isinstance(event, SessionInfoEvent) and event.session_id:
+                self._session_id = event.session_id
+                # Buffer the SessionInfoEvent itself too — downstream
+                # consumers (e.g. IPCRecoveryClient) may need it.
+                self._buffered_events.append(event)
+                return event.session_id
+
+            if isinstance(event, ErrorEvent) and not event.recoverable:
+                self._buffered_events.append(event)
+                return None
+
+            # Any other event (init progress, system messages, …) —
+            # buffer it so events() can yield it later.
+            self._buffered_events.append(event)
+
         return None
 
     async def attach_session(self, session_id: str) -> bool:
@@ -820,6 +879,10 @@ class IPCClient:
         an error occurs. When the connection is lost, the iterator exits
         cleanly (stops yielding) rather than raising an exception.
 
+        Any events buffered by request-response methods (e.g.
+        ``create_session``) are yielded first before reading from the
+        socket.
+
         Connection loss can be detected by:
         1. The iterator stopping (connection closed cleanly)
         2. Receiving an ErrorEvent (error during read)
@@ -828,6 +891,16 @@ class IPCClient:
             Events from the server.
         """
         logger.debug("events(): starting event loop")
+
+        # Drain events that were buffered during request-response
+        # operations (e.g. create_session consuming init-progress events).
+        while self._buffered_events:
+            event = self._buffered_events.pop(0)
+            logger.debug(f"events(): yielding buffered {type(event).__name__}")
+            if self._on_event:
+                self._on_event(event)
+            yield event
+
         while self._connected:
             try:
                 message = await self._read_message()
