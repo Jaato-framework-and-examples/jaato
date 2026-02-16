@@ -1082,7 +1082,7 @@ def create_plugin():
             If your test needs dependencies, create a virtual environment first:
             <pre style="margin-top: 8px; background: var(--color-bg-secondary); padding: 8px; border-radius: 4px; font-size: 13px;">python3 -m venv .venv
 source .venv/bin/activate
-pip install -e jaato-sdk/ -e . -e rich-client/</pre>
+pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"</pre>
           </div>
         </div>
         <div class="panel-code">

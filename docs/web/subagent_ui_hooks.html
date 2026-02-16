@@ -125,7 +125,7 @@
 <body>
     <h1>Subagent UI Hooks API</h1>
 
-    <p>The <code>AgentUIHooks</code> protocol enables rich terminal UIs (like rich-client) to integrate with the agent system, providing visibility into main agent and subagent execution, output, and accounting.</p>
+    <p>The <code>AgentUIHooks</code> protocol enables rich terminal UIs (like jaato-tui) to integrate with the agent system, providing visibility into main agent and subagent execution, output, and accounting.</p>
 
     <h2>Overview</h2>
 
@@ -846,10 +846,10 @@ subagent_plugin.set_ui_hooks(hooks)</pre>
         <li><code>shared/jaato_client.py</code> - Main agent hook integration</li>
         <li><code>shared/jaato_session.py</code> - Tool call hooks emission (set_ui_hooks, _run_chat_loop)</li>
         <li><code>shared/plugins/subagent/plugin.py</code> - Subagent hook integration</li>
-        <li><code>rich-client/agent_registry.py</code> - Agent state management</li>
-        <li><code>rich-client/output_buffer.py</code> - Active tool tracking and spinner rendering</li>
-        <li><code>rich-client/agent_panel.py</code> - Agent visualization</li>
-        <li><code>rich-client/rich_client.py</code> - Hook implementation example</li>
+        <li><code>jaato-tui/agent_registry.py</code> - Agent state management</li>
+        <li><code>jaato-tui/output_buffer.py</code> - Active tool tracking and spinner rendering</li>
+        <li><code>jaato-tui/agent_panel.py</code> - Agent visualization</li>
+        <li><code>jaato-tui/rich_client.py</code> - Hook implementation example</li>
     </ul>
 
 </body>
