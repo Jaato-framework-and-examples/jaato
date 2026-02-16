@@ -521,10 +521,13 @@ class SessionManager:
         # Note: We don't call emit_current_state() here because the client
         # already received all events during initialize() via direct emission.
 
-        # Send complete SessionInfoEvent with state snapshot (unless auth pending)
-        if not server.auth_pending:
-            self._emit_to_client(client_id, self._build_session_info_event(session))
+        # Send SessionInfoEvent to confirm session creation.  When auth is
+        # pending the tool/model lists may be incomplete, but the client
+        # needs the session_id immediately.  on_auth_complete() will send
+        # an updated SessionInfoEvent once the provider is fully ready.
+        self._emit_to_client(client_id, self._build_session_info_event(session))
 
+        if not server.auth_pending:
             self._emit_to_client(client_id, SystemMessageEvent(
                 message=f"Session created: {name} ({session_id})",
                 style="info",
