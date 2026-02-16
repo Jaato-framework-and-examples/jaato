@@ -1122,8 +1122,8 @@ class JaatoSession:
         """
         # Get context limit from provider if available
         context_limit = 128_000  # Default
-        if self._provider and hasattr(self._provider, 'context_limit'):
-            context_limit = self._provider.context_limit
+        if self._provider and hasattr(self._provider, 'get_context_limit'):
+            context_limit = self._provider.get_context_limit()
 
         # Get session_id - use runtime's session ID or generate placeholder
         # The server will assign proper session_id when session is registered
