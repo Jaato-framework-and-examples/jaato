@@ -68,7 +68,7 @@ from jaato_sdk.events import (
 )
 ```
 
-See the [rich-client](../rich-client/) for a full TUI implementation example.
+See the [jaato-tui](../jaato-tui/) for a full TUI implementation example.
 
 ## Requirements
 

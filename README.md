@@ -116,15 +116,18 @@ git clone https://github.com/apanoia/jaato.git
 cd jaato
 
 # For contributors: install all packages in development mode
-pip install -e jaato-sdk/ -e . -e rich-client/
+pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 
 # For SDK users: just the lightweight client library
 pip install jaato-sdk/
 
-# With optional extras (for server)
-pip install ".[vision]"       # PNG screenshots (requires libcairo2-dev on Linux)
-pip install ".[dev]"          # pytest and dev tools
-pip install ".[all]"          # all optional dependencies
+# With optional extras (server)
+pip install "jaato-server/.[dev]"          # pytest and dev tools
+pip install "jaato-server/.[all]"          # all server optional dependencies
+
+# With optional extras (TUI client)
+pip install "jaato-tui/.[vision]"  # PNG screenshots (requires libcairo2-dev on Linux)
+pip install "jaato-tui/.[all]"     # all client optional dependencies
 ```
 
 📖 **[Installation guides →](https://apanoia.github.io/jaato/web/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors
@@ -148,14 +151,14 @@ jaato uses a server-client architecture. Start the server daemon, then connect w
 .venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
 
 # Connect TUI client
-.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock
+.venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
 ```
 
 Or use headless mode for scripting:
 
 ```bash
 # Single prompt, non-interactive
-.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
+.venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
 ```
 
 ### Features

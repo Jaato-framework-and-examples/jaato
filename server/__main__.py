@@ -2,7 +2,7 @@
 """Jaato Server - Multi-client AI assistant backend.
 
 This is the main entry point for the Jaato server, which provides:
-- IPC socket for local clients (rich-client, IDE extensions)
+- IPC socket for local clients (jaato-tui, IDE extensions)
 - WebSocket for remote/web clients
 - Multi-session management
 - Daemon mode for background operation

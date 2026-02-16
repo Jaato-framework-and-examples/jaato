@@ -215,7 +215,7 @@ python3 -m venv .venv
 
 ```bash
 # Install all three packages in development mode
-.venv/bin/pip install -e jaato-sdk/ -e . -e rich-client/
+.venv/bin/pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ```
 
 This installs `google-genai`, the recommended SDK for Google's generative models.

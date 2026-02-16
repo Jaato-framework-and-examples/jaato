@@ -8,7 +8,7 @@ import pytest
 
 # Add parent directories to path for imports
 _repo_root = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(_repo_root / "rich-client"))
+sys.path.insert(0, str(_repo_root / "jaato-tui"))
 
 from clipboard.osc52 import (
     OSC52_MAX_BYTES,

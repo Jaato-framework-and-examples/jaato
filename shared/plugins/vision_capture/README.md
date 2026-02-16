@@ -274,5 +274,5 @@ class VisionCapturePlugin(Protocol):
 
 ## Related
 
-- [Rich Client README](../../../rich-client/README.md) - Client documentation
+- [TUI Client README](../../../jaato-tui/README.md) - Client documentation
 - [Plugin Development](../README.md) - How to create plugins

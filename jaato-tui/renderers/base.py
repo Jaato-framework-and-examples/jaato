@@ -1,4 +1,4 @@
-# rich-client/renderers/base.py
+# jaato-tui/renderers/base.py
 """Abstract base class for client renderers.
 
 Defines the interface that all renderers (TUI, headless, etc.) must implement.

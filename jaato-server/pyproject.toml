@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jaato-server"
 version = "0.2.2"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
-readme = "README.md"
+readme = "../README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
@@ -54,6 +54,8 @@ dependencies = [
     "pyte>=0.8.0",
     "watchdog>=4.0.0",
     "rich>=13.0.0",  # Used by shared plugins for formatting
+    "ast-grep-py>=0.30.0",  # AST-based code search
+    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
 ]
 
 [project.optional-dependencies]
@@ -61,24 +63,11 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
-ast = [
-    "ast-grep-py>=0.30.0",  # AST-based code search
-]
 kaggle = [
     "kaggle>=1.5.0",
 ]
-vision = [
-    "cairosvg>=2.7.0",  # SVG to PNG conversion for screenshots
-]
-mermaid = [
-    "mermaid-py>=0.5.0",  # Mermaid diagram parsing (fallback when mmdc unavailable)
-    "cairosvg>=2.7.0",  # SVG to PNG conversion (for mermaid-py SVG output)
-]
-pdf = [
-    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
-]
 all = [
-    "jaato[dev,ast,kaggle,vision,mermaid,pdf]",
+    "jaato-server[dev,kaggle]",
 ]
 
 [project.scripts]
@@ -112,5 +101,5 @@ gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
 gc_budget = "shared.plugins.gc_budget:create_plugin"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = [".."]
 include = ["shared*", "server*"]

@@ -1,4 +1,4 @@
-# rich-client/headless_mode.py
+# jaato-tui/headless_mode.py
 """Headless mode for jaato client.
 
 Provides non-interactive, file-based output for automation and scripting.

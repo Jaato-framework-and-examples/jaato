@@ -132,7 +132,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # Install all packages in development mode
-pip install -e jaato-sdk/ -e . -e rich-client/
+pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 
 # Run tests
 pytest
@@ -158,7 +158,7 @@ pytest
           <p>
             The project uses <code>pytest</code> for testing. Install all three
             packages (SDK, server, TUI) in development mode with
-            <code>pip install -e jaato-sdk/ -e . -e rich-client/</code>.
+            <code>pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"</code>.
             Optional extras (vision/PNG support, AST search) are defined in
             <code>pyproject.toml</code>.
           </p>
@@ -205,8 +205,8 @@ pytest -k "test_plugin"</code></pre>
           <p>jaato consists of three packages:</p>
           <ul>
             <li><strong>jaato-sdk/</strong> - Lightweight SDK (events, types, IPC client)</li>
-            <li><strong>. (root)</strong> - Server daemon with all runtime plugins</li>
-            <li><strong>rich-client/</strong> - Terminal user interface client</li>
+            <li><strong>jaato-server/</strong> - Server daemon with all runtime plugins</li>
+            <li><strong>jaato-tui/</strong> - Terminal user interface client</li>
           </ul>
           <h3>Core Directories</h3>
           <ul>
@@ -255,7 +255,7 @@ pytest -k "test_plugin"</code></pre>
 │   ├── ipc.py                # Unix socket server
 │   └── websocket.py          # WebSocket server
 │
-├── rich-client/              # TUI package
+├── jaato-tui/                # TUI package
 │   ├── rich_client.py        # Main TUI
 │   └── pyproject.toml
 │
