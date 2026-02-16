@@ -1147,7 +1147,7 @@ class JaatoSession:
 
         total_system_tokens = 0
 
-        # 1. Base instructions from .jaato/system_instructions.md
+        # 1. Base instructions from .jaato/instructions/ (or legacy single file)
         base_instructions = getattr(self._runtime, '_base_system_instructions', None)
         base_tokens = self._count_tokens(base_instructions) if base_instructions else 0
         if base_tokens > 0:

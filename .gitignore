@@ -50,7 +50,7 @@ Thumbs.db
 !.jaato/skills/
 !.jaato/templates/
 .jaato/templates/index.json
-!.jaato/system_instructions.md
+!.jaato/instructions/
 
 # Test folders
 tests_enablement_2.0/

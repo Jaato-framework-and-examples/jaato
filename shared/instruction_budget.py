@@ -53,7 +53,7 @@ DEFAULT_SOURCE_POLICIES: Dict[InstructionSource, GCPolicy] = {
 
 class SystemChildType(Enum):
     """Types of SYSTEM instruction children with their default GC policies."""
-    BASE = "base"           # User-provided .jaato/system_instructions.md - LOCKED
+    BASE = "base"           # User-provided .jaato/instructions/*.md - LOCKED
     CLIENT = "client"       # Programmatic system_instructions param - LOCKED
     FRAMEWORK = "framework" # Task completion, parallel tool guidance - LOCKED
 
