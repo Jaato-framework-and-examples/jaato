@@ -121,10 +121,13 @@ pip install -e jaato-sdk/ -e . -e rich-client/
 # For SDK users: just the lightweight client library
 pip install jaato-sdk/
 
-# With optional extras (for server)
-pip install ".[vision]"       # PNG screenshots (requires libcairo2-dev on Linux)
+# With optional extras (server)
 pip install ".[dev]"          # pytest and dev tools
-pip install ".[all]"          # all optional dependencies
+pip install ".[all]"          # all server optional dependencies
+
+# With optional extras (TUI client)
+pip install "rich-client/.[vision]"  # PNG screenshots (requires libcairo2-dev on Linux)
+pip install "rich-client/.[all]"     # all client optional dependencies
 ```
 
 📖 **[Installation guides →](https://apanoia.github.io/jaato/web/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors
