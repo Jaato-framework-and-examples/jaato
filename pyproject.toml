@@ -78,7 +78,7 @@ pdf = [
     "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
 ]
 all = [
-    "jaato[dev,ast,kaggle,vision,mermaid,pdf]",
+    "jaato-server[dev,ast,kaggle,vision,mermaid,pdf]",
 ]
 
 [project.scripts]
