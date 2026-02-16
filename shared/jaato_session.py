@@ -1120,12 +1120,15 @@ class JaatoSession:
         Args:
             session_instructions: The user-provided system_instructions from configure().
         """
-        # Use a safe default here.  The real context limit is applied on the
-        # first turn inside _update_conversation_budget(), after the provider
-        # is fully warmed up.  Calling provider.get_context_limit() at this
-        # point is unsafe because some providers (e.g. GitHub Models) make
-        # blocking network calls that can hang during session initialization.
-        context_limit = 128_000  # Default; corrected on first turn
+        # Get context limit from provider.  By this point the provider has
+        # already connect()'ed and resolved the limit (e.g. from model metadata
+        # or a static lookup), so this is a cheap in-memory read.
+        context_limit = 128_000  # Default
+        if self._provider and hasattr(self._provider, 'get_context_limit'):
+            try:
+                context_limit = self._provider.get_context_limit()
+            except Exception:
+                pass  # keep default
 
         # Get session_id - use runtime's session ID or generate placeholder
         # The server will assign proper session_id when session is registered
@@ -1326,25 +1329,9 @@ class JaatoSession:
         return enrichments
 
     def _update_conversation_budget(self) -> None:
-        """Update CONVERSATION entry in instruction budget from current history.
-
-        Also refreshes the budget's context_limit from the provider on each
-        turn.  This corrects the default set during _populate_instruction_budget()
-        once the provider is fully warmed up and responsive.
-        """
+        """Update CONVERSATION entry in instruction budget from current history."""
         if not self._instruction_budget:
             return
-
-        # Refresh context_limit from the provider.  During init we use a safe
-        # default (128K) because some providers block on network calls.  By the
-        # time the first turn completes the provider is guaranteed to be ready.
-        if self._provider and hasattr(self._provider, 'get_context_limit'):
-            try:
-                self._instruction_budget.context_limit = (
-                    self._provider.get_context_limit()
-                )
-            except Exception:
-                pass  # keep previous value
 
         history = self.get_history()
         conversation_tokens = 0
@@ -2044,19 +2031,6 @@ NOTES
             raise RuntimeError("Session not configured. Call configure() first.")
 
         self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
-
-        # On first turn, refresh the budget's context_limit from the provider.
-        # During _populate_instruction_budget() we use a safe 128K default to
-        # avoid blocking network calls from some providers.  By the time the
-        # user sends the first message the provider is fully warmed up.
-        if self._turn_index == 0 and self._instruction_budget and self._provider:
-            try:
-                self._instruction_budget.context_limit = (
-                    self._provider.get_context_limit()
-                )
-                self._emit_instruction_budget_update()
-            except Exception:
-                pass  # corrected on subsequent turns via _update_conversation_budget
 
         # Increment turn counter
         self._turn_index += 1
