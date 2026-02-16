@@ -14,7 +14,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e jaato-sdk/ && pip install -e ".[dev]"
+        run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[dev]"
 
       - name: Run tests
         run: pytest shared/tests/ server/test_client.py server/test_workspace_command.py
@@ -39,7 +39,7 @@ jobs:
         run: |
           version=$(python -c "
           import tomllib, pathlib
-          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          data = tomllib.loads(pathlib.Path('jaato-server/pyproject.toml').read_text())
           print(data['project']['version'])
           ")
           echo "Package version: $version"
@@ -52,9 +52,10 @@ jobs:
           echo "Version ${version} is available for publishing"
 
       - name: Build package
-        run: python -m build .
+        run: python -m build jaato-server/
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          packages-dir: jaato-server/dist/

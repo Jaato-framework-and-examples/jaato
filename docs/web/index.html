@@ -472,15 +472,15 @@
           <pre><code class="language-bash"># Option 1: Full server with all plugins (most users)
 git clone https://github.com/apanoia/jaato.git
 cd jaato
-pip install -e .                    # Server + all runtime plugins
-pip install -e rich-client/         # Optional: TUI client
+pip install -e "jaato-server/."      # Server + all runtime plugins
+pip install -e "jaato-tui/."        # Optional: TUI client
 
 # Option 2: SDK only (for building custom clients)
 pip install -e jaato-sdk/           # Lightweight: events, types, IPC client
 
 # With optional extras
-pip install -e ".[vision]"    # PNG screenshots (requires libcairo2-dev on Linux)
-pip install -e ".[all]"       # all optional dependencies</code></pre>
+pip install -e "jaato-tui/.[vision]"  # PNG screenshots (requires libcairo2-dev on Linux)
+pip install -e "jaato-server/.[all]"  # all server optional dependencies</code></pre>
         </div>
         <p style="margin-top: 16px;">
           <strong>SDK-only</strong> is ideal for building custom clients against a running jaato server.
@@ -539,7 +539,7 @@ python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install all three packages in development mode
-pip install -e jaato-sdk/ -e . -e rich-client/
+pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 
 # Run tests to verify setup
 pytest</code></pre>

@@ -21,11 +21,11 @@ As a power user, I want to press Ctrl+G to open my prompt in vim/emacs/vscode so
 
 ### Implementation (Completed)
 
-1. **File**: `rich-client/keybindings.py`
+1. **File**: `jaato-tui/keybindings.py`
    - Added `open_editor: "c-g"` to DEFAULT_KEYBINDINGS
    - Added `open_editor` field to KeybindingConfig dataclass
 
-2. **File**: `rich-client/pt_display.py`
+2. **File**: `jaato-tui/pt_display.py`
    - Added keybinding handler using `event.current_buffer.open_in_editor()`
 
 3. **File**: `CLAUDE.md`
@@ -108,7 +108,7 @@ As a user with a long session, I want to search for "authentication" to find whe
 
 ### Implementation
 
-1. **New file**: `rich-client/search_overlay.py`
+1. **New file**: `jaato-tui/search_overlay.py`
    ```python
    @dataclass
    class SearchMatch:
@@ -167,20 +167,20 @@ As a user with a long session, I want to search for "authentication" to find whe
 
 ### Implementation (Completed)
 
-1. **File**: `rich-client/output_buffer.py`
+1. **File**: `jaato-tui/output_buffer.py`
    - Added search state: `_search_query`, `_search_matches`, `_search_current_idx`
    - Added methods: `search()`, `search_next()`, `search_prev()`, `clear_search()`, `get_search_status()`
    - Added helper: `_scroll_to_match()` to center current match in viewport
 
-2. **File**: `rich-client/keybindings.py`
+2. **File**: `jaato-tui/keybindings.py`
    - Added keybindings: `search`=c-f, `search_next`=enter, `search_prev`=c-p, `search_close`=escape
 
-3. **File**: `rich-client/pt_display.py`
+3. **File**: `jaato-tui/pt_display.py`
    - Added search mode state and UI
    - Added keybinding handlers for search mode
    - Search prompt shows status: `Search (1/5) [Enter: next, Ctrl+P: prev, Esc: close]>`
 
-4. **File**: `rich-client/theme.py` and theme JSON files
+4. **File**: `jaato-tui/theme.py` and theme JSON files
    - Added styles: `search_prompt`, `search_match`, `search_match_current`
 
 ### Acceptance Criteria
@@ -213,7 +213,7 @@ As a user pasting a large log file, I don't want the terminal to freeze while it
 
 ### Implementation
 
-1. **File**: `rich-client/pt_display.py` (keybindings section)
+1. **File**: `jaato-tui/pt_display.py` (keybindings section)
 
 2. **Add paste registry**:
    ```python

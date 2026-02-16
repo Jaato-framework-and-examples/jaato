@@ -26,7 +26,7 @@ This document provides ultra-detailed sequence diagrams showing the complete int
 │                              PRESENTATION LAYER                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │  RichClient (TUI)          │  WebClient (future)  │  IDE Plugin (future) │    │
-│  │  rich-client/rich_client.py │                      │                      │    │
+│  │  jaato-tui/rich_client.py │                      │                      │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                           │
 │                          ┌───────────┴───────────┐                              │
@@ -1016,10 +1016,10 @@ sequenceDiagram
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| **RichClient** | `rich-client/rich_client.py` | TUI application, event handling |
-| **IPCClient** | `rich-client/ipc_client.py` | Client-side IPC connection |
-| **PTDisplay** | `rich-client/pt_display.py` | prompt_toolkit display layout |
-| **Backend** | `rich-client/backend.py` | Backend abstraction (Direct/IPC) |
+| **RichClient** | `jaato-tui/rich_client.py` | TUI application, event handling |
+| **IPCClient** | `jaato-tui/ipc_client.py` | Client-side IPC connection |
+| **PTDisplay** | `jaato-tui/pt_display.py` | prompt_toolkit display layout |
+| **Backend** | `jaato-tui/backend.py` | Backend abstraction (Direct/IPC) |
 | **JaatoDaemon** | `server/__main__.py` | Daemon process, PID management |
 | **JaatoIPCServer** | `server/ipc.py` | Server-side IPC handling |
 | **JaatoWSServer** | `server/websocket.py` | WebSocket server |

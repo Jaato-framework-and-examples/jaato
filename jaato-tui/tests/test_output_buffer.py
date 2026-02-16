@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import sys
 import os
 
-# Add the rich-client directory to the path
+# Add the jaato-tui directory to the path
 rich_client_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if rich_client_dir not in sys.path:
     sys.path.insert(0, rich_client_dir)

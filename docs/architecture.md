@@ -25,7 +25,7 @@ The framework supports a server-first architecture where the core logic runs as 
               │                           │
               ▼                           ▼
     ┌──────────────────┐        ┌──────────────────┐
-    │   rich-client    │        │   web-client     │
+    │   jaato-tui    │        │   web-client     │
     │   (TUI via IPC)  │        │   (via WebSocket)│
     └──────────────────┘        └──────────────────┘
 ```

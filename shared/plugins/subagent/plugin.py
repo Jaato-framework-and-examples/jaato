@@ -1114,7 +1114,7 @@ class SubagentPlugin:
     def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
         """Set UI hooks for subagent lifecycle events.
 
-        This enables rich terminal UIs (like rich-client) to track subagent
+        This enables rich terminal UIs (like jaato-tui) to track subagent
         creation, execution, and completion.
 
         Args:

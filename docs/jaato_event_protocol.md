@@ -775,7 +775,7 @@ How events originate inside the server and reach clients:
 
 ## Part 8: Client UI Element Mapping
 
-How the rich-client maps events to visual elements:
+How the TUI client maps events to visual elements:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -957,7 +957,7 @@ A full turn from user prompt to model completion, showing every event emitted:
 
 ## Part 10: Display Refresh Strategy
 
-The rich-client uses a debounced refresh mechanism to balance responsiveness with rendering efficiency:
+The TUI client uses a debounced refresh mechanism to balance responsiveness with rendering efficiency:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

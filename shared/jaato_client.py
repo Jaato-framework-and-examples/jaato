@@ -246,7 +246,7 @@ class JaatoClient:
     def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
         """Set UI hooks for agent lifecycle events.
 
-        This enables rich terminal UIs (like rich-client) to track the main agent's
+        This enables rich terminal UIs (like jaato-tui) to track the main agent's
         lifecycle, output, and accounting data.
 
         Args:
