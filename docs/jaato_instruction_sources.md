@@ -23,12 +23,17 @@ When a session is configured, system instructions are assembled in the following
 *⚠️ With `JAATO_DEFERRED_TOOLS=true` (the default), initial context is smaller — only "core" tools are loaded upfront. The model discovers other tools via introspection as needed, so actual per-request token usage may be lower than these estimates.*
 
 ### Layer 1: Base System Instructions
-**Source:** `.jaato/system_instructions.md`
+**Source:** `.jaato/instructions/*.md` (folder of sorted instruction files)
 **Priority:** HIGHEST (appears first)
 **Estimated Tokens:** 0-500+ (user-defined, highly variable)
 **Lookup Order:**
-1. `{CWD}/.jaato/system_instructions.md`
-2. `~/.jaato/system_instructions.md`
+1. `{CWD}/.jaato/instructions/` (all `*.md` files, sorted by filename)
+2. `~/.jaato/instructions/` (all `*.md` files, sorted by filename)
+3. Fallback: `{CWD}/.jaato/system_instructions.md` (legacy single file)
+4. Fallback: `~/.jaato/system_instructions.md` (legacy single file)
+
+Files are sorted lexicographically by filename, so numeric prefixes control order
+(e.g. `00-system-instructions.md`, `10-coding-standards.md`, `15-review-policy.md`).
 
 **Purpose:** Defines base behavioral rules that apply to ALL agents (main and subagents), such as transparency requirements and operational constraints.
 
@@ -185,8 +190,8 @@ During runtime, messages between agents are queued with priority-based processin
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  1. BASE INSTRUCTIONS                                        │    │
-│  │     .jaato/system_instructions.md                            │    │
-│  │     (CWD first, then ~/.jaato)                               │    │
+│  │     .jaato/instructions/*.md (sorted by filename)            │    │
+│  │     (CWD first, then ~/.jaato; legacy single file fallback) │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                              ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────┐    │
@@ -278,7 +283,7 @@ Plugins can define:
 
 | Source | Type | When Applied | Order | Est. Tokens |
 |--------|------|--------------|-------|-------------|
-| `.jaato/system_instructions.md` | Static | Session creation | 1st | 0-500+ |
+| `.jaato/instructions/*.md` | Static | Session creation | 1st | 0-500+ |
 | Session `system_instructions` param | Dynamic | Session creation | 2nd | 0-1,000+ |
 | Plugin instructions | Dynamic | Session creation | 3rd | 200-3,000+ |
 | Permission instructions | Dynamic | Session creation | 4th | ~100-200 |
