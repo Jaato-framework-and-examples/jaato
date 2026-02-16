@@ -146,7 +146,7 @@ class JaatoRuntime:
         # Formatter pipeline (optional, for collecting formatter instructions)
         self._formatter_pipeline: Optional[Any] = None
 
-        # Base system instructions (loaded from .jaato/system_instructions.md)
+        # Base system instructions (loaded from .jaato/instructions/ or legacy single file)
         self._base_system_instructions: Optional[str] = None
         self._load_base_system_instructions()
 
@@ -157,29 +157,75 @@ class JaatoRuntime:
         self._telemetry: TelemetryPlugin = create_telemetry_plugin()
 
     def _load_base_system_instructions(self) -> None:
-        """Load base system instructions from .jaato/system_instructions.md.
+        """Load base system instructions from .jaato/instructions/ folder.
 
-        Searches for the file in:
-        1. Current working directory: .jaato/system_instructions.md
-        2. User config directory: ~/.jaato/system_instructions.md
+        Searches for instruction files in two locations (first match wins):
+        1. Current working directory: .jaato/instructions/
+        2. User config directory: ~/.jaato/instructions/
 
-        The file contents are loaded and will be prepended to all agent
-        system instructions, ensuring consistent behavior across main
-        agent and all subagents.
+        All ``*.md`` files found in the instructions folder are sorted by
+        filename (so numeric prefixes like ``00-``, ``10-``, ``15-`` control
+        ordering) and concatenated with double-newline separators.
+
+        Falls back to the legacy single-file path
+        ``.jaato/system_instructions.md`` if no instructions folder exists
+        in either location.
+
+        The combined contents are prepended to all agent system instructions,
+        ensuring consistent behavior across main agent and all subagents.
         """
-        search_paths = [
+        # Primary: look for an instructions/ folder
+        search_dirs = [
+            Path.cwd() / ".jaato" / "instructions",
+            Path.home() / ".jaato" / "instructions",
+        ]
+
+        for instructions_dir in search_dirs:
+            if instructions_dir.is_dir():
+                parts = self._load_instruction_files(instructions_dir)
+                if parts:
+                    self._base_system_instructions = "\n\n".join(parts)
+                    return
+
+        # Fallback: legacy single-file path
+        legacy_paths = [
             Path.cwd() / ".jaato" / "system_instructions.md",
             Path.home() / ".jaato" / "system_instructions.md",
         ]
 
-        for path in search_paths:
+        for path in legacy_paths:
             if path.exists() and path.is_file():
                 try:
                     self._base_system_instructions = path.read_text(encoding='utf-8')
                     return
                 except (IOError, OSError):
-                    # Silently skip if file can't be read
                     pass
+
+    @staticmethod
+    def _load_instruction_files(instructions_dir: Path) -> List[str]:
+        """Load and concatenate all .md files from an instructions directory.
+
+        Files are sorted lexicographically by filename, so numeric prefixes
+        (e.g. ``00-system-instructions.md``, ``10-coding-standards.md``,
+        ``15-review-policy.md``) control the order.
+
+        Args:
+            instructions_dir: Path to the instructions directory.
+
+        Returns:
+            List of file contents (one entry per file), in sorted order.
+            Empty list if no readable .md files are found.
+        """
+        parts: List[str] = []
+        for md_file in sorted(instructions_dir.glob("*.md")):
+            if md_file.is_file():
+                try:
+                    content = md_file.read_text(encoding='utf-8')
+                    if content.strip():
+                        parts.append(content)
+                except (IOError, OSError):
+                    pass  # Silently skip unreadable files
+        return parts
 
     @property
     def is_connected(self) -> bool:
@@ -857,7 +903,8 @@ class JaatoRuntime:
         """Get system instructions, optionally filtered by plugin names.
 
         The final instructions are assembled in this order:
-        1. Base system instructions from .jaato/system_instructions.md (if exists)
+        1. Base system instructions from .jaato/instructions/ folder (if exists,
+           falls back to legacy .jaato/system_instructions.md)
         2. Additional instructions passed as parameter
         3. Plugin-specific system instructions
 
@@ -908,7 +955,7 @@ class JaatoRuntime:
         # Assemble final instructions: base -> additional -> plugin
         result_parts = []
 
-        # 1. Base system instructions from .jaato/system_instructions.md
+        # 1. Base system instructions from .jaato/instructions/ (or legacy single file)
         if self._base_system_instructions:
             result_parts.append(self._base_system_instructions)
 

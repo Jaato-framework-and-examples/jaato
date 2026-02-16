@@ -190,7 +190,7 @@ class InstructionSource(Enum):
 
 class SystemChildType(Enum):
     """Types of SYSTEM instruction children"""
-    BASE = "base"           # User-provided .jaato/system_instructions.md
+    BASE = "base"           # User-provided .jaato/instructions/*.md (or legacy single file)
     CLIENT = "client"       # Programmatic system_instructions param
     FRAMEWORK = "framework" # Task completion, parallel tool guidance
 

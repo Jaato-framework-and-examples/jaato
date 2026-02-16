@@ -77,7 +77,7 @@ JAATO's harness consists of three complementary layers, each serving a distinct 
 │  │   LAYER 1: INSTRUCTIONS                                      │    │
 │  │   "What the model KNOWS"                                     │    │
 │  │                                                              │    │
-│  │   • Base system instructions (.jaato/system_instructions.md) │    │
+│  │   • Base system instructions (.jaato/instructions/*.md)      │    │
 │  │   • Session-specific instructions                            │    │
 │  │   • Plugin instructions (tool usage guides)                  │    │
 │  │   • Framework constants (task completion, parallel tools)    │    │
@@ -152,7 +152,7 @@ Instructions shape the model's understanding, behavior, and decision-making.
 │       ▼                                                              │
 │  ┌─────────────────────────────────────────────┐                    │
 │  │  1. BASE INSTRUCTIONS                        │  ~0-500 tokens    │
-│  │     .jaato/system_instructions.md            │                    │
+│  │     .jaato/instructions/*.md (sorted)        │                    │
 │  │     (behavioral rules, transparency)         │                    │
 │  └─────────────────────────────────────────────┘                    │
 │       │                                                              │
@@ -612,7 +612,7 @@ Each layer can be customized independently to create the desired harness profile
 
 | Method | Effect |
 |--------|--------|
-| `.jaato/system_instructions.md` | Project-wide behavioral rules |
+| `.jaato/instructions/*.md` | Project-wide behavioral rules (sorted by filename) |
 | `session.configure(system_instructions=...)` | Session-specific guidance |
 | Plugin enable/disable | Control which plugin instructions are included |
 | Prompt enrichment plugins | Add context automatically |
