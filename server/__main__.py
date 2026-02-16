@@ -413,6 +413,8 @@ class JaatoDaemon:
                     logger.info(f"Session {new_session_id} created and context set")
                     if self._ipc_server:
                         self._ipc_server.set_client_session(client_id, new_session_id)
+                else:
+                    self._hint_available_auth_providers(client_id)
                 return
 
             elif cmd == "session.attach":

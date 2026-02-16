@@ -466,12 +466,10 @@ class SessionManager:
             env_overrides=env_overrides,
         )
 
-        # Initialize the server (events go directly to requesting client)
+        # Initialize the server (events go directly to requesting client).
+        # On failure, core.py already emits a detailed ConfigurationError —
+        # no need for a redundant SessionError here.
         if not server.initialize():
-            self._emit_to_client(client_id, ErrorEvent(
-                error="Failed to initialize session",
-                error_type="SessionError",
-            ))
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
