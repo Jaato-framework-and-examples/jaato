@@ -54,6 +54,8 @@ dependencies = [
     "pyte>=0.8.0",
     "watchdog>=4.0.0",
     "rich>=13.0.0",  # Used by shared plugins for formatting
+    "ast-grep-py>=0.30.0",  # AST-based code search
+    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
 ]
 
 [project.optional-dependencies]
@@ -61,17 +63,11 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
-ast = [
-    "ast-grep-py>=0.30.0",  # AST-based code search
-]
 kaggle = [
     "kaggle>=1.5.0",
 ]
-pdf = [
-    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
-]
 all = [
-    "jaato-server[dev,ast,kaggle,pdf]",
+    "jaato-server[dev,kaggle]",
 ]
 
 [project.scripts]
