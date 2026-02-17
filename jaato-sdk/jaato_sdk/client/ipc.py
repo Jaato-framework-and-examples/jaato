@@ -301,6 +301,14 @@ class IPCClient:
                     # Retry connection with backoff — the daemon may need
                     # a moment after pipe creation before it can accept
                     # client connections.
+                    #
+                    # IMPORTANT: We must NOT use short per-attempt timeouts
+                    # inside wait_for().  If wait_for() cancels the coroutine
+                    # after create_pipe_connection() has already established a
+                    # transport, the transport leaks and the server sees a
+                    # ghost client.  Instead we use the full remaining budget
+                    # and only retry on errors that prove no connection was
+                    # established (ConnectionRefused, FileNotFound, OSError).
                     deadline = time.time() + timeout
                     last_err: Optional[Exception] = None
                     while True:
@@ -310,12 +318,21 @@ class IPCClient:
                         try:
                             self._reader, self._writer = await asyncio.wait_for(
                                 self._connect_windows_pipe(pipe_path),
-                                timeout=min(2.0, remaining),
+                                timeout=remaining,
                             )
                             self._connected = True
                             last_err = None
                             break
-                        except (asyncio.TimeoutError, OSError, ConnectionRefusedError, FileNotFoundError) as e2:
+                        except asyncio.TimeoutError:
+                            # Timeout may mean the transport was created at
+                            # the OS level — stop retrying to avoid ghosts.
+                            last_err = TimeoutError(
+                                f"Pipe connection timed out after {timeout}s"
+                            )
+                            break
+                        except (OSError, ConnectionRefusedError, FileNotFoundError) as e2:
+                            # These errors mean no transport was created;
+                            # the server is not ready yet — safe to retry.
                             last_err = e2
                             remaining = deadline - time.time()
                             if remaining <= 0:
@@ -352,6 +369,10 @@ class IPCClient:
                     # Retry connection with backoff — the daemon may need
                     # a moment after socket creation before it can accept
                     # client connections.
+                    #
+                    # Only retry on ConnectionRefusedError/OSError (no
+                    # transport created).  On TimeoutError, stop to avoid
+                    # leaking a transport that the server already accepted.
                     deadline = time.time() + timeout
                     last_err: Optional[Exception] = None
                     while True:
@@ -361,12 +382,17 @@ class IPCClient:
                         try:
                             self._reader, self._writer = await asyncio.wait_for(
                                 asyncio.open_unix_connection(self.socket_path),
-                                timeout=min(2.0, remaining),
+                                timeout=remaining,
                             )
                             self._connected = True
                             last_err = None
                             break
-                        except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e2:
+                        except asyncio.TimeoutError:
+                            last_err = TimeoutError(
+                                f"Socket connection timed out after {timeout}s"
+                            )
+                            break
+                        except (ConnectionRefusedError, OSError) as e2:
                             last_err = e2
                             remaining = deadline - time.time()
                             if remaining <= 0:
