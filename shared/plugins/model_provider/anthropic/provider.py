@@ -16,12 +16,9 @@ Features:
 """
 
 import json
-import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
-
-logger = logging.getLogger(__name__)
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -305,13 +302,7 @@ class AnthropicProvider:
         proxy_url = get_proxy_url()
 
         if not ca_bundle and not kerberos_enabled and not proxy_url:
-            self._trace("[_create_http_client] No proxy/SSL config detected, using SDK defaults")
             return None  # Let SDK create its own client with default settings
-
-        self._trace(
-            f"[_create_http_client] Creating custom httpx client: "
-            f"proxy={proxy_url}, ca_bundle={ca_bundle}, kerberos={kerberos_enabled}"
-        )
 
         kwargs = {}
         if ca_bundle:
@@ -974,8 +965,7 @@ class AnthropicProvider:
         """Handle API errors and convert to appropriate exceptions.
 
         Detects SSL/TLS errors (common with corporate proxies) and provides
-        actionable guidance via shared.ssl_helper.  Also detects generic
-        connection errors and logs proxy diagnostics.
+        actionable guidance via shared.ssl_helper.
         """
         import ssl as _ssl
 
@@ -991,30 +981,6 @@ class AnthropicProvider:
         if is_ssl_error:
             from shared.ssl_helper import log_ssl_guidance
             log_ssl_guidance("Anthropic API", error)
-
-        # Log connection errors with proxy diagnostics
-        is_connection_error = (
-            "connection" in error_str
-            or "connect" in error_str
-            or "apiconnectionerror" in error_type.lower()
-        )
-        if is_connection_error:
-            from shared.http.proxy import get_proxy_url
-            from shared.ssl_helper import active_cert_bundle
-            proxy_url = get_proxy_url()
-            ca_bundle = active_cert_bundle()
-            self._trace(
-                f"[_handle_api_error] Connection error: {error_type}: {error}\n"
-                f"  proxy={proxy_url}, ca_bundle={ca_bundle}"
-            )
-            logger.warning(
-                "Anthropic API connection failed: %s. "
-                "Proxy: %s, CA bundle: %s. "
-                "If behind a corporate proxy, ensure HTTPS_PROXY is set. "
-                "If the proxy does SSL inspection, set REQUESTS_CA_BUNDLE "
-                "to your corporate CA certificate path.",
-                error, proxy_url, ca_bundle,
-            )
 
         # Check for authentication errors
         if "authentication" in error_str or "invalid api key" in error_str or "401" in error_str:
@@ -1065,8 +1031,6 @@ class AnthropicProvider:
         """Count tokens for the given content.
 
         Uses Anthropic's beta token counting API for accurate counts.
-        Falls back to chars/4 estimate if the API call fails (logging
-        the underlying error so proxy/SSL issues are visible).
 
         Args:
             content: Text to count tokens for.
@@ -1085,11 +1049,8 @@ class AnthropicProvider:
                 messages=[{"role": "user", "content": content}],
             )
             return result.input_tokens
-        except Exception as e:
-            # Log the error so proxy/SSL connection issues are visible
-            # instead of silently falling back. This helps diagnose cases
-            # where count_tokens "succeeds" but send_message fails.
-            self._trace(f"[count_tokens] API call failed, using estimate: {e}")
+        except Exception:
+            # Fallback to estimate on error
             return len(content) // 4
 
     def get_context_limit(self) -> int:
