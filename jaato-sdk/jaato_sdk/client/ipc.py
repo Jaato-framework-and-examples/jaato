@@ -536,18 +536,19 @@ class IPCClient:
         return await self._wait_for_socket()
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
-        """Wait for the IPC endpoint to become available and accepting connections.
+        """Wait for the IPC endpoint to become available.
 
-        For Unix sockets, this waits for the socket file to appear AND for
-        the server to actually accept connections (not just bind).  For
-        Windows named pipes, it uses ``WaitNamedPipeW`` to check pipe
-        availability.
+        For Unix sockets, this waits for the socket file to appear.  Note
+        that the file may exist before the server is actually listening;
+        callers should use a retry loop for the real connection attempt
+        (see ``connect()``).  For Windows named pipes, it uses
+        ``WaitNamedPipeW`` to check pipe availability.
 
         Args:
             timeout: Maximum time to wait.
 
         Returns:
-            True if endpoint became available and is accepting connections.
+            True if endpoint became available.
         """
         start = time.time()
 
@@ -582,26 +583,15 @@ class IPCClient:
                 await asyncio.sleep(0.2)
             return False
         else:
-            # Unix: wait for socket file to appear AND be connectable.
-            # The socket file can exist before the server calls listen(),
-            # so we probe with an actual connection attempt to avoid a
-            # race where the caller tries to connect before the server is
-            # ready.
+            # Unix: wait for socket file to appear.  The file may exist
+            # before the server is actually listening, but we intentionally
+            # do NOT probe with a real connection here — that would create
+            # a ghost client on the server.  The retry loop in connect()
+            # handles the listen-readiness race instead.
             socket_file = Path(self.socket_path)
             while time.time() - start < timeout:
                 if socket_file.exists():
-                    try:
-                        r, w = await asyncio.wait_for(
-                            asyncio.open_unix_connection(str(socket_file)),
-                            timeout=min(1.0, max(0.1, timeout - (time.time() - start))),
-                        )
-                        # Server is accepting — close the probe connection.
-                        w.close()
-                        await w.wait_closed()
-                        return True
-                    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-                        # Socket file exists but server not listening yet.
-                        pass
+                    return True
                 await asyncio.sleep(0.2)
             return False
 
