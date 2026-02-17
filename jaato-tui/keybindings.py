@@ -165,6 +165,7 @@ DEFAULT_KEYBINDINGS = {
     # Workspace file panel
     "toggle_workspace": "c-w",  # Toggle workspace file panel
     "workspace_open_file": "enter",  # Open selected file in external editor
+    "workspace_clear": "delete",  # Clear workspace file list
 
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
@@ -361,6 +362,7 @@ class KeybindingConfig:
     # Workspace file panel
     toggle_workspace: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_workspace"])
     workspace_open_file: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_open_file"])
+    workspace_clear: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_clear"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
@@ -560,6 +562,7 @@ class KeybindingConfig:
             "tool_output_down": self.tool_output_down,
             "toggle_workspace": self.toggle_workspace,
             "workspace_open_file": self.workspace_open_file,
+            "workspace_clear": self.workspace_clear,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -744,5 +747,6 @@ def generate_example_config() -> str:
 
         "toggle_workspace": "c-w",
         "workspace_open_file": "enter",
+        "workspace_clear": "delete",
     }
     return json.dumps(example, indent=2)

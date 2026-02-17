@@ -71,6 +71,7 @@ class WorkspacePanel:
     Navigation (when popup is visible and input is empty):
         Up/Down    – scroll through the file list.
         Left/Right – collapse/expand directory at cursor.
+        Delete     – clear file list (only future changes will appear).
         Ctrl+W     – close the panel.
         Escape     – close the panel.
     """
@@ -79,6 +80,7 @@ class WorkspacePanel:
         self,
         toggle_key: Optional[KeyBinding] = None,
         open_file_key: Optional[KeyBinding] = None,
+        clear_key: Optional[KeyBinding] = None,
     ):
         """Initialize the workspace panel.
 
@@ -87,6 +89,8 @@ class WorkspacePanel:
                         footer hint.
             open_file_key: Keybinding used to open the selected file in an
                           external editor.  Shown in the footer hint.
+            clear_key: Keybinding used to clear the file list.  Shown in the
+                       footer hint.
         """
         # File state: {relative_path: status_string}
         self._files: Dict[str, str] = {}
@@ -108,6 +112,7 @@ class WorkspacePanel:
 
         self._toggle_key = toggle_key or "c-w"
         self._open_file_key = open_file_key or "enter"
+        self._clear_key = clear_key or "delete"
         self._theme: Optional["ThemeConfig"] = None
         self._tree_dirty: bool = True  # Rebuild tree before next render
 
@@ -168,6 +173,18 @@ class WorkspacePanel:
             else:
                 self._files[path] = status
                 self._highlights[path] = now + _HIGHLIGHT_DURATION
+        self._tree_dirty = True
+
+    def clear(self) -> None:
+        """Clear all tracked files, resetting the panel to its initial state.
+
+        After clearing, only new filesystem changes will appear.
+        """
+        self._files.clear()
+        self._highlights.clear()
+        self._collapsed_dirs.clear()
+        self._cursor_index = 0
+        self._scroll_offset = 0
         self._tree_dirty = True
 
     @property
@@ -556,7 +573,8 @@ class WorkspacePanel:
         # Right-align close hint
         close_hint = f"[{format_key_for_display(self._toggle_key)} close]"
         open_hint = f"{format_key_for_display(self._open_file_key)} open · "
-        nav_hint = f"↑↓ navigate · ◂▸ fold · {open_hint}"
+        clear_hint = f"{format_key_for_display(self._clear_key)} clear · "
+        nav_hint = f"↑↓ · ◂▸ · {open_hint}{clear_hint}"
         right_content = nav_hint + close_hint
         padding = max(1, width - 4 - len(f" {count} files") - len(right_content))
         footer.append(" " * padding)

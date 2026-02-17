@@ -471,6 +471,7 @@ class PTDisplay:
         self._workspace_panel = WorkspacePanel(
             toggle_key=self._keybinding_config.toggle_workspace,
             open_file_key=self._keybinding_config.workspace_open_file,
+            clear_key=self._keybinding_config.workspace_clear,
         )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
@@ -1975,6 +1976,13 @@ class PTDisplay:
             has priority.
             """
             self._open_workspace_file()
+
+        @kb.add(*keys.get_key_args("workspace_clear"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_clear(event):
+            """Clear the workspace file list so only future changes appear."""
+            self._workspace_panel.clear()
+            self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
         def handle_ctrl_b(event):
