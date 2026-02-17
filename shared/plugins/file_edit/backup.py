@@ -135,7 +135,7 @@ class BackupManager:
             return
 
         try:
-            with open(self._metadata_path, 'r') as f:
+            with open(self._metadata_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 for backup_path_str, info_dict in data.items():
                     self._backup_metadata[backup_path_str] = BackupInfo(
@@ -159,7 +159,7 @@ class BackupManager:
                 str(bp): info.to_dict()
                 for bp, info in self._backup_metadata.items()
             }
-            with open(self._metadata_path, 'w') as f:
+            with open(self._metadata_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
         except IOError:
             pass

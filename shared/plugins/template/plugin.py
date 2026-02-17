@@ -905,7 +905,7 @@ Template rendering requires approval since it writes files."""
             index_name = template_path.name
             if index_name not in self._template_index:
                 syntax = self._detect_template_syntax(
-                    template_path.read_text() if template_path.exists() else ""
+                    template_path.read_text(encoding="utf-8") if template_path.exists() else ""
                 )
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
@@ -1003,7 +1003,7 @@ Template rendering requires approval since it writes files."""
 
             # Read content and extract metadata
             try:
-                content = abs_path.read_text()
+                content = abs_path.read_text(encoding="utf-8")
             except (IOError, OSError) as e:
                 self._trace(f"  error reading {abs_path}: {e}")
                 continue
@@ -1093,7 +1093,7 @@ Template rendering requires approval since it writes files."""
                 }
             }
 
-            index_path.write_text(json.dumps(index_data, indent=2))
+            index_path.write_text(json.dumps(index_data, indent=2), encoding="utf-8")
             self._trace(f"_persist_index: wrote {len(self._template_index)} entries to {index_path}")
         except (IOError, OSError) as e:
             self._trace(f"_persist_index: error writing index: {e}")
@@ -1262,13 +1262,13 @@ Template rendering requires approval since it writes files."""
             suffix = template_path.suffix
             while template_path.exists():
                 # Check if existing file has same content
-                if template_path.read_text() == content:
+                if template_path.read_text(encoding="utf-8") == content:
                     return template_path, False  # Reuse existing (not new)
                 template_path = self._templates_dir / f"{base_name}-{counter}{suffix}"
                 counter += 1
 
             # Write template
-            template_path.write_text(content)
+            template_path.write_text(content, encoding="utf-8")
             self._trace(f"wrote template: {template_path}")
             return template_path, True  # Newly created
 
@@ -1681,7 +1681,7 @@ Template rendering requires approval since it writes files."""
                     "paths_tried": paths_tried
                 }
             try:
-                template = resolved_path.read_text()
+                template = resolved_path.read_text(encoding="utf-8")
                 template_source = str(resolved_path)
             except IOError as e:
                 return {
@@ -1704,7 +1704,7 @@ Template rendering requires approval since it writes files."""
             # Create parent directories
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            out_path.write_text(rendered)
+            out_path.write_text(rendered, encoding="utf-8")
         except IOError as e:
             return {
                 "error": f"Failed to write output: {e}",
@@ -1804,7 +1804,7 @@ Template rendering requires approval since it writes files."""
                     "paths_tried": paths_tried
                 }
             try:
-                template = resolved_path.read_text()
+                template = resolved_path.read_text(encoding="utf-8")
                 template_source = str(resolved_path)
             except IOError as e:
                 return {
@@ -1844,7 +1844,7 @@ Template rendering requires approval since it writes files."""
 
         # Write rendered content to file
         try:
-            out_path.write_text(rendered)
+            out_path.write_text(rendered, encoding="utf-8")
             bytes_written = len(rendered.encode('utf-8'))
         except IOError as e:
             return {
@@ -2028,7 +2028,7 @@ Template rendering requires approval since it writes files."""
 
         # Read template content
         try:
-            template_content = resolved_path.read_text()
+            template_content = resolved_path.read_text(encoding="utf-8")
         except IOError as e:
             return {
                 "error": f"Failed to read template: {e}",

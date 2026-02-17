@@ -286,7 +286,7 @@ class MultiFileExecutor:
                 if resolved.exists():
                     if resolved_str not in working_content:
                         try:
-                            working_content[resolved_str] = resolved.read_text()
+                            working_content[resolved_str] = resolved.read_text(encoding="utf-8")
                         except OSError as e:
                             return False, f"Cannot read file {op.path}: {e}", i
 
@@ -551,7 +551,7 @@ class MultiFileExecutor:
 
         # Write result
         try:
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -600,7 +600,7 @@ class MultiFileExecutor:
 
         # Write content
         try:
-            resolved.write_text(op.content)
+            resolved.write_text(op.content, encoding="utf-8")
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -844,7 +844,7 @@ def generate_multi_file_diff_preview(
 
             if resolved_str not in working_content and resolved.exists():
                 try:
-                    working_content[resolved_str] = resolved.read_text()
+                    working_content[resolved_str] = resolved.read_text(encoding="utf-8")
                 except OSError:
                     pass
 

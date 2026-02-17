@@ -86,7 +86,7 @@ class GitignoreParser:
             return
 
         try:
-            content = gitignore_path.read_text()
+            content = gitignore_path.read_text(encoding="utf-8")
             for line in content.splitlines():
                 line = line.strip()
                 # Skip empty lines and comments
