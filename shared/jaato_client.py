@@ -89,16 +89,21 @@ class JaatoClient:
         sub_session = runtime.create_session(model="gemini-2.5-flash")
     """
 
-    def __init__(self, provider_name: Optional[str] = None):
+    def __init__(self, provider_name: Optional[str] = None,
+                 workspace_path: Optional[str] = None):
         """Initialize JaatoClient with specified provider.
 
         Args:
             provider_name: Name of the model provider to use.
                 If not specified, reads from JAATO_PROVIDER env var.
+            workspace_path: Explicit workspace directory path. When running as
+                a daemon, the process cwd differs from the client's workspace.
+                Passed through to ``JaatoRuntime`` for instruction loading.
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
         self._provider_name: Optional[str] = provider_name or get_default_provider()
+        self._workspace_path: Optional[str] = workspace_path
 
         # Store model name for session creation
         self._model_name: Optional[str] = None
@@ -326,7 +331,10 @@ class JaatoClient:
             raise ValueError("provider is required (pass it to JaatoClient() or set JAATO_PROVIDER env var)")
 
         # Create runtime and connect
-        self._runtime = JaatoRuntime(provider_name=self._provider_name)
+        from pathlib import Path as _Path
+        ws = _Path(self._workspace_path) if self._workspace_path else None
+        self._runtime = JaatoRuntime(provider_name=self._provider_name,
+                                     workspace_path=ws)
         self._runtime.connect(project, location)
 
         # Store for reference and session creation
