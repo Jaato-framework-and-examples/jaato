@@ -349,6 +349,36 @@ class OutputBuffer:
         # Updated when plan data changes; used by add_active_tool() to replace
         # raw UUIDs with step numbers (e.g., "Step #3") in the tool tree.
         self._step_id_to_number: Dict[str, int] = {}
+        # Permission comment mode - when True, panel uses open-bottom box style
+        self._permission_comment_mode: bool = False
+        # Permission comment text - displayed in embedded comment box within permission prompt
+        self._permission_comment_text: str = ""
+
+    def set_permission_comment_mode(self, active: bool) -> None:
+        """Set whether permission comment mode is active.
+
+        When active, the panel renders with an open bottom border
+        so the comment input box can visually continue the panel.
+
+        Args:
+            active: True to use open-bottom box style, False for normal.
+        """
+        self._permission_comment_mode = active
+        # Clear comment text when exiting permission mode
+        if not active:
+            self._permission_comment_text = ""
+
+    def set_permission_comment_text(self, text: str) -> None:
+        """Set the permission comment text to display in the embedded comment box.
+
+        This text is shown inside the permission prompt as a "virtual" input box.
+        The actual input is captured by prompt_toolkit, and this method updates
+        the displayed text.
+
+        Args:
+            text: The current comment text from the user.
+        """
+        self._permission_comment_text = text
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -2116,6 +2146,20 @@ class OutputBuffer:
                 return True
         return False
 
+    def is_permission_prompt_pending(self) -> bool:
+        """Check if there's a permission prompt (not clarification) pending.
+
+        This is used to distinguish permission prompts from other channel input
+        scenarios like exit confirmation or clarification requests.
+
+        Returns:
+            True if a tool permission prompt is pending.
+        """
+        for tool in self._active_tools:
+            if tool.permission_state == "pending":
+                return True
+        return False
+
     def scroll_up(self, lines: int = 5) -> bool:
         """Scroll up (view older content).
 
@@ -3610,6 +3654,14 @@ class OutputBuffer:
         # "Permission required" header line
         overhead += 1
 
+        # Bottom elements (rendered after content):
+        # - Options line (1 line for [y]es [n]o [a]lways etc.)
+        overhead += 1
+        # - Comment box if permission comment mode is enabled:
+        #   label (1) + top border (1) + content (1) + bottom border (1) + margin (1) = 5 lines
+        if self._permission_comment_mode:
+            overhead += 5
+
         return overhead
 
     def _render_truncated_lines(
@@ -3893,6 +3945,8 @@ class OutputBuffer:
                 max_width=max_width,
                 preserve_ansi=True
             )
+            # Render embedded comment box if in permission comment mode
+            self._render_embedded_comment_box(output, indent, max_width)
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -3952,6 +4006,11 @@ class OutputBuffer:
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
 
+        # Render embedded comment box for legacy flow (both diff and box formats)
+        legacy_indent = f"{prefix}{continuation}  "
+        legacy_max_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+        self._render_embedded_comment_box(output, legacy_indent, legacy_max_width)
+
     def _is_options_line(self, line: str) -> bool:
         """Check if a line is the permission options line.
 
@@ -4003,8 +4062,11 @@ class OutputBuffer:
 
             is_focused = (i == self._permission_focus_index)
 
-            # Build the option text: [y]es or [once]
-            if short != full and full.startswith(short):
+            # Build the option text
+            if self._permission_comment_mode:
+                # In comment mode: show plain labels (shortcuts don't work)
+                option_text = full
+            elif short != full and full.startswith(short):
                 # Format: [y]es - short is prefix of full
                 option_text = f"[{short}]{full[len(short):]}"
             else:
@@ -4021,6 +4083,78 @@ class OutputBuffer:
         hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
 
         return " ".join(parts) + hint
+
+    def _render_embedded_comment_box(self, output: Text, indent: str, max_width: int) -> None:
+        """Render an embedded comment text box within the permission prompt.
+
+        This renders a visual text box showing the current comment being typed.
+        The actual input is handled by prompt_toolkit, and the text is passed
+        via set_permission_comment_text().
+
+        Args:
+            output: Text object to append to.
+            indent: Indentation prefix for each line.
+            max_width: Maximum width for the comment box content.
+        """
+        if not self._permission_comment_mode:
+            return
+
+        # Get the focused option label for the hint
+        focused_label = ""
+        if self._permission_response_options and self._permission_focus_index < len(self._permission_response_options):
+            opt = self._permission_response_options[self._permission_focus_index]
+            if isinstance(opt, dict):
+                focused_label = opt.get('label', opt.get('key', ''))
+            else:
+                focused_label = getattr(opt, 'label', getattr(opt, 'key', str(opt)))
+
+        # Calculate box dimensions
+        box_width = min(max_width - 2, 60)  # Leave room for borders
+        content_width = box_width - 4  # Account for "│ " on each side
+
+        # Render comment box label
+        output.append("\n")
+        output.append(indent, style=self._style("tree_connector", "dim"))
+        output.append("Comment (optional):", style=self._style("permission_comment_label", "cyan"))
+
+        # Render top border of comment box
+        output.append("\n")
+        output.append(indent, style=self._style("tree_connector", "dim"))
+        output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_comment_border", "dim"))
+
+        # Render comment text content (or placeholder if empty)
+        comment_text = self._permission_comment_text or ""
+        if comment_text:
+            # Wrap text to fit in box
+            import textwrap
+            wrapped_lines = textwrap.wrap(comment_text, width=content_width) or [""]
+            # Limit to 3 lines max
+            if len(wrapped_lines) > 3:
+                wrapped_lines = wrapped_lines[:3]
+                wrapped_lines[-1] = wrapped_lines[-1][:content_width-3] + "..."
+        else:
+            # Show cursor placeholder when empty
+            wrapped_lines = ["▏"]
+
+        for line in wrapped_lines:
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            padded_line = line.ljust(content_width)
+            output.append("│ ", style=self._style("permission_comment_border", "dim"))
+            output.append(padded_line, style=self._style("permission_comment_input", ""))
+            output.append(" │", style=self._style("permission_comment_border", "dim"))
+
+        # Render bottom border
+        output.append("\n")
+        output.append(indent, style=self._style("tree_connector", "dim"))
+        output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_comment_border", "dim"))
+
+        # Render hint with focused option
+        output.append("\n")
+        output.append(indent, style=self._style("tree_connector", "dim"))
+        output.append("⇥ cycle options  ↵ submit ", style=self._style("permission_comment_hint", "dim"))
+        if focused_label:
+            output.append(f"[{focused_label}]", style=self._style("permission_comment_focused", "bold cyan"))
 
     def _render_clarification_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render clarification prompt for a tool awaiting user input."""

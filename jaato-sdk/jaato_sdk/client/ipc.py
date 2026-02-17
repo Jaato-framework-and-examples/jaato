@@ -863,6 +863,7 @@ class IPCClient:
         self,
         request_id: str,
         response: str,
+        comment: str = "",
         edited_arguments: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a permission request.
@@ -870,11 +871,13 @@ class IPCClient:
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
+            comment: Optional user comment with additional instructions.
             edited_arguments: Optional edited tool arguments (when response is "e").
         """
         await self._send_event(PermissionResponseRequest(
             request_id=request_id,
             response=response,
+            comment=comment,
             edited_arguments=edited_arguments,
         ))
 

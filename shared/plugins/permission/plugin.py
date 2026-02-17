@@ -340,9 +340,15 @@ class PermissionPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""
-        # No system instructions needed - the model should just call tools directly.
-        # The permission middleware will prompt for approval when needed.
-        return None
+        return """USER COMMENTS WITH PERMISSION RESPONSES:
+When a user approves a permission request, they may include an optional comment with additional instructions or context. This comment appears in the tool result's `_permission.user_comment` field.
+
+IMPORTANT: User comments are direct instructions from the user that you MUST acknowledge and follow.
+- If a comment contains a request (e.g., "but also update the tests"), you should act on it.
+- If a comment contains a reminder (e.g., "don't forget to handle errors"), keep it in mind for subsequent actions.
+- If a comment contains a correction (e.g., "use Python 3.12 syntax"), apply it to your work.
+
+Always acknowledge user comments in your response and explain how you will address them."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
@@ -1091,13 +1097,21 @@ class PermissionPlugin:
         Updates session rules if channel requests it.
 
         Returns:
-            Tuple of (is_allowed, metadata_dict) with 'reason' and 'method'.
+            Tuple of (is_allowed, metadata_dict) with 'reason', 'method', and optional 'comment'.
         """
         decision = response.decision
+        comment = response.comment  # User's additional instructions
+
+        # Helper to build info dict with optional comment
+        def make_info(reason: str, method: str) -> Dict[str, Any]:
+            info = {'reason': reason, 'method': method}
+            if comment:
+                info['comment'] = comment
+            return info
 
         if decision in (ChannelDecision.ALLOW, ChannelDecision.ALLOW_ONCE):
             self._log_decision(tool_name, args, "allow", response.reason)
-            return True, {'reason': response.reason, 'method': 'user_approved'}
+            return True, make_info(response.reason, 'user_approved')
 
         elif decision == ChannelDecision.ALLOW_SESSION:
             # Add to session whitelist
@@ -1105,25 +1119,25 @@ class PermissionPlugin:
             if self._policy:
                 self._policy.add_session_whitelist(pattern)
             self._log_decision(tool_name, args, "allow", f"Session whitelist: {pattern}")
-            return True, {'reason': response.reason, 'method': 'session_whitelist'}
+            return True, make_info(response.reason, 'session_whitelist')
 
         elif decision == ChannelDecision.ALLOW_ALL:
             # Pre-approve all future requests in this session
             self._allow_all = True
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
-            return True, {'reason': response.reason, 'method': 'allow_all'}
+            return True, make_info(response.reason, 'allow_all')
 
         elif decision == ChannelDecision.ALLOW_TURN:
             # Suspend prompts for remainder of this turn
             self._turn_suspended = True
             self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
-            return True, {'reason': response.reason, 'method': 'turn_suspension'}
+            return True, make_info(response.reason, 'turn_suspension')
 
         elif decision == ChannelDecision.ALLOW_UNTIL_IDLE:
             # Suspend prompts until session goes idle
             self._idle_suspended = True
             self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
-            return True, {'reason': response.reason, 'method': 'idle_suspension'}
+            return True, make_info(response.reason, 'idle_suspension')
 
         elif decision == ChannelDecision.COMMENT:
             # Deny with user feedback — the comment text is in response.reason
@@ -1137,7 +1151,7 @@ class PermissionPlugin:
 
         elif decision == ChannelDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
-            return False, {'reason': response.reason, 'method': 'user_denied'}
+            return False, make_info(response.reason, 'user_denied')
 
         elif decision == ChannelDecision.DENY_SESSION:
             # Add to session blacklist
@@ -1145,11 +1159,11 @@ class PermissionPlugin:
             if self._policy:
                 self._policy.add_session_blacklist(pattern)
             self._log_decision(tool_name, args, "deny", f"Session blacklist: {pattern}")
-            return False, {'reason': response.reason, 'method': 'session_blacklist'}
+            return False, make_info(response.reason, 'session_blacklist')
 
         elif decision == ChannelDecision.TIMEOUT:
             self._log_decision(tool_name, args, "deny", "Channel timeout")
-            return False, {'reason': response.reason, 'method': 'timeout'}
+            return False, make_info(response.reason, 'timeout')
 
         elif decision == ChannelDecision.EDIT:
             # EDIT is handled in check_permission loop, but if we get here

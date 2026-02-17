@@ -819,6 +819,7 @@ class PermissionResponseRequest(Event):
     type: EventType = field(default=EventType.PERMISSION_RESPONSE)
     request_id: str = ""
     response: str = ""  # "y", "n", "a", "never", etc.
+    comment: str = ""  # Optional user comment with additional instructions
     # Edited tool arguments (set when response is "e" and client handled editing)
     edited_arguments: Optional[Dict[str, Any]] = None
 

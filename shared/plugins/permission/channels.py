@@ -269,6 +269,7 @@ class ChannelResponse:
     remember: bool = False  # Whether to remember this decision for the session
     remember_pattern: Optional[str] = None  # Pattern to remember (e.g., "git *")
     expires_at: Optional[str] = None  # ISO8601 expiration time
+    comment: str = ""  # Optional user comment with additional instructions
 
     # Edited content - set when decision is EDIT or when content was edited before approval
     edited_arguments: Optional[Dict[str, Any]] = None
@@ -290,6 +291,7 @@ class ChannelResponse:
             remember=data.get("remember", False),
             remember_pattern=data.get("remember_pattern"),
             expires_at=data.get("expires_at"),
+            comment=data.get("comment", ""),
             edited_arguments=data.get("edited_arguments"),
             was_edited=data.get("was_edited", False),
         )
@@ -303,6 +305,7 @@ class ChannelResponse:
             "remember": self.remember,
             "remember_pattern": self.remember_pattern,
             "expires_at": self.expires_at,
+            "comment": self.comment,
             "was_edited": self.was_edited,
         }
         if self.edited_arguments is not None:
@@ -1016,6 +1019,10 @@ class QueueChannel(ConsoleChannel):
         If the tool has editable content and user selects 'edit', the edit_callback
         is invoked to open an external editor. The edited content is returned in
         the ChannelResponse for the permission plugin to use.
+
+        Response format supports:
+        - Plain string: "y", "n", "always", etc.
+        - JSON with comment: '{"response": "y", "comment": "additional text"}'
         """
         # Signal that we're waiting for input
         self._waiting_for_input = True
@@ -1048,12 +1055,24 @@ class QueueChannel(ConsoleChannel):
                     reason=f"No response within {request.timeout_seconds}s",
                 )
 
+            # Parse response - check for JSON format with comment
+            comment = ""
+            actual_response = response_text
+            if response_text.startswith("{"):
+                try:
+                    parsed = json.loads(response_text)
+                    actual_response = parsed.get("response", response_text)
+                    comment = parsed.get("comment", "")
+                except json.JSONDecodeError:
+                    # Not valid JSON, treat as plain response
+                    pass
+
             # Parse response using request's response_options (uses parent's method)
             # Check for comment prefix first (c:comment text) — the TUI sends
             # comments in this format so the full text flows through the queue
             # as a single string without requiring extra protocol fields.
-            if response_text.startswith("c:"):
-                comment_text = response_text[2:].strip()
+            if actual_response.startswith("c:"):
+                comment_text = actual_response[2:].strip()
                 if comment_text:
                     return ChannelResponse(
                         request_id=request.request_id,
@@ -1062,18 +1081,20 @@ class QueueChannel(ConsoleChannel):
                     )
                 # Empty comment after prefix — fall through to normal matching
                 # which will match "c" as the comment option short key
-            matched_option = request.get_option_for_input(response_text)
+            matched_option = request.get_option_for_input(actual_response)
             if matched_option:
                 # Special handling for EDIT decision
                 if matched_option.decision == ChannelDecision.EDIT:
                     return self._handle_edit_request(request)
-                return self._create_response_for_option(request, matched_option)
+                response = self._create_response_for_option(request, matched_option)
+                response.comment = comment
+                return response
             else:
                 # Invalid input - treat as deny
                 return ChannelResponse(
                     request_id=request.request_id,
                     decision=ChannelDecision.DENY,
-                    reason=f"Invalid response: {response_text}",
+                    reason=f"Invalid response: {actual_response}",
                 )
 
         finally:

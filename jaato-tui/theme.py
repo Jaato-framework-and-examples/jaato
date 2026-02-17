@@ -427,6 +427,15 @@ DEFAULT_SEMANTIC_STYLES = {
     "permission_bar_focused": StyleSpec(fg="background", bg="primary"),  # Reverse video
     "permission_bar_hint": StyleSpec(fg="muted", italic=True),
 
+    # Permission comment input box (embedded visual display)
+    "permission_comment_label": StyleSpec(fg="secondary", bold=True),
+    "permission_comment_border": StyleSpec(fg="muted"),
+    "permission_comment_input": StyleSpec(fg="text"),
+    "permission_comment_hint": StyleSpec(fg="muted", italic=True),
+    "permission_comment_focused": StyleSpec(fg="primary", bold=True),
+    # Hidden keystroke capture buffer (invisible - matches background)
+    "permission_comment_hidden": StyleSpec(fg="background", bg="background"),
+
     # Input area
     "input_text": StyleSpec(fg="text"),
     "input_prompt": StyleSpec(fg="primary", bold=True),
@@ -764,6 +773,14 @@ class ThemeConfig:
             "permission-bar.option": "permission_bar_option",
             "permission-bar.focused": "permission_bar_focused",
             "permission-bar.hint": "permission_bar_hint",
+            # Permission comment input box
+            "permission-comment": "permission_bar_bg",
+            "permission-comment-label": "permission_comment_label",
+            "permission-comment-border": "permission_comment_border",
+            "permission-comment-input": "permission_comment_input",
+            "permission-comment-hint": "permission_comment_hint",
+            "permission-comment-focused": "permission_comment_focused",
+            "permission-comment-hidden": "permission_comment_hidden",
             # Status bar
             "status-bar": "status_bar_bg",
             "status-bar.label": "status_bar_label",

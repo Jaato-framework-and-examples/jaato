@@ -2213,13 +2213,14 @@ class JaatoServer:
         self._model_thread = threading.Thread(target=model_thread, daemon=True)
         self._model_thread.start()
 
-    def respond_to_permission(self, request_id: str, response: str,
+    def respond_to_permission(self, request_id: str, response: str, comment: str = "",
                               edited_arguments: Optional[Dict[str, Any]] = None) -> None:
         """Respond to a permission request.
 
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
+            comment: Optional user comment with additional instructions.
             edited_arguments: Optional edited tool arguments (when response is "e"
                 and the client handled editing locally).
         """
@@ -2235,7 +2236,12 @@ class JaatoServer:
         if edited_arguments is not None:
             self._pending_edited_arguments = edited_arguments
 
-        self._channel_input_queue.put(response)
+        # Encode response with comment as JSON if comment is present
+        if comment:
+            import json
+            self._channel_input_queue.put(json.dumps({"response": response, "comment": comment}))
+        else:
+            self._channel_input_queue.put(response)
 
     def respond_to_clarification(self, request_id: str, response: str) -> None:
         """Respond to a clarification question.

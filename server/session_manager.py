@@ -1910,6 +1910,7 @@ class SessionManager:
         elif isinstance(event, PermissionResponseRequest):
             server.respond_to_permission(
                 event.request_id, event.response,
+                comment=event.comment,
                 edited_arguments=event.edited_arguments,
             )
 
