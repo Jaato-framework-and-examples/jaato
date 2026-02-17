@@ -480,7 +480,15 @@ class ToolExecutor:
                 if not allowed:
                     if debug:
                         print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
-                    return False, {'error': f"Permission denied: {perm_info.get('reason', '')}", '_permission': permission_meta}
+                    # For comment decisions, use the reason directly (it already
+                    # contains "Tool not executed. User comment: ...") instead of
+                    # wrapping with "Permission denied:" prefix which is redundant.
+                    reason = perm_info.get('reason', '')
+                    if perm_info.get('method') == 'user_comment':
+                        error_msg = reason
+                    else:
+                        error_msg = f"Permission denied: {reason}"
+                    return False, {'error': error_msg, '_permission': permission_meta}
                 # Use edited arguments if the user modified them during permission
                 if perm_info.get('was_edited') and perm_info.get('modified_args'):
                     args = perm_info['modified_args']

@@ -583,6 +583,7 @@ class PTDisplay:
         # Permission keyboard navigation state
         self._permission_response_options: Optional[list] = None  # Current response options
         self._permission_focus_index: int = 0  # Currently focused option index
+        self._comment_mode_active: bool = False  # When True, user is typing free-text comment
 
         # Stop callback for interrupting model generation
         self._stop_callback: Optional[Callable[[], bool]] = None
@@ -676,7 +677,8 @@ class PTDisplay:
         still get large pastes collapsed into placeholders.
         """
         # In permission mode, validate input and revert if invalid
-        if self._waiting_for_channel_input and self._valid_input_prefixes:
+        # Comment mode bypasses validation — user types free-text
+        if self._waiting_for_channel_input and self._valid_input_prefixes and not self._comment_mode_active:
             current_text = self._input_buffer.text
             if not self._is_valid_permission_input(current_text):
                 # Revert to last valid input
@@ -1603,6 +1605,15 @@ class PTDisplay:
                 # In pager mode - advance page
                 self._advance_pager_page()
                 return
+            # Comment mode: submit comment text with "c:" prefix, require non-empty
+            if self._comment_mode_active:
+                text = self._input_buffer.text.strip()
+                if not text:
+                    return  # Require non-empty comment
+                self._input_buffer.reset()
+                if self._input_callback:
+                    self._input_callback(f"c:{text}")
+                return
             # Check for permission mode - if input is empty, select focused option
             raw_text = self._input_buffer.text
             text = raw_text.strip()
@@ -1695,6 +1706,10 @@ class PTDisplay:
                 return
             # Check for permission mode - select focused option
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                if self._comment_mode_active:
+                    # In comment mode, space inserts a space character
+                    event.current_buffer.insert_text(" ")
+                    return
                 self._select_focused_permission_option()
                 return
             # Normal mode - insert space character
@@ -1707,6 +1722,7 @@ class PTDisplay:
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
                 # Permission mode: cycle to next option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
+                self._update_comment_mode()
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
                 if buffer:
@@ -1730,6 +1746,7 @@ class PTDisplay:
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
                 # Permission mode: cycle to previous option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
+                self._update_comment_mode()
                 # Update output buffer for inline highlighting (use correct buffer from agent registry)
                 buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
                 if buffer:
@@ -3425,6 +3442,56 @@ class PTDisplay:
         """
         return text.lower() in self._valid_input_prefixes
 
+    @staticmethod
+    def _is_comment_option(option) -> bool:
+        """Check if a permission option is the comment option.
+
+        Handles both dict (from event serialization) and object formats.
+
+        Args:
+            option: A permission response option (dict or object).
+
+        Returns:
+            True if this option represents the comment/feedback action.
+        """
+        if isinstance(option, dict):
+            return option.get('decision') == 'comment' or option.get('short') == 'c'
+        decision = getattr(option, 'decision', None)
+        if decision is not None:
+            # Handle both enum and string values
+            val = decision.value if hasattr(decision, 'value') else decision
+            return val == 'comment'
+        return getattr(option, 'short', '') == 'c'
+
+    def _update_comment_mode(self) -> None:
+        """Toggle comment mode based on the currently focused permission option.
+
+        When focus lands on the comment option, activates comment mode which:
+        - Bypasses prefix validation so the user can type free-text
+        - Clears the input buffer for a fresh start
+
+        When focus moves away from comment, deactivates comment mode and
+        clears any partially-typed comment text.
+        """
+        if not self._permission_response_options:
+            self._comment_mode_active = False
+            return
+
+        option = self._permission_response_options[self._permission_focus_index]
+        entering = self._is_comment_option(option)
+
+        if entering and not self._comment_mode_active:
+            # Entering comment mode: clear buffer, unlock input
+            self._comment_mode_active = True
+            self._input_buffer.text = ""
+            self._input_buffer.cursor_position = 0
+        elif not entering and self._comment_mode_active:
+            # Leaving comment mode: clear buffer, lock input back
+            self._comment_mode_active = False
+            self._input_buffer.text = ""
+            self._input_buffer.cursor_position = 0
+            self._last_valid_permission_input = ""
+
     def set_waiting_for_channel_input(
         self,
         waiting: bool,
@@ -3446,6 +3513,7 @@ class PTDisplay:
                             Each option should have: short, full, description attributes.
         """
         self._waiting_for_channel_input = waiting
+        self._comment_mode_active = False  # Always reset comment mode on state change
         # Compute valid prefixes for keystroke filtering
         if waiting and response_options:
             self._valid_input_prefixes = self._compute_valid_prefixes(response_options)
@@ -3468,9 +3536,15 @@ class PTDisplay:
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
-        """Select the currently focused permission option and submit it."""
+        """Select the currently focused permission option and submit it.
+
+        Does nothing if comment mode is active — comment mode requires the
+        user to type text and press Enter, not select-by-shortcut.
+        """
         if not self._permission_response_options or not self._input_callback:
             return
+        if self._comment_mode_active:
+            return  # Comment option requires typed text, not bare selection
 
         # Get the focused option
         option = self._permission_response_options[self._permission_focus_index]

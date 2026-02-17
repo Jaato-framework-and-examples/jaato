@@ -80,6 +80,7 @@ class ChannelDecision(Enum):
     ALLOW_TURN = "allow_turn"        # Allow all remaining tools this turn (clears on IDLE)
     ALLOW_UNTIL_IDLE = "allow_until_idle"  # Allow until session goes idle (clears on IDLE)
     EDIT = "edit"                    # User wants to edit content before deciding
+    COMMENT = "comment"              # Deny with user feedback that the model sees
     TIMEOUT = "timeout"              # Channel didn't respond in time
 
 
@@ -579,7 +580,7 @@ class ConsoleChannel(Channel):
         self._output_func(options_line)
 
         try:
-            response = self._read_input().strip().lower()
+            response = self._read_input().strip()
         except (EOFError, KeyboardInterrupt):
             return ChannelResponse(
                 request_id=request.request_id,
@@ -587,8 +588,20 @@ class ConsoleChannel(Channel):
                 reason="User cancelled input",
             )
 
+        # Check for comment prefix (c:comment text) before option matching
+        if response.startswith("c:"):
+            comment_text = response[2:].strip()
+            if comment_text:
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.COMMENT,
+                    reason=comment_text,
+                )
+            # Empty comment — fall through to normal matching
+
         # Parse response using request's response_options
-        matched_option = request.get_option_for_input(response)
+        response_lower = response.lower()
+        matched_option = request.get_option_for_input(response_lower)
         if matched_option:
             return self._create_response_for_option(request, matched_option)
         else:
@@ -1036,6 +1049,19 @@ class QueueChannel(ConsoleChannel):
                 )
 
             # Parse response using request's response_options (uses parent's method)
+            # Check for comment prefix first (c:comment text) — the TUI sends
+            # comments in this format so the full text flows through the queue
+            # as a single string without requiring extra protocol fields.
+            if response_text.startswith("c:"):
+                comment_text = response_text[2:].strip()
+                if comment_text:
+                    return ChannelResponse(
+                        request_id=request.request_id,
+                        decision=ChannelDecision.COMMENT,
+                        reason=comment_text,
+                    )
+                # Empty comment after prefix — fall through to normal matching
+                # which will match "c" as the comment option short key
             matched_option = request.get_option_for_input(response_text)
             if matched_option:
                 # Special handling for EDIT decision
