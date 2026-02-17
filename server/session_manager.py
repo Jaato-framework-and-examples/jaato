@@ -202,14 +202,25 @@ class SessionManager:
     # Workspace file monitoring
     # ------------------------------------------------------------------
 
-    def _start_workspace_monitor(self, session_id: str, workspace_path: str) -> None:
+    def _start_workspace_monitor(
+        self,
+        session_id: str,
+        workspace_path: str,
+        server: Optional[JaatoServer] = None,
+    ) -> None:
         """Start (or restart) a workspace file monitor for a session.
 
         If a monitor already exists for this session it is stopped first.
 
+        After starting the monitor, wires up the sandbox manager plugin
+        so that readwrite sandbox paths are automatically watched.
+
         Args:
             session_id: The session to monitor.
             workspace_path: Absolute path to the workspace directory.
+            server: The session's JaatoServer.  If not provided, looked up
+                from ``self._sessions``.  Pass explicitly when the session
+                is not yet registered (e.g., during ``_load_session``).
         """
         self._stop_workspace_monitor(session_id)
 
@@ -230,8 +241,16 @@ class SessionManager:
         self._workspace_monitors[session_id] = monitor
         logger.debug("Workspace monitor started for session %s", session_id)
 
+        # Wire sandbox path monitoring: when the user runs
+        # "sandbox add readwrite /some/path", the workspace monitor should
+        # also watch that path for file changes.
+        self._wire_sandbox_to_monitor(session_id, monitor, server=server)
+
     def _stop_workspace_monitor(self, session_id: str) -> None:
         """Stop the workspace monitor for a session if one exists.
+
+        Also clears the sandbox manager callback so it doesn't reference
+        a stale monitor.
 
         Args:
             session_id: The session whose monitor to stop.
@@ -240,6 +259,67 @@ class SessionManager:
         if monitor:
             monitor.stop()
             logger.debug("Workspace monitor stopped for session %s", session_id)
+
+        # Clear the sandbox manager callback to avoid stale references
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session and session.server:
+            sandbox_plugin = session.server._find_plugin_for_command("sandbox")
+            if sandbox_plugin and hasattr(sandbox_plugin, 'set_on_readwrite_paths_changed'):
+                sandbox_plugin.set_on_readwrite_paths_changed(None)
+
+    def _wire_sandbox_to_monitor(
+        self,
+        session_id: str,
+        monitor: WorkspaceMonitor,
+        server: Optional[JaatoServer] = None,
+    ) -> None:
+        """Connect the sandbox manager plugin to the workspace monitor.
+
+        When the user adds or removes readwrite sandbox paths, the monitor
+        should start or stop watching those directories.  This method:
+
+        1. Finds the sandbox manager plugin in the session's registry.
+        2. Seeds the monitor with current readwrite paths.
+        3. Registers a callback so future changes are propagated.
+
+        Args:
+            session_id: The session whose sandbox plugin to wire.
+            monitor: The workspace monitor to update.
+            server: The session's JaatoServer.  If not provided, looked up
+                from ``self._sessions``.
+        """
+        if server is None:
+            with self._lock:
+                session = self._sessions.get(session_id)
+            if not session or not session.server:
+                return
+            server = session.server
+
+        sandbox_plugin = server._find_plugin_for_command("sandbox")
+        if not sandbox_plugin or not hasattr(sandbox_plugin, 'set_on_readwrite_paths_changed'):
+            return
+
+        # Seed the monitor with current readwrite paths
+        if hasattr(sandbox_plugin, 'get_readwrite_paths'):
+            current_paths = sandbox_plugin.get_readwrite_paths()
+            if current_paths:
+                monitor.update_sandbox_paths(current_paths)
+                logger.debug(
+                    "Seeded workspace monitor with %d sandbox readwrite paths for session %s",
+                    len(current_paths), session_id,
+                )
+
+        # Register callback for future changes
+        def on_readwrite_changed(paths: List[str]) -> None:
+            """Called by sandbox manager when readwrite paths change."""
+            monitor.update_sandbox_paths(paths)
+            logger.debug(
+                "Updated workspace monitor sandbox paths: %d paths for session %s",
+                len(paths), session_id,
+            )
+
+        sandbox_plugin.set_on_readwrite_paths_changed(on_readwrite_changed)
 
     def _send_workspace_snapshot(self, session_id: str, client_id: str) -> None:
         """Send the full workspace file snapshot to a specific client.
@@ -879,7 +959,7 @@ class SessionManager:
 
         # Restore workspace file monitor with persisted tracked state
         if state.workspace_path:
-            self._start_workspace_monitor(session_id, state.workspace_path)
+            self._start_workspace_monitor(session_id, state.workspace_path, server=server)
             monitor = self._workspace_monitors.get(session_id)
             if monitor and state.workspace_files:
                 monitor.restore(state.workspace_files)
