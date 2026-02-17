@@ -1128,6 +1128,9 @@ class PTDisplay:
         if not rel_path:
             return
 
+        # Sandbox-monitored files are tracked with absolute paths.
+        # os.path.join handles this correctly: when the second argument
+        # is absolute, it ignores the first (workspace) component.
         workspace = (
             os.path.expanduser(self._session_workspace)
             if self._session_workspace

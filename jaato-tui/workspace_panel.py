@@ -305,14 +305,18 @@ class WorkspacePanel:
         return False
 
     def get_selected_file_path(self) -> Optional[str]:
-        """Return the relative path of the file at the current cursor position.
+        """Return the path of the file at the current cursor position.
 
-        Reconstructs the full relative path by combining the parent directory
-        prefix with the file name.  Returns ``None`` if the cursor is on a
-        directory or the list is empty.
+        Reconstructs the full path by combining the parent directory prefix
+        with the file name.  Returns ``None`` if the cursor is on a directory
+        or the list is empty.
+
+        For workspace files, returns a relative path (e.g. ``"server/core.py"``).
+        For sandbox-monitored files (tracked with absolute paths), returns
+        an absolute path (e.g. ``"/home/user/data/config.json"``).
 
         Returns:
-            Relative file path (e.g. ``"server/core.py"``), or None.
+            File path (relative for workspace, absolute for sandbox), or None.
         """
         flat = self._get_flat_entries()
         if not flat or self._cursor_index >= len(flat):
