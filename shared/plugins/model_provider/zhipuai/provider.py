@@ -231,9 +231,10 @@ class ZhipuAIProvider(AnthropicProvider):
     def _create_client(self) -> Any:
         """Create Anthropic client pointing to Zhipu AI server.
 
-        Uses the parent's _create_http_client() to configure proxy and SSL
-        settings (corporate CA certificates, Kerberos auth, standard proxy
-        env vars) so connections work behind corporate proxies.
+        Uses the parent's _create_http_client() to configure SSL and
+        Kerberos settings (corporate CA certificates, SPNEGO auth) when
+        needed. Standard proxy env vars are handled by the SDK's default
+        httpx client via trust_env.
         """
         import anthropic
 
