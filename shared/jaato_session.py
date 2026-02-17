@@ -1101,20 +1101,17 @@ class JaatoSession:
                 if isinstance(result, int):
                     return result
                 else:
-                    logger.warning(
-                        "count_tokens returned non-int (%s), falling back to estimate",
-                        type(result).__name__,
+                    self._trace(
+                        f"count_tokens returned non-int ({type(result).__name__}), "
+                        f"falling back to estimate"
                     )
             except Exception as e:
-                logger.warning(
-                    "count_tokens failed (%s: %s), falling back to estimate "
-                    "(text length: %d chars)",
-                    type(e).__name__, e, len(text),
+                self._trace(
+                    f"count_tokens FAILED ({type(e).__name__}: {e}), "
+                    f"falling back to estimate (text length: {len(text)} chars)"
                 )
         estimate = estimate_tokens(text)
-        logger.debug(
-            "Using estimated token count: %d (from %d chars)", estimate, len(text)
-        )
+        self._trace(f"count_tokens: using estimate={estimate} (from {len(text)} chars)")
         return estimate
 
     def _populate_instruction_budget(
@@ -1167,10 +1164,10 @@ class JaatoSession:
 
         # 1. Base instructions from .jaato/instructions/ (or legacy single file)
         base_instructions = getattr(self._runtime, '_base_system_instructions', None)
-        logger.info("BUDGET_CALC: Counting base instructions tokens (%d chars)...",
-                     len(base_instructions) if base_instructions else 0)
+        self._trace(f"BUDGET_CALC: Counting base instructions tokens "
+                    f"({len(base_instructions) if base_instructions else 0} chars)...")
         base_tokens = self._count_tokens(base_instructions) if base_instructions else 0
-        logger.info("BUDGET_CALC: Base instructions = %d tokens", base_tokens)
+        self._trace(f"BUDGET_CALC: Base instructions = {base_tokens} tokens")
         if base_tokens > 0:
             self._instruction_budget.add_child(
                 InstructionSource.SYSTEM,
@@ -1182,10 +1179,10 @@ class JaatoSession:
             total_system_tokens += base_tokens
 
         # 2. Client-provided session instructions (programmatic)
-        logger.info("BUDGET_CALC: Counting client instructions tokens (%d chars)...",
-                     len(session_instructions) if session_instructions else 0)
+        self._trace(f"BUDGET_CALC: Counting client instructions tokens "
+                    f"({len(session_instructions) if session_instructions else 0} chars)...")
         client_tokens = self._count_tokens(session_instructions) if session_instructions else 0
-        logger.info("BUDGET_CALC: Client instructions = %d tokens", client_tokens)
+        self._trace(f"BUDGET_CALC: Client instructions = {client_tokens} tokens")
         if client_tokens > 0:
             self._instruction_budget.add_child(
                 InstructionSource.SYSTEM,
@@ -1197,12 +1194,12 @@ class JaatoSession:
             total_system_tokens += client_tokens
 
         # 3. Framework constants (task completion, parallel tool guidance, turn summary)
-        logger.info("BUDGET_CALC: Counting framework constants tokens...")
+        self._trace("BUDGET_CALC: Counting framework constants tokens...")
         framework_tokens = self._count_tokens(_TASK_COMPLETION_INSTRUCTION)
         if _is_parallel_tools_enabled():
             framework_tokens += self._count_tokens(_PARALLEL_TOOL_GUIDANCE)
         framework_tokens += self._count_tokens(_TURN_SUMMARY_INSTRUCTION)
-        logger.info("BUDGET_CALC: Framework constants = %d tokens", framework_tokens)
+        self._trace(f"BUDGET_CALC: Framework constants = {framework_tokens} tokens")
         self._instruction_budget.add_child(
             InstructionSource.SYSTEM,
             SystemChildType.FRAMEWORK.value,
@@ -1215,7 +1212,7 @@ class JaatoSession:
         self._instruction_budget.update_tokens(InstructionSource.SYSTEM, total_system_tokens)
 
         # PLUGIN: Per-tool system instructions
-        logger.info("BUDGET_CALC: Counting plugin instruction tokens...")
+        self._trace("BUDGET_CALC: Counting plugin instruction tokens...")
         plugin_tokens = 0
         if self._runtime.registry:
             plugin_entry = self._instruction_budget.get_entry(InstructionSource.PLUGIN)
@@ -1224,11 +1221,11 @@ class JaatoSession:
                 if plugin and hasattr(plugin, 'get_system_instructions'):
                     instr = plugin.get_system_instructions()
                     if instr:
-                        logger.info("BUDGET_CALC:   Plugin '%s' (%d chars)...",
-                                     plugin_name, len(instr))
+                        self._trace(f"BUDGET_CALC:   Plugin '{plugin_name}' "
+                                    f"({len(instr)} chars)...")
                         tokens = self._count_tokens(instr)
-                        logger.info("BUDGET_CALC:   Plugin '%s' = %d tokens",
-                                     plugin_name, tokens)
+                        self._trace(f"BUDGET_CALC:   Plugin '{plugin_name}' "
+                                    f"= {tokens} tokens")
                         plugin_tokens += tokens
                         # Add as child entry for drill-down
                         from .instruction_budget import PluginToolType, DEFAULT_TOOL_POLICIES
@@ -1263,7 +1260,7 @@ class JaatoSession:
                         )
 
         self._instruction_budget.update_tokens(InstructionSource.PLUGIN, plugin_tokens)
-        logger.info("BUDGET_CALC: Total plugin instructions = %d tokens", plugin_tokens)
+        self._trace(f"BUDGET_CALC: Total plugin instructions = {plugin_tokens} tokens")
 
         # ENRICHMENT: Enrichment pipeline additions
         # The enrichment tokens are included in the combined system instruction
@@ -1276,12 +1273,18 @@ class JaatoSession:
 
         # Summary
         total_initial = total_system_tokens + plugin_tokens
-        logger.info(
-            "BUDGET_CALC: Initial budget complete — system=%d, plugins=%d, "
-            "total=%d tokens (context limit: %d, %.1f%% used)",
-            total_system_tokens, plugin_tokens, total_initial,
-            context_limit, (total_initial / context_limit * 100) if context_limit else 0,
-        )
+        try:
+            pct = (total_initial / context_limit * 100) if context_limit else 0
+            self._trace(
+                f"BUDGET_CALC: Initial budget complete — system={total_system_tokens}, "
+                f"plugins={plugin_tokens}, total={total_initial} tokens "
+                f"(context limit: {context_limit}, {pct:.1f}% used)"
+            )
+        except (TypeError, ValueError):
+            self._trace(
+                f"BUDGET_CALC: Initial budget complete — system={total_system_tokens}, "
+                f"plugins={plugin_tokens}, total={total_initial} tokens"
+            )
 
         # Emit budget update event
         self._emit_instruction_budget_update()
