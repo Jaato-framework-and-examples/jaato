@@ -15,6 +15,7 @@ Schema
     {
       "pattern_detection": {
         "repetitive_call_threshold": 3,
+        "error_retry_threshold": 3,
         "introspection_loop_threshold": 2,
         "max_reads_before_action": 5,
         "max_turn_duration_seconds": 120.0,
@@ -168,6 +169,7 @@ def generate_default_config() -> str:
     default = {
         "pattern_detection": {
             "repetitive_call_threshold": 3,
+            "error_retry_threshold": 3,
             "introspection_loop_threshold": 2,
             "max_reads_before_action": 5,
             "max_turn_duration_seconds": 120.0,
@@ -209,6 +211,7 @@ def generate_default_config_safe() -> str:
     default = {
         "pattern_detection": {
             "repetitive_call_threshold": defaults.repetitive_call_threshold,
+            "error_retry_threshold": defaults.error_retry_threshold,
             "introspection_loop_threshold": defaults.introspection_loop_threshold,
             "max_reads_before_action": defaults.max_reads_before_action,
             "max_turn_duration_seconds": defaults.max_turn_duration_seconds,
@@ -261,6 +264,7 @@ def _parse_pattern_detection(
 
     int_fields = {
         "repetitive_call_threshold": (1, 100),
+        "error_retry_threshold": (1, 100),
         "introspection_loop_threshold": (1, 100),
         "max_reads_before_action": (1, 100),
     }
