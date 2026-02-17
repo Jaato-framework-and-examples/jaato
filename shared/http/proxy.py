@@ -599,14 +599,13 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
 
     Configures the client based on:
     1. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers and sets
-       explicit proxy with Negotiate auth header
-    2. Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY): Sets explicit
-       proxy URL on the client rather than relying on httpx env detection,
-       which may not propagate correctly through all SDK code paths
+       explicit proxy, which overrides httpx's env-based NO_PROXY handling
+    2. Standard proxy env vars (httpx handles these when no explicit proxy
+       via trust_env=True, which is the default)
 
-    Note: When explicit proxy config is set, it overrides httpx's built-in
-    NO_PROXY handling. For per-request bypass, use get_httpx_kwargs(url)
-    instead, which calls should_bypass_proxy().
+    Note: When Kerberos is enabled, explicit proxy config is set, which
+    bypasses httpx's built-in NO_PROXY handling. For per-request bypass,
+    use get_httpx_kwargs(url) instead, which calls should_bypass_proxy().
 
     Args:
         **client_kwargs: Additional kwargs to pass to httpx.Client
@@ -616,22 +615,21 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
     """
     import httpx
 
-    proxy_url = get_proxy_url()
-    if proxy_url:
-        # Always set explicit proxy so SDK wrappers (e.g. Anthropic)
-        # that create their own httpx client reliably route through it.
-        client_kwargs.setdefault("proxy", proxy_url)
+    if is_kerberos_proxy_enabled():
+        proxy_url = get_proxy_url()
+        if proxy_url:
+            proxy_host, _, _ = parse_proxy_url(proxy_url)
 
-    if is_kerberos_proxy_enabled() and proxy_url:
-        proxy_host, _, _ = parse_proxy_url(proxy_url)
+            # Set proxy
+            client_kwargs.setdefault("proxy", proxy_url)
 
-        # Add SPNEGO token to headers
-        token = generate_spnego_token(proxy_host)
-        if token:
-            headers = client_kwargs.get("headers", {})
-            if isinstance(headers, dict):
-                headers["Proxy-Authorization"] = f"Negotiate {token}"
-                client_kwargs["headers"] = headers
+            # Add SPNEGO token to headers
+            token = generate_spnego_token(proxy_host)
+            if token:
+                headers = client_kwargs.get("headers", {})
+                if isinstance(headers, dict):
+                    headers["Proxy-Authorization"] = f"Negotiate {token}"
+                    client_kwargs["headers"] = headers
 
     return httpx.Client(**client_kwargs)
 
@@ -670,9 +668,9 @@ def get_httpx_kwargs(url: str) -> Dict[str, Any]:
 def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
     """Create an httpx AsyncClient with appropriate proxy configuration.
 
-    Same caveats as get_httpx_client() regarding NO_PROXY: when explicit
-    proxy config is set, it overrides httpx's env-based NO_PROXY handling.
-    Use get_httpx_kwargs(url) for per-request bypass.
+    Same caveats as get_httpx_client() regarding NO_PROXY: when Kerberos
+    is enabled, explicit proxy config overrides httpx's env-based NO_PROXY
+    handling. Use get_httpx_kwargs(url) for per-request bypass.
 
     Args:
         **client_kwargs: Additional kwargs to pass to httpx.AsyncClient
@@ -682,17 +680,16 @@ def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
     """
     import httpx
 
-    proxy_url = get_proxy_url()
-    if proxy_url:
-        client_kwargs.setdefault("proxy", proxy_url)
-
-    if is_kerberos_proxy_enabled() and proxy_url:
-        proxy_host, _, _ = parse_proxy_url(proxy_url)
-        token = generate_spnego_token(proxy_host)
-        if token:
-            headers = client_kwargs.get("headers", {})
-            if isinstance(headers, dict):
-                headers["Proxy-Authorization"] = f"Negotiate {token}"
-                client_kwargs["headers"] = headers
+    if is_kerberos_proxy_enabled():
+        proxy_url = get_proxy_url()
+        if proxy_url:
+            proxy_host, _, _ = parse_proxy_url(proxy_url)
+            client_kwargs.setdefault("proxy", proxy_url)
+            token = generate_spnego_token(proxy_host)
+            if token:
+                headers = client_kwargs.get("headers", {})
+                if isinstance(headers, dict):
+                    headers["Proxy-Authorization"] = f"Negotiate {token}"
+                    client_kwargs["headers"] = headers
 
     return httpx.AsyncClient(**client_kwargs)
