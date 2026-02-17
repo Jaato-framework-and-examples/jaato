@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 import hashlib
 import json
@@ -716,12 +716,37 @@ class BehavioralPattern:
 
 @dataclass
 class PatternDetectionConfig:
-    """Configuration for behavioral pattern detection."""
+    """Configuration for behavioral pattern detection.
+
+    Attributes:
+        enabled: Whether pattern detection is active.
+        repetitive_call_threshold: Number of consecutive identical tool calls
+            (regardless of success) before triggering REPETITIVE_CALLS.
+        error_retry_threshold: Default number of consecutive failures of the
+            same tool before triggering ERROR_RETRY_LOOP.
+        error_retry_overrides: Per-tool overrides for error_retry_threshold.
+            Maps tool name to its specific threshold.  Tools not listed here
+            fall back to the global ``error_retry_threshold``.  Example::
+
+                error_retry_overrides={"web_search": 5, "bash": 2}
+
+        introspection_tool_names: Tools considered "introspection" for
+            INTROSPECTION_LOOP detection.
+        introspection_loop_threshold: N introspection calls without action.
+        read_only_tools: Tools that only read (for READ_ONLY_LOOP).
+        action_tools: Tools that perform mutations.
+        max_reads_before_action: N reads without action = stall.
+        max_turn_duration_seconds: Turn taking too long = possible stall.
+        announce_phrases: Phrases that suggest the model is about to act
+            (for ANNOUNCE_NO_ACTION detection).
+    """
 
     enabled: bool = True
 
     # Repetition thresholds
     repetitive_call_threshold: int = 3        # Same tool N times triggers detection
+    error_retry_threshold: int = 3            # N consecutive failures before detection
+    error_retry_overrides: Dict[str, int] = field(default_factory=dict)
     introspection_tool_names: Set[str] = field(
         default_factory=lambda: {"list_tools", "get_tool_schemas", "askPermission"}
     )
@@ -752,6 +777,14 @@ class PatternDetectionConfig:
             "making the change",
         ]
     )
+
+    def get_error_retry_threshold(self, tool_name: str) -> int:
+        """Return the error retry threshold for a specific tool.
+
+        Checks ``error_retry_overrides`` first; falls back to the global
+        ``error_retry_threshold``.
+        """
+        return self.error_retry_overrides.get(tool_name, self.error_retry_threshold)
 
 
 # -----------------------------------------------------------------------------
@@ -808,6 +841,20 @@ class PrerequisitePolicy:
         pattern_type: The BehavioralPatternType to fire on violation. Defaults to
             PREREQUISITE_VIOLATED. The ``policy_id`` on the emitted pattern
             provides the specific identity.
+        severity_thresholds: Maps each severity level to the minimum number of
+            *prior* violations required to reach that level.  The detector
+            picks the highest severity whose threshold is met.  Defaults to
+            ``{MINOR: 0, MODERATE: 1, SEVERE: 2}`` which means: 1st
+            violation → MINOR, 2nd → MODERATE, 3rd+ → SEVERE.
+
+            To block immediately on the first violation, set::
+
+                severity_thresholds={MINOR: 0, MODERATE: 0, SEVERE: 0}
+
+            To allow three soft nudges before blocking::
+
+                severity_thresholds={MINOR: 0, MODERATE: 2, SEVERE: 4}
+
         nudge_templates: Nudge messages per severity level. The template strings
             may contain ``{tool_name}`` (the gated tool that was called),
             ``{prerequisite_tool}`` (the required tool), and ``{count}``
@@ -824,6 +871,7 @@ class PrerequisitePolicy:
     gated_tools: Set[str]
     lookback_turns: int = 2
     pattern_type: BehavioralPatternType = BehavioralPatternType.PREREQUISITE_VIOLATED
+    severity_thresholds: Dict["PatternSeverity", int] = field(default_factory=dict)
     nudge_templates: Dict["PatternSeverity", Tuple["NudgeType", str]] = field(
         default_factory=dict
     )
@@ -831,6 +879,30 @@ class PrerequisitePolicy:
         "Call {prerequisite_tool} before using {tool_name}"
     )
     owner_plugin: str = ""
+
+    # Default thresholds used when severity_thresholds is empty.
+    _DEFAULT_SEVERITY_THRESHOLDS: ClassVar[Dict["PatternSeverity", int]] = {
+        PatternSeverity.MINOR: 0,
+        PatternSeverity.MODERATE: 1,
+        PatternSeverity.SEVERE: 2,
+    }
+
+    def get_severity(self, violation_count: int) -> "PatternSeverity":
+        """Return the highest severity whose threshold is met.
+
+        Args:
+            violation_count: Number of *prior* violations for this policy
+                (0 on the first occurrence).
+
+        Returns:
+            The appropriate PatternSeverity for the given violation count.
+        """
+        thresholds = self.severity_thresholds or self._DEFAULT_SEVERITY_THRESHOLDS
+        # Walk from highest to lowest severity
+        for severity in (PatternSeverity.SEVERE, PatternSeverity.MODERATE, PatternSeverity.MINOR):
+            if severity in thresholds and violation_count >= thresholds[severity]:
+                return severity
+        return PatternSeverity.MINOR
 
 
 class NudgeLevel(Enum):

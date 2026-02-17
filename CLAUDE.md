@@ -536,4 +536,5 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Design Philosophy](docs/design-philosophy.md) - Opinionated design decisions and rationale
 - [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
+- [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
