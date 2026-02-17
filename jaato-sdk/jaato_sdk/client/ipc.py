@@ -418,7 +418,7 @@ class IPCClient:
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
         # Get client's working directory (for finding config files like .lsp.json)
-        working_dir = os.getcwd()
+        working_dir = self.workspace_path or os.getcwd()
 
         # Always resolve to absolute path - server will check if it exists
         # This allows relative paths like "../.env" to work correctly
