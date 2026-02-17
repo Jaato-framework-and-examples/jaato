@@ -114,13 +114,19 @@ class JaatoRuntime:
         )
     """
 
-    def __init__(self, provider_name: str = "google_genai"):
+    def __init__(self, provider_name: str = "google_genai",
+                 workspace_path: Optional[Path] = None):
         """Initialize JaatoRuntime.
 
         Args:
             provider_name: Name of the model provider to use (default: 'google_genai').
+            workspace_path: Explicit workspace directory for loading instructions.
+                When running as a daemon, the process cwd may differ from the
+                client's workspace, so callers should pass the workspace path
+                explicitly. Falls back to ``Path.cwd()`` when not provided.
         """
         self._provider_name: str = provider_name
+        self._workspace_path: Optional[Path] = workspace_path
         self._provider_config: Optional[ProviderConfig] = None
 
         # Multi-provider support: map provider_name -> ProviderConfig
@@ -175,8 +181,10 @@ class JaatoRuntime:
         ensuring consistent behavior across main agent and all subagents.
         """
         # Primary: look for an instructions/ folder
+        # Use explicit workspace_path when provided (daemon mode), else cwd
+        base = self._workspace_path or Path.cwd()
         search_dirs = [
-            Path.cwd() / ".jaato" / "instructions",
+            base / ".jaato" / "instructions",
             Path.home() / ".jaato" / "instructions",
         ]
 
@@ -189,7 +197,7 @@ class JaatoRuntime:
 
         # Fallback: legacy single-file path
         legacy_paths = [
-            Path.cwd() / ".jaato" / "system_instructions.md",
+            base / ".jaato" / "system_instructions.md",
             Path.home() / ".jaato" / "system_instructions.md",
         ]
 

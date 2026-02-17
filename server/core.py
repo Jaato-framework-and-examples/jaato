@@ -742,7 +742,8 @@ class JaatoServer:
             # Use session env context so provider can access session-specific API keys
             self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
             with self._with_session_env():
-                self._jaato = JaatoClient(provider_name=provider_to_use)
+                self._jaato = JaatoClient(provider_name=provider_to_use,
+                                          workspace_path=self._workspace_path)
                 # Pass project/location for providers that need them (Google/Vertex)
                 # Other providers ignore these and use their own env vars
                 self._jaato.connect(project_id, location, model_name)
