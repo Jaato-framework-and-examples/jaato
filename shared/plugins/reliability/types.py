@@ -722,6 +722,7 @@ class PatternDetectionConfig:
 
     # Repetition thresholds
     repetitive_call_threshold: int = 3        # Same tool N times triggers detection
+    error_retry_threshold: int = 3            # N consecutive failures before detection
     introspection_tool_names: Set[str] = field(
         default_factory=lambda: {"list_tools", "get_tool_schemas", "askPermission"}
     )

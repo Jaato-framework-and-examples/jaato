@@ -115,12 +115,27 @@ class TestLoadPatternDetection:
         assert config is not None
         assert config.repetitive_call_threshold == 5
 
+    def test_error_retry_threshold(self, tmp_path):
+        """Parses error_retry_threshold correctly."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_threshold": 2,
+            }
+        }))
+
+        config, _, warnings = load_policy_config(config_path=config_file)
+        assert warnings == []
+        assert config is not None
+        assert config.error_retry_threshold == 2
+
     def test_all_pattern_detection_fields(self, tmp_path):
         """Parses all supported pattern_detection fields."""
         config_file = tmp_path / "policies.json"
         config_file.write_text(json.dumps({
             "pattern_detection": {
                 "repetitive_call_threshold": 4,
+                "error_retry_threshold": 2,
                 "introspection_loop_threshold": 3,
                 "max_reads_before_action": 8,
                 "max_turn_duration_seconds": 60.0,
@@ -135,6 +150,7 @@ class TestLoadPatternDetection:
         assert warnings == []
         assert config is not None
         assert config.repetitive_call_threshold == 4
+        assert config.error_retry_threshold == 2
         assert config.introspection_loop_threshold == 3
         assert config.max_reads_before_action == 8
         assert config.max_turn_duration_seconds == 60.0

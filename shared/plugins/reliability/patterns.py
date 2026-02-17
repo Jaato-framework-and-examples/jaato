@@ -518,9 +518,13 @@ class PatternDetector:
         )
 
     def _check_error_retry_loop(self, tool_name: str) -> Optional[BehavioralPattern]:
-        """Check for retrying same failing operation unchanged."""
-        # Look for consecutive failures of the same tool with similar args
-        threshold = 3
+        """Check for retrying same failing operation unchanged.
+
+        Detects consecutive failures of the same tool with similar arguments.
+        The threshold is configurable via ``error_retry_threshold`` in
+        ``PatternDetectionConfig`` (default: 3).
+        """
+        threshold = self._config.error_retry_threshold
 
         recent_failures: List[ToolCall] = []
         for call in reversed(self._turn_history):
