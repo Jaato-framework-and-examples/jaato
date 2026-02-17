@@ -18,6 +18,7 @@ from .types import (
     FailureKey,
     FailureRecord,
     FailureSeverity,
+    PrerequisitePolicy,
     ReliabilityConfig,
     ToolReliabilityState,
     TrustState,
@@ -49,6 +50,12 @@ from .persistence import (
 )
 from .patterns import PatternDetector
 from .nudge import NudgeInjector, NudgeStrategy
+from .policy_config import (
+    generate_default_config_safe,
+    get_default_policy_config_path,
+    load_policy_config,
+    resolve_policy_config_path,
+)
 
 __all__ = [
     # Plugin
@@ -86,6 +93,8 @@ __all__ = [
     "UserReliabilityData",
     # Pattern detection
     "PatternDetector",
+    # Prerequisite policies
+    "PrerequisitePolicy",
     # Nudge injection
     "Nudge",
     "NudgeConfig",
@@ -93,4 +102,9 @@ __all__ = [
     "NudgeLevel",
     "NudgeStrategy",
     "NudgeType",
+    # Policy config file
+    "generate_default_config_safe",
+    "get_default_policy_config_path",
+    "load_policy_config",
+    "resolve_policy_config_path",
 ]

@@ -1,7 +1,11 @@
 """Reliability plugin for tracking tool failures and adaptive trust."""
 
 import logging
+import os
+import subprocess
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..base import (
@@ -30,6 +34,7 @@ from .types import (
     NudgeLevel,
     NudgeType,
     PatternDetectionConfig,
+    PrerequisitePolicy,
     ReliabilityConfig,
     ToolReliabilityState,
     TrustState,
@@ -42,6 +47,12 @@ from .persistence import (
 )
 from .patterns import PatternDetector
 from .nudge import NudgeInjector, NudgeStrategy
+from .policy_config import (
+    generate_default_config_safe,
+    get_default_policy_config_path,
+    load_policy_config,
+    resolve_policy_config_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +110,11 @@ class ReliabilityPlugin:
         self._pattern_detector: Optional[PatternDetector] = None
         # on_pattern_detected: (pattern) -> None
         self._on_pattern_detected: Optional[Callable[[BehavioralPattern], None]] = None
+
+        # File-based prerequisite policies (loaded from reliability-policies.json).
+        # Tracked separately so they can be unregistered on reload.
+        self._file_policies: List[PrerequisitePolicy] = []
+        self._file_policy_warnings: List[str] = []
 
         # Nudge injection
         self._nudge_config = NudgeConfig()
@@ -209,6 +225,7 @@ class ReliabilityPlugin:
                 CommandCompletion("settings", "Show or save settings"),
                 CommandCompletion("model", "Model-specific reliability tracking"),
                 CommandCompletion("patterns", "Behavioral pattern detection"),
+                CommandCompletion("policies", "Manage file-based prerequisite policies"),
                 CommandCompletion("nudge", "Nudge injection settings"),
                 CommandCompletion("behavior", "Model behavioral profiles"),
             ]
@@ -258,6 +275,13 @@ class ReliabilityPlugin:
                     CommandCompletion("direct", "Gentle + direct instructions"),
                     CommandCompletion("full", "All nudges including interrupts"),
                     CommandCompletion("history", "Show nudge history"),
+                ]
+            elif subcommand == "policies":
+                return [
+                    CommandCompletion("status", "Show loaded file-based policies"),
+                    CommandCompletion("reload", "Reload policies from config file"),
+                    CommandCompletion("edit", "Open config file in external editor"),
+                    CommandCompletion("path", "Show config file path"),
                 ]
             elif subcommand == "behavior":
                 return [
@@ -327,10 +351,18 @@ class ReliabilityPlugin:
         return None  # No special instructions needed
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the plugin."""
-        if config:
-            # Could load config overrides here
-            pass
+        """Initialize the plugin.
+
+        Loads file-based policies from ``reliability-policies.json`` if
+        the config file exists at the workspace or user level.
+        """
+        count, warnings = self.load_file_policies()
+        if count > 0:
+            logger.info(
+                "Loaded %d prerequisite policies from reliability-policies.json", count
+            )
+        for w in warnings:
+            logger.warning("reliability-policies.json: %s", w)
         logger.info("Reliability plugin initialized")
 
     def shutdown(self) -> None:
@@ -420,6 +452,9 @@ class ReliabilityPlugin:
             self._config.enable_auto_recovery = recovery_mode == "auto"
 
         logger.info(f"Loaded {len(persisted_states)} tool states and {len(persisted_history)} history records")
+
+        # Reload file-based policies now that workspace path is known
+        self.load_file_policies()
 
     def set_output_callback(self, callback: OutputCallback) -> None:
         """Set callback for output messages."""
@@ -553,6 +588,75 @@ class ReliabilityPlugin:
         """
         for policy in policies:
             self.register_prerequisite_policy(policy)
+
+    # -------------------------------------------------------------------------
+    # File-based Policy Configuration
+    # -------------------------------------------------------------------------
+
+    def load_file_policies(self) -> Tuple[int, List[str]]:
+        """Load policies from the ``reliability-policies.json`` config file.
+
+        Reads ``pattern_detection`` overrides and ``prerequisite_policies``
+        from the JSON file, applies any pattern-detection config changes,
+        and registers file-defined prerequisite policies with the detector.
+
+        Previously loaded file policies are unregistered first so that
+        ``reload`` is safe to call repeatedly.
+
+        Returns:
+            A 2-tuple of (number of policies loaded, list of warnings).
+        """
+        self._unregister_file_policies()
+
+        config, policies, warnings = load_policy_config(self._workspace_path)
+
+        # Apply pattern detection config overrides
+        if config is not None:
+            self.set_pattern_detection_config(config)
+
+        # Register file-based prerequisite policies
+        self._file_policies = policies
+        self._file_policy_warnings = warnings
+        for policy in policies:
+            self.register_prerequisite_policy(policy)
+
+        if policies:
+            logger.info("Loaded %d prerequisite policies from config file", len(policies))
+
+        return len(policies), warnings
+
+    def _unregister_file_policies(self) -> None:
+        """Remove previously loaded file-based policies from the detector.
+
+        Clears the ``_file_policies`` list and removes each policy from
+        the detector's internal registries so that a subsequent
+        ``load_file_policies`` starts fresh.
+        """
+        if not self._file_policies:
+            return
+
+        if self._pattern_detector:
+            for policy in self._file_policies:
+                pid = policy.policy_id
+                self._pattern_detector._prerequisite_policies.pop(pid, None)
+                # Clean up gated tool reverse index
+                for tool in policy.gated_tools:
+                    plist = self._pattern_detector._gated_tool_to_policies.get(tool, [])
+                    self._pattern_detector._gated_tool_to_policies[tool] = [
+                        p for p in plist if p.policy_id != pid
+                    ]
+
+        # Also remove from the queued policies list (if pattern detection
+        # hasn't been enabled yet)
+        if hasattr(self, '_queued_policies'):
+            old_ids = {p.policy_id for p in self._file_policies}
+            self._queued_policies = [
+                p for p in self._queued_policies
+                if p.policy_id not in old_ids
+            ]
+
+        self._file_policies = []
+        self._file_policy_warnings = []
 
     def _handle_pattern_detected(self, pattern: BehavioralPattern) -> None:
         """Internal handler for detected patterns. Triggers nudges and user callback."""
@@ -1849,10 +1953,16 @@ class ReliabilityPlugin:
             return self._cmd_patterns(args)
         elif subcommand == "nudge":
             return self._cmd_nudge(args)
+        elif subcommand == "policies":
+            return self._cmd_policies(args)
         elif subcommand == "behavior":
             return self._cmd_behavior(args)
         else:
-            return f"Unknown subcommand: {subcommand}\nUse: status, recovery, reset, history, config, settings, model, patterns, nudge, behavior"
+            return (
+                f"Unknown subcommand: {subcommand}\n"
+                "Use: status, recovery, reset, history, config, settings, "
+                "model, patterns, policies, nudge, behavior"
+            )
 
     def _cmd_status(self, args: str) -> str:
         """Show reliability status."""
@@ -2292,6 +2402,154 @@ class ReliabilityPlugin:
             lines.append("")
 
         return "\n".join(lines)
+
+    # -------------------------------------------------------------------------
+    # File-based Policy Commands
+    # -------------------------------------------------------------------------
+
+    def _cmd_policies(self, args: str) -> str:
+        """Handle file-based policy management commands.
+
+        Subcommands:
+            status  — show loaded file-based policies and config file location
+            reload  — re-read policies from the config file
+            edit    — open the config file in ``$EDITOR``
+            path    — print the resolved config file path
+        """
+        parts = args.strip().lower().split() if args else []
+
+        if not parts or parts[0] == "status":
+            return self._policies_status()
+        elif parts[0] == "reload":
+            return self._policies_reload()
+        elif parts[0] == "edit":
+            return self._policies_edit()
+        elif parts[0] == "path":
+            return self._policies_path()
+        else:
+            return (
+                f"Unknown policies subcommand: {parts[0]}\n"
+                "Usage: reliability policies [status|reload|edit|path]"
+            )
+
+    def _policies_status(self) -> str:
+        """Show loaded file-based policies and config file location."""
+        config_path = resolve_policy_config_path(self._workspace_path)
+
+        lines = [
+            "File-based Policy Configuration",
+            "-" * 60,
+            f"  Config file: {config_path or '(not found)'}",
+            f"  Loaded policies: {len(self._file_policies)}",
+        ]
+
+        if self._file_policy_warnings:
+            lines.append("")
+            lines.append("  Warnings:")
+            for w in self._file_policy_warnings:
+                lines.append(f"    - {w}")
+
+        if self._file_policies:
+            lines.append("")
+            lines.append("  Active prerequisite policies:")
+            for policy in self._file_policies:
+                lines.append(f"    [{policy.policy_id}]")
+                lines.append(f"      Prerequisite: {policy.prerequisite_tool}")
+                lines.append(f"      Gated tools: {', '.join(sorted(policy.gated_tools))}")
+                lines.append(f"      Lookback: {policy.lookback_turns} turns")
+                nudge_sevs = ", ".join(s.value for s in sorted(policy.nudge_templates, key=lambda s: s.value))
+                if nudge_sevs:
+                    lines.append(f"      Nudge levels: {nudge_sevs}")
+
+        # Also show pattern detection overrides if loaded from file
+        if config_path:
+            config, _, _ = load_policy_config(self._workspace_path)
+            if config is not None:
+                lines.append("")
+                lines.append("  Pattern detection overrides (from file):")
+                lines.append(f"    Repetitive call threshold: {config.repetitive_call_threshold}")
+                lines.append(f"    Introspection loop threshold: {config.introspection_loop_threshold}")
+                lines.append(f"    Max reads before action: {config.max_reads_before_action}")
+
+        lines.append("-" * 60)
+
+        default_path = get_default_policy_config_path(self._workspace_path)
+        if not config_path:
+            lines.append(
+                f"  Tip: create {default_path} or use 'reliability policies edit'"
+            )
+
+        return "\n".join(lines)
+
+    def _policies_reload(self) -> str:
+        """Reload policies from the config file."""
+        count, warnings = self.load_file_policies()
+
+        lines = []
+        config_path = resolve_policy_config_path(self._workspace_path)
+
+        if config_path is None:
+            return "No reliability-policies.json found. Use 'reliability policies edit' to create one."
+
+        lines.append(f"Reloaded from {config_path}")
+        lines.append(f"  Prerequisite policies loaded: {count}")
+
+        if warnings:
+            lines.append("")
+            lines.append("  Warnings:")
+            for w in warnings:
+                lines.append(f"    - {w}")
+
+        if count > 0:
+            lines.append("")
+            for policy in self._file_policies:
+                lines.append(f"  [{policy.policy_id}] {policy.prerequisite_tool} -> {', '.join(sorted(policy.gated_tools))}")
+
+        return "\n".join(lines)
+
+    def _policies_edit(self) -> str:
+        """Open the policy config file in the user's external editor.
+
+        If no config file exists, creates one with annotated defaults
+        so the user has a starting point. After the editor exits, the
+        file is validated and policies are reloaded automatically.
+        """
+        config_path = resolve_policy_config_path(self._workspace_path)
+        if config_path is None:
+            # Create a new file with defaults
+            config_path = get_default_policy_config_path(self._workspace_path)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(generate_default_config_safe(), encoding="utf-8")
+
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+
+        try:
+            result = subprocess.run([editor, str(config_path)], check=False)
+        except FileNotFoundError:
+            return f"Editor not found: {editor}\nSet $EDITOR or $VISUAL to your preferred editor."
+        except OSError as exc:
+            return f"Failed to launch editor: {exc}"
+
+        if result.returncode != 0:
+            return f"Editor exited with code {result.returncode}; policies NOT reloaded."
+
+        # Validate and reload after editing
+        return self._policies_reload()
+
+    def _policies_path(self) -> str:
+        """Show the resolved config file path."""
+        config_path = resolve_policy_config_path(self._workspace_path)
+        default_path = get_default_policy_config_path(self._workspace_path)
+
+        if config_path:
+            return f"Active config file: {config_path}"
+
+        return (
+            f"No config file found.\n"
+            f"  Workspace: {Path(self._workspace_path) / '.jaato' / 'reliability-policies.json' if self._workspace_path else '(no workspace)'}\n"
+            f"  User: {Path.home() / '.jaato' / 'reliability-policies.json'}\n"
+            f"\nUse 'reliability policies edit' to create one at:\n  {default_path}"
+        )
 
     def _cmd_nudge(self, args: str) -> str:
         """Handle nudge injection commands."""
