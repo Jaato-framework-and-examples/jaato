@@ -141,6 +141,7 @@ DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
     PermissionResponseOption("once", "once", "Allow once without remembering", ChannelDecision.ALLOW_ONCE),
     PermissionResponseOption("never", "never", "Deny and blacklist for session", ChannelDecision.DENY_SESSION),
     PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
+    PermissionResponseOption("c", "comment", "Deny with feedback the model sees", ChannelDecision.COMMENT),
 ]
 
 # Edit option - added conditionally for tools with editable content
@@ -631,6 +632,7 @@ class ConsoleChannel(Channel):
             ChannelDecision.ALLOW_ALL: "",   # No special color
             ChannelDecision.ALLOW_TURN: self.ANSI_CYAN,  # Same as session-level
             ChannelDecision.ALLOW_UNTIL_IDLE: self.ANSI_CYAN,  # Same as session-level
+            ChannelDecision.COMMENT: self.ANSI_YELLOW,  # Deny-adjacent
         }
 
         parts = ["Options: "]
