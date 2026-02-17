@@ -29,6 +29,11 @@ Schema
           "prerequisite_tool": "createPlan",
           "gated_tools": ["updateStep"],
           "lookback_turns": 5,
+          "severity_thresholds": {
+            "minor": 0,
+            "moderate": 1,
+            "severe": 2
+          },
           "nudge_templates": {
             "minor": ["direct", "Call createPlan before updateStep."],
             "moderate": ["direct", "You MUST createPlan before updateStep (violation #{count})."],
@@ -177,6 +182,11 @@ def generate_default_config() -> str:
                 "prerequisite_tool": "createPlan",
                 "gated_tools": ["updateStep"],
                 "lookback_turns": 5,
+                "severity_thresholds": {
+                    "minor": 0,
+                    "moderate": 1,
+                    "severe": 2,
+                },
                 "nudge_templates": {
                     "minor": ["direct", "Call {prerequisite_tool} before using {tool_name}."],
                     "moderate": ["direct", "You MUST call {prerequisite_tool} before {tool_name} (violation #{count})."],
@@ -213,6 +223,11 @@ def generate_default_config_safe() -> str:
                 "prerequisite_tool": "createPlan",
                 "gated_tools": ["updateStep"],
                 "lookback_turns": 5,
+                "severity_thresholds": {
+                    "minor": 0,
+                    "moderate": 1,
+                    "severe": 2,
+                },
                 "nudge_templates": {
                     "minor": ["direct", "Call {prerequisite_tool} before using {tool_name}."],
                     "moderate": ["direct", "You MUST call {prerequisite_tool} before {tool_name} (violation #{count})."],
@@ -357,6 +372,29 @@ def _parse_single_policy(
         warnings.append(f"{prefix}: 'expected_action_template' must be a string; using default")
         expected_action_template = "Call {prerequisite_tool} before using {tool_name}"
 
+    # Severity thresholds — maps severity name to violation count
+    severity_thresholds: Dict[PatternSeverity, int] = {}
+    raw_thresholds = entry.get("severity_thresholds")
+    if raw_thresholds is not None:
+        if isinstance(raw_thresholds, dict):
+            for sev_key, count in raw_thresholds.items():
+                severity = _SEVERITY_MAP.get(sev_key.lower())
+                if severity is None:
+                    warnings.append(
+                        f"{prefix}.severity_thresholds: unknown severity '{sev_key}'; "
+                        f"expected one of: {', '.join(_SEVERITY_MAP)}"
+                    )
+                    continue
+                if not isinstance(count, int) or count < 0:
+                    warnings.append(
+                        f"{prefix}.severity_thresholds.{sev_key}: "
+                        f"must be a non-negative integer; got {count!r}"
+                    )
+                    continue
+                severity_thresholds[severity] = count
+        else:
+            warnings.append(f"{prefix}: 'severity_thresholds' must be an object")
+
     # Nudge templates
     nudge_templates: Dict[PatternSeverity, Tuple[NudgeType, str]] = {}
     raw_nudge = entry.get("nudge_templates")
@@ -400,6 +438,7 @@ def _parse_single_policy(
         prerequisite_tool=prerequisite_tool,
         gated_tools=gated_tools,
         lookback_turns=lookback_turns,
+        severity_thresholds=severity_thresholds,
         nudge_templates=nudge_templates,
         expected_action_template=expected_action_template,
         owner_plugin="policy_config",

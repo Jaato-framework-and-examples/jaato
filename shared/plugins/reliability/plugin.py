@@ -2457,6 +2457,9 @@ class ReliabilityPlugin:
                 lines.append(f"      Prerequisite: {policy.prerequisite_tool}")
                 lines.append(f"      Gated tools: {', '.join(sorted(policy.gated_tools))}")
                 lines.append(f"      Lookback: {policy.lookback_turns} turns")
+                thresholds = policy.severity_thresholds or policy._DEFAULT_SEVERITY_THRESHOLDS
+                thresh_parts = [f"{s.value}@{n}" for s, n in sorted(thresholds.items(), key=lambda x: x[1])]
+                lines.append(f"      Severity escalation: {', '.join(thresh_parts)}")
                 nudge_sevs = ", ".join(s.value for s in sorted(policy.nudge_templates, key=lambda s: s.value))
                 if nudge_sevs:
                     lines.append(f"      Nudge levels: {nudge_sevs}")
