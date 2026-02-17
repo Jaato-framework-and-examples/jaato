@@ -12,7 +12,6 @@ sys.path.insert(0, str(_repo_root / "jaato-tui"))
 
 from clipboard.osc52 import (
     OSC52_MAX_BYTES,
-    OSC52_TMUX_MAX_BYTES,
     OSC52_SCREEN_MAX_BYTES,
     _truncate_utf8_safe,
     OSC52Provider,
@@ -121,15 +120,16 @@ class TestBufferSizeCalculation:
         # This would exceed the limit!
         assert len(encoded) > OSC52_MAX_BYTES
 
-    def test_tmux_uses_conservative_limit(self):
-        """Tmux uses a conservative 16KB limit to avoid display corruption."""
-        # tmux passthrough is fragile - large sequences cause terminal parsing failures
-        max_text_bytes = (OSC52_TMUX_MAX_BYTES // 4) * 3
+    def test_tmux_uses_standard_limit(self):
+        """Tmux uses the standard limit — no DCS passthrough needed.
+
+        tmux natively intercepts OSC 52 via set-clipboard, so we send
+        raw sequences without DCS wrapping and can use the full limit.
+        """
+        max_text_bytes = (OSC52_MAX_BYTES // 4) * 3
         text = "a" * max_text_bytes
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        assert len(encoded) <= OSC52_TMUX_MAX_BYTES
-        # Verify it's much smaller than the standard limit
-        assert OSC52_TMUX_MAX_BYTES < OSC52_MAX_BYTES / 4
+        assert len(encoded) <= OSC52_MAX_BYTES
 
     def test_screen_uses_conservative_limit(self):
         """Screen uses a conservative limit similar to tmux."""
@@ -169,6 +169,96 @@ class TestOSC52Provider:
         monkeypatch.setenv("TERM", "screen-256color")
         provider = OSC52Provider()
         assert provider.name == "OSC 52 (screen)"
+
+    def test_tmux_not_detected_as_screen(self, monkeypatch):
+        """When TMUX is set and TERM=screen, detect as tmux not screen.
+
+        tmux typically sets TERM=screen or TERM=screen-256color, but when
+        TMUX env var is present, it's tmux — not GNU screen.
+        """
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+        monkeypatch.setenv("TERM", "screen-256color")
+        provider = OSC52Provider()
+        assert provider._in_tmux is True
+        assert provider._in_screen is False
+        assert provider.name == "OSC 52 (tmux)"
+
+    def test_tmux_sends_raw_osc52(self, monkeypatch):
+        """In tmux, OSC 52 is sent raw without DCS passthrough wrapping.
+
+        tmux natively intercepts OSC 52 via set-clipboard, so DCS
+        passthrough wrapping is unnecessary and imposes size limits.
+        """
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+        monkeypatch.setenv("TERM", "screen-256color")
+
+        provider = OSC52Provider()
+
+        written_data = []
+
+        def mock_open(path, mode="r", *args, **kwargs):
+            if path == "/dev/tty":
+                from io import StringIO
+
+                class MockTTY(StringIO):
+                    def write(self, data):
+                        written_data.append(data)
+                        return len(data)
+
+                    def flush(self):
+                        pass
+
+                return MockTTY()
+            raise OSError("unexpected open")
+
+        monkeypatch.setattr("builtins.open", mock_open)
+
+        provider.copy("hello")
+        assert len(written_data) == 1
+        seq = written_data[0]
+
+        # Must be raw OSC 52, NOT wrapped in DCS passthrough
+        assert seq.startswith("\x1b]52;c;")
+        assert seq.endswith("\x1b\\")
+        # Must NOT contain DCS passthrough markers
+        assert "\x1bPtmux;" not in seq
+
+    def test_tmux_large_text_uses_full_limit(self, monkeypatch):
+        """In tmux, large text uses the standard limit, not a conservative one."""
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+        monkeypatch.setenv("TERM", "screen-256color")
+
+        provider = OSC52Provider()
+
+        written_data = []
+
+        def mock_open(path, mode="r", *args, **kwargs):
+            if path == "/dev/tty":
+                from io import StringIO
+
+                class MockTTY(StringIO):
+                    def write(self, data):
+                        written_data.append(data)
+                        return len(data)
+
+                    def flush(self):
+                        pass
+
+                return MockTTY()
+            raise OSError("unexpected open")
+
+        monkeypatch.setattr("builtins.open", mock_open)
+
+        # 20KB of text — would have been truncated by the old 16KB (base64) limit
+        large_text = "x" * 20000
+        provider.copy(large_text)
+        assert len(written_data) == 1
+
+        seq = written_data[0]
+        base64_part = seq[7:-2]  # Remove \x1b]52;c; prefix and \x1b\ suffix
+        decoded = base64.b64decode(base64_part).decode("utf-8")
+        # All 20KB should be preserved (well under the 56KB standard limit)
+        assert decoded == large_text
 
     def test_large_text_truncated_correctly(self, monkeypatch, tmp_path):
         """Large text is truncated without buffer overflow."""
