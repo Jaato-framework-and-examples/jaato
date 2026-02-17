@@ -5,6 +5,9 @@ for each tool+parameters combination. When failures exceed thresholds,
 tools are escalated to require explicit user approval.
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 from .plugin import (
     ReliabilityPlugin,
     ReliabilityPermissionWrapper,
