@@ -447,11 +447,15 @@ class WorkspacePanel:
         count = self.file_count
         title = f"Workspace ({count} file{'s' if count != 1 else ''} created/modified)"
 
+        border = self._style("workspace_popup_border") or "blue"
+        bg = self._style("workspace_popup_background")
+
         if not self._files:
             return Panel(
                 Text("No file changes in this session", style="dim"),
                 title=f"[bold]{title}[/bold]",
-                border_style="blue",
+                border_style=border,
+                style=bg,
                 width=width,
             )
 
@@ -493,7 +497,7 @@ class WorkspacePanel:
             if entry["is_dir"]:
                 # Directory line
                 marker = "▸ " if entry["collapsed"] else "▾ " if entry.get("dir_path") else "  "
-                dir_style = "bold" if is_cursor else ""
+                dir_style = "reverse bold" if is_cursor else ""
                 line.append(f" {indent}{marker}{entry['name']}/", style=dir_style)
             else:
                 # File line
@@ -563,6 +567,7 @@ class WorkspacePanel:
         return Panel(
             Group(*elements),
             title=f"[bold]{title}[/bold]",
-            border_style="blue",
+            border_style=border,
+            style=bg,
             width=width,
         )

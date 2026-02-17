@@ -443,6 +443,10 @@ DEFAULT_SEMANTIC_STYLES = {
     "budget_gc_partial": StyleSpec(fg="#5f87ff"),  # Blue
     "budget_gc_ephemeral": StyleSpec(dim=True),
 
+    # Workspace panel
+    "workspace_popup_border": StyleSpec(fg="primary"),
+    "workspace_popup_background": StyleSpec(bg="background"),
+
     # Tool output popup
     "tool_output_popup_border": StyleSpec(fg="#5fafaf"),  # Teal/cyan
     "tool_output_popup_background": StyleSpec(fg="text", bg="background"),
