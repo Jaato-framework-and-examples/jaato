@@ -84,6 +84,11 @@ class SandboxManagerPlugin:
         # Paths added via add_path_programmatic() before workspace/session
         # were available.  Each entry is (path, access).
         self._pending_programmatic_paths: List[tuple] = []
+        # Optional callback invoked when the set of readwrite-allowed paths
+        # changes (after ``_sync_to_registry``).  The callback receives a
+        # list of absolute paths that currently have readwrite access.
+        # Used by the workspace monitor to start/stop watching sandbox dirs.
+        self._on_readwrite_paths_changed: Optional[Callable[[List[str]], None]] = None
 
     @property
     def name(self) -> str:
@@ -119,6 +124,25 @@ class SandboxManagerPlugin:
         self._config = None
         self._pending_programmatic_paths.clear()
         self._initialized = False
+
+    def set_on_readwrite_paths_changed(
+        self,
+        callback: Optional[Callable[[List[str]], None]],
+    ) -> None:
+        """Register a callback for when readwrite sandbox paths change.
+
+        The callback receives a list of absolute paths that currently have
+        readwrite access.  It is invoked after each ``sandbox add`` or
+        ``sandbox remove`` command, as well as after config reloads.
+
+        Used by the session manager to update the workspace monitor's set
+        of watched sandbox directories.
+
+        Args:
+            callback: Callable receiving ``List[str]`` of readwrite paths,
+                or ``None`` to clear.
+        """
+        self._on_readwrite_paths_changed = callback
 
     def set_plugin_registry(self, registry) -> None:
         """Receive the plugin registry for authorization management.
@@ -367,7 +391,11 @@ class SandboxManagerPlugin:
         self._pending_programmatic_paths.clear()
 
     def _sync_to_registry(self) -> None:
-        """Sync current config to the plugin registry."""
+        """Sync current config to the plugin registry.
+
+        After syncing, notifies the readwrite-paths-changed callback
+        so that the workspace monitor can update its watched directories.
+        """
         if not self._registry or not self._config:
             return
 
@@ -389,6 +417,35 @@ class SandboxManagerPlugin:
 
         self._trace(f"Synced to registry: {len(self._config.allowed_paths)} allowed, "
                    f"{len(self._config.denied_paths)} denied")
+
+        # Notify the workspace monitor about readwrite path changes
+        self._notify_readwrite_paths_changed()
+
+    def get_readwrite_paths(self) -> List[str]:
+        """Return the list of currently allowed readwrite paths.
+
+        Only includes paths that are not denied at a higher precedence level.
+
+        Returns:
+            List of absolute paths with readwrite access.
+        """
+        if not self._config:
+            return []
+
+        paths = []
+        for entry in self._config.allowed_paths:
+            if entry.access == "readwrite":
+                if not self._is_path_denied_by_higher_precedence(entry.path, entry.source):
+                    paths.append(os.path.normpath(os.path.abspath(entry.path)))
+        return paths
+
+    def _notify_readwrite_paths_changed(self) -> None:
+        """Invoke the readwrite-paths-changed callback if registered."""
+        if self._on_readwrite_paths_changed is not None:
+            try:
+                self._on_readwrite_paths_changed(self.get_readwrite_paths())
+            except Exception as e:
+                self._trace(f"Error in on_readwrite_paths_changed callback: {e}")
 
     def _is_path_denied_by_higher_precedence(self, path: str, source: str) -> bool:
         """Check if a path is denied by a higher precedence source.

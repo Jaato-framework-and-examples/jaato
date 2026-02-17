@@ -3,6 +3,11 @@
 Tracks filesystem changes within a session's workspace directory, maintaining
 a delta of files created, modified, or deleted since the session was started.
 
+Also supports monitoring additional *sandbox paths* — directories that the
+user has granted readwrite access to via the ``sandbox add readwrite`` command.
+Files within sandbox paths are tracked using **absolute paths** in the
+``tracked`` dict so they don't collide with workspace-relative entries.
+
 Architecture
 ------------
 - On ``start()``, an initial ``os.walk`` seeds the **baseline** set (files that
@@ -13,6 +18,8 @@ Architecture
 - The ``tracked`` dict maps relative paths to a ``FileStatus`` string
   (``"created"``, ``"modified"``, or ``"deleted"``).
 - Only the *delta from baseline* is exposed to clients.
+- Sandbox paths are tracked with absolute path keys in the same ``tracked``
+  dict, distinguishable by their leading ``/``.
 
 Thread-safety
 -------------
@@ -109,38 +116,54 @@ class _ChangeAccumulator:
 
 
 class _EventHandler(FileSystemEventHandler):
-    """Watchdog handler that feeds events into the monitor."""
+    """Watchdog handler that feeds events into the monitor.
 
-    def __init__(self, monitor: "WorkspaceMonitor"):
+    Handles events from both the main workspace watch and sandbox path
+    watches.  The ``sandbox_root`` attribute, when set, tells the monitor
+    that events originate from a sandbox path and should be tracked with
+    absolute paths.
+    """
+
+    def __init__(self, monitor: "WorkspaceMonitor", sandbox_root: Optional[str] = None):
         super().__init__()
         self._monitor = monitor
+        self.sandbox_root = sandbox_root
 
     def on_created(self, event):
         if not event.is_directory:
-            self._monitor._on_fs_event(event.src_path, "created")
+            self._monitor._on_fs_event(event.src_path, "created", sandbox_root=self.sandbox_root)
 
     def on_modified(self, event):
         if not event.is_directory:
-            self._monitor._on_fs_event(event.src_path, "modified")
+            self._monitor._on_fs_event(event.src_path, "modified", sandbox_root=self.sandbox_root)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            self._monitor._on_fs_event(event.src_path, "deleted")
+            self._monitor._on_fs_event(event.src_path, "deleted", sandbox_root=self.sandbox_root)
 
     def on_moved(self, event):
         if not event.is_directory:
-            self._monitor._on_fs_event(event.src_path, "deleted")
-            self._monitor._on_fs_event(event.dest_path, "created")
+            self._monitor._on_fs_event(event.src_path, "deleted", sandbox_root=self.sandbox_root)
+            self._monitor._on_fs_event(event.dest_path, "created", sandbox_root=self.sandbox_root)
 
 
 class WorkspaceMonitor:
     """Monitors a workspace directory and tracks file changes since session start.
 
+    Also monitors additional *sandbox paths* — directories the user has
+    granted readwrite access to.  Files from sandbox paths are tracked in the
+    same ``tracked`` dict but keyed by their **absolute path** (which always
+    starts with ``/``) so they are distinguishable from workspace-relative
+    entries.  Each sandbox path gets its own watchdog schedule on the same
+    observer.
+
     Lifecycle:
         1. ``__init__(workspace_path, on_changed)`` – creates the monitor.
         2. ``start()`` – seeds baseline via ``os.walk``, starts watchdog.
         3. Filesystem events arrive → debounced → ``on_changed`` callback.
-        4. ``stop()`` – tears down watchdog and debounce timer.
+        4. ``add_sandbox_path(path)`` / ``remove_sandbox_path(path)`` – manage
+           additional watched directories at runtime.
+        5. ``stop()`` – tears down watchdog and debounce timer.
 
     The ``tracked`` dict holds only the *session delta*:
     - ``"created"`` – file did not exist in baseline, now exists.
@@ -152,7 +175,8 @@ class WorkspaceMonitor:
 
     Attributes:
         workspace_path: The root directory being monitored.
-        tracked: Current delta dict ``{relative_path: status}``.
+        tracked: Current delta dict ``{path: status}``.  Workspace files use
+            relative paths; sandbox files use absolute paths.
         baseline: Set of relative paths present when the session started.
     """
 
@@ -180,6 +204,11 @@ class WorkspaceMonitor:
         self._observer: Optional[Observer] = None
         self._accumulator = _ChangeAccumulator(on_flush=self._handle_flush)
         self._running = False
+
+        # Sandbox path monitoring: maps absolute sandbox root → baseline set
+        self._sandbox_baselines: Dict[str, Set[str]] = {}
+        # Maps absolute sandbox root → watchdog ObservedWatch handle
+        self._sandbox_watches: Dict[str, object] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -218,15 +247,165 @@ class WorkspaceMonitor:
             len(self.baseline),
         )
 
+        # Schedule watches for any sandbox paths that were added before start().
+        for sandbox_path, baseline in list(self._sandbox_baselines.items()):
+            if sandbox_path not in self._sandbox_watches:
+                sb_handler = _EventHandler(self, sandbox_root=sandbox_path)
+                try:
+                    watch = self._observer.schedule(sb_handler, sandbox_path, recursive=True)
+                    self._sandbox_watches[sandbox_path] = watch
+                    logger.info(
+                        "Sandbox path watch started (deferred): %s (%d baseline files)",
+                        sandbox_path, len(baseline),
+                    )
+                except Exception:
+                    logger.exception("Failed to schedule deferred sandbox watch for %s", sandbox_path)
+
     def stop(self) -> None:
-        """Stop watching and release resources."""
+        """Stop watching and release resources.
+
+        Stops the main workspace watch and all sandbox watches.
+        """
         self._running = False
         self._accumulator.cancel()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
             self._observer = None
+        self._sandbox_watches.clear()
+        self._sandbox_baselines.clear()
         logger.info("Workspace monitor stopped: %s", self.workspace_path)
+
+    # ------------------------------------------------------------------
+    # Sandbox path management
+    # ------------------------------------------------------------------
+
+    def add_sandbox_path(self, abs_path: str) -> None:
+        """Start watching a sandbox path for file changes.
+
+        Sandbox paths are directories outside the workspace that the user
+        has granted readwrite access to.  Files within them are tracked
+        using absolute paths in the ``tracked`` dict.
+
+        Safe to call before ``start()`` — the watch will be deferred until
+        the observer is running.  Calling with an already-watched path
+        is a no-op.
+
+        Args:
+            abs_path: Absolute path to the directory to monitor.
+        """
+        abs_path = os.path.abspath(abs_path)
+
+        # Skip if same as workspace (already watched)
+        if os.path.realpath(abs_path) == os.path.realpath(self.workspace_path):
+            return
+
+        # Skip if already watched
+        if abs_path in self._sandbox_watches:
+            return
+
+        if not os.path.isdir(abs_path):
+            logger.warning("Sandbox path does not exist or is not a directory: %s", abs_path)
+            return
+
+        # Seed baseline for this sandbox path
+        sandbox_baseline: Set[str] = set()
+        for dirpath, dirnames, filenames in os.walk(abs_path):
+            # Skip hidden directories by default for sandbox paths
+            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            for fname in filenames:
+                if not fname.startswith('.'):
+                    full = os.path.join(dirpath, fname)
+                    sandbox_baseline.add(full)
+
+        with self._lock:
+            self._sandbox_baselines[abs_path] = sandbox_baseline
+
+        # Schedule watchdog watch if observer is running
+        if self._observer is not None and self._running:
+            handler = _EventHandler(self, sandbox_root=abs_path)
+            try:
+                watch = self._observer.schedule(handler, abs_path, recursive=True)
+                self._sandbox_watches[abs_path] = watch
+                logger.info(
+                    "Sandbox path watch started: %s (%d baseline files)",
+                    abs_path, len(sandbox_baseline),
+                )
+            except Exception:
+                logger.exception("Failed to schedule sandbox watch for %s", abs_path)
+        else:
+            # Observer not running yet — store baseline so it can be
+            # scheduled when start() is called or observer restarts.
+            logger.debug(
+                "Sandbox path queued (observer not running): %s (%d baseline files)",
+                abs_path, len(sandbox_baseline),
+            )
+
+    def remove_sandbox_path(self, abs_path: str) -> None:
+        """Stop watching a sandbox path and remove its tracked entries.
+
+        Args:
+            abs_path: Absolute path of the sandbox directory to stop monitoring.
+        """
+        abs_path = os.path.abspath(abs_path)
+
+        # Unschedule watchdog watch
+        watch = self._sandbox_watches.pop(abs_path, None)
+        if watch is not None and self._observer is not None:
+            try:
+                self._observer.unschedule(watch)
+            except Exception:
+                logger.debug("Failed to unschedule sandbox watch for %s (may already be stopped)", abs_path)
+
+        with self._lock:
+            self._sandbox_baselines.pop(abs_path, None)
+
+            # Remove tracked entries that belong to this sandbox root
+            prefix = abs_path + os.sep
+            to_remove = [
+                key for key in self.tracked
+                if key == abs_path or key.startswith(prefix)
+            ]
+            for key in to_remove:
+                del self.tracked[key]
+
+        if watch is not None:
+            logger.info("Sandbox path watch stopped: %s", abs_path)
+
+    def get_sandbox_paths(self) -> List[str]:
+        """Return the list of currently monitored sandbox paths.
+
+        Returns:
+            List of absolute paths being monitored as sandbox paths.
+        """
+        return list(self._sandbox_baselines.keys())
+
+    def update_sandbox_paths(self, readwrite_paths: List[str]) -> None:
+        """Synchronise the set of watched sandbox paths.
+
+        Adds watches for new paths and removes watches for paths that are
+        no longer in the provided list.  The workspace path itself is always
+        excluded.
+
+        Args:
+            readwrite_paths: Complete list of absolute paths that should be
+                monitored.  Paths not already watched will be added; paths
+                currently watched but absent from this list will be removed.
+        """
+        desired = set()
+        ws_real = os.path.realpath(self.workspace_path)
+        for p in readwrite_paths:
+            p = os.path.abspath(p)
+            if os.path.realpath(p) != ws_real:
+                desired.add(p)
+
+        current = set(self._sandbox_baselines.keys())
+
+        for p in desired - current:
+            self.add_sandbox_path(p)
+
+        for p in current - desired:
+            self.remove_sandbox_path(p)
 
     def get_snapshot(self) -> List[Dict[str, str]]:
         """Return the full current tracked state as a list of change dicts.
@@ -276,6 +455,8 @@ class WorkspaceMonitor:
         Must be called **after** ``start()`` and ``restore()`` so that
         both the watchdog and the persisted state are available.
 
+        Reconciles both workspace files and sandbox-path files.
+
         Returns:
             List of change dicts representing what changed while the
             server was down (may be empty).
@@ -294,8 +475,20 @@ class WorkspaceMonitor:
                     rel = os.path.relpath(full, self.workspace_path)
                     current_files.add(rel)
 
+        # Also scan sandbox paths
+        sandbox_current: Set[str] = set()
+        for sandbox_root in self._sandbox_baselines:
+            if os.path.isdir(sandbox_root):
+                for dirpath, dirnames, filenames in os.walk(sandbox_root):
+                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                    for fname in filenames:
+                        if not fname.startswith('.'):
+                            full = os.path.join(dirpath, fname)
+                            sandbox_current.add(full)
+
         changes: List[Dict[str, str]] = []
         with self._lock:
+            # --- Workspace reconciliation ---
             # Files that exist now but weren't in baseline → might be new.
             for f in current_files - self.baseline:
                 if f not in self.tracked:
@@ -303,9 +496,35 @@ class WorkspaceMonitor:
                     changes.append({"path": f, "status": "created"})
 
             # Files tracked as created/modified but no longer on disk → deleted.
+            # Only check workspace-relative paths (not starting with /)
             for f, status in list(self.tracked.items()):
+                if os.path.isabs(f):
+                    continue  # sandbox entries handled below
                 if status in ("created", "modified") and f not in current_files:
                     if f in self.baseline:
+                        self.tracked[f] = "deleted"
+                        changes.append({"path": f, "status": "deleted"})
+                    else:
+                        del self.tracked[f]
+                        changes.append({"path": f, "status": "deleted"})
+
+            # --- Sandbox reconciliation ---
+            all_sandbox_baseline = set()
+            for bl in self._sandbox_baselines.values():
+                all_sandbox_baseline |= bl
+
+            # New sandbox files not in baseline
+            for f in sandbox_current - all_sandbox_baseline:
+                if f not in self.tracked:
+                    self.tracked[f] = "created"
+                    changes.append({"path": f, "status": "created"})
+
+            # Sandbox files tracked but gone from disk
+            for f, status in list(self.tracked.items()):
+                if not os.path.isabs(f):
+                    continue  # workspace entries handled above
+                if status in ("created", "modified") and f not in sandbox_current:
+                    if f in all_sandbox_baseline:
                         self.tracked[f] = "deleted"
                         changes.append({"path": f, "status": "deleted"})
                     else:
@@ -366,18 +585,35 @@ class WorkspaceMonitor:
             return self._gitignore.is_ignored(p)
         return self._gitignore.is_ignored(p)
 
-    def _on_fs_event(self, abs_path: str, event_type: str) -> None:
+    def _on_fs_event(
+        self,
+        abs_path: str,
+        event_type: str,
+        sandbox_root: Optional[str] = None,
+    ) -> None:
         """Handle a raw filesystem event from watchdog.
 
         Translates the event into the session-delta semantics and feeds
         it into the debounce accumulator.
 
+        For workspace events (``sandbox_root is None``), the tracked key is
+        a path relative to the workspace.  For sandbox events, the tracked
+        key is the **absolute path** of the file.
+
         Args:
             abs_path: Absolute path of the changed file.
             event_type: One of ``"created"``, ``"modified"``, ``"deleted"``.
+            sandbox_root: If set, the event comes from a sandbox path watch
+                and this is the absolute root of that sandbox directory.
         """
         if not self._running:
             return
+
+        if sandbox_root is not None:
+            self._on_sandbox_fs_event(abs_path, event_type, sandbox_root)
+            return
+
+        # --- Workspace event (original logic) ---
 
         # Ignore paths outside workspace (shouldn't happen, but guard).
         try:
@@ -436,6 +672,66 @@ class WorkspaceMonitor:
                 return
 
         self._accumulator.record(rel, new_status)
+
+    def _on_sandbox_fs_event(
+        self,
+        abs_path: str,
+        event_type: str,
+        sandbox_root: str,
+    ) -> None:
+        """Handle a filesystem event from a sandbox path watch.
+
+        Uses the absolute file path as the tracked key.  Baseline for the
+        sandbox root is consulted to determine create vs modify semantics.
+
+        Args:
+            abs_path: Absolute path of the changed file.
+            event_type: One of ``"created"``, ``"modified"``, ``"deleted"``.
+            sandbox_root: Absolute root of the sandbox directory.
+        """
+        # Skip hidden files in sandbox paths
+        basename = os.path.basename(abs_path)
+        if basename.startswith('.'):
+            return
+
+        key = abs_path
+
+        with self._lock:
+            sandbox_baseline = self._sandbox_baselines.get(sandbox_root, set())
+            in_baseline = abs_path in sandbox_baseline
+            current_status = self.tracked.get(key)
+
+            if event_type == "created":
+                new_status = "modified" if in_baseline else "created"
+                self.tracked[key] = new_status
+
+            elif event_type == "modified":
+                if current_status == "created":
+                    new_status = "created"
+                elif in_baseline:
+                    new_status = "modified"
+                elif current_status is None and not in_baseline:
+                    new_status = "created"
+                else:
+                    new_status = current_status or "modified"
+                self.tracked[key] = new_status
+
+            elif event_type == "deleted":
+                if current_status == "created":
+                    del self.tracked[key]
+                    new_status = "deleted"
+                elif in_baseline:
+                    self.tracked[key] = "deleted"
+                    new_status = "deleted"
+                elif current_status is not None:
+                    del self.tracked[key]
+                    new_status = "deleted"
+                else:
+                    return
+            else:
+                return
+
+        self._accumulator.record(key, new_status)
 
     def _handle_flush(self, changes: List[Dict[str, str]]) -> None:
         """Called by the accumulator after the debounce period.
