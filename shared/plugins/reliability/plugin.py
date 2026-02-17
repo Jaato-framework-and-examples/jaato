@@ -213,9 +213,17 @@ class ReliabilityPlugin:
             ),
         ]
 
-    def get_command_completions(self, command_parts: List[str]) -> List[CommandCompletion]:
-        """Provide completions for reliability commands."""
-        if len(command_parts) == 1:
+    def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
+        """Provide completions for reliability commands.
+
+        Args:
+            command: The command name (e.g., "reliability").
+            args: Arguments typed so far after the command name.
+        """
+        if command != "reliability":
+            return []
+
+        if len(args) == 0:
             return [
                 CommandCompletion("status", "Show reliability status for all tools"),
                 CommandCompletion("recovery", "Set recovery mode (auto|ask)"),
@@ -230,8 +238,8 @@ class ReliabilityPlugin:
                 CommandCompletion("behavior", "Model behavioral profiles"),
             ]
 
-        if len(command_parts) == 2:
-            subcommand = command_parts[1]
+        if len(args) == 1:
+            subcommand = args[0]
             if subcommand == "recovery":
                 return [
                     CommandCompletion("auto", "Automatically recover tools after cooldown"),
@@ -290,15 +298,15 @@ class ReliabilityPlugin:
                     CommandCompletion("patterns", "Show pattern breakdown by model"),
                 ]
 
-        if len(command_parts) == 3:
-            subcommand = command_parts[1]
-            if subcommand == "recovery" and command_parts[2] == "save":
+        if len(args) == 2:
+            subcommand = args[0]
+            if subcommand == "recovery" and args[1] == "save":
                 return [
                     CommandCompletion("workspace", "Save to workspace (.jaato/reliability.json)"),
                     CommandCompletion("user", "Save as user default (~/.jaato/reliability.json)"),
                 ]
             elif subcommand == "settings":
-                arg = command_parts[2]
+                arg = args[1]
                 if arg == "save":
                     return [
                         CommandCompletion("workspace", "Save to workspace"),
@@ -310,7 +318,7 @@ class ReliabilityPlugin:
                         CommandCompletion("session", "Clear session overrides"),
                     ]
             elif subcommand == "model":
-                arg = command_parts[2]
+                arg = args[1]
                 if arg == "status":
                     # Return list of tracked models
                     models = set(m for (m, _) in self._model_profiles.keys())
@@ -325,7 +333,7 @@ class ReliabilityPlugin:
                         CommandCompletion("save", "Save strategy setting"),
                     ]
             elif subcommand == "behavior":
-                arg = command_parts[2]
+                arg = args[1]
                 if arg in ("status", "compare", "patterns"):
                     # Return list of tracked behavioral profiles
                     models = set(self._behavioral_profiles.keys())
@@ -336,9 +344,9 @@ class ReliabilityPlugin:
                         for m in sorted(models)
                     ]
 
-        if len(command_parts) == 4:
-            subcommand = command_parts[1]
-            if subcommand == "model" and command_parts[2] in ("suggest", "auto", "disabled") and command_parts[3] == "save":
+        if len(args) == 3:
+            subcommand = args[0]
+            if subcommand == "model" and args[1] in ("suggest", "auto", "disabled") and args[2] == "save":
                 return [
                     CommandCompletion("workspace", "Save to workspace"),
                     CommandCompletion("user", "Save as user default"),
