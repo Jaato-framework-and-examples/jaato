@@ -1125,6 +1125,16 @@ class PermissionPlugin:
             self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
             return True, {'reason': response.reason, 'method': 'idle_suspension'}
 
+        elif decision == ChannelDecision.COMMENT:
+            # Deny with user feedback — the comment text is in response.reason
+            # and will be included in the tool error message so the model sees it
+            self._log_decision(tool_name, args, "deny", f"User comment: {response.reason}")
+            return False, {
+                'reason': f"Tool not executed. User comment: {response.reason}",
+                'method': 'user_comment',
+                'comment': response.reason,
+            }
+
         elif decision == ChannelDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
             return False, {'reason': response.reason, 'method': 'user_denied'}
