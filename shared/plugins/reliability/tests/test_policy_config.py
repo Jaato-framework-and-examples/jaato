@@ -367,6 +367,144 @@ class TestLoadPrerequisitePolicies:
         assert len(warnings) == 1
         assert "must be an array" in warnings[0]
 
+    def test_severity_thresholds_parsed(self, tmp_path):
+        """Parses severity_thresholds into PatternSeverity -> int mapping."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "strict_policy",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "minor": 0,
+                        "moderate": 0,
+                        "severe": 0,
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert warnings == []
+        assert len(policies) == 1
+        thresholds = policies[0].severity_thresholds
+        assert thresholds[PatternSeverity.MINOR] == 0
+        assert thresholds[PatternSeverity.MODERATE] == 0
+        assert thresholds[PatternSeverity.SEVERE] == 0
+
+    def test_severity_thresholds_custom_escalation(self, tmp_path):
+        """Custom thresholds allowing more violations before escalation."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "lenient_policy",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "minor": 0,
+                        "moderate": 3,
+                        "severe": 6,
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert warnings == []
+        thresholds = policies[0].severity_thresholds
+        assert thresholds[PatternSeverity.MINOR] == 0
+        assert thresholds[PatternSeverity.MODERATE] == 3
+        assert thresholds[PatternSeverity.SEVERE] == 6
+
+    def test_severity_thresholds_partial(self, tmp_path):
+        """Only some severities specified — others omitted."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "partial",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "severe": 1,
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert warnings == []
+        thresholds = policies[0].severity_thresholds
+        assert PatternSeverity.SEVERE in thresholds
+        assert PatternSeverity.MINOR not in thresholds
+
+    def test_severity_thresholds_invalid_value_warns(self, tmp_path):
+        """Non-integer threshold value produces a warning."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "bad_threshold",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "minor": "not_a_number",
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert len(policies) == 1
+        assert len(warnings) == 1
+        assert "non-negative integer" in warnings[0]
+        # The invalid entry was skipped
+        assert PatternSeverity.MINOR not in policies[0].severity_thresholds
+
+    def test_severity_thresholds_negative_warns(self, tmp_path):
+        """Negative threshold value produces a warning."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "neg_threshold",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "minor": -1,
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert len(policies) == 1
+        assert len(warnings) == 1
+        assert "non-negative integer" in warnings[0]
+
+    def test_severity_thresholds_unknown_severity_warns(self, tmp_path):
+        """Unknown severity key produces a warning."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "unknown_sev",
+                    "prerequisite_tool": "prep",
+                    "gated_tools": ["action"],
+                    "severity_thresholds": {
+                        "critical": 0,
+                    },
+                }
+            ]
+        }))
+
+        _, policies, warnings = load_policy_config(config_path=config_file)
+        assert len(policies) == 1
+        assert len(warnings) == 1
+        assert "unknown severity" in warnings[0]
+
 
 class TestLoadErrors:
     """Tests for error conditions."""
@@ -724,3 +862,147 @@ class TestPoliciesCompletion:
         assert "reload" in values
         assert "edit" in values
         assert "path" in values
+
+
+class TestGetSeverity:
+    """Tests for PrerequisitePolicy.get_severity() method."""
+
+    def test_default_thresholds(self):
+        """With empty severity_thresholds, uses built-in defaults."""
+        policy = PrerequisitePolicy(
+            policy_id="test",
+            prerequisite_tool="prep",
+            gated_tools={"action"},
+        )
+        assert policy.get_severity(0) == PatternSeverity.MINOR
+        assert policy.get_severity(1) == PatternSeverity.MODERATE
+        assert policy.get_severity(2) == PatternSeverity.SEVERE
+        assert policy.get_severity(10) == PatternSeverity.SEVERE
+
+    def test_immediate_severe(self):
+        """All thresholds at 0 means SEVERE from the first violation."""
+        policy = PrerequisitePolicy(
+            policy_id="strict",
+            prerequisite_tool="prep",
+            gated_tools={"action"},
+            severity_thresholds={
+                PatternSeverity.MINOR: 0,
+                PatternSeverity.MODERATE: 0,
+                PatternSeverity.SEVERE: 0,
+            },
+        )
+        assert policy.get_severity(0) == PatternSeverity.SEVERE
+        assert policy.get_severity(5) == PatternSeverity.SEVERE
+
+    def test_lenient_thresholds(self):
+        """High thresholds allow many violations before escalation."""
+        policy = PrerequisitePolicy(
+            policy_id="lenient",
+            prerequisite_tool="prep",
+            gated_tools={"action"},
+            severity_thresholds={
+                PatternSeverity.MINOR: 0,
+                PatternSeverity.MODERATE: 3,
+                PatternSeverity.SEVERE: 6,
+            },
+        )
+        assert policy.get_severity(0) == PatternSeverity.MINOR
+        assert policy.get_severity(2) == PatternSeverity.MINOR
+        assert policy.get_severity(3) == PatternSeverity.MODERATE
+        assert policy.get_severity(5) == PatternSeverity.MODERATE
+        assert policy.get_severity(6) == PatternSeverity.SEVERE
+        assert policy.get_severity(100) == PatternSeverity.SEVERE
+
+    def test_partial_thresholds_only_severe(self):
+        """Only SEVERE specified — falls back to MINOR for lower counts."""
+        policy = PrerequisitePolicy(
+            policy_id="partial",
+            prerequisite_tool="prep",
+            gated_tools={"action"},
+            severity_thresholds={
+                PatternSeverity.SEVERE: 1,
+            },
+        )
+        # 0 violations: SEVERE threshold (1) not met, MODERATE not defined,
+        # MINOR not defined → falls through to default MINOR
+        assert policy.get_severity(0) == PatternSeverity.MINOR
+        assert policy.get_severity(1) == PatternSeverity.SEVERE
+        assert policy.get_severity(5) == PatternSeverity.SEVERE
+
+
+class TestSeverityThresholdsDetectorIntegration:
+    """Tests that per-policy severity thresholds flow through to the detector."""
+
+    def test_custom_thresholds_affect_detection(self, tmp_path):
+        """Detector uses policy's severity_thresholds, not hardcoded values."""
+        # Create a config with immediate-severe policy
+        config_dir = tmp_path / ".jaato"
+        config_dir.mkdir()
+        config_file = config_dir / "reliability-policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "immediate_block",
+                    "prerequisite_tool": "createPlan",
+                    "gated_tools": ["updateStep"],
+                    "severity_thresholds": {
+                        "minor": 0,
+                        "moderate": 0,
+                        "severe": 0,
+                    },
+                }
+            ]
+        }))
+
+        plugin = ReliabilityPlugin()
+        plugin.enable_pattern_detection(True)
+
+        detected = []
+        plugin.set_pattern_hook(lambda p: detected.append(p))
+        plugin.set_workspace_path(str(tmp_path))
+
+        # First call to updateStep without createPlan
+        plugin.on_turn_start(1)
+        plugin.on_tool_called("updateStep", {})
+
+        assert len(detected) == 1
+        # Because all thresholds are 0, the very first violation is SEVERE
+        assert detected[0].severity == PatternSeverity.SEVERE
+        assert detected[0].policy_id == "immediate_block"
+
+    def test_lenient_thresholds_delay_escalation(self, tmp_path):
+        """Lenient thresholds keep severity low for early violations."""
+        config_dir = tmp_path / ".jaato"
+        config_dir.mkdir()
+        config_file = config_dir / "reliability-policies.json"
+        config_file.write_text(json.dumps({
+            "prerequisite_policies": [
+                {
+                    "policy_id": "lenient",
+                    "prerequisite_tool": "createPlan",
+                    "gated_tools": ["updateStep"],
+                    "severity_thresholds": {
+                        "minor": 0,
+                        "moderate": 5,
+                        "severe": 10,
+                    },
+                }
+            ]
+        }))
+
+        plugin = ReliabilityPlugin()
+        plugin.enable_pattern_detection(True)
+
+        detected = []
+        plugin.set_pattern_hook(lambda p: detected.append(p))
+        plugin.set_workspace_path(str(tmp_path))
+
+        # Simulate multiple violations across turns
+        for turn in range(1, 5):
+            plugin.on_turn_start(turn)
+            plugin.on_tool_called("updateStep", {})
+
+        # All 4 violations should be MINOR (threshold for moderate is 5)
+        assert len(detected) == 4
+        for p in detected:
+            assert p.severity == PatternSeverity.MINOR

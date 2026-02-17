@@ -323,17 +323,14 @@ class PatternDetector:
             if call.tool_name == policy.prerequisite_tool:
                 return None  # Prerequisite satisfied within this turn
 
-        # Determine severity based on how many violations for this specific policy
+        # Determine severity based on how many prior violations for this
+        # specific policy.  Thresholds come from the policy itself so that
+        # each policy can define its own escalation curve.
         violation_count = sum(
             1 for p in self._detected_patterns
             if getattr(p, 'policy_id', None) == policy.policy_id
         )
-        if violation_count >= 2:
-            severity = PatternSeverity.SEVERE
-        elif violation_count >= 1:
-            severity = PatternSeverity.MODERATE
-        else:
-            severity = PatternSeverity.MINOR
+        severity = policy.get_severity(violation_count)
 
         duration = self._calculate_duration()
         expected_action = policy.expected_action_template.format(
