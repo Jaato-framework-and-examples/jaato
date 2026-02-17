@@ -98,6 +98,9 @@
     "tool_unselected": {"dim": true},
     "tool_indicator": {"fg": "primary", "dim": true},
 
+    "workspace_popup_border": {"fg": "primary"},
+    "workspace_popup_background": {"bg": "background"},
+
     "tool_output_popup_border": {"fg": "#8be9fd"},
     "tool_output_popup_background": {"fg": "text", "bg": "background"},
     "tool_output_popup_header": {"fg": "text", "bold": true},
