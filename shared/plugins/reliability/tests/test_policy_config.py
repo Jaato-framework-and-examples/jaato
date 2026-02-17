@@ -925,14 +925,14 @@ class TestPoliciesCompletion:
     def test_level1_includes_policies(self):
         """Top-level completions include 'policies'."""
         plugin = ReliabilityPlugin()
-        completions = plugin.get_command_completions(["reliability"])
+        completions = plugin.get_command_completions("reliability", [])
         values = [c.value for c in completions]
         assert "policies" in values
 
     def test_level2_policies_subcommands(self):
         """Second-level completions for 'policies' include all subcommands."""
         plugin = ReliabilityPlugin()
-        completions = plugin.get_command_completions(["reliability", "policies"])
+        completions = plugin.get_command_completions("reliability", ["policies"])
         values = [c.value for c in completions]
         assert "status" in values
         assert "reload" in values
