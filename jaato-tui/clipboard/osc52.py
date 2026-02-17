@@ -7,13 +7,9 @@ import sys
 # OSC 52 size limit (base64 encoded) - some terminals cap at ~74KB
 OSC52_MAX_BYTES = 74994
 
-# Conservative limit for tmux passthrough to avoid terminal parsing failures.
-# tmux's OSC52 passthrough is fragile with large payloads - the outer terminal
+# Screen DCS passthrough is fragile with large payloads - the outer terminal
 # may fail to parse the sequence and render raw base64 as visible text.
 # 16KB base64 (~12KB text) is a safe practical limit.
-OSC52_TMUX_MAX_BYTES = 16384
-
-# Screen has similar issues
 OSC52_SCREEN_MAX_BYTES = 16384
 
 
@@ -66,11 +62,27 @@ class OSC52Provider:
     tmux (with set-clipboard on), and others.
 
     Note: macOS Terminal.app does not support OSC 52.
+
+    tmux handling:
+        When running inside tmux, we send the raw OSC 52 sequence without
+        DCS passthrough wrapping. tmux natively intercepts OSC 52 via its
+        ``set-clipboard`` option (defaults to ``on`` or ``external`` since
+        tmux 1.8/3.2). tmux stores the content in its paste buffer and
+        re-emits its own OSC 52 to the outer terminal. This avoids the
+        ~12 KB size limit imposed by DCS passthrough fragility and allows
+        copying the same amount of text as a standard terminal (~56 KB).
+
+    screen handling:
+        GNU screen still requires DCS passthrough wrapping with a
+        conservative 16 KB limit, as it lacks native OSC 52 interception.
     """
 
     def __init__(self):
         self._in_tmux = bool(os.environ.get("TMUX"))
-        self._in_screen = "screen" in os.environ.get("TERM", "")
+        # Detect screen, but not when TMUX is also set (tmux sets TERM=screen*)
+        self._in_screen = (
+            not self._in_tmux and "screen" in os.environ.get("TERM", "")
+        )
 
     @property
     def name(self) -> str:
@@ -92,11 +104,11 @@ class OSC52Provider:
         if not text:
             return False
 
-        # Calculate effective limit - use conservative limits for tmux/screen
-        # to avoid terminal parsing failures with large sequences
-        if self._in_tmux:
-            max_encoded = OSC52_TMUX_MAX_BYTES
-        elif self._in_screen:
+        # Calculate effective limit.
+        # tmux: standard limit — tmux handles OSC 52 natively via set-clipboard,
+        #   no DCS passthrough needed, so no fragility-related size constraint.
+        # screen: conservative limit — requires DCS passthrough which is fragile.
+        if self._in_screen:
             max_encoded = OSC52_SCREEN_MAX_BYTES
         else:
             max_encoded = OSC52_MAX_BYTES
@@ -116,13 +128,10 @@ class OSC52Provider:
         # Use ESC \ as terminator for better compatibility
         osc52_seq = f"\x1b]52;c;{encoded}\x1b\\"
 
-        # Wrap for tmux/screen passthrough if needed
-        if self._in_tmux:
-            # tmux passthrough: ESC Ptmux; ESC <seq> ESC \
-            # Double any ESC in the sequence for tmux
-            inner = osc52_seq.replace("\x1b", "\x1b\x1b")
-            osc52_seq = f"\x1bPtmux;{inner}\x1b\\"
-        elif self._in_screen:
+        # Wrap for screen passthrough if needed.
+        # tmux: no wrapping — tmux natively intercepts OSC 52 when
+        #   set-clipboard is on/external and forwards to the outer terminal.
+        if self._in_screen:
             # screen passthrough: ESC P <seq> ESC \
             osc52_seq = f"\x1bP{osc52_seq}\x1b\\"
 
