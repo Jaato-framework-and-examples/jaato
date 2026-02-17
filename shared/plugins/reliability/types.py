@@ -716,13 +716,37 @@ class BehavioralPattern:
 
 @dataclass
 class PatternDetectionConfig:
-    """Configuration for behavioral pattern detection."""
+    """Configuration for behavioral pattern detection.
+
+    Attributes:
+        enabled: Whether pattern detection is active.
+        repetitive_call_threshold: Number of consecutive identical tool calls
+            (regardless of success) before triggering REPETITIVE_CALLS.
+        error_retry_threshold: Default number of consecutive failures of the
+            same tool before triggering ERROR_RETRY_LOOP.
+        error_retry_overrides: Per-tool overrides for error_retry_threshold.
+            Maps tool name to its specific threshold.  Tools not listed here
+            fall back to the global ``error_retry_threshold``.  Example::
+
+                error_retry_overrides={"web_search": 5, "bash": 2}
+
+        introspection_tool_names: Tools considered "introspection" for
+            INTROSPECTION_LOOP detection.
+        introspection_loop_threshold: N introspection calls without action.
+        read_only_tools: Tools that only read (for READ_ONLY_LOOP).
+        action_tools: Tools that perform mutations.
+        max_reads_before_action: N reads without action = stall.
+        max_turn_duration_seconds: Turn taking too long = possible stall.
+        announce_phrases: Phrases that suggest the model is about to act
+            (for ANNOUNCE_NO_ACTION detection).
+    """
 
     enabled: bool = True
 
     # Repetition thresholds
     repetitive_call_threshold: int = 3        # Same tool N times triggers detection
     error_retry_threshold: int = 3            # N consecutive failures before detection
+    error_retry_overrides: Dict[str, int] = field(default_factory=dict)
     introspection_tool_names: Set[str] = field(
         default_factory=lambda: {"list_tools", "get_tool_schemas", "askPermission"}
     )
@@ -753,6 +777,14 @@ class PatternDetectionConfig:
             "making the change",
         ]
     )
+
+    def get_error_retry_threshold(self, tool_name: str) -> int:
+        """Return the error retry threshold for a specific tool.
+
+        Checks ``error_retry_overrides`` first; falls back to the global
+        ``error_retry_threshold``.
+        """
+        return self.error_retry_overrides.get(tool_name, self.error_retry_threshold)
 
 
 # -----------------------------------------------------------------------------

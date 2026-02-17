@@ -129,6 +129,66 @@ class TestLoadPatternDetection:
         assert config is not None
         assert config.error_retry_threshold == 2
 
+    def test_error_retry_overrides_parsed(self, tmp_path):
+        """Parses error_retry_overrides per-tool thresholds."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_overrides": {
+                    "bash": 2,
+                    "web_search": 5,
+                }
+            }
+        }))
+
+        config, _, warnings = load_policy_config(config_path=config_file)
+        assert warnings == []
+        assert config is not None
+        assert config.error_retry_overrides == {"bash": 2, "web_search": 5}
+
+    def test_error_retry_overrides_invalid_value_warns(self, tmp_path):
+        """Non-integer override value produces a warning."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_overrides": {
+                    "bash": "not_a_number",
+                }
+            }
+        }))
+
+        config, _, warnings = load_policy_config(config_path=config_file)
+        assert len(warnings) == 1
+        assert "positive integer" in warnings[0]
+
+    def test_error_retry_overrides_zero_warns(self, tmp_path):
+        """Zero threshold is not valid (must be >= 1)."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_overrides": {
+                    "bash": 0,
+                }
+            }
+        }))
+
+        config, _, warnings = load_policy_config(config_path=config_file)
+        assert len(warnings) == 1
+        assert "positive integer" in warnings[0]
+
+    def test_error_retry_overrides_non_object_warns(self, tmp_path):
+        """Non-object error_retry_overrides produces a warning."""
+        config_file = tmp_path / "policies.json"
+        config_file.write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_overrides": [1, 2, 3]
+            }
+        }))
+
+        config, _, warnings = load_policy_config(config_path=config_file)
+        assert len(warnings) == 1
+        assert "must be an object" in warnings[0]
+
     def test_all_pattern_detection_fields(self, tmp_path):
         """Parses all supported pattern_detection fields."""
         config_file = tmp_path / "policies.json"
