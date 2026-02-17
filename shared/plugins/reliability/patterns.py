@@ -323,17 +323,14 @@ class PatternDetector:
             if call.tool_name == policy.prerequisite_tool:
                 return None  # Prerequisite satisfied within this turn
 
-        # Determine severity based on how many violations for this specific policy
+        # Determine severity based on how many prior violations for this
+        # specific policy.  Thresholds come from the policy itself so that
+        # each policy can define its own escalation curve.
         violation_count = sum(
             1 for p in self._detected_patterns
             if getattr(p, 'policy_id', None) == policy.policy_id
         )
-        if violation_count >= 2:
-            severity = PatternSeverity.SEVERE
-        elif violation_count >= 1:
-            severity = PatternSeverity.MODERATE
-        else:
-            severity = PatternSeverity.MINOR
+        severity = policy.get_severity(violation_count)
 
         duration = self._calculate_duration()
         expected_action = policy.expected_action_template.format(
@@ -521,9 +518,15 @@ class PatternDetector:
         )
 
     def _check_error_retry_loop(self, tool_name: str) -> Optional[BehavioralPattern]:
-        """Check for retrying same failing operation unchanged."""
-        # Look for consecutive failures of the same tool with similar args
-        threshold = 3
+        """Check for retrying same failing operation unchanged.
+
+        Detects consecutive failures of the same tool with similar arguments.
+        The threshold is resolved per-tool via
+        ``PatternDetectionConfig.get_error_retry_threshold(tool_name)``,
+        which checks ``error_retry_overrides`` first, then falls back to
+        the global ``error_retry_threshold`` (default: 3).
+        """
+        threshold = self._config.get_error_retry_threshold(tool_name)
 
         recent_failures: List[ToolCall] = []
         for call in reversed(self._turn_history):

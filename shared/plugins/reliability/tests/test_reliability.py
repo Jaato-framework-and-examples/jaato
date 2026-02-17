@@ -1366,6 +1366,188 @@ class TestPatternDetection:
         assert plugin.get_pattern_detector() is not None
 
 
+class TestErrorRetryLoopDetection:
+    """Tests for configurable error_retry_threshold."""
+
+    @pytest.fixture
+    def plugin(self):
+        plugin = ReliabilityPlugin()
+        plugin.enable_pattern_detection(True)
+        return plugin
+
+    def _fail_tool(self, plugin, tool_name="bash", args=None):
+        """Helper: call a tool and mark it as failed."""
+        args = args or {"command": "broken"}
+        plugin.on_tool_called(tool_name, args)
+        plugin.on_tool_result(tool_name, args, False, {"error": "fail"})
+
+    def _succeed_tool(self, plugin, tool_name="bash", args=None):
+        """Helper: call a tool and mark it as succeeded."""
+        args = args or {"command": "works"}
+        plugin.on_tool_called(tool_name, args)
+        plugin.on_tool_result(tool_name, args, True, "ok")
+
+    def test_default_threshold_three(self, plugin):
+        """Default error_retry_threshold is 3 — first two failures are silent."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        self._fail_tool(plugin)
+        self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 0
+
+    def test_default_threshold_triggers_at_three(self, plugin):
+        """Third consecutive failure triggers ERROR_RETRY_LOOP."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        for _ in range(3):
+            self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+    def test_custom_threshold_via_config(self):
+        """Lower error_retry_threshold triggers earlier."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(error_retry_threshold=2))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        self._fail_tool(plugin)
+        self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+    def test_high_threshold_delays_detection(self):
+        """Higher threshold allows more retries before detection."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(error_retry_threshold=5))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        for _ in range(4):
+            self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 0
+
+        # 5th failure triggers it
+        self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+    def test_success_breaks_failure_streak(self, plugin):
+        """A successful call resets the consecutive failure count."""
+        from ..types import BehavioralPatternType
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        # 2 failures, 1 success, 2 failures — never reaches 3 consecutive
+        self._fail_tool(plugin)
+        self._fail_tool(plugin)
+        self._succeed_tool(plugin)
+        self._fail_tool(plugin)
+        self._fail_tool(plugin)
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 0
+
+    def test_per_tool_override_stricter(self):
+        """Per-tool override with lower threshold triggers earlier for that tool."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            error_retry_threshold=5,
+            error_retry_overrides={"bash": 2},
+        ))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        # bash overridden to 2 — triggers after 2 failures
+        self._fail_tool(plugin, "bash")
+        self._fail_tool(plugin, "bash")
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+    def test_per_tool_override_lenient(self):
+        """Per-tool override with higher threshold allows more retries for that tool."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            error_retry_threshold=2,
+            error_retry_overrides={"web_search": 5},
+        ))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        # web_search overridden to 5 — 4 failures should NOT trigger
+        for _ in range(4):
+            self._fail_tool(plugin, "web_search", {"query": "test"})
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 0
+
+        # 5th failure triggers it
+        self._fail_tool(plugin, "web_search", {"query": "test"})
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+    def test_override_only_affects_specified_tool(self):
+        """Tools without overrides still use the global threshold."""
+        from ..types import BehavioralPatternType, PatternDetectionConfig
+
+        plugin = ReliabilityPlugin()
+        plugin.set_pattern_detection_config(PatternDetectionConfig(
+            error_retry_threshold=3,
+            error_retry_overrides={"bash": 10},
+        ))
+        plugin.enable_pattern_detection(True)
+
+        patterns = []
+        plugin.set_pattern_hook(lambda p: patterns.append(p))
+
+        plugin.on_turn_start(1)
+        # readFile not overridden — uses global threshold of 3
+        for _ in range(3):
+            self._fail_tool(plugin, "readFile", {"path": "/nope"})
+
+        error_patterns = [p for p in patterns if p.pattern_type == BehavioralPatternType.ERROR_RETRY_LOOP]
+        assert len(error_patterns) == 1
+
+
 class TestTemplatePrerequisiteDetection:
     """Tests for template prerequisite pattern detection.
 
