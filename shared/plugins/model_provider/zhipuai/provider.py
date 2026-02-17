@@ -229,14 +229,26 @@ class ZhipuAIProvider(AnthropicProvider):
         self._trace("[INIT] Initialization complete")
 
     def _create_client(self) -> Any:
-        """Create Anthropic client pointing to Zhipu AI server."""
+        """Create Anthropic client pointing to Zhipu AI server.
+
+        Uses the parent's _create_http_client() to configure proxy and SSL
+        settings (corporate CA certificates, Kerberos auth, standard proxy
+        env vars) so connections work behind corporate proxies.
+        """
         import anthropic
 
         self._trace(f"[_create_client] Creating Anthropic client with base_url={self._base_url}")
-        client = anthropic.Anthropic(
-            base_url=self._base_url,
-            api_key=self._api_key,
-        )
+
+        # Build custom httpx client for proxy/SSL if needed
+        http_client = self._create_http_client()
+        client_kwargs: Dict[str, Any] = {
+            "base_url": self._base_url,
+            "api_key": self._api_key,
+        }
+        if http_client:
+            client_kwargs["http_client"] = http_client
+
+        client = anthropic.Anthropic(**client_kwargs)
         self._trace("[_create_client] Client created successfully")
         return client
 

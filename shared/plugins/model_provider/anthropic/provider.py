@@ -291,12 +291,17 @@ class AnthropicProvider:
         Anthropic SDK create its own default client.
         """
         from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import get_httpx_client, is_kerberos_proxy_enabled
+        from shared.http.proxy import (
+            get_httpx_client,
+            get_proxy_url,
+            is_kerberos_proxy_enabled,
+        )
 
         ca_bundle = active_cert_bundle()
         kerberos_enabled = is_kerberos_proxy_enabled()
+        proxy_url = get_proxy_url()
 
-        if not ca_bundle and not kerberos_enabled:
+        if not ca_bundle and not kerberos_enabled and not proxy_url:
             return None  # Let SDK create its own client with default settings
 
         kwargs = {}
