@@ -273,7 +273,7 @@ class FileEditPlugin:
             return
 
         try:
-            content = gitignore.read_text()
+            content = gitignore.read_text(encoding="utf-8")
             lines = content.splitlines()
 
             # Check if .jaato is already present
@@ -281,7 +281,7 @@ class FileEditPlugin:
                 return
 
             # Add .jaato to gitignore
-            with gitignore.open("a") as f:
+            with gitignore.open("a", encoding="utf-8") as f:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
@@ -783,7 +783,7 @@ will show you a preview and require approval before execution. Backups are autom
             return None
 
         try:
-            old_content = file_path.read_text()
+            old_content = file_path.read_text(encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to read file for update permission display: {path}", exc_info=True)
             display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
@@ -863,7 +863,7 @@ will show you a preview and require approval before execution. Backups are autom
             return None
 
         try:
-            content = file_path.read_text()
+            content = file_path.read_text(encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to read file for delete permission display: {path}", exc_info=True)
             display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
@@ -907,7 +907,7 @@ will show you a preview and require approval before execution. Backups are autom
             return None
 
         try:
-            content = source.read_text()
+            content = source.read_text(encoding="utf-8")
         except OSError as e:
             display_source = ellipsize_path(source_path, DEFAULT_MAX_PATH_WIDTH)
             return PermissionDisplayInfo(
@@ -1010,7 +1010,7 @@ will show you a preview and require approval before execution. Backups are autom
                 return {"error": "limit must be a positive integer"}
 
         try:
-            content = file_path.read_text()
+            content = file_path.read_text(encoding="utf-8")
             all_lines = content.splitlines(keepends=True)
             total_lines = len(all_lines)
 
@@ -1093,7 +1093,7 @@ will show you a preview and require approval before execution. Backups are autom
             epilogue = args.get("epilogue")
 
             try:
-                current_content = file_path.read_text()
+                current_content = file_path.read_text(encoding="utf-8")
             except OSError as e:
                 return {"error": f"Failed to read file: {e}"}
 
@@ -1117,7 +1117,7 @@ will show you a preview and require approval before execution. Backups are autom
             backup_path = self._backup_manager.create_backup(file_path)
 
         try:
-            file_path.write_text(new_content)
+            file_path.write_text(new_content, encoding="utf-8")
             result = {
                 "success": True,
                 "path": normalize_result_path(path),
@@ -1151,7 +1151,7 @@ will show you a preview and require approval before execution. Backups are autom
         try:
             # Create parent directories if needed
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content)
+            file_path.write_text(content, encoding="utf-8")
             return {
                 "success": True,
                 "path": normalize_result_path(path),

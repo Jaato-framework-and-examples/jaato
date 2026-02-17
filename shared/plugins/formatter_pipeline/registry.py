@@ -123,7 +123,7 @@ class FormatterRegistry:
             return False
 
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
                 self._config = data.get("formatters", [])
                 return True
