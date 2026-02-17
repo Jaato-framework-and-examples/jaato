@@ -395,7 +395,11 @@ class IPCClient:
         from dotenv import dotenv_values
 
         # Load client's .env file (without modifying os.environ)
+        # Resolve relative env_file paths against workspace_path (if set),
+        # otherwise against the process cwd (the default Path behaviour).
         env_path = Path(self.env_file)
+        if not env_path.is_absolute() and self.workspace_path:
+            env_path = Path(self.workspace_path) / env_path
         if env_path.exists():
             client_env = dotenv_values(env_path)
         else:
