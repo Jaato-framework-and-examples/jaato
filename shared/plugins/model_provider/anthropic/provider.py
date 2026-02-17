@@ -285,32 +285,32 @@ class AnthropicProvider:
     def _create_http_client(self) -> Optional[Any]:
         """Create a custom httpx client if proxy or SSL configuration is needed.
 
-        Returns an httpx.Client configured with:
+        Only creates a custom client when the SDK's default httpx client
+        can't handle the configuration on its own:
         - Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
         - Kerberos/SPNEGO proxy authentication (via JAATO_KERBEROS_PROXY)
-        - Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY)
+
+        Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY) are handled by the
+        SDK's default client via httpx's trust_env=True, so we do NOT create
+        a custom client just for those - doing so would lose the SDK's default
+        timeout, keepalive, and other transport settings.
 
         Returns None if no custom configuration is needed, letting the
         Anthropic SDK create its own default client.
         """
         from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import (
-            get_httpx_client,
-            get_proxy_url,
-            is_kerberos_proxy_enabled,
-        )
+        from shared.http.proxy import get_httpx_client, is_kerberos_proxy_enabled
 
         ca_bundle = active_cert_bundle()
         kerberos_enabled = is_kerberos_proxy_enabled()
-        proxy_url = get_proxy_url()
 
-        if not ca_bundle and not kerberos_enabled and not proxy_url:
-            self._trace("[_create_http_client] No proxy/SSL config detected, using SDK defaults")
+        if not ca_bundle and not kerberos_enabled:
+            self._trace("[_create_http_client] No CA bundle or Kerberos, using SDK defaults")
             return None  # Let SDK create its own client with default settings
 
         self._trace(
             f"[_create_http_client] Creating custom httpx client: "
-            f"proxy={proxy_url}, ca_bundle={ca_bundle}, kerberos={kerberos_enabled}"
+            f"ca_bundle={ca_bundle}, kerberos={kerberos_enabled}"
         )
 
         kwargs = {}
