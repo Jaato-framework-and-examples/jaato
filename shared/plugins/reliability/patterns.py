@@ -521,10 +521,12 @@ class PatternDetector:
         """Check for retrying same failing operation unchanged.
 
         Detects consecutive failures of the same tool with similar arguments.
-        The threshold is configurable via ``error_retry_threshold`` in
-        ``PatternDetectionConfig`` (default: 3).
+        The threshold is resolved per-tool via
+        ``PatternDetectionConfig.get_error_retry_threshold(tool_name)``,
+        which checks ``error_retry_overrides`` first, then falls back to
+        the global ``error_retry_threshold`` (default: 3).
         """
-        threshold = self._config.error_retry_threshold
+        threshold = self._config.get_error_retry_threshold(tool_name)
 
         recent_failures: List[ToolCall] = []
         for call in reversed(self._turn_history):

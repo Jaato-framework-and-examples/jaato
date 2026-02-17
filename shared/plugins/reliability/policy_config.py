@@ -16,6 +16,7 @@ Schema
       "pattern_detection": {
         "repetitive_call_threshold": 3,
         "error_retry_threshold": 3,
+        "error_retry_overrides": {"web_search": 5, "bash": 2},
         "introspection_loop_threshold": 2,
         "max_reads_before_action": 5,
         "max_turn_duration_seconds": 120.0,
@@ -170,6 +171,7 @@ def generate_default_config() -> str:
         "pattern_detection": {
             "repetitive_call_threshold": 3,
             "error_retry_threshold": 3,
+            "error_retry_overrides": {},
             "introspection_loop_threshold": 2,
             "max_reads_before_action": 5,
             "max_turn_duration_seconds": 120.0,
@@ -212,6 +214,7 @@ def generate_default_config_safe() -> str:
         "pattern_detection": {
             "repetitive_call_threshold": defaults.repetitive_call_threshold,
             "error_retry_threshold": defaults.error_retry_threshold,
+            "error_retry_overrides": dict(defaults.error_retry_overrides),
             "introspection_loop_threshold": defaults.introspection_loop_threshold,
             "max_reads_before_action": defaults.max_reads_before_action,
             "max_turn_duration_seconds": defaults.max_turn_duration_seconds,
@@ -302,6 +305,27 @@ def _parse_pattern_detection(
             kwargs["announce_phrases"] = val
         else:
             warnings.append("'announce_phrases' must be a list of strings")
+
+    if "error_retry_overrides" in section:
+        val = section["error_retry_overrides"]
+        if isinstance(val, dict):
+            overrides: Dict[str, int] = {}
+            for tool_name, count in val.items():
+                if not isinstance(tool_name, str):
+                    warnings.append(
+                        f"'error_retry_overrides': keys must be strings; got {type(tool_name).__name__}"
+                    )
+                    continue
+                if not isinstance(count, int) or count < 1:
+                    warnings.append(
+                        f"'error_retry_overrides.{tool_name}': must be a positive integer; got {count!r}"
+                    )
+                    continue
+                overrides[tool_name] = count
+            if overrides:
+                kwargs["error_retry_overrides"] = overrides
+        else:
+            warnings.append("'error_retry_overrides' must be an object mapping tool names to integers")
 
     if not kwargs:
         return None
