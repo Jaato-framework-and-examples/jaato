@@ -290,29 +290,27 @@ class JaatoServer:
 
     @contextlib.contextmanager
     def _in_workspace(self):
-        """Context manager to temporarily change to the workspace directory.
+        """Context manager to set workspace environment for the current scope.
 
-        Also sets JAATO_WORKSPACE_ROOT env var for thread-safe token resolution
-        in subagents (since os.chdir is process-wide and racy).
+        Sets JAATO_WORKSPACE_ROOT env var for plugins that read it during init.
+        Does NOT call os.chdir() — that is process-global and not thread-safe,
+        which corrupts cwd for concurrent sessions in daemon mode.
+        All workspace-dependent code uses explicit absolute paths (cwd= in
+        subprocess calls, set_workspace_path() on plugins, etc.).
         """
         if not self._workspace_path:
             yield
             return
 
-        original_cwd = os.getcwd()
         original_workspace_env = os.environ.get("JAATO_WORKSPACE_ROOT")
         try:
-            os.chdir(self._workspace_path)
             os.environ["JAATO_WORKSPACE_ROOT"] = self._workspace_path
-            logger.debug(f"Changed to workspace: {self._workspace_path}")
             yield
         finally:
-            os.chdir(original_cwd)
             if original_workspace_env is not None:
                 os.environ["JAATO_WORKSPACE_ROOT"] = original_workspace_env
             elif "JAATO_WORKSPACE_ROOT" in os.environ:
                 del os.environ["JAATO_WORKSPACE_ROOT"]
-            logger.debug(f"Restored to: {original_cwd}")
 
     @contextlib.contextmanager
     def _with_session_env(self):
@@ -2606,8 +2604,7 @@ class JaatoServer:
         # Try to verify auth again (use session env and workspace context for credentials)
         try:
             with self._with_session_env(), self._in_workspace():
-                import os
-                self._trace(f"[auth] Current working directory: {os.getcwd()}")
+                self._trace(f"[auth] Workspace path: {self._workspace_path}")
                 auth_ok = self._jaato.verify_auth(allow_interactive=False)
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")

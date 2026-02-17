@@ -137,6 +137,13 @@ class SessionManager:
         if storage_path:
             self._session_config.storage_path = storage_path
 
+        # Resolve storage_path to absolute at init time so later saves don't
+        # depend on cwd (which is unreliable in daemon mode with concurrent sessions).
+        if not os.path.isabs(self._session_config.storage_path):
+            self._session_config.storage_path = os.path.abspath(
+                self._session_config.storage_path
+            )
+
         self._session_plugin.initialize({
             'storage_path': self._session_config.storage_path
         })
