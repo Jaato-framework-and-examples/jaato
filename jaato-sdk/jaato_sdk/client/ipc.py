@@ -298,15 +298,31 @@ class IPCClient:
                 if self.auto_start:
                     if not await self._start_server():
                         return False
-                    # Try again after starting server
-                    try:
-                        self._reader, self._writer = await asyncio.wait_for(
-                            self._connect_windows_pipe(pipe_path),
-                            timeout=timeout,
-                        )
-                        self._connected = True
-                    except Exception as e2:
-                        raise ConnectionError(f"Connection failed: {e2}")
+                    # Retry connection with backoff — the daemon may need
+                    # a moment after pipe creation before it can accept
+                    # client connections.
+                    deadline = time.time() + timeout
+                    last_err: Optional[Exception] = None
+                    while True:
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            break
+                        try:
+                            self._reader, self._writer = await asyncio.wait_for(
+                                self._connect_windows_pipe(pipe_path),
+                                timeout=min(2.0, remaining),
+                            )
+                            self._connected = True
+                            last_err = None
+                            break
+                        except (asyncio.TimeoutError, OSError, ConnectionRefusedError, FileNotFoundError) as e2:
+                            last_err = e2
+                            remaining = deadline - time.time()
+                            if remaining <= 0:
+                                break
+                            await asyncio.sleep(min(0.5, remaining))
+                    if last_err is not None:
+                        raise ConnectionError(f"Connection failed after auto-start: {last_err}")
                 else:
                     raise ConnectionError(f"Connection failed: {e}")
         else:
@@ -333,15 +349,31 @@ class IPCClient:
                 if self.auto_start:
                     if not await self._start_server():
                         raise ConnectionError(f"Connection failed (auto-start failed): {e}")
-                    # Retry after server started
-                    try:
-                        self._reader, self._writer = await asyncio.wait_for(
-                            asyncio.open_unix_connection(self.socket_path),
-                            timeout=timeout,
-                        )
-                        self._connected = True
-                    except Exception as e2:
-                        raise ConnectionError(f"Connection failed after auto-start: {e2}")
+                    # Retry connection with backoff — the daemon may need
+                    # a moment after socket creation before it can accept
+                    # client connections.
+                    deadline = time.time() + timeout
+                    last_err: Optional[Exception] = None
+                    while True:
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            break
+                        try:
+                            self._reader, self._writer = await asyncio.wait_for(
+                                asyncio.open_unix_connection(self.socket_path),
+                                timeout=min(2.0, remaining),
+                            )
+                            self._connected = True
+                            last_err = None
+                            break
+                        except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e2:
+                            last_err = e2
+                            remaining = deadline - time.time()
+                            if remaining <= 0:
+                                break
+                            await asyncio.sleep(min(0.5, remaining))
+                    if last_err is not None:
+                        raise ConnectionError(f"Connection failed after auto-start: {last_err}")
                 else:
                     raise ConnectionError(f"Connection failed: {e}")
 
@@ -504,13 +536,18 @@ class IPCClient:
         return await self._wait_for_socket()
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
-        """Wait for the IPC endpoint to become available.
+        """Wait for the IPC endpoint to become available and accepting connections.
+
+        For Unix sockets, this waits for the socket file to appear AND for
+        the server to actually accept connections (not just bind).  For
+        Windows named pipes, it uses ``WaitNamedPipeW`` to check pipe
+        availability.
 
         Args:
             timeout: Maximum time to wait.
 
         Returns:
-            True if endpoint became available.
+            True if endpoint became available and is accepting connections.
         """
         start = time.time()
 
@@ -545,14 +582,27 @@ class IPCClient:
                 await asyncio.sleep(0.2)
             return False
         else:
-            # Unix: wait for socket file to appear
+            # Unix: wait for socket file to appear AND be connectable.
+            # The socket file can exist before the server calls listen(),
+            # so we probe with an actual connection attempt to avoid a
+            # race where the caller tries to connect before the server is
+            # ready.
             socket_file = Path(self.socket_path)
             while time.time() - start < timeout:
                 if socket_file.exists():
-                    # Give server a moment to start listening
-                    await asyncio.sleep(0.1)
-                    return True
-                await asyncio.sleep(0.1)
+                    try:
+                        r, w = await asyncio.wait_for(
+                            asyncio.open_unix_connection(str(socket_file)),
+                            timeout=min(1.0, max(0.1, timeout - (time.time() - start))),
+                        )
+                        # Server is accepting — close the probe connection.
+                        w.close()
+                        await w.wait_closed()
+                        return True
+                    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+                        # Socket file exists but server not listening yet.
+                        pass
+                await asyncio.sleep(0.2)
             return False
 
     def _check_server_running(self) -> Optional[int]:
