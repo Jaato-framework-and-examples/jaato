@@ -213,7 +213,7 @@ class ReliabilityPersistence:
         workspace_file = self.workspace_file
         if workspace_file and workspace_file.exists():
             try:
-                data = json.loads(workspace_file.read_text())
+                data = json.loads(workspace_file.read_text(encoding="utf-8"))
                 data = self._migrate_if_needed(data)
                 self._workspace_data = WorkspaceReliabilityData.from_dict(data)
                 logger.debug(f"Loaded workspace reliability data from {workspace_file}")
@@ -244,7 +244,7 @@ class ReliabilityPersistence:
 
             # Atomic write
             tmp_path = workspace_file.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(self._workspace_data.to_dict(), indent=2))
+            tmp_path.write_text(json.dumps(self._workspace_data.to_dict(), indent=2), encoding="utf-8")
             tmp_path.rename(workspace_file)
 
             logger.debug(f"Saved workspace reliability data to {workspace_file}")
@@ -264,7 +264,7 @@ class ReliabilityPersistence:
 
         if self._user_path.exists():
             try:
-                data = json.loads(self._user_path.read_text())
+                data = json.loads(self._user_path.read_text(encoding="utf-8"))
                 data = self._migrate_if_needed(data)
                 self._user_data = UserReliabilityData.from_dict(data)
                 logger.debug(f"Loaded user reliability data from {self._user_path}")
@@ -290,7 +290,7 @@ class ReliabilityPersistence:
 
             # Atomic write
             tmp_path = self._user_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(self._user_data.to_dict(), indent=2))
+            tmp_path.write_text(json.dumps(self._user_data.to_dict(), indent=2), encoding="utf-8")
             tmp_path.rename(self._user_path)
 
             logger.debug(f"Saved user reliability data to {self._user_path}")

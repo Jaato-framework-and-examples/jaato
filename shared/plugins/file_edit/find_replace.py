@@ -218,7 +218,7 @@ class FindReplaceExecutor:
             FileMatch if there are matches, None otherwise
         """
         try:
-            content = file_path.read_text()
+            content = file_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             # Skip files we can't read
             return None
@@ -326,9 +326,9 @@ class FindReplaceExecutor:
                         self._backup_fn(file_path)
 
                     # Apply replacement
-                    content = file_path.read_text()
+                    content = file_path.read_text(encoding="utf-8")
                     new_content = compiled_pattern.sub(replacement, content)
-                    file_path.write_text(new_content)
+                    file_path.write_text(new_content, encoding="utf-8")
 
                     self._trace(f"find_and_replace: updated {fm.path}")
 
