@@ -14,6 +14,7 @@ from jaato_sdk.client import (
 from jaato_sdk.events import (
     Event,
     EventType,
+    ClientType,
     PresentationContext,
     serialize_event,
     deserialize_event,
@@ -34,6 +35,7 @@ __all__ = [
     # Events
     "Event",
     "EventType",
+    "ClientType",
     "PresentationContext",
     "serialize_event",
     "deserialize_event",

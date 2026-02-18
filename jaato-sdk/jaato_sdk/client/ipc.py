@@ -53,6 +53,7 @@ from jaato_sdk.events import (
     HistoryRequest,
     HistoryEvent,
     ClientConfigRequest,
+    ClientType,
     PresentationContext,
     SessionInfoEvent,
 )
@@ -485,7 +486,7 @@ class IPCClient:
         # (e.g. avoid wide tables on narrow terminals).
         presentation = PresentationContext(
             content_width=content_width,
-            client_type="terminal",
+            client_type=ClientType.TERMINAL,
         )
 
         # Get client's working directory (for finding config files like .lsp.json)

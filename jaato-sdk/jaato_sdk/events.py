@@ -970,6 +970,19 @@ class ConfigUpdateRequest(Event):
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
 
 
+class ClientType(str, Enum):
+    """Presentation-layer categories for PresentationContext.
+
+    Values describe the *kind* of display surface, not specific apps.
+    A Telegram bot and a WhatsApp bot are both ``CHAT``; a browser-based
+    UI is ``WEB``; a headless integration is ``API``.
+    """
+    TERMINAL = "terminal"  # TUI / CLI (rich text, fixed-width)
+    WEB = "web"            # Browser-based UI (HTML, responsive)
+    CHAT = "chat"          # Messaging platform (Telegram, Slack, WhatsApp, …)
+    API = "api"            # Headless / programmatic (plain text)
+
+
 @dataclass
 class PresentationContext:
     """Display capabilities and constraints of the connected client.
@@ -1003,7 +1016,7 @@ class PresentationContext:
         supports_expandable_content: Whether the client can collapse overflow
             behind an expand/click affordance (e.g. Telegram inline buttons,
             HTML details, TUI panels).
-        client_type: Hint identifying the client kind.
+        client_type: The kind of client (see ``ClientType`` enum).
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -1021,7 +1034,7 @@ class PresentationContext:
     supports_expandable_content: bool = False
 
     # ── Client hint ─────────────────────────────────────────────
-    client_type: str = "terminal"
+    client_type: ClientType = ClientType.TERMINAL
 
     # ──────────────────────────────────────────────────────────
 
@@ -1093,7 +1106,7 @@ class PresentationContext:
             "supports_unicode": self.supports_unicode,
             "supports_mermaid": self.supports_mermaid,
             "supports_expandable_content": self.supports_expandable_content,
-            "client_type": self.client_type,
+            "client_type": self.client_type.value,
         }
 
     @classmethod
@@ -1110,7 +1123,7 @@ class PresentationContext:
             supports_unicode=data.get("supports_unicode", True),
             supports_mermaid=data.get("supports_mermaid", False),
             supports_expandable_content=data.get("supports_expandable_content", False),
-            client_type=data.get("client_type", "terminal"),
+            client_type=ClientType(data.get("client_type", "terminal")),
         )
 
 
