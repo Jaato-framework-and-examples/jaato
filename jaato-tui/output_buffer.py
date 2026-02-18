@@ -95,6 +95,49 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_PATTERN.sub('', text)
 
 
+def _ljust_visible(text: str, width: int) -> str:
+    """Left-justify text to *width* visible characters, preserving ANSI codes.
+
+    Like ``str.ljust()`` but only counts characters that are actually visible
+    on the terminal (i.e. ANSI escape sequences are ignored when measuring).
+
+    Args:
+        text: String that may contain ANSI escape codes.
+        width: Target visible width to pad to.
+
+    Returns:
+        The original string with trailing spaces appended so its visible
+        length equals *width*.  If the visible length already meets or
+        exceeds *width*, the string is returned unchanged.
+    """
+    visible = _visible_len(text)
+    if visible >= width:
+        return text
+    return text + ' ' * (width - visible)
+
+
+def _wrap_visible(text: str, width: int) -> list[str]:
+    """Wrap text to *width* visible characters, handling ANSI codes.
+
+    ANSI escape codes are stripped for measurement/wrapping, then each
+    resulting physical line is returned as plain text (no ANSI codes).
+    This is appropriate for permission/clarification boxes where the
+    content is rendered with a uniform box style anyway.
+
+    Args:
+        text: String that may contain ANSI escape codes.
+        width: Maximum visible width per line.
+
+    Returns:
+        List of wrapped plain-text lines.
+    """
+    plain = _strip_ansi(text)
+    if len(plain) <= width:
+        return [plain]
+    wrapped = textwrap.wrap(plain, width=width, break_long_words=True)
+    return wrapped if wrapped else [plain]
+
+
 def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bool]:
     """Slice a string with ANSI codes to a visible width range.
 
@@ -2624,20 +2667,17 @@ class OutputBuffer:
                             # Count newlines within each line + 1 for the line itself
                             height += line.count('\n') + 1
                     else:
-                        # Box calculation
+                        # Box calculation — use _visible_len to ignore ANSI codes
                         max_prompt_lines = 18
                         max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                        box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
 
                         # First count ALL wrapped lines to decide truncation (matches render logic)
                         total_wrapped_lines = 0
                         for prompt_line in prompt_lines:
-                            if len(prompt_line) > content_width:
-                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                                total_wrapped_lines += len(wrapped) if wrapped else 1
-                            else:
-                                total_wrapped_lines += 1
+                            wrapped = _wrap_visible(prompt_line, content_width)
+                            total_wrapped_lines += len(wrapped)
 
                         if total_wrapped_lines > max_prompt_lines:
                             # Truncation triggered - render shows:
@@ -2648,11 +2688,8 @@ class OutputBuffer:
 
                             # Calculate wrapped lines for last line
                             last_line = prompt_lines[-1]
-                            if len(last_line) > content_width:
-                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
-                                last_line_count = len(last_wrapped) if last_wrapped else 1
-                            else:
-                                last_line_count = 1
+                            last_wrapped = _wrap_visible(last_line, content_width)
+                            last_line_count = len(last_wrapped)
 
                             rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
                         else:
@@ -2698,17 +2735,14 @@ class OutputBuffer:
                         prompt_lines = tool.clarification_prompt_lines
                         max_prompt_lines = 18
                         max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                        box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
 
                         # First count ALL wrapped lines to decide truncation (matches render logic)
                         total_wrapped_lines = 0
                         for prompt_line in prompt_lines:
-                            if len(prompt_line) > content_width:
-                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                                total_wrapped_lines += len(wrapped) if wrapped else 1
-                            else:
-                                total_wrapped_lines += 1
+                            wrapped = _wrap_visible(prompt_line, content_width)
+                            total_wrapped_lines += len(wrapped)
 
                         if total_wrapped_lines > max_prompt_lines:
                             # Truncation triggered - render shows:
@@ -2719,11 +2753,8 @@ class OutputBuffer:
 
                             # Calculate wrapped lines for last line
                             last_line = prompt_lines[-1]
-                            if len(last_line) > content_width:
-                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
-                                last_line_count = len(last_wrapped) if last_wrapped else 1
-                            else:
-                                last_line_count = 1
+                            last_wrapped = _wrap_visible(last_line, content_width)
+                            last_line_count = len(last_wrapped)
 
                             rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
                         else:
@@ -3911,19 +3942,19 @@ class OutputBuffer:
                     output.append(visual_line)
         else:
             # Standard box format
+            # Use _visible_len to ignore ANSI escape codes when measuring
+            # prompt line widths — prompt_lines may contain ANSI color codes
+            # which are invisible but would inflate len() calculations.
             max_prompt_lines = 18
             max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-            box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4) if prompt_lines else 40
+            box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4) if prompt_lines else 40
             content_width = box_width - 4
 
-            # Wrap and potentially truncate lines
+            # Wrap and potentially truncate lines (strip ANSI for clean box content)
             wrapped_lines: list[str] = []
             for line in prompt_lines:
-                if len(line) > content_width:
-                    wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
-                    wrapped_lines.extend(wrapped if wrapped else [line])
-                else:
-                    wrapped_lines.append(line)
+                wrapped = _wrap_visible(line, content_width)
+                wrapped_lines.extend(wrapped)
 
             # Check if truncation needed
             if len(wrapped_lines) > max_prompt_lines:
@@ -3940,11 +3971,12 @@ class OutputBuffer:
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_text", "yellow"))
 
-            # Content lines
+            # Content lines — use _ljust_visible so padding is based on
+            # visible width, not byte length (handles residual ANSI codes)
             for line in display_lines:
                 output.append("\n")
                 output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-                padded = line.ljust(content_width)
+                padded = _ljust_visible(line, content_width)
                 output.append("│ " + padded + " │", style=self._style("permission_text", "yellow"))
 
             # Bottom border
