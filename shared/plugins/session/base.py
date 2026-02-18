@@ -9,6 +9,7 @@ to save and resume sessions across client restarts.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from ..model_provider.types import Message
@@ -197,22 +198,34 @@ class SessionPlugin(Protocol):
 
     # ==================== Core Persistence ====================
 
-    def save(self, state: SessionState) -> None:
+    def save(
+        self,
+        state: SessionState,
+        storage_dir: Optional[Path] = None,
+    ) -> None:
         """Save session state to persistent storage.
 
         Args:
             state: The complete session state to persist.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize(). SessionManager passes
+                a workspace-resolved path; standalone JaatoClient omits it.
 
         Raises:
             IOError: If the session cannot be saved.
         """
         ...
 
-    def load(self, session_id: str) -> SessionState:
+    def load(
+        self,
+        session_id: str,
+        storage_dir: Optional[Path] = None,
+    ) -> SessionState:
         """Load session state from persistent storage.
 
         Args:
             session_id: The session ID to load.
+            storage_dir: Override storage directory (see save() for details).
 
         Returns:
             The loaded SessionState.
@@ -223,27 +236,44 @@ class SessionPlugin(Protocol):
         """
         ...
 
-    def list_sessions(self) -> List[SessionInfo]:
+    def list_sessions(
+        self,
+        storage_dir: Optional[Path] = None,
+    ) -> List[SessionInfo]:
         """List all available sessions.
+
+        Args:
+            storage_dir: Override storage directory (see save() for details).
 
         Returns:
             List of SessionInfo objects, sorted by updated_at descending.
         """
         ...
 
-    def delete(self, session_id: str) -> bool:
+    def delete(
+        self,
+        session_id: str,
+        storage_dir: Optional[Path] = None,
+    ) -> bool:
         """Delete a session from storage.
 
         Args:
             session_id: The session ID to delete.
+            storage_dir: Override storage directory (see save() for details).
 
         Returns:
             True if deleted, False if session didn't exist.
         """
         ...
 
-    def get_latest(self) -> Optional[SessionInfo]:
+    def get_latest(
+        self,
+        storage_dir: Optional[Path] = None,
+    ) -> Optional[SessionInfo]:
         """Get the most recently updated session.
+
+        Args:
+            storage_dir: Override storage directory (see save() for details).
 
         Returns:
             SessionInfo for the latest session, or None if no sessions exist.
@@ -302,7 +332,12 @@ class SessionPlugin(Protocol):
 
     # ==================== Description Management ====================
 
-    def set_description(self, session_id: str, description: str) -> None:
+    def set_description(
+        self,
+        session_id: str,
+        description: str,
+        storage_dir: Optional[Path] = None,
+    ) -> None:
         """Set the description for a session.
 
         Called when the model provides a session description via tool call.
@@ -310,6 +345,7 @@ class SessionPlugin(Protocol):
         Args:
             session_id: The session ID to update.
             description: The model-generated description.
+            storage_dir: Override storage directory (see save() for details).
         """
         ...
 

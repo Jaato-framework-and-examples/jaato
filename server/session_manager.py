@@ -130,20 +130,18 @@ class SessionManager:
             storage_path: Override for session storage path.
         """
 
-        # Initialize session plugin for persistence
+        # Initialize session plugin for persistence.
+        # storage_path stays relative (e.g. ".jaato/sessions") — it is
+        # resolved per-workspace via _session_storage_dir() at each call site.
         self._session_plugin: SessionPlugin = create_session_plugin()
         self._session_config: SessionConfig = load_session_config()
 
         if storage_path:
             self._session_config.storage_path = storage_path
 
-        # Resolve storage_path to absolute at init time so later saves don't
-        # depend on cwd (which is unreliable in daemon mode with concurrent sessions).
-        if not os.path.isabs(self._session_config.storage_path):
-            self._session_config.storage_path = os.path.abspath(
-                self._session_config.storage_path
-            )
-
+        # Initialize with relative storage_path. The plugin's self._storage_path
+        # acts as a fallback for standalone JaatoClient usage; SessionManager
+        # always passes an explicit storage_dir resolved per-workspace.
         self._session_plugin.initialize({
             'storage_path': self._session_config.storage_path
         })
@@ -165,7 +163,27 @@ class SessionManager:
         # Workspace file monitors keyed by session_id
         self._workspace_monitors: Dict[str, WorkspaceMonitor] = {}
 
-        logger.info(f"SessionManager initialized with storage: {self._session_config.storage_path}")
+        logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
+
+    def _session_storage_dir(self, workspace_path: str) -> pathlib.Path:
+        """Resolve session storage directory for a workspace.
+
+        Combines the workspace path with the configured (relative) storage_path
+        to produce an absolute directory, e.g.
+        ``/home/user/project`` + ``.jaato/sessions`` → ``/home/user/project/.jaato/sessions``.
+
+        Args:
+            workspace_path: Absolute path to the client's workspace.
+
+        Returns:
+            Absolute Path to the session storage directory.
+
+        Raises:
+            ValueError: If workspace_path is empty/None.
+        """
+        if not workspace_path:
+            raise ValueError("workspace_path required for session storage")
+        return pathlib.Path(workspace_path) / self._session_config.storage_path
 
     def set_event_callback(
         self,
@@ -518,7 +536,7 @@ class SessionManager:
         name = session_name or f"Session {timestamp.strftime('%Y-%m-%d %H:%M')}"
 
         # Check for collision with existing session
-        existing = self._get_persisted_sessions()
+        existing = self._get_persisted_sessions(workspace_path=workspace_path)
         existing_ids = {s.session_id for s in existing}
         counter = 0
         original_id = session_id
@@ -565,7 +583,7 @@ class SessionManager:
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
         # Configure TODO plugin with session-scoped storage
-        session_dir = pathlib.Path(self._session_config.storage_path) / session_id
+        session_dir = self._session_storage_dir(workspace_path) / session_id
         self._configure_todo_storage(server, session_dir)
 
         # Apply client-specific config (e.g., terminal_width)
@@ -660,8 +678,9 @@ class SessionManager:
             if session:
                 session_workspace = session.workspace_path
             else:
-                # Check persisted sessions on disk
-                persisted = self._get_persisted_sessions()
+                # Check persisted sessions on disk — try client's workspace first,
+                # since that's the most likely location for the session file
+                persisted = self._get_persisted_sessions(workspace_path=client_workspace)
                 for s in persisted:
                     if s.session_id == session_id:
                         session_workspace = s.workspace_path
@@ -707,7 +726,7 @@ class SessionManager:
                 # Try to load from disk (pass client_id for init progress events)
                 logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
                 try:
-                    session = self._load_session(session_id, client_id=client_id)
+                    session = self._load_session(session_id, client_id=client_id, workspace_path=workspace_path)
                     logger.debug(f"attach_session: _load_session returned {session is not None}")
                 except Exception as e:
                     logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
@@ -782,20 +801,28 @@ class SessionManager:
     def _load_session(
         self,
         session_id: str,
-        client_id: Optional[str] = None
+        client_id: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ) -> Optional[Session]:
         """Load a session from disk.
 
         Args:
             session_id: The session ID to load.
             client_id: Optional client ID to receive init progress events.
+            workspace_path: Workspace directory for resolving the session
+                storage path. Required so we know which workspace's
+                ``.jaato/sessions/`` to look in.
 
         Returns:
             The loaded Session, or None if not found.
         """
         logger.debug(f"_load_session: attempting to load {session_id}")
+
+        # Resolve storage directory from workspace
+        storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
+
         try:
-            state = self._session_plugin.load(session_id)
+            state = self._session_plugin.load(session_id, storage_dir=storage_dir)
             logger.debug(f"_load_session: loaded state for {session_id}")
         except FileNotFoundError:
             logger.debug(f"_load_session: session {session_id} not found on disk")
@@ -857,7 +884,11 @@ class SessionManager:
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
         # Configure TODO plugin with session-scoped storage
-        session_dir = pathlib.Path(self._session_config.storage_path) / session_id
+        effective_workspace = workspace_path or state.workspace_path
+        if effective_workspace:
+            session_dir = self._session_storage_dir(effective_workspace) / session_id
+        else:
+            session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
 
         # Restore history to the server's JaatoClient
@@ -919,7 +950,8 @@ class SessionManager:
             self._restore_subagent_states(
                 session_id,
                 state.metadata['subagents'],
-                server
+                server,
+                workspace_path=effective_workspace,
             )
 
         # Restore TODO plugin state (agent-plan mapping, blocked steps)
@@ -987,7 +1019,8 @@ class SessionManager:
         self,
         session_id: str,
         subagent_registry: Dict[str, Any],
-        server: JaatoServer
+        server: JaatoServer,
+        workspace_path: Optional[str] = None,
     ) -> int:
         """Restore subagent states from persisted data.
 
@@ -995,6 +1028,7 @@ class SessionManager:
             session_id: The parent session ID.
             subagent_registry: Registry dict from state.metadata["subagents"].
             server: The JaatoServer to restore subagents into.
+            workspace_path: Workspace directory for resolving storage path.
 
         Returns:
             Number of subagents successfully restored.
@@ -1009,9 +1043,12 @@ class SessionManager:
             return 0
 
         # Load per-agent state files
-        subagents_dir = pathlib.Path(
-            self._session_config.storage_path
-        ) / session_id / "subagents"
+        if workspace_path:
+            subagents_dir = self._session_storage_dir(workspace_path) / session_id / "subagents"
+        else:
+            subagents_dir = pathlib.Path(
+                self._session_config.storage_path
+            ) / session_id / "subagents"
 
         agent_states: Dict[str, Dict[str, Any]] = {}
         if subagents_dir.exists():
@@ -1204,6 +1241,12 @@ class SessionManager:
             if session.server and "main" in session.server._agents:
                 turn_accounting = session.server._agents["main"].turn_accounting
 
+            # Resolve storage directory from workspace
+            if session.workspace_path:
+                storage_dir = self._session_storage_dir(session.workspace_path)
+            else:
+                storage_dir = pathlib.Path(self._session_config.storage_path)
+
             # Get subagent state if subagent plugin is available
             subagent_metadata = {}
             if session.server and session.server.registry:
@@ -1217,11 +1260,12 @@ class SessionManager:
                         self._save_subagent_states(
                             session.session_id,
                             subagent_plugin,
-                            subagent_registry.get('agents', [])
+                            subagent_registry.get('agents', []),
+                            storage_dir=storage_dir,
                         )
 
             # Save TODO plugin state
-            session_dir = pathlib.Path(self._session_config.storage_path) / session.session_id
+            session_dir = storage_dir / session.session_id
             if session.server:
                 self._save_todo_state(session.server, session_dir)
 
@@ -1281,7 +1325,7 @@ class SessionManager:
                 workspace_files=workspace_files,
             )
 
-            self._session_plugin.save(state)
+            self._session_plugin.save(state, storage_dir=storage_dir)
             session.is_dirty = False
 
             logger.debug(f"Saved session: {session.session_id}")
@@ -1379,7 +1423,8 @@ class SessionManager:
         self,
         session_id: str,
         subagent_plugin: Any,
-        agents: List[Dict[str, Any]]
+        agents: List[Dict[str, Any]],
+        storage_dir: Optional[pathlib.Path] = None,
     ) -> None:
         """Save per-agent state files for subagents.
 
@@ -1387,11 +1432,11 @@ class SessionManager:
             session_id: The parent session ID.
             subagent_plugin: The SubagentPlugin instance.
             agents: List of agent info dicts from the registry.
+            storage_dir: Workspace-resolved session storage directory.
         """
         # Create subagents directory
-        subagents_dir = pathlib.Path(
-            self._session_config.storage_path
-        ) / session_id / "subagents"
+        base = storage_dir or pathlib.Path(self._session_config.storage_path)
+        subagents_dir = base / session_id / "subagents"
         subagents_dir.mkdir(parents=True, exist_ok=True)
 
         for agent_info in agents:
@@ -1485,10 +1530,12 @@ class SessionManager:
         Returns:
             True if deleted.
         """
+        workspace_path = None
         with self._lock:
-            # Remove from memory
+            # Remove from memory — capture workspace_path before popping
             session = self._sessions.pop(session_id, None)
             if session:
+                workspace_path = session.workspace_path
                 # Notify attached clients
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, SystemMessageEvent(
@@ -1501,7 +1548,8 @@ class SessionManager:
                 session.server.shutdown()
 
         # Delete from disk
-        deleted = self._session_plugin.delete(session_id)
+        storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
+        deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
 
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
@@ -1584,7 +1632,7 @@ class SessionManager:
 
         # Check persisted sessions (already sorted by updated_at descending)
         logger.debug(f"  checking persisted sessions...")
-        persisted = self._get_persisted_sessions()
+        persisted = self._get_persisted_sessions(workspace_path=workspace_path)
         logger.debug(f"  found {len(persisted)} persisted session(s)")
 
         if persisted and workspace_path:
@@ -1610,10 +1658,19 @@ class SessionManager:
     # Session Queries
     # =========================================================================
 
-    def _get_persisted_sessions(self) -> List[PluginSessionInfo]:
-        """Get list of sessions from disk."""
+    def _get_persisted_sessions(
+        self,
+        workspace_path: Optional[str] = None,
+    ) -> List[PluginSessionInfo]:
+        """Get list of sessions from disk.
+
+        Args:
+            workspace_path: Workspace directory to list sessions for.
+                When provided, lists sessions from that workspace's storage.
+        """
+        storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         try:
-            return self._session_plugin.list_sessions()
+            return self._session_plugin.list_sessions(storage_dir=storage_dir)
         except Exception as e:
             logger.error(f"Failed to list persisted sessions: {e}")
             return []
@@ -1622,25 +1679,43 @@ class SessionManager:
         """List all sessions (in-memory and on-disk).
 
         Returns merged view with runtime status for loaded sessions.
+        Collects persisted sessions from all known workspaces (in-memory
+        sessions + client configs).
         """
         result: Dict[str, RuntimeSessionInfo] = {}
 
-        # Add persisted sessions first
-        for info in self._get_persisted_sessions():
-            result[info.session_id] = RuntimeSessionInfo(
-                session_id=info.session_id,
-                name=info.description or info.session_id,
-                description=info.description,
-                created_at=info.created_at.isoformat(),
-                last_activity=info.updated_at.isoformat(),
-                model_provider="",
-                model_name=info.model or "",
-                is_processing=False,
-                is_loaded=False,
-                client_count=0,
-                turn_count=info.turn_count,
-                workspace_path=info.workspace_path,
-            )
+        # Collect all known workspace paths from in-memory sessions and client configs
+        known_workspaces: Set[str] = set()
+        with self._lock:
+            for session in self._sessions.values():
+                if session.workspace_path:
+                    norm = self._normalize_workspace(session.workspace_path)
+                    if norm:
+                        known_workspaces.add(norm)
+            for config in self._client_config.values():
+                wp = config.get('working_dir')
+                if wp:
+                    norm = self._normalize_workspace(wp)
+                    if norm:
+                        known_workspaces.add(norm)
+
+        # Add persisted sessions from all known workspaces
+        for wp in known_workspaces:
+            for info in self._get_persisted_sessions(workspace_path=wp):
+                result[info.session_id] = RuntimeSessionInfo(
+                    session_id=info.session_id,
+                    name=info.description or info.session_id,
+                    description=info.description,
+                    created_at=info.created_at.isoformat(),
+                    last_activity=info.updated_at.isoformat(),
+                    model_provider="",
+                    model_name=info.model or "",
+                    is_processing=False,
+                    is_loaded=False,
+                    client_count=0,
+                    turn_count=info.turn_count,
+                    workspace_path=info.workspace_path,
+                )
 
         # Overlay in-memory sessions (have more current info)
         with self._lock:
