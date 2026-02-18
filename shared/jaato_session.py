@@ -212,6 +212,12 @@ class JaatoSession:
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
 
+        # Presentation context describing the client's display constraints
+        # and capabilities (width, markdown support, expandable content, etc.).
+        # Injected into system instructions so the model adapts its output.
+        # Set via set_presentation_context() when the client connects.
+        self._presentation_context: Optional['PresentationContext'] = None
+
         # Priority-aware message queue for agent communication
         # Uses double-linked list for efficient mid-queue removal of parent messages
         # Parent/user messages: processed mid-turn (high priority)
@@ -281,6 +287,21 @@ class JaatoSession:
             width: Terminal width in columns.
         """
         self._terminal_width = width
+
+    def set_presentation_context(self, ctx: 'PresentationContext') -> None:
+        """Set the presentation context describing client display capabilities.
+
+        Updates both the stored context and ``_terminal_width`` (for backwards
+        compatibility with code that reads the width directly).  The context is
+        used by ``get_system_instructions()`` to inject a display-context block
+        into the model's system prompt.
+
+        Args:
+            ctx: Presentation context from the connected client.
+        """
+        from .plugins.model_provider.types import PresentationContext  # noqa: F811
+        self._presentation_context = ctx
+        self._terminal_width = ctx.content_width
 
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
@@ -1021,7 +1042,8 @@ class JaatoSession:
         # Build system instructions
         self._system_instruction = self._runtime.get_system_instructions(
             plugin_names=tools,
-            additional=system_instructions
+            additional=system_instructions,
+            presentation_context=self._presentation_context,
         )
 
         # Store user commands

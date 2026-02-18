@@ -233,6 +233,11 @@ class JaatoServer:
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
 
+        # Presentation context describing client display capabilities.
+        # Set via set_presentation_context() when the client sends
+        # ClientConfigRequest with a presentation dict.
+        self._presentation_context: Optional['PresentationContext'] = None
+
         # Session-specific environment variables (isolated per session)
         # These are loaded from the session's .env file and NOT applied to
         # global os.environ, keeping each session's configuration isolated.
@@ -282,6 +287,21 @@ class JaatoServer:
         for agent in self._agents.values():
             if agent.formatter_pipeline:
                 agent.formatter_pipeline.set_console_width(width)
+
+    def set_presentation_context(self, ctx: 'PresentationContext') -> None:
+        """Set the presentation context and propagate to session components.
+
+        Also keeps ``terminal_width`` in sync for backwards compatibility.
+
+        Args:
+            ctx: Presentation context from the connected client.
+        """
+        self._presentation_context = ctx
+        # Keep terminal_width in sync (property setter propagates to pipelines)
+        self.terminal_width = ctx.content_width
+        # Propagate full context to JaatoClient → JaatoSession
+        if self._jaato:
+            self._jaato.set_presentation_context(ctx)
 
     @property
     def auth_pending(self) -> bool:

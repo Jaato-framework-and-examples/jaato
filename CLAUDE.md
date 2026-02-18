@@ -301,6 +301,33 @@ This separation ensures:
 - Multiple clients can present the same data differently
 - Presentation can evolve without changing pipeline logic
 
+### Presentation Context (Agent Display Awareness)
+
+The model receives display constraints via `PresentationContext` (defined in
+`jaato-sdk/jaato_sdk/events.py`) so it adapts its output format.
+
+**Data flow:**
+```
+Client → ClientConfigRequest.presentation (dict)
+  → SessionManager._apply_client_config()
+  → JaatoServer.set_presentation_context()
+  → JaatoClient → JaatoSession._presentation_context
+  → get_system_instructions(presentation_context=...) → system prompt
+```
+
+**Key fields:** `content_width`, `supports_tables`, `supports_code_blocks`,
+`supports_images`, `supports_expandable_content`, `client_type`.
+
+`client_type` is a `ClientType` enum (`terminal`, `web`, `chat`, `api`) —
+values describe the presentation surface category, not specific apps.
+
+When `supports_expandable_content=True`, the model outputs freely and the
+**client** wraps overflow in its native expand/collapse widget (Telegram inline
+buttons, HTML `<details>`, TUI scrollable panel). When `False`, the model is
+asked to use compact formats for narrow displays.
+
+See [Agent Presentation Awareness](docs/design/agent-presentation-awareness.md).
+
 ### Plugin Auto-Wiring
 
 Plugins are automatically wired during initialization - no manual wiring needed:

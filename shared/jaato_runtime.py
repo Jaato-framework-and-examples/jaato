@@ -906,7 +906,8 @@ class JaatoRuntime:
     def get_system_instructions(
         self,
         plugin_names: Optional[List[str]] = None,
-        additional: Optional[str] = None
+        additional: Optional[str] = None,
+        presentation_context: Optional['PresentationContext'] = None,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
@@ -915,6 +916,11 @@ class JaatoRuntime:
            falls back to legacy .jaato/system_instructions.md)
         2. Additional instructions passed as parameter
         3. Plugin-specific system instructions
+        4. Formatter pipeline instructions (output rendering capabilities)
+        5. Presentation context (client display constraints)
+        6. Framework-level task completion instruction
+        7. Parallel tool guidance
+        8. Turn-end summary guidance
 
         This ensures base behavioral rules (like transparency, no silent pauses)
         apply consistently to all agents (main and subagents).
@@ -923,6 +929,10 @@ class JaatoRuntime:
             plugin_names: Optional list of plugin names to include.
                          If None, returns full cached system instructions.
             additional: Optional additional instructions to prepend.
+            presentation_context: Optional client display context.  When
+                provided, a compact display-constraint block is appended so
+                the model can adapt its output format (tables, lists, etc.)
+                to the client's capabilities.
 
         Returns:
             Combined system instructions string, or None.
@@ -981,14 +991,20 @@ class JaatoRuntime:
             if formatter_instructions:
                 result_parts.append(formatter_instructions)
 
-        # 5. Framework-level task completion instruction (always included)
+        # 5. Presentation context (client display constraints and capabilities)
+        if presentation_context is not None:
+            ctx_instruction = presentation_context.to_system_instruction()
+            if ctx_instruction:
+                result_parts.append(ctx_instruction)
+
+        # 6. Framework-level task completion instruction (always included)
         result_parts.append(_TASK_COMPLETION_INSTRUCTION)
 
-        # 6. Parallel tool guidance (when parallel execution is enabled)
+        # 7. Parallel tool guidance (when parallel execution is enabled)
         if _is_parallel_tools_enabled():
             result_parts.append(_PARALLEL_TOOL_GUIDANCE)
 
-        # 7. Turn-end summary guidance (always included)
+        # 8. Turn-end summary guidance (always included)
         result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
         return "\n\n".join(result_parts)

@@ -248,6 +248,18 @@ class JaatoClient:
         if self._session:
             self._session.set_terminal_width(width)
 
+    def set_presentation_context(self, ctx: 'PresentationContext') -> None:
+        """Set the presentation context describing client display capabilities.
+
+        Propagates to the session, which uses it for system instruction
+        generation and keeps ``_terminal_width`` in sync.
+
+        Args:
+            ctx: Presentation context from the connected client.
+        """
+        if self._session:
+            self._session.set_presentation_context(ctx)
+
     def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
         """Set UI hooks for agent lifecycle events.
 

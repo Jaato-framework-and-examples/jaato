@@ -509,3 +509,7 @@ class ThinkingConfig:
             enabled=data.get("enabled", False),
             budget=data.get("budget", 10000)
         )
+
+
+# Re-export from SDK so server-side code can import from either location.
+from jaato_sdk.events import PresentationContext  # noqa: F401

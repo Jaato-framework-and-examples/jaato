@@ -1034,6 +1034,18 @@ client.set_thinking_plugin(thinking)
             formatting to properly wrap and align text.
           </p>
 
+          <h3>set_presentation_context</h3>
+          <div class="method-signature">
+            <span class="method-name">set_presentation_context</span>(<span class="param">ctx</span>: <span class="type">PresentationContext</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set display capabilities for the connected client. The context is
+            injected into the model's system instructions so it adapts output
+            format (e.g. vertical lists on narrow displays, full tables on wide
+            ones). Also updates <code>terminal_width</code> for backwards
+            compatibility. See <a href="types.html#presentation-context">PresentationContext</a>.
+          </p>
+
           <h3>get_model_completions</h3>
           <div class="method-signature">
             <span class="method-name">get_model_completions</span>(<span class="param">args</span>: <span class="type">List[str]</span>) -> <span class="type">List[CommandCompletion]</span>
@@ -1063,7 +1075,14 @@ class MyUIHooks(AgentUIHooks):
 
 # Set hooks on client
 client.set_ui_hooks(MyUIHooks())
-client.set_terminal_width(120)</code></pre>
+client.set_terminal_width(120)
+
+# Or set full presentation context
+from jaato import PresentationContext, ClientType
+client.set_presentation_context(PresentationContext(
+    content_width=120,
+    client_type=ClientType.TERMINAL,
+))</code></pre>
           </div>
         </div>
       </section>
