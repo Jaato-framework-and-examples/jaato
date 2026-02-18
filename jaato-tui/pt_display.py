@@ -644,6 +644,23 @@ class PTDisplay:
         self._build_app()
         return True
 
+    def _force_full_repaint(self) -> None:
+        """Force a full screen repaint on the next render cycle.
+
+        Resets the prompt_toolkit renderer's cached screen state so the next
+        render writes ALL characters to the terminal instead of only changed
+        cells.  This prevents ghost/orphaned characters that can appear when
+        the differential renderer skips cells it believes are unchanged but
+        that actually contain stale content from a previous frame (e.g. after
+        scrolling changes the viewport content significantly).
+        """
+        if self._app and hasattr(self._app, 'renderer'):
+            renderer = self._app.renderer
+            # Setting _last_screen to None tells the renderer it has no
+            # previous state to diff against, so every cell is rewritten.
+            if hasattr(renderer, '_last_screen'):
+                renderer._last_screen = None
+
     def _update_dimensions(self) -> bool:
         """Check if terminal size changed and update components if so.
 
@@ -1813,6 +1830,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_down"))
@@ -1832,6 +1850,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_top"))
@@ -1847,6 +1866,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_to_top()
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_bottom"))
@@ -1862,6 +1882,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_to_bottom()
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         # Mouse scroll handlers - bind mouse wheel to page up/down
@@ -1878,6 +1899,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("mouse_scroll_down"), eager=True)
@@ -1893,6 +1915,7 @@ class PTDisplay:
             else:
                 self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             self._sync_output_display()
+            self._force_full_repaint()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("nav_up"), eager=True, filter=not_in_search_mode)
@@ -2226,8 +2249,10 @@ class PTDisplay:
                     self._output_buffer.scroll_up(lines=mouse_scroll_lines)
             else:
                 self._output_buffer.scroll_up(lines=mouse_scroll_lines)
-            # Re-sync display to reflect new scroll position, then invalidate
+            # Re-sync display to reflect new scroll position, force full repaint
+            # to clear any ghost characters, then invalidate
             self._sync_output_display()
+            self._force_full_repaint()
             if self._app:
                 self._app.invalidate()
 
@@ -2241,8 +2266,10 @@ class PTDisplay:
                     self._output_buffer.scroll_down(lines=mouse_scroll_lines)
             else:
                 self._output_buffer.scroll_down(lines=mouse_scroll_lines)
-            # Re-sync display to reflect new scroll position, then invalidate
+            # Re-sync display to reflect new scroll position, force full repaint
+            # to clear any ghost characters, then invalidate
             self._sync_output_display()
+            self._force_full_repaint()
             if self._app:
                 self._app.invalidate()
 
