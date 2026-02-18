@@ -112,10 +112,14 @@ class MemoryPlugin:
                         },
                         "tags": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {"type": "string", "minLength": 2},
                             "description": (
-                                "Keywords for retrieval. Use specific, searchable terms "
-                                "(e.g., ['authentication', 'oauth', 'jwt'] not ['auth stuff'])"
+                                "Specific keywords for retrieval (minimum 2 characters each). "
+                                "Tags must be distinctive enough to identify THIS memory "
+                                "without matching unrelated ones. "
+                                "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'react_hooks'. "
+                                "Bad: generic words like 'code', 'error', 'fix', 'config', "
+                                "or single letters."
                             )
                         }
                     },
@@ -199,7 +203,11 @@ class MemoryPlugin:
             "- Use `list_memory_tags` to discover what topics have been stored\n\n"
             "**Best practices:**\n"
             "- Only store substantial, reusable information (not ephemeral responses)\n"
-            "- Use specific, searchable tags (e.g., 'database_schema', 'api_auth')\n"
+            "- Use **specific, distinctive** tags that uniquely identify the topic. "
+            "Each tag should narrow retrieval to relevant memories only. "
+            "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'celery_retry_policy'. "
+            "Bad: generic tags like 'code', 'error', 'fix', 'bug', 'config', 'api' — "
+            "these match too many unrelated memories\n"
             "- Write clear descriptions to help future retrieval\n"
         )
 
@@ -402,12 +410,28 @@ class MemoryPlugin:
                 "message": "Memory plugin not initialized"
             }
 
+        # Validate and normalize tags: strip whitespace, reject single-char tags
+        raw_tags = args.get("tags", [])
+        valid_tags = [
+            tag.strip() for tag in raw_tags
+            if isinstance(tag, str) and len(tag.strip()) >= 2
+        ]
+        if not valid_tags:
+            return {
+                "status": "error",
+                "message": (
+                    "All tags were rejected — each tag must be a meaningful "
+                    "word or phrase (at least 2 characters). "
+                    f"Received: {raw_tags!r}"
+                )
+            }
+
         # Create memory object
         memory = Memory(
             id=f"mem_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:20]}",
             content=args["content"],
             description=args["description"],
-            tags=args["tags"],
+            tags=valid_tags,
             timestamp=datetime.now().isoformat(),
             usage_count=0
         )
@@ -773,6 +797,14 @@ class MemoryPlugin:
             return "content cannot be empty"
         if not data["tags"]:
             return "tags cannot be empty"
+
+        # Tag quality: each tag must be at least 2 characters
+        short_tags = [tag for tag in data["tags"] if len(tag.strip()) < 2]
+        if short_tags:
+            return (
+                f"tags must be meaningful words (at least 2 characters each), "
+                f"got: {short_tags!r}"
+            )
 
         return None
 
