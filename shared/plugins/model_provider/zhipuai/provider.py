@@ -4,15 +4,23 @@ This provider enables access to Zhipu AI's GLM models via the Anthropic-compatib
 API endpoint, primarily targeting GLM Coding Plan subscribers.
 
 Zhipu AI offers the GLM family of models including:
-- GLM-4.7: Latest flagship with native chain-of-thought reasoning (200K context)
+- GLM-5: Flagship MoE model with agentic engineering focus (200K context)
+- GLM-4.7: Flagship with native chain-of-thought reasoning (200K context)
 - GLM-4.7-Flash/Flashx: Fast inference variants (200K context)
 - GLM-4.6: Previous flagship, strong coding (200K context)
 - GLM-4.5/Air/Flash: Balanced and lightweight models (128K context)
 
+Model discovery:
+    The provider supports dynamic model listing via Z.AI's OpenAI-compatible
+    ``GET /models`` endpoint (``/api/paas/v4/models``).  When an API key is
+    available, ``list_models()`` queries this endpoint so that newly released
+    models (e.g. GLM-5) appear automatically.  A static ``MODEL_CONTEXT_LIMITS``
+    dict provides fallback metadata (context window sizes) for known models.
+
 Usage:
     provider = ZhipuAIProvider()
     provider.initialize(ProviderConfig(api_key="your-key"))
-    provider.connect('glm-4.7')
+    provider.connect('glm-5')
     response = provider.send_message("Hello!")
 
 Environment variables:
@@ -22,6 +30,7 @@ Environment variables:
     ZHIPUAI_CONTEXT_LENGTH: Override context length for models
 """
 
+import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -49,10 +58,12 @@ from .auth import (
 logger = logging.getLogger(__name__)
 
 
-# Known GLM models available via the Anthropic-compatible API,
-# with their context window sizes in tokens.
-# Source: Roo Code, lm-deluge, ekai-gateway, moai-adk, Z.AI docs.
+# Known GLM models with their context window sizes in tokens.
+# Used as metadata fallback when the dynamic /models endpoint is unavailable.
+# Source: models.dev, Roo Code, lm-deluge, ekai-gateway, moai-adk, Z.AI docs.
 MODEL_CONTEXT_LIMITS = {
+    # GLM-5 — 200K context, 128K output
+    "glm-5": 204800,
     # GLM-4.7 family — 200K context
     "glm-4.7": 204800,
     "glm-4.7-flash": 204800,
@@ -73,11 +84,42 @@ DEFAULT_CONTEXT_LIMIT = 131072
 KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
 
 
-# GLM models that support extended thinking (chain-of-thought reasoning)
-# GLM-4.7 has native chain-of-thought reasoning capability
+# GLM models that support extended thinking (chain-of-thought reasoning).
+# GLM-5 and GLM-4.7 (non-flash) have native chain-of-thought capability.
 THINKING_CAPABLE_MODELS = [
+    "glm-5",
     "glm-4.7",
 ]
+
+# ── OpenAI-compatible models endpoint for dynamic discovery ───────────
+# Z.AI exposes GET /models on the OpenAI-compatible API surface.  The
+# Anthropic-compatible endpoint we use for chat does NOT have this, so
+# we derive the OpenAI base URL from the configured Anthropic base URL.
+_ANTHROPIC_TO_OPENAI_PATH = {
+    "/api/anthropic": "/api/paas/v4",
+    "/api/coding/anthropic": "/api/coding/paas/v4",
+}
+
+
+def _openai_models_url(anthropic_base_url: str) -> str:
+    """Derive the OpenAI-compatible ``/models`` URL from the Anthropic base.
+
+    Handles both the pay-per-token (``/api/paas/v4``) and coding-plan
+    (``/api/coding/paas/v4``) variants.
+
+    Args:
+        anthropic_base_url: The Anthropic-compat base URL
+            (e.g. ``https://api.z.ai/api/anthropic``).
+
+    Returns:
+        Full URL for the ``GET /models`` endpoint.
+    """
+    base = anthropic_base_url.rstrip("/")
+    for suffix, replacement in _ANTHROPIC_TO_OPENAI_PATH.items():
+        if base.endswith(suffix):
+            return base[: -len(suffix)] + replacement + "/models"
+    # Best-effort: assume sibling /paas/v4 next to whatever path is set
+    return base.rsplit("/", 1)[0] + "/paas/v4/models"
 
 
 class ZhipuAIAPIKeyNotFoundError(Exception):
@@ -109,9 +151,10 @@ class ZhipuAIProvider(AnthropicProvider):
     what's necessary for Zhipu AI's API:
     - Custom base_url pointing to Z.AI's Anthropic-compatible endpoint
     - API key authentication via ZHIPUAI_API_KEY
-    - Model listing for GLM models
+    - Dynamic model discovery via the OpenAI-compatible ``GET /models``
+      endpoint, with a static fallback for offline/unconfigured use
     - Caching disabled (may not be supported)
-    - Extended thinking for GLM-4.7 (native chain-of-thought reasoning)
+    - Extended thinking for GLM-5 and GLM-4.7 (native chain-of-thought)
 
     All message handling, streaming, and converters are inherited from
     AnthropicProvider since Zhipu AI uses the same API format.
@@ -286,7 +329,7 @@ class ZhipuAIProvider(AnthropicProvider):
         """Connect to a specific model.
 
         Args:
-            model_name: Model name (e.g., 'glm-4.7', 'glm-4.7-flash').
+            model_name: Model name (e.g., 'glm-5', 'glm-4.7', 'glm-4.7-flash').
         """
         # For Zhipu AI, we don't have a model listing API via the Anthropic endpoint,
         # so we just accept the model name and let the API validate it
@@ -298,21 +341,72 @@ class ZhipuAIProvider(AnthropicProvider):
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List available GLM models.
 
-        Returns known GLM models. Since the Anthropic-compatible API
-        doesn't provide a model listing endpoint, we return a static list.
+        Attempts dynamic discovery via Z.AI's OpenAI-compatible
+        ``GET /models`` endpoint.  Falls back to the static
+        ``KNOWN_MODELS`` list when the API call fails (network
+        errors, missing credentials, etc.).
 
         Args:
             prefix: Optional filter prefix.
 
         Returns:
-            List of model names.
+            Sorted list of model names.
         """
-        models = KNOWN_MODELS.copy()
+        models = self._fetch_remote_models()
+        if not models:
+            models = KNOWN_MODELS.copy()
 
         if prefix:
             models = [m for m in models if m.startswith(prefix)]
 
         return sorted(models)
+
+    def _fetch_remote_models(self) -> List[str]:
+        """Fetch model list from Z.AI's OpenAI-compatible ``GET /models`` endpoint.
+
+        Derives the correct URL from the configured Anthropic base URL so
+        that both the pay-per-token and coding-plan endpoints are handled.
+        Uses the project's corporate-ready httpx client (``shared.http``)
+        for proxy, Kerberos, and custom CA-cert support.
+
+        Returns:
+            List of model ID strings, or an empty list on failure.
+        """
+        api_key = getattr(self, "_api_key", None)
+        if not api_key:
+            # Try environment / stored credentials so listing works
+            # even on an uninitialized provider instance.
+            api_key = resolve_api_key() or get_stored_api_key()
+        if not api_key:
+            self._trace("[_fetch_remote_models] No API key available, skipping")
+            return []
+
+        base_url = getattr(self, "_base_url", DEFAULT_ZHIPUAI_BASE_URL)
+        url = _openai_models_url(base_url)
+        self._trace(f"[_fetch_remote_models] GET {url}")
+
+        try:
+            from shared.http.proxy import get_httpx_client
+
+            client = get_httpx_client()
+            resp = client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            model_ids = [m["id"] for m in data.get("data", []) if "id" in m]
+            self._trace(f"[_fetch_remote_models] Got {len(model_ids)} models: {model_ids}")
+            return model_ids
+        except Exception as exc:
+            self._trace(f"[_fetch_remote_models] Failed: {exc}")
+            logger.debug("Failed to fetch Z.AI model list: %s", exc)
+            return []
 
     def get_context_limit(self) -> int:
         """Get context window size.
@@ -327,12 +421,15 @@ class ZhipuAIProvider(AnthropicProvider):
     def _is_thinking_capable(self) -> bool:
         """Check if the current model supports extended thinking.
 
-        GLM-4.7 has native chain-of-thought reasoning capability.
-        Flash and other GLM variants do not support it.
+        GLM-5 and GLM-4.7 (non-flash) have native chain-of-thought
+        reasoning capability.  Flash and other GLM variants do not.
         """
         if not self._model_name:
             return False
         name_lower = self._model_name.lower()
+        # GLM-5 always supports thinking
+        if name_lower.startswith("glm-5"):
+            return True
         # GLM-4.7 supports thinking, but flash variants do not
         return name_lower.startswith("glm-4.7") and "flash" not in name_lower
 

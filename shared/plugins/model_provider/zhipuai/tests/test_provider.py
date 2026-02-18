@@ -1,5 +1,6 @@
 """Tests for ZhipuAIProvider."""
 
+import json
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from ..provider import (
     MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
     THINKING_CAPABLE_MODELS,
+    _openai_models_url,
 )
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 from ...base import ProviderConfig
@@ -143,28 +145,69 @@ class TestConnection:
 
 
 class TestModelListing:
-    """Tests for model listing."""
+    """Tests for model listing.
+
+    ``list_models()`` first attempts dynamic discovery via Z.AI's
+    OpenAI-compatible ``GET /models`` endpoint, then falls back to the
+    static ``KNOWN_MODELS`` list.
+    """
 
     @patch('anthropic.Anthropic')
-    def test_list_models(self, mock_anthropic):
-        """Should list known GLM models."""
+    def test_list_models_fallback_to_static(self, mock_anthropic):
+        """Should fall back to static list when remote fetch fails."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
-        models = provider.list_models()
+
+        with patch.object(provider, '_fetch_remote_models', return_value=[]):
+            models = provider.list_models()
 
         assert len(models) == len(KNOWN_MODELS)
+        assert "glm-5" in models
         assert "glm-4.7" in models
         assert "glm-4.7-flash" in models
+
+    @patch('anthropic.Anthropic')
+    def test_list_models_uses_remote(self, mock_anthropic):
+        """Should use remote model list when available."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        remote = ["glm-5", "glm-4.7", "glm-new-model"]
+        with patch.object(provider, '_fetch_remote_models', return_value=remote):
+            models = provider.list_models()
+
+        assert models == sorted(remote)
+        assert "glm-new-model" in models
 
     @patch('anthropic.Anthropic')
     def test_list_models_with_prefix(self, mock_anthropic):
         """Should filter models by prefix."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
-        models = provider.list_models(prefix="glm-4.7")
+
+        with patch.object(provider, '_fetch_remote_models', return_value=[]):
+            models = provider.list_models(prefix="glm-4.7")
 
         assert len(models) == 3  # glm-4.7, glm-4.7-flash, glm-4.7-flashx
         assert all(m.startswith("glm-4.7") for m in models)
+
+    @patch('anthropic.Anthropic')
+    def test_list_models_prefix_on_remote(self, mock_anthropic):
+        """Should apply prefix filter on dynamically fetched models."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        remote = ["glm-5", "glm-5-vision", "glm-4.7"]
+        with patch.object(provider, '_fetch_remote_models', return_value=remote):
+            models = provider.list_models(prefix="glm-5")
+
+        assert models == ["glm-5", "glm-5-vision"]
+
+    @patch('anthropic.Anthropic')
+    def test_glm5_in_known_models(self, mock_anthropic):
+        """GLM-5 should be present in the static model list."""
+        assert "glm-5" in KNOWN_MODELS
+        assert MODEL_CONTEXT_LIMITS["glm-5"] == 204800
 
 
 class TestContextLimit:
@@ -323,6 +366,16 @@ class TestThinkingSupport:
         assert provider.supports_thinking() is True
 
     @patch('anthropic.Anthropic')
+    def test_thinking_capable_glm5(self, mock_anthropic):
+        """GLM-5 should be thinking-capable."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-5")
+
+        assert provider._is_thinking_capable() is True
+        assert provider.supports_thinking() is True
+
+    @patch('anthropic.Anthropic')
     def test_thinking_not_capable_flash(self, mock_anthropic):
         """GLM-4.7-flash should NOT be thinking-capable."""
         provider = ZhipuAIProvider()
@@ -409,6 +462,142 @@ class TestThinkingSupport:
 
         assert provider._enable_thinking is True
         assert provider._thinking_budget == 15000
+
+
+class TestOpenAIModelsURL:
+    """Tests for _openai_models_url helper.
+
+    This function derives the OpenAI-compatible ``/models`` URL from the
+    Anthropic base URL so that both pay-per-token and coding-plan
+    endpoints are handled correctly.
+    """
+
+    def test_default_anthropic_url(self):
+        """Should map default Anthropic URL to /api/paas/v4/models."""
+        url = _openai_models_url("https://api.z.ai/api/anthropic")
+        assert url == "https://api.z.ai/api/paas/v4/models"
+
+    def test_coding_plan_anthropic_url(self):
+        """Should map coding plan Anthropic URL to /api/coding/paas/v4/models."""
+        url = _openai_models_url("https://api.z.ai/api/coding/anthropic")
+        assert url == "https://api.z.ai/api/coding/paas/v4/models"
+
+    def test_trailing_slash_stripped(self):
+        """Should handle trailing slash on input URL."""
+        url = _openai_models_url("https://api.z.ai/api/anthropic/")
+        assert url == "https://api.z.ai/api/paas/v4/models"
+
+    def test_china_endpoint(self):
+        """Should handle open.bigmodel.cn domain."""
+        url = _openai_models_url("https://open.bigmodel.cn/api/anthropic")
+        assert url == "https://open.bigmodel.cn/api/paas/v4/models"
+
+    def test_unknown_path_fallback(self):
+        """Should fall back to sibling /paas/v4 for unknown paths."""
+        url = _openai_models_url("https://custom.example.com/v1")
+        assert url == "https://custom.example.com/paas/v4/models"
+
+
+class TestFetchRemoteModels:
+    """Tests for dynamic model discovery via ``_fetch_remote_models()``.
+
+    Verifies that the provider correctly queries Z.AI's OpenAI-compatible
+    ``GET /models`` endpoint and parses the response.  Uses the project's
+    corporate-ready httpx client via ``shared.http.proxy.get_httpx_client``.
+    """
+
+    @patch('anthropic.Anthropic')
+    def test_fetch_parses_openai_format(self, mock_anthropic):
+        """Should parse standard OpenAI /models response format."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        resp_data = {
+            "object": "list",
+            "data": [
+                {"id": "glm-5", "object": "model"},
+                {"id": "glm-4.7", "object": "model"},
+                {"id": "glm-4.7-flash", "object": "model"},
+            ],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp_data
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+
+        with patch('shared.http.proxy.get_httpx_client', return_value=mock_client):
+            models = provider._fetch_remote_models()
+
+        assert "glm-5" in models
+        assert "glm-4.7" in models
+        assert len(models) == 3
+
+        # Verify the correct URL was called
+        call_args = mock_client.get.call_args
+        assert "/paas/v4/models" in call_args[0][0]
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-key"
+
+    @patch('anthropic.Anthropic')
+    def test_fetch_returns_empty_on_network_error(self, mock_anthropic):
+        """Should return empty list on network errors (graceful fallback)."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = Exception("Connection refused")
+
+        with patch('shared.http.proxy.get_httpx_client', return_value=mock_client):
+            models = provider._fetch_remote_models()
+
+        assert models == []
+
+    @patch('anthropic.Anthropic')
+    def test_fetch_returns_empty_without_api_key(self, mock_anthropic):
+        """Should return empty list when no API key is available."""
+        provider = ZhipuAIProvider()
+        # Not initialized — no API key set
+        provider._api_key = None
+
+        with patch(
+            'shared.plugins.model_provider.zhipuai.provider.resolve_api_key',
+            return_value=None,
+        ), patch(
+            'shared.plugins.model_provider.zhipuai.provider.get_stored_api_key',
+            return_value=None,
+        ):
+            models = provider._fetch_remote_models()
+
+        assert models == []
+
+    @patch('anthropic.Anthropic')
+    def test_fetch_skips_entries_without_id(self, mock_anthropic):
+        """Should skip malformed entries in /models response."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+
+        resp_data = {
+            "object": "list",
+            "data": [
+                {"id": "glm-5"},
+                {"name": "no-id-field"},  # Missing 'id'
+                {"id": "glm-4.7"},
+            ],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp_data
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_resp
+
+        with patch('shared.http.proxy.get_httpx_client', return_value=mock_client):
+            models = provider._fetch_remote_models()
+
+        assert models == ["glm-5", "glm-4.7"]
 
 
 class TestCreateProvider:
