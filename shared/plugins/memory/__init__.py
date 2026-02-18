@@ -17,6 +17,8 @@ Usage:
     })
 """
 
+PLUGIN_KIND = "tool"
+
 from .plugin import MemoryPlugin, create_plugin
 
-__all__ = ["MemoryPlugin", "create_plugin"]
+__all__ = ["MemoryPlugin", "create_plugin", "PLUGIN_KIND"]
