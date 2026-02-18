@@ -114,11 +114,12 @@ class MemoryPlugin:
                             "type": "array",
                             "items": {"type": "string", "minLength": 2},
                             "description": (
-                                "Keywords for retrieval. Each tag must be a meaningful "
-                                "word or phrase (minimum 2 characters). Use specific, "
-                                "searchable terms like 'authentication', 'oauth', 'jwt', "
-                                "'database_schema'. Never use single letters or abbreviations "
-                                "shorter than 2 characters."
+                                "Specific keywords for retrieval (minimum 2 characters each). "
+                                "Tags must be distinctive enough to identify THIS memory "
+                                "without matching unrelated ones. "
+                                "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'react_hooks'. "
+                                "Bad: generic words like 'code', 'error', 'fix', 'config', "
+                                "or single letters."
                             )
                         }
                     },
@@ -202,9 +203,11 @@ class MemoryPlugin:
             "- Use `list_memory_tags` to discover what topics have been stored\n\n"
             "**Best practices:**\n"
             "- Only store substantial, reusable information (not ephemeral responses)\n"
-            "- Tags must be meaningful words or phrases (minimum 2 characters each). "
-            "Good: 'database_schema', 'api_auth', 'jwt'. "
-            "Bad: single letters like 'a', 'd', 'j'\n"
+            "- Use **specific, distinctive** tags that uniquely identify the topic. "
+            "Each tag should narrow retrieval to relevant memories only. "
+            "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'celery_retry_policy'. "
+            "Bad: generic tags like 'code', 'error', 'fix', 'bug', 'config', 'api' — "
+            "these match too many unrelated memories\n"
             "- Write clear descriptions to help future retrieval\n"
         )
 
