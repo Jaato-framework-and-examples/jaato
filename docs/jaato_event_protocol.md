@@ -262,7 +262,7 @@ The `mode` field on `AgentOutputEvent` controls how the client should handle eac
 AgentOutputEvent(source="model", mode="write")     ← new text block
 AgentOutputEvent(source="model", mode="append")    ← more chunks...
 AgentOutputEvent(source="model", mode="append")    ← ...
-AgentOutputEvent(source="model", mode="flush")     ← ⬛ text done, tools next
+AgentOutputEvent(source="system", text="", mode="flush")  ← text done, tools next
 ToolCallStartEvent(tool_name="...")                 ← tool execution begins
 ToolCallEndEvent(...)
 ...                                                 ← more tools if parallel
@@ -1127,7 +1127,8 @@ The server emits `AgentOutputEvent` chunks as they stream from the model — pot
 
 ```python
 from jaato_sdk.events import (
-    AgentOutputEvent, ToolCallStartEvent, ToolCallEndEvent,
+    AgentOutputEvent, AgentCompletedEvent,
+    ToolCallStartEvent, ToolCallEndEvent,
     TurnCompletedEvent, PermissionInputModeEvent,
 )
 
@@ -1136,14 +1137,17 @@ tool_calls: list[dict] = []
 
 async for event in client.events():
 
-    # --- Text streaming ---
-    if isinstance(event, AgentOutputEvent) and event.source == "model":
-        if event.mode == "flush":
-            # Model text is done — emit buffered text now
-            if text_buffer:
-                send_message("".join(text_buffer))
-                text_buffer.clear()
-        elif event.mode in ("write", "append"):
+    # --- Flush signal (check BEFORE source filtering) ---
+    # Flush is emitted as source="system", mode="flush", text=""
+    if isinstance(event, AgentOutputEvent) and event.mode == "flush":
+        # Model text is done — emit buffered text now
+        if text_buffer:
+            send_message("".join(text_buffer))
+            text_buffer.clear()
+
+    # --- Model text streaming ---
+    elif isinstance(event, AgentOutputEvent) and event.source == "model":
+        if event.mode in ("write", "append"):
             text_buffer.append(event.text)
 
     # --- Tool execution ---
@@ -1162,7 +1166,7 @@ async for event in client.events():
             response=user_choice,  # "y", "n", "a", "never", etc.
         )
 
-    # --- Turn completed ---
+    # --- Turn completed (NOT terminal — do NOT break here) ---
     elif isinstance(event, TurnCompletedEvent):
         # Flush any remaining text (text-only responses skip "flush")
         if text_buffer:
@@ -1172,6 +1176,15 @@ async for event in client.events():
         if tool_calls:
             send_tool_summary(tool_calls)
             tool_calls.clear()
+        # Continue looping — multi-turn flows emit multiple TurnCompletedEvents
+
+    # --- Agent completed (TERMINAL — exit the loop) ---
+    elif isinstance(event, AgentCompletedEvent):
+        # Flush any remaining buffers
+        if text_buffer:
+            send_message("".join(text_buffer))
+            text_buffer.clear()
+        break
 ```
 
 ### Key Rules
@@ -1180,6 +1193,18 @@ async for event in client.events():
 2. **`mode="flush"` has empty `text`** — don't append it to the buffer. It's a control signal, not content.
 3. **Multiple flush cycles per turn** — a turn with tool calls may loop: text → flush → tools → text → flush → tools → turn completed. Reset your text buffer on each flush.
 4. **`source` filtering matters** — buffer `source="model"` text. Other sources (`"system"`, `"tool"`, plugin names) carry different content (tool output, system messages) that may need separate handling.
+
+### Common Pitfalls
+
+These are real bugs encountered in production client implementations:
+
+1. **Flush `source` is `"system"`, not `"model"`** — The SDK emits flush as `on_output("system", "", "flush")`. If your client checks `source == "model"` before checking `mode == "flush"`, the flush signal is silently dropped and text is never finalized before tool execution. **Always check `mode == "flush"` before filtering on `source`.**
+
+2. **`TurnCompletedEvent` is NOT terminal** — In multi-turn agentic flows (model responds → calls tool → model responds again), multiple `TurnCompletedEvent`s are emitted before the final `AgentCompletedEvent`. **Do not break your event loop on `TurnCompletedEvent`.** Only `AgentCompletedEvent` signals the end of the interaction.
+
+3. **Guard against empty text before sending** — Flush can fire before any model text arrives (when the model's first action is a tool call with no preamble). If your client sends/edits a message on every flush, an empty accumulated buffer will cause errors (e.g., Telegram rejects empty messages). **Check that accumulated text is non-empty before sending.**
+
+4. **Permission events can arrive without preceding model text** — The model may invoke a tool immediately without saying anything first. Your client should handle `PermissionInputModeEvent` arriving before any `AgentOutputEvent(source="model")` — don't assume there is always text to flush before a permission placeholder.
 
 ---
 
