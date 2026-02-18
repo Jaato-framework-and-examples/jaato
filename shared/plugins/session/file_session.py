@@ -131,17 +131,25 @@ class FileSessionPlugin:
 
     # ==================== SessionPlugin: Core Persistence ====================
 
-    def save(self, state: SessionState) -> None:
+    def save(
+        self,
+        state: SessionState,
+        storage_dir: Optional[Path] = None,
+    ) -> None:
         """Save session state to a JSON file.
 
         Args:
             state: The complete session state to persist.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
         """
         # Update with current description if we have one
         if self._session_description and not state.description:
             state.description = self._session_description
 
-        file_path = self._storage_path / f"{state.session_id}.json"
+        target_dir = storage_dir or self._storage_path
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
 
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -149,11 +157,17 @@ class FileSessionPlugin:
 
         self._current_session_id = state.session_id
 
-    def load(self, session_id: str) -> SessionState:
+    def load(
+        self,
+        session_id: str,
+        storage_dir: Optional[Path] = None,
+    ) -> SessionState:
         """Load session state from a JSON file.
 
         Args:
             session_id: The session ID to load.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
 
         Returns:
             The loaded SessionState.
@@ -162,7 +176,8 @@ class FileSessionPlugin:
             FileNotFoundError: If the session file doesn't exist.
             ValueError: If the session data is corrupted.
         """
-        file_path = self._storage_path / f"{session_id}.json"
+        target_dir = storage_dir or self._storage_path
+        file_path = target_dir / f"{session_id}.json"
 
         if not file_path.exists():
             raise FileNotFoundError(f"Session not found: {session_id}")
@@ -180,15 +195,26 @@ class FileSessionPlugin:
 
         return state
 
-    def list_sessions(self) -> List[SessionInfo]:
+    def list_sessions(
+        self,
+        storage_dir: Optional[Path] = None,
+    ) -> List[SessionInfo]:
         """List all available sessions.
+
+        Args:
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
 
         Returns:
             List of SessionInfo objects, sorted by updated_at descending.
         """
+        target_dir = storage_dir or self._storage_path
         sessions = []
 
-        for file_path in self._storage_path.glob("*.json"):
+        if not target_dir.exists():
+            return sessions
+
+        for file_path in target_dir.glob("*.json"):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -203,7 +229,11 @@ class FileSessionPlugin:
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
-    def delete(self, session_id: str) -> bool:
+    def delete(
+        self,
+        session_id: str,
+        storage_dir: Optional[Path] = None,
+    ) -> bool:
         """Delete a session and its associated data.
 
         Removes both the session JSON file and the session subdirectory
@@ -211,12 +241,15 @@ class FileSessionPlugin:
 
         Args:
             session_id: The session ID to delete.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
 
         Returns:
             True if deleted, False if session didn't exist.
         """
-        file_path = self._storage_path / f"{session_id}.json"
-        session_dir = self._storage_path / session_id
+        target_dir = storage_dir or self._storage_path
+        file_path = target_dir / f"{session_id}.json"
+        session_dir = target_dir / session_id
 
         deleted = False
 
@@ -235,13 +268,20 @@ class FileSessionPlugin:
 
         return deleted
 
-    def get_latest(self) -> Optional[SessionInfo]:
+    def get_latest(
+        self,
+        storage_dir: Optional[Path] = None,
+    ) -> Optional[SessionInfo]:
         """Get the most recently updated session.
+
+        Args:
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
 
         Returns:
             SessionInfo for the latest session, or None if no sessions exist.
         """
-        sessions = self.list_sessions()
+        sessions = self.list_sessions(storage_dir=storage_dir)
         return sessions[0] if sessions else None
 
     # ==================== SessionPlugin: Lifecycle Hooks ====================
@@ -324,7 +364,12 @@ class FileSessionPlugin:
 
     # ==================== SessionPlugin: Description Management ====================
 
-    def set_description(self, session_id: str, description: str) -> None:
+    def set_description(
+        self,
+        session_id: str,
+        description: str,
+        storage_dir: Optional[Path] = None,
+    ) -> None:
         """Set the description for a session.
 
         Called when the model provides a session description via tool call.
@@ -332,11 +377,14 @@ class FileSessionPlugin:
         Args:
             session_id: The session ID to update.
             description: The model-generated description.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
         """
         self._session_description = description
 
         # Update the file if it exists
-        file_path = self._storage_path / f"{session_id}.json"
+        target_dir = storage_dir or self._storage_path
+        file_path = target_dir / f"{session_id}.json"
         if file_path.exists():
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -778,16 +826,22 @@ class FileSessionPlugin:
 
     # ==================== Internal Helpers ====================
 
-    def _cleanup_old_sessions(self, max_sessions: int) -> int:
+    def _cleanup_old_sessions(
+        self,
+        max_sessions: int,
+        storage_dir: Optional[Path] = None,
+    ) -> int:
         """Remove oldest sessions if we exceed the limit.
 
         Args:
             max_sessions: Maximum number of sessions to keep.
+            storage_dir: Override storage directory. When None, uses the
+                directory set during initialize().
 
         Returns:
             Number of sessions deleted.
         """
-        sessions = self.list_sessions()
+        sessions = self.list_sessions(storage_dir=storage_dir)
 
         if len(sessions) <= max_sessions:
             return 0
@@ -797,7 +851,7 @@ class FileSessionPlugin:
         deleted = 0
 
         for session in to_delete:
-            if self.delete(session.session_id):
+            if self.delete(session.session_id, storage_dir=storage_dir):
                 deleted += 1
 
         return deleted

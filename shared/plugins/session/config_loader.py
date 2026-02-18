@@ -82,15 +82,17 @@ def _parse_config(data: Dict[str, Any], base_path: str) -> SessionConfig:
 
     Args:
         data: Dictionary from JSON config file.
-        base_path: Base directory for relative paths.
+        base_path: Base directory for locating the config file (not used
+            for resolving storage_path — that is resolved per-workspace
+            by SessionManager or at use-time by standalone JaatoClient).
 
     Returns:
         SessionConfig with parsed values.
     """
-    # Handle storage_path relative to base_path
+    # Keep storage_path as-is (relative). Resolution to an absolute path
+    # happens at the call site: SessionManager resolves it per-workspace,
+    # and standalone JaatoClient resolves it relative to its own cwd.
     storage_path = data.get("storage_path", ".jaato/sessions")
-    if not Path(storage_path).is_absolute():
-        storage_path = str(Path(base_path) / storage_path)
 
     return SessionConfig(
         storage_path=storage_path,
