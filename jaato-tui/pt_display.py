@@ -1722,6 +1722,14 @@ class PTDisplay:
         def handle_permission_next(event):
             """Handle TAB - cycle to next permission option, or complete in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                # In comment mode with a pending @ file ref, delegate to file completion
+                if self._comment_mode_active and self._comment_has_pending_file_ref():
+                    buff = event.app.current_buffer
+                    if buff.complete_state:
+                        buff.complete_next()
+                    else:
+                        buff.start_completion()
+                    return
                 # Permission mode: cycle to next option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
                 self._update_comment_mode()
@@ -1746,6 +1754,12 @@ class PTDisplay:
         def handle_permission_prev(event):
             """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                # In comment mode with a pending @ file ref, delegate to file completion
+                if self._comment_mode_active and self._comment_has_pending_file_ref():
+                    buff = event.app.current_buffer
+                    if buff.complete_state:
+                        buff.complete_previous()
+                    return
                 # Permission mode: cycle to previous option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
                 self._update_comment_mode()
@@ -3481,6 +3495,39 @@ class PTDisplay:
             val = decision.value if hasattr(decision, 'value') else decision
             return val == 'comment'
         return getattr(option, 'short', '') == 'c'
+
+    def _comment_has_pending_file_ref(self) -> bool:
+        """Check if the comment input has a pending @/@ file reference pattern.
+
+        Used to decide whether TAB should trigger file completion instead of
+        cycling permission options when in comment mode. Replicates the same
+        detection logic used by AtFileCompleter and DoubleAtSandboxCompleter.
+
+        Returns:
+            True if text before cursor contains a valid @ or @@ trigger.
+        """
+        text = self._input_buffer.text[:self._input_buffer.cursor_position]
+        if not text:
+            return False
+
+        # Check @@ first (more specific)
+        double_pos = text.rfind('@@')
+        if double_pos != -1:
+            if double_pos == 0 or not (text[double_pos - 1].isalnum() or text[double_pos - 1] in '._-'):
+                return True
+
+        # Check single @
+        at_pos = text.rfind('@')
+        if at_pos != -1:
+            # Not part of @@
+            if at_pos > 0 and text[at_pos - 1] == '@':
+                return False
+            # Not email-like
+            if at_pos > 0 and (text[at_pos - 1].isalnum() or text[at_pos - 1] in '._-'):
+                return False
+            return True
+
+        return False
 
     def _update_comment_mode(self) -> None:
         """Toggle comment mode based on the currently focused permission option.
