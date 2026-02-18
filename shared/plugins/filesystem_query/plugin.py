@@ -216,7 +216,10 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         """
         # Use workspace_root if configured, otherwise fall back to CWD
         # This ensures absolute paths outside the boundary are always blocked
-        workspace = self._workspace_root or os.path.realpath(os.getcwd())
+        if not self._workspace_root:
+            # No workspace — cannot sandbox, allow explicitly provided paths
+            return True
+        workspace = self._workspace_root
 
         # Resolve path relative to workspace first
         resolved = self._resolve_path(path)
@@ -456,12 +459,15 @@ Tips:
             self._config = load_config()
 
         pattern = args.get("pattern", "")
-        root = args.get("root", self._workspace_root or os.getcwd())
+        root = args.get("root") or self._workspace_root
         max_results = args.get("max_results", self._config.max_results)
         include_hidden = args.get("include_hidden", False)
 
         if not pattern:
             return {"error": "Pattern is required", "files": [], "total": 0}
+
+        if not root:
+            return {"error": "No root specified and no workspace configured", "files": [], "total": 0}
 
         # Normalize trailing ** — Python pathlib.glob("dir/**") only matches
         # the directory itself, not files inside it. Append /* to match files.
@@ -606,7 +612,7 @@ Tips:
             self._config = load_config()
 
         pattern = args.get("pattern", "")
-        path = args.get("path", self._workspace_root or os.getcwd())
+        path = args.get("path") or self._workspace_root
         file_glob = args.get("file_glob")
         context_lines = args.get("context_lines", self._config.context_lines)
         case_sensitive = args.get("case_sensitive", True)
@@ -615,21 +621,24 @@ Tips:
         if not pattern:
             return {"error": "Pattern is required", "matches": [], "total_matches": 0}
 
-        # Sandbox check: ensure search path is within allowed workspace (with /tmp support)
-        if not self._is_path_allowed(path):
-            return {
-                "error": f"Path not allowed: {path}",
-                "matches": [],
-                "total_matches": 0,
-            }
-
-        # Compile regex
+        # Compile regex early to catch syntax errors before path validation
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
             regex = re.compile(pattern, flags)
         except re.error as e:
             return {
                 "error": f"Invalid regex pattern: {e}",
+                "matches": [],
+                "total_matches": 0,
+            }
+
+        if not path:
+            return {"error": "No path specified and no workspace configured", "matches": [], "total_matches": 0}
+
+        # Sandbox check: ensure search path is within allowed workspace (with /tmp support)
+        if not self._is_path_allowed(path):
+            return {
+                "error": f"Path not allowed: {path}",
                 "matches": [],
                 "total_matches": 0,
             }
@@ -851,7 +860,7 @@ Tips:
             self._config = load_config()
 
         pattern = arguments.get("pattern", "")
-        path = arguments.get("path", os.getcwd())
+        path = arguments.get("path") or self._workspace_root
         file_glob = arguments.get("file_glob")
         context_lines = arguments.get("context_lines", self._config.context_lines)
         case_sensitive = arguments.get("case_sensitive", True)
@@ -862,6 +871,10 @@ Tips:
                 content="Error: Pattern is required",
                 chunk_type="error"
             )
+            return
+
+        if not path:
+            yield StreamChunk(content="Error: No path specified and no workspace configured", chunk_type="error")
             return
 
         # Compile regex
@@ -999,7 +1012,7 @@ Tips:
             self._config = load_config()
 
         pattern = arguments.get("pattern", "")
-        root = arguments.get("root", self._workspace_root or os.getcwd())
+        root = arguments.get("root") or self._workspace_root
         max_results = arguments.get("max_results", self._config.max_results)
         include_hidden = arguments.get("include_hidden", False)
 
@@ -1008,6 +1021,10 @@ Tips:
                 content="Error: Pattern is required",
                 chunk_type="error"
             )
+            return
+
+        if not root:
+            yield StreamChunk(content="Error: No root specified and no workspace configured", chunk_type="error")
             return
 
         # Normalize trailing ** — Python pathlib.glob("dir/**") only matches

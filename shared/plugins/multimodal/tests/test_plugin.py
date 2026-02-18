@@ -23,7 +23,7 @@ class TestMultimodalPluginInitialization:
         plugin = MultimodalPlugin()
         plugin.initialize()
         assert plugin._initialized is True
-        assert plugin._base_path == Path.cwd()
+        assert plugin._base_path is None
         assert plugin._max_image_size_mb == 10.0
 
     def test_initialize_with_base_path(self):

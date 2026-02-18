@@ -30,7 +30,7 @@ def discover_references(
     Args:
         references_dir: Directory path to scan (relative or absolute).
         base_path: Base path for resolving relative references_dir.
-                   Defaults to current working directory.
+                   Returns empty list when None (cannot resolve without workspace).
         project_root: Root directory for making resolved paths relative.
                       This should be where the agent operates from.
                       Defaults to parent of references_dir if it's under .jaato/.
@@ -39,7 +39,7 @@ def discover_references(
         List of ReferenceSource instances discovered from the directory.
     """
     if base_path is None:
-        base_path = os.getcwd()
+        return []  # No base path — cannot discover references
 
     # Resolve the references directory path
     refs_path = Path(references_dir)
@@ -415,7 +415,8 @@ def load_config(
     path: Optional[str] = None,
     env_var: str = "REFERENCES_CONFIG_PATH",
     auto_discover: bool = True,
-    references_dir: str = ".jaato/references"
+    references_dir: str = ".jaato/references",
+    workspace_path: Optional[str] = None,
 ) -> ReferencesConfig:
     """Load and validate a references configuration file.
 
@@ -424,6 +425,8 @@ def load_config(
         env_var: Environment variable name for config path
         auto_discover: Whether to auto-discover references from references_dir.
         references_dir: Directory to scan for individual reference files.
+        workspace_path: Workspace root for resolving workspace-relative paths.
+            When None, workspace-relative default paths are skipped.
 
     Returns:
         ReferencesConfig instance with merged sources from config file
@@ -439,12 +442,13 @@ def load_config(
         path = os.environ.get(env_var)
 
     if path is None:
-        # Try default locations
-        default_paths = [
-            Path.cwd() / "references.json",
-            Path.cwd() / ".references.json",
-            Path.home() / ".config" / "jaato" / "references.json",
-        ]
+        # Try default locations — workspace-relative paths only if workspace is set
+        default_paths = []
+        if workspace_path:
+            ws = Path(workspace_path)
+            default_paths.append(ws / "references.json")
+            default_paths.append(ws / ".references.json")
+        default_paths.append(Path.home() / ".config" / "jaato" / "references.json")
         for default_path in default_paths:
             if default_path.exists():
                 path = str(default_path)
@@ -503,7 +507,7 @@ def load_config(
 
     # Auto-discover references if enabled
     if config.auto_discover_references:
-        discovered = discover_references(config.references_dir)
+        discovered = discover_references(config.references_dir, base_path=workspace_path)
         if discovered:
             # Build set of existing IDs to avoid duplicates
             existing_ids = {s.id for s in config.sources}

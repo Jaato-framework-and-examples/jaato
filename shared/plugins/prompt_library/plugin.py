@@ -235,36 +235,56 @@ class PromptLibraryPlugin:
         # No callback - default to first option (usually 'yes' or safe default)
         return options[0] if options else None
 
-    def _get_workspace(self) -> Path:
-        """Get the current workspace path."""
+    def _get_workspace(self) -> Optional[Path]:
+        """Get the current workspace path, or None if not set."""
         if self._workspace_path:
             return Path(self._workspace_path)
-        return Path.cwd()
+        return None
 
     def _get_prompt_sources(self) -> List[PromptSource]:
         """Get all prompt source locations in priority order."""
         workspace = self._get_workspace()
         home = Path.home()
 
-        sources = [
-            # Jaato native prompts (writable)
-            PromptSource(
-                path=workspace / ".jaato" / "prompts",
-                source_name="project",
-                entry_file=PROMPT_ENTRY_FILE,
-                writable=True,
-            ),
+        sources = []
+
+        # Workspace-relative sources (only when workspace is set)
+        if workspace:
+            sources.extend([
+                # Jaato native prompts (writable)
+                PromptSource(
+                    path=workspace / ".jaato" / "prompts",
+                    source_name="project",
+                    entry_file=PROMPT_ENTRY_FILE,
+                    writable=True,
+                ),
+                # Jaato skills (writable, for ClawdHub installs)
+                PromptSource(
+                    path=workspace / ".jaato" / "skills",
+                    source_name="project-skills",
+                    entry_file=SKILL_ENTRY_FILE,
+                    writable=True,
+                ),
+                # Claude Code interop (read-only)
+                PromptSource(
+                    path=workspace / ".claude" / "skills",
+                    source_name="claude-skills",
+                    entry_file=SKILL_ENTRY_FILE,
+                    writable=False,
+                ),
+                PromptSource(
+                    path=workspace / ".claude" / "commands",
+                    source_name="claude-commands",
+                    entry_file=SKILL_ENTRY_FILE,  # or plain files
+                    writable=False,
+                ),
+            ])
+
+        sources.extend([
             PromptSource(
                 path=home / ".jaato" / "prompts",
                 source_name="global",
                 entry_file=PROMPT_ENTRY_FILE,
-                writable=True,
-            ),
-            # Jaato skills (writable, for ClawdHub installs)
-            PromptSource(
-                path=workspace / ".jaato" / "skills",
-                source_name="project-skills",
-                entry_file=SKILL_ENTRY_FILE,
                 writable=True,
             ),
             PromptSource(
@@ -273,26 +293,13 @@ class PromptLibraryPlugin:
                 entry_file=SKILL_ENTRY_FILE,
                 writable=True,
             ),
-            # Claude Code interop (read-only)
-            PromptSource(
-                path=workspace / ".claude" / "skills",
-                source_name="claude-skills",
-                entry_file=SKILL_ENTRY_FILE,
-                writable=False,
-            ),
-            PromptSource(
-                path=workspace / ".claude" / "commands",
-                source_name="claude-commands",
-                entry_file=SKILL_ENTRY_FILE,  # or plain files
-                writable=False,
-            ),
             PromptSource(
                 path=home / ".claude" / "skills",
                 source_name="claude-global",
                 entry_file=SKILL_ENTRY_FILE,
                 writable=False,
             ),
-        ]
+        ])
 
         return sources
 
@@ -526,12 +533,17 @@ class PromptLibraryPlugin:
 
     # ==================== Fetch Implementation ====================
 
-    def _get_destination_dir(self, destination: str) -> Path:
-        """Get the destination directory for fetched prompts."""
+    def _get_destination_dir(self, destination: str) -> Optional[Path]:
+        """Get the destination directory for fetched prompts.
+
+        Returns None if destination is 'project' but no workspace is set.
+        """
         if destination == "user":
             return Path.home() / ".jaato" / "prompts"
-        else:  # project
-            return self._get_workspace() / ".jaato" / "prompts"
+        workspace = self._get_workspace()
+        if workspace is None:
+            return None
+        return workspace / ".jaato" / "prompts"
 
     def _add_provenance(
         self,
@@ -1534,7 +1546,10 @@ class PromptLibraryPlugin:
         if save_global:
             prompts_dir = Path.home() / ".jaato" / "prompts"
         else:
-            prompts_dir = self._get_workspace() / ".jaato" / "prompts"
+            workspace = self._get_workspace()
+            if workspace is None:
+                return {'error': 'No workspace path configured — cannot save project prompt'}
+            prompts_dir = workspace / ".jaato" / "prompts"
 
         # Create directory if needed
         prompts_dir.mkdir(parents=True, exist_ok=True)

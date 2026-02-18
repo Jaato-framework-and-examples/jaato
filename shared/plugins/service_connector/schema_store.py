@@ -69,18 +69,15 @@ class SchemaStore:
 
         Args:
             workspace_path: Base directory for the workspace. If None,
-                uses the current working directory.
+                workspace-relative paths will not resolve until
+                set_workspace_path() is called.
         """
-        if workspace_path:
-            self._workspace = Path(workspace_path)
-        else:
-            self._workspace = Path.cwd()
-
-        self._base_path = self._workspace / DEFAULT_SERVICES_DIR
+        self._workspace: Optional[Path] = Path(workspace_path) if workspace_path else None
+        self._base_path: Optional[Path] = self._workspace / DEFAULT_SERVICES_DIR if self._workspace else None
 
     @property
-    def base_path(self) -> Path:
-        """Get the base path for service storage."""
+    def base_path(self) -> Optional[Path]:
+        """Get the base path for service storage, or None if no workspace set."""
         return self._base_path
 
     def set_workspace_path(self, path: str) -> None:

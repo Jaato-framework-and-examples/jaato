@@ -152,8 +152,8 @@ class TemplatePlugin:
     def __init__(self):
         self._initialized = False
         self._agent_name: Optional[str] = None
-        self._base_path: Path = Path.cwd()
-        self._templates_dir: Path = Path.cwd() / ".jaato" / "templates"
+        self._base_path: Optional[Path] = None
+        self._templates_dir: Optional[Path] = None
         # Track extracted templates in this session: hash -> path
         self._extracted_templates: Dict[str, Path] = {}
         # Unified template index: name -> TemplateIndexEntry
@@ -184,7 +184,8 @@ class TemplatePlugin:
             self._base_path = Path(config["base_path"])
 
         # Templates directory under .jaato
-        self._templates_dir = self._base_path / ".jaato" / "templates"
+        if self._base_path is not None:
+            self._templates_dir = self._base_path / ".jaato" / "templates"
 
         self._initialized = True
         self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
@@ -201,6 +202,17 @@ class TemplatePlugin:
         """
         self._plugin_registry = registry
         self._trace("set_plugin_registry: wired with registry")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Update the base path to the client's workspace directory.
+
+        Called by PluginRegistry.set_workspace_path() when a session binds
+        to a specific workspace.  Re-resolves _base_path and _templates_dir
+        so template resolution uses the workspace, not the server CWD.
+        """
+        self._base_path = Path(path)
+        self._templates_dir = self._base_path / ".jaato" / "templates"
+        self._trace(f"set_workspace_path: base_path={self._base_path}, templates_dir={self._templates_dir}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
@@ -876,7 +888,7 @@ Template rendering requires approval since it writes files."""
                 extracted.append((content_hash, template_path, variables))
 
                 # Build annotation with COMPLETE variable list
-                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                rel_path = template_path.relative_to(self._base_path) if self._base_path and template_path.is_relative_to(self._base_path) else template_path
 
                 # Show ALL variables so the model knows exactly what to provide
                 if variables:
@@ -1582,43 +1594,30 @@ Template rendering requires approval since it writes files."""
                 return path, paths_tried
             return None, paths_tried
 
-        # 4. Try relative to current working directory
-        cwd_path = Path.cwd() / path
-        paths_tried.append(str(cwd_path))
-        if cwd_path.exists():
-            return cwd_path, paths_tried
+        # 4. Try relative to base_path (workspace)
+        if self._base_path is not None:
+            base_path = self._base_path / path
+            paths_tried.append(str(base_path))
+            if base_path.exists():
+                return base_path, paths_tried
 
-        # 5. Try relative to base_path (configured path)
-        base_path = self._base_path / path
-        paths_tried.append(str(base_path))
-        if base_path.exists():
-            return base_path, paths_tried
+        # 5. Try relative to .jaato/templates/
+        if self._templates_dir is not None:
+            templates_path = self._templates_dir / path
+            paths_tried.append(str(templates_path))
+            if templates_path.exists():
+                return templates_path, paths_tried
 
-        # 6. Try relative to .jaato/templates/
-        templates_path = self._templates_dir / path
-        paths_tried.append(str(templates_path))
-        if templates_path.exists():
-            return templates_path, paths_tried
-
-        # 7. Try resolving .. components explicitly
-        try:
-            resolved = (Path.cwd() / path).resolve()
-            if str(resolved) not in paths_tried:
-                paths_tried.append(str(resolved))
-            if resolved.exists():
-                return resolved, paths_tried
-        except (OSError, ValueError):
-            pass
-
-        # 8. Try resolving from base_path
-        try:
-            resolved = (self._base_path / path).resolve()
-            if str(resolved) not in paths_tried:
-                paths_tried.append(str(resolved))
-            if resolved.exists():
-                return resolved, paths_tried
-        except (OSError, ValueError):
-            pass
+        # 6. Try resolving .. components from base_path
+        if self._base_path is not None:
+            try:
+                resolved = (self._base_path / path).resolve()
+                if str(resolved) not in paths_tried:
+                    paths_tried.append(str(resolved))
+                if resolved.exists():
+                    return resolved, paths_tried
+            except (OSError, ValueError):
+                pass
 
         return None, paths_tried
 
@@ -1699,6 +1698,11 @@ Template rendering requires approval since it writes files."""
         try:
             out_path = Path(output_path)
             if not out_path.is_absolute():
+                if self._base_path is None:
+                    return {
+                        "error": "No workspace path configured — cannot resolve relative output path",
+                        "status": "no_workspace"
+                    }
                 out_path = self._base_path / out_path
 
             # Create parent directories
@@ -1745,7 +1749,7 @@ Template rendering requires approval since it writes files."""
 
             # Show relative path for display when inside base_path
             try:
-                display_path = str(source_path.relative_to(self._base_path)) if source_path.is_relative_to(self._base_path) else str(source_path)
+                display_path = str(source_path.relative_to(self._base_path)) if self._base_path and source_path.is_relative_to(self._base_path) else str(source_path)
             except ValueError:
                 display_path = str(source_path)
 
@@ -1816,6 +1820,11 @@ Template rendering requires approval since it writes files."""
         # Check if output path already exists
         out_path = Path(output_path)
         if not out_path.is_absolute():
+            if self._base_path is None:
+                return {
+                    "error": "No workspace path configured — cannot resolve relative output path",
+                    "status": "no_workspace"
+                }
             out_path = self._base_path / out_path
 
         if out_path.exists() and not overwrite:
@@ -1978,6 +1987,8 @@ Template rendering requires approval since it writes files."""
 
         path_obj = Path(file_path)
         if not path_obj.is_absolute():
+            if self._base_path is None:
+                return {"valid": False, "path": file_path, "errors": ["No workspace path configured — cannot resolve relative path"], "warnings": []}
             path_obj = self._base_path / path_obj
 
         if not path_obj.exists():

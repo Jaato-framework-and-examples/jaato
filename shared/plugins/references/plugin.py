@@ -71,6 +71,8 @@ class ReferencesPlugin:
         self._on_selection_resolved: Optional[Callable[[str, List[str]], None]] = None
         # Project root for resolving relative paths (stored during initialize)
         self._project_root: Optional[str] = None
+        # Workspace path set by PluginRegistry.set_workspace_path()
+        self._workspace_path: Optional[str] = None
         # Plugin registry for cross-plugin communication (e.g., authorizing external paths)
         self._plugin_registry = None
         # Transitive reference metadata: maps each transitively discovered ID
@@ -108,6 +110,24 @@ class ReferencesPlugin:
         """
         self._plugin_registry = registry
         self._trace(f"set_plugin_registry: registry set")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Update the workspace path for resolving reference source paths.
+
+        Called by PluginRegistry.set_workspace_path() when a session binds
+        to a specific workspace.  Re-derives _project_root and reloads the
+        configuration so sources resolve against the workspace, not the
+        server CWD.
+        """
+        self._workspace_path = path
+        # Re-derive project root from workspace
+        base_path_obj = Path(path).resolve()
+        if '.jaato' in base_path_obj.parts:
+            jaato_idx = base_path_obj.parts.index('.jaato')
+            self._project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
+        else:
+            self._project_root = str(base_path_obj)
+        self._trace(f"set_workspace_path: workspace={path}, project_root={self._project_root}")
 
     def _authorize_source_path(self, source: ReferenceSource) -> None:
         """Authorize a source's path for readonly access via the sandbox plugin.
@@ -288,7 +308,7 @@ class ReferencesPlugin:
                 self._trace(
                     f"transitive:   '{source.id}' path not found "
                     f"(resolved={source.resolved_path}, original={source.path}, "
-                    f"project_root={self._project_root}, cwd={Path.cwd()})"
+                    f"project_root={self._project_root}, workspace={self._workspace_path})"
                 )
                 return None
 
@@ -671,18 +691,21 @@ class ReferencesPlugin:
 
         # Compute and store project root for path resolution
         # This is used when resolving paths for catalog sources and in _get_reference_content
-        inline_base_path = config.get("base_path", os.getcwd())
-        base_path_obj = Path(inline_base_path).resolve()
-        if '.jaato' in base_path_obj.parts:
-            jaato_idx = base_path_obj.parts.index('.jaato')
-            self._project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
-        else:
-            self._project_root = str(base_path_obj)
+        inline_base_path = config.get("base_path") or self._workspace_path
+        if not inline_base_path:
+            self._trace("initialize: no base_path in config and no workspace set — project_root will be None")
+        base_path_obj = Path(inline_base_path).resolve() if inline_base_path else None
+        if base_path_obj is not None:
+            if '.jaato' in base_path_obj.parts:
+                jaato_idx = base_path_obj.parts.index('.jaato')
+                self._project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
+            else:
+                self._project_root = str(base_path_obj)
 
         # Try to load from file first (master catalog)
         config_path = config.get("config_path")
         try:
-            self._config = load_config(config_path)
+            self._config = load_config(config_path, workspace_path=inline_base_path)
         except FileNotFoundError:
             # Use defaults
             self._config = ReferencesConfig()
@@ -705,9 +728,9 @@ class ReferencesPlugin:
                 else:
                     resolved_sources.append(s)
 
-            # Resolve relative paths for inline sources against provided base or CWD
-            # Make paths relative to project root (not CWD which may differ)
-            resolve_source_paths(resolved_sources, inline_base_path, relative_to=self._project_root)
+            # Resolve relative paths for inline sources against workspace
+            if inline_base_path:
+                resolve_source_paths(resolved_sources, inline_base_path, relative_to=self._project_root)
             self._sources = resolved_sources
         else:
             # Use sources from master catalog - resolve paths for current context

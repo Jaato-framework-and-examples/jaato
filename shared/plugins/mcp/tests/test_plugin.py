@@ -482,21 +482,17 @@ class TestMCPPluginConfigSave:
             assert 'TestServer' in saved['mcpServers']
 
     def test_save_config_default_path(self):
-        """Config should be saved to .mcp.json in current directory if no path set."""
+        """Config should be saved to .mcp.json in workspace directory if no path set."""
         plugin = MCPToolPlugin()
         with tempfile.TemporaryDirectory() as tmpdir:
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                plugin._config_path = None
-                plugin._config_cache = {'mcpServers': {}}
+            plugin.set_workspace_path(tmpdir)
+            plugin._config_path = None
+            plugin._config_cache = {'mcpServers': {}}
 
-                result = plugin._save_config()
+            result = plugin._save_config()
 
-                assert result is None
-                assert os.path.exists('.mcp.json')
-            finally:
-                os.chdir(old_cwd)
+            assert result is None
+            assert os.path.exists(os.path.join(tmpdir, '.mcp.json'))
 
 
 class TestMCPPluginSchemaClean:
@@ -591,14 +587,10 @@ class TestMCPPluginRegistryLoading:
             with open(config_path, 'w') as f:
                 json.dump(config, f)
 
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                registry = plugin._load_mcp_registry()
-                assert "mcpServers" in registry
-                assert "Test" in registry["mcpServers"]
-            finally:
-                os.chdir(old_cwd)
+            plugin.set_workspace_path(tmpdir)
+            registry = plugin._load_mcp_registry()
+            assert "mcpServers" in registry
+            assert "Test" in registry["mcpServers"]
 
 
 class TestMCPPluginLogging:

@@ -113,6 +113,7 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
         self._max_results = DEFAULT_MAX_RESULTS
         self._context_lines = DEFAULT_CONTEXT_LINES
         self._exclude_dirs = list(DEFAULT_EXCLUDE_DIRS)
+        self._workspace_path: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -151,6 +152,14 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
             self._max_results,
             self._context_lines,
         )
+
+    def set_workspace_path(self, path: str) -> None:
+        """Update the workspace path used as the default search root.
+
+        Called by PluginRegistry.set_workspace_path() when a session binds
+        to a specific workspace.
+        """
+        self._workspace_path = path
 
     def shutdown(self) -> None:
         """Shutdown the plugin and release resources."""
@@ -420,13 +429,16 @@ Guidelines:
 
         pattern = args.get("pattern", "")
         language = args.get("language")
-        path = args.get("path", os.getcwd())
+        path = args.get("path") or self._workspace_path
         file_pattern = args.get("file_pattern")
         context_lines = args.get("context_lines", self._context_lines)
         max_results = args.get("max_results", self._max_results)
 
         if not pattern:
             return {"error": "Pattern is required", "matches": [], "total_matches": 0}
+
+        if not path:
+            return {"error": "No path specified and no workspace configured", "matches": [], "total_matches": 0}
 
         search_path = Path(path).resolve()
         if not search_path.exists():
@@ -689,13 +701,17 @@ Guidelines:
 
         pattern = arguments.get("pattern", "")
         language = arguments.get("language")
-        path = arguments.get("path", os.getcwd())
+        path = arguments.get("path") or self._workspace_path
         file_pattern = arguments.get("file_pattern")
         context_lines = arguments.get("context_lines", self._context_lines)
         max_results = arguments.get("max_results", self._max_results)
 
         if not pattern:
             yield StreamChunk(content="Error: Pattern is required", chunk_type="error")
+            return
+
+        if not path:
+            yield StreamChunk(content="Error: No path specified and no workspace configured", chunk_type="error")
             return
 
         search_path = Path(path).resolve()

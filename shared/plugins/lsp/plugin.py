@@ -443,7 +443,9 @@ class LSPToolPlugin:
             return path
         if self._workspace_path:
             return os.path.abspath(os.path.join(self._workspace_path, path))
-        return os.path.abspath(path)
+        # No workspace set — return path as-is (cannot resolve against CWD
+        # in daemon mode as it would leak the server's directory)
+        return path
 
     def shutdown(self) -> None:
         """Shutdown the LSP plugin and clean up resources."""
@@ -1603,12 +1605,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         paths = []
         if self._custom_config_path:
             paths.append(self._custom_config_path)
-        # Use workspace_path if set, otherwise fall back to cwd
-        workspace = self._workspace_path or os.getcwd()
-        paths.extend([
-            os.path.join(workspace, '.lsp.json'),
-            os.path.expanduser('~/.lsp.json'),
-        ])
+        # Use workspace_path if set; skip workspace-relative path otherwise
+        if self._workspace_path:
+            paths.append(os.path.join(self._workspace_path, '.lsp.json'))
+        paths.append(os.path.expanduser('~/.lsp.json'))
 
         for path in paths:
             if os.path.exists(path):
@@ -1666,12 +1666,16 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     # Expand variables in args (e.g., ${workspaceRoot})
                     raw_args = spec.get('args', [])
                     expanded_args = expand_variables(raw_args)
+                    # Use workspace-based root_uri when config doesn't specify one
+                    root_uri = spec.get('rootUri')
+                    if not root_uri and self._workspace_path:
+                        root_uri = f"file://{self._workspace_path}"
                     config = ServerConfig(
                         name=name,
                         command=spec.get('command', ''),
                         args=expanded_args,
                         env=spec.get('env'),
-                        root_uri=spec.get('rootUri'),
+                        root_uri=root_uri,
                         language_id=spec.get('languageId'),
                         extra_paths_key=spec.get('extraPathsKey'),
                     )

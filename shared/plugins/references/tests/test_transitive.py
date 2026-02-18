@@ -839,6 +839,7 @@ class TestInitializeWithTransitive:
                 f.write("# Retry Pattern\n\nRetry content here.")
 
             plugin.initialize({
+                "base_path": temp_dir,
                 "sources": [
                     {
                         "id": "cb-ref",
@@ -887,6 +888,7 @@ class TestInitializeWithTransitive:
                 f.write("# Retry Guide\n\nRetry content here.")
 
             plugin.initialize({
+                "base_path": temp_dir,
                 "sources": [
                     {
                         "id": "cb-ref",
