@@ -53,6 +53,7 @@ from jaato_sdk.events import (
     HistoryRequest,
     HistoryEvent,
     ClientConfigRequest,
+    PresentationContext,
     SessionInfoEvent,
 )
 
@@ -482,18 +483,10 @@ class IPCClient:
         # Build presentation context describing TUI terminal capabilities.
         # This is transmitted to the server so the model can adapt its output
         # (e.g. avoid wide tables on narrow terminals).
-        presentation = {
-            "content_width": content_width,
-            "supports_markdown": True,
-            "supports_tables": True,
-            "supports_code_blocks": True,
-            "supports_images": False,
-            "supports_rich_text": True,
-            "supports_unicode": True,
-            "supports_mermaid": False,
-            "supports_expandable_content": False,
-            "client_type": "terminal",
-        }
+        presentation = PresentationContext(
+            content_width=content_width,
+            client_type="terminal",
+        )
 
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
@@ -512,7 +505,7 @@ class IPCClient:
             provider_trace_log=provider_trace,
             working_dir=working_dir,
             env_file=env_file_abs,
-            presentation=presentation,
+            presentation=presentation.to_dict(),
         ))
 
     async def _start_server(self) -> bool:
