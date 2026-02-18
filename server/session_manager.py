@@ -154,7 +154,7 @@ class SessionManager:
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
 
-        # Per-client configuration (terminal_width, etc.)
+        # Per-client configuration (presentation context, working_dir, etc.)
         self._client_config: Dict[str, Dict[str, Any]] = {}
 
         # Event routing callback
@@ -392,12 +392,7 @@ class SessionManager:
         if client_id not in self._client_config:
             self._client_config[client_id] = {}
 
-        # Store and apply terminal width
-        if event.terminal_width:
-            self._client_config[client_id]['terminal_width'] = event.terminal_width
-            logger.info(f"Client {client_id} set terminal_width={event.terminal_width}")
-
-        # Store presentation context (full display capabilities)
+        # Store presentation context (display capabilities)
         if event.presentation:
             self._client_config[client_id]['presentation'] = event.presentation
             logger.info(f"Client {client_id} set presentation context (client_type={event.presentation.get('client_type', 'unknown')})")
@@ -425,8 +420,7 @@ class SessionManager:
     def _apply_client_config_to_server(self, client_id: str, server: 'JaatoServer') -> None:
         """Apply stored client configuration to a server.
 
-        Called when a client creates or attaches to a session.  Applies
-        presentation context (if available) or falls back to terminal_width.
+        Called when a client creates or attaches to a session.
 
         Args:
             client_id: The client whose config to apply.
@@ -438,9 +432,6 @@ class SessionManager:
             ctx = PresentationContext.from_dict(config['presentation'])
             server.set_presentation_context(ctx)
             logger.debug(f"Applied presentation context to server for client {client_id}")
-        elif 'terminal_width' in config:
-            server.terminal_width = config['terminal_width']
-            logger.debug(f"Applied terminal_width={config['terminal_width']} to server for client {client_id}")
         if 'working_dir' in config:
             server.workspace_path = config['working_dir']
             logger.debug(f"Applied workspace_path={config['working_dir']} to server for client {client_id}")
@@ -448,11 +439,6 @@ class SessionManager:
     @staticmethod
     def _apply_presentation_to_server(event: 'ClientConfigRequest', server: 'JaatoServer') -> None:
         """Construct and apply PresentationContext from a ClientConfigRequest.
-
-        If the event carries a full ``presentation`` dict, a
-        ``PresentationContext`` is built from it.  Otherwise falls back to
-        setting ``terminal_width`` directly (backwards compat for older
-        clients that only send ``terminal_width``).
 
         Args:
             event: The client config event.
@@ -462,8 +448,6 @@ class SessionManager:
             from shared.plugins.model_provider.types import PresentationContext
             ctx = PresentationContext.from_dict(event.presentation)
             server.set_presentation_context(ctx)
-        elif event.terminal_width:
-            server.terminal_width = event.terminal_width
 
     def _handle_turn_tracking_event(self, session: Session, event: Event) -> None:
         """Handle events for turn tracking (interrupted tool recovery).
@@ -616,7 +600,7 @@ class SessionManager:
         session_dir = self._session_storage_dir(workspace_path) / session_id
         self._configure_todo_storage(server, session_dir)
 
-        # Apply client-specific config (e.g., terminal_width)
+        # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
 
         # Create session object
@@ -794,7 +778,7 @@ class SessionManager:
 
         logger.info(f"Client {client_id} attached to session {session_id}")
 
-        # Apply client-specific config (e.g., terminal_width)
+        # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, session.server)
 
         # Only emit current state if session was already in memory.
