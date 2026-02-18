@@ -166,11 +166,13 @@ class TestReadFileExecution:
 
         result = plugin._execute_read_file({"path": str(test_file)})
 
-        assert "error" not in result
-        assert result["content"] == "Hello, World!"
-        assert result["path"] == str(test_file)
-        assert result["size"] == 13
-        assert result["lines"] == 1
+        # readFile returns a plain string (header + content) to avoid
+        # JSON escaping in provider converters
+        assert isinstance(result, str)
+        assert "Hello, World!" in result
+        assert str(test_file) in result
+        assert "size: 13" in result
+        assert "lines: 1" in result
 
     def test_read_nonexistent_file(self, tmp_path):
         plugin = FileEditPlugin()
