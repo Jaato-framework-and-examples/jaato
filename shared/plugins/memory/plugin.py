@@ -112,10 +112,13 @@ class MemoryPlugin:
                         },
                         "tags": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {"type": "string", "minLength": 2},
                             "description": (
-                                "Keywords for retrieval. Use specific, searchable terms "
-                                "(e.g., ['authentication', 'oauth', 'jwt'] not ['auth stuff'])"
+                                "Keywords for retrieval. Each tag must be a meaningful "
+                                "word or phrase (minimum 2 characters). Use specific, "
+                                "searchable terms like 'authentication', 'oauth', 'jwt', "
+                                "'database_schema'. Never use single letters or abbreviations "
+                                "shorter than 2 characters."
                             )
                         }
                     },
@@ -199,7 +202,9 @@ class MemoryPlugin:
             "- Use `list_memory_tags` to discover what topics have been stored\n\n"
             "**Best practices:**\n"
             "- Only store substantial, reusable information (not ephemeral responses)\n"
-            "- Use specific, searchable tags (e.g., 'database_schema', 'api_auth')\n"
+            "- Tags must be meaningful words or phrases (minimum 2 characters each). "
+            "Good: 'database_schema', 'api_auth', 'jwt'. "
+            "Bad: single letters like 'a', 'd', 'j'\n"
             "- Write clear descriptions to help future retrieval\n"
         )
 
@@ -402,12 +407,28 @@ class MemoryPlugin:
                 "message": "Memory plugin not initialized"
             }
 
+        # Validate and normalize tags: strip whitespace, reject single-char tags
+        raw_tags = args.get("tags", [])
+        valid_tags = [
+            tag.strip() for tag in raw_tags
+            if isinstance(tag, str) and len(tag.strip()) >= 2
+        ]
+        if not valid_tags:
+            return {
+                "status": "error",
+                "message": (
+                    "All tags were rejected — each tag must be a meaningful "
+                    "word or phrase (at least 2 characters). "
+                    f"Received: {raw_tags!r}"
+                )
+            }
+
         # Create memory object
         memory = Memory(
             id=f"mem_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:20]}",
             content=args["content"],
             description=args["description"],
-            tags=args["tags"],
+            tags=valid_tags,
             timestamp=datetime.now().isoformat(),
             usage_count=0
         )
@@ -773,6 +794,14 @@ class MemoryPlugin:
             return "content cannot be empty"
         if not data["tags"]:
             return "tags cannot be empty"
+
+        # Tag quality: each tag must be at least 2 characters
+        short_tags = [tag for tag in data["tags"] if len(tag.strip()) < 2]
+        if short_tags:
+            return (
+                f"tags must be meaningful words (at least 2 characters each), "
+                f"got: {short_tags!r}"
+            )
 
         return None
 

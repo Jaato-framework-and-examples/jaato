@@ -151,5 +151,54 @@ class TestMemoryPlugin(unittest.TestCase):
         self.assertEqual(result2["memories"][0]["usage_count"], 2)
 
 
+    def test_single_letter_tags_rejected(self):
+        """Test that single-letter tags are rejected."""
+        executors = self.plugin.get_executors()
+
+        result = executors["store_memory"]({
+            "content": "Some content",
+            "description": "Test memory",
+            "tags": ["a", "b", "c"]
+        })
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("at least 2 characters", result["message"])
+
+    def test_short_tags_filtered_valid_kept(self):
+        """Test that short tags are filtered but valid tags are kept."""
+        executors = self.plugin.get_executors()
+
+        result = executors["store_memory"]({
+            "content": "Authentication details",
+            "description": "Auth flow",
+            "tags": ["a", "authentication", "x", "oauth"]
+        })
+
+        # Should succeed with only the valid tags
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["tags"], ["authentication", "oauth"])
+
+    def test_validate_memory_schema_rejects_short_tags(self):
+        """Test that _validate_memory_schema rejects short tags."""
+        error = self.plugin._validate_memory_schema({
+            "content": "test",
+            "description": "test",
+            "tags": ["a", "b"]
+        })
+
+        self.assertIsNotNone(error)
+        self.assertIn("at least 2 characters", error)
+
+    def test_validate_memory_schema_accepts_valid_tags(self):
+        """Test that _validate_memory_schema accepts valid tags."""
+        error = self.plugin._validate_memory_schema({
+            "content": "test",
+            "description": "test",
+            "tags": ["authentication", "oauth"]
+        })
+
+        self.assertIsNone(error)
+
+
 if __name__ == "__main__":
     unittest.main()
