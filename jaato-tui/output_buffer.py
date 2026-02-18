@@ -4875,28 +4875,48 @@ class OutputBuffer:
         # This is the definitive safety net against ALL measurement inaccuracies
         # (word-wrap differences between textwrap and Rich, inter-item spacing edge
         # cases, spinner lines, tool tree height miscalculations, etc.).
-        # Rich Panel clips from the BOTTOM when content exceeds height, which hides
-        # the most recent output. By cropping from the TOP here, we guarantee the
-        # most recent (bottom) content is always visible.
         #
-        # Only crop when at the bottom (scroll_offset==0). When scrolled up, the
-        # user wants to see the OLDER content at the top of the viewport; cropping
-        # from the top would remove exactly what they scrolled up to see. In that
-        # case, Panel's default bottom-clipping is correct (clips the newer edge
-        # of the visible range, preserving the older content the user navigated to).
-        if height and self._scroll_offset == 0 and isinstance(output, Text):
+        # Two cases:
+        # - scroll_offset==0 (at bottom): Crop from TOP so the most recent (bottom)
+        #   content is always visible. Without this, Rich Panel clips from the bottom,
+        #   hiding the newest output.
+        # - scroll_offset>0 (scrolled up): Crop from BOTTOM so the older content at
+        #   the top (which the user scrolled to see) is preserved. Without this,
+        #   measurement mismatches cause overflow that Rich Panel clips from the bottom,
+        #   but the mismatch between measured and actual line counts can leave ghost
+        #   characters from the previous frame on screen during differential rendering.
+        if height and isinstance(output, Text):
             plain = output.plain
             line_count = plain.count('\n') + 1 if plain else 0
             if line_count > height:
-                trim_count = line_count - height
-                pos = 0
-                for _ in range(trim_count):
-                    idx = plain.find('\n', pos)
-                    if idx == -1:
-                        break
-                    pos = idx + 1
-                if pos > 0:
-                    output = output[pos:]
+                if self._scroll_offset == 0:
+                    # At bottom: trim from TOP to keep newest content visible
+                    trim_count = line_count - height
+                    pos = 0
+                    for _ in range(trim_count):
+                        idx = plain.find('\n', pos)
+                        if idx == -1:
+                            break
+                        pos = idx + 1
+                    if pos > 0:
+                        output = output[pos:]
+                else:
+                    # Scrolled up: trim from BOTTOM to keep oldest content visible.
+                    # Find the position just after the (height)th line's newline,
+                    # then take everything before it.
+                    pos = 0
+                    for _ in range(height):
+                        idx = plain.find('\n', pos)
+                        if idx == -1:
+                            # Fewer newlines than height — keep everything
+                            pos = len(plain)
+                            break
+                        pos = idx + 1
+                    # pos now points to the start of line (height+1); slice up to
+                    # the preceding newline to keep exactly `height` lines.
+                    if pos < len(plain):
+                        # -1 to exclude the trailing newline of the last kept line
+                        output = output[:pos - 1] if pos > 0 else output
 
         # Add debug line numbers if enabled (checked at runtime for .env support)
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
