@@ -105,7 +105,8 @@ class TestJaatoSessionConfigure:
 
         mock_runtime.get_system_instructions.assert_called_with(
             plugin_names=None,
-            additional="Be a researcher."
+            additional="Be a researcher.",
+            presentation_context=None,
         )
 
 

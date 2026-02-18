@@ -39,6 +39,7 @@ from shared.plugins.session import (
     SessionInfo as PluginSessionInfo,
 )
 
+from shared.instruction_token_cache import InstructionTokenCache
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from jaato_sdk.events import (
@@ -162,6 +163,10 @@ class SessionManager:
 
         # Workspace file monitors keyed by session_id
         self._workspace_monitors: Dict[str, WorkspaceMonitor] = {}
+
+        # Shared instruction token cache — survives across session
+        # creates/restores within the same daemon process.
+        self._instruction_token_cache = InstructionTokenCache()
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
@@ -583,6 +588,7 @@ class SessionManager:
             workspace_path=workspace_path,
             session_id=session_id,
             env_overrides=env_overrides,
+            instruction_token_cache=self._instruction_token_cache,
         )
 
         # Initialize the server (events go directly to requesting client).
@@ -877,6 +883,7 @@ class SessionManager:
             provider=None,  # Let env_file determine provider
             on_event=init_callback,
             session_id=session_id,
+            instruction_token_cache=self._instruction_token_cache,
         )
         logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
 

@@ -43,6 +43,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args, HelpLines
@@ -166,6 +167,7 @@ class JaatoServer:
         workspace_path: Optional[str] = None,
         session_id: Optional[str] = None,
         env_overrides: Optional[Dict[str, str]] = None,
+        instruction_token_cache: Optional[InstructionTokenCache] = None,
     ):
         """Initialize the server.
 
@@ -179,6 +181,9 @@ class JaatoServer:
             session_id: Unique identifier for this session (used in logs).
             env_overrides: Optional dict of env vars that take precedence over
                           the .env file (e.g., from post-auth wizard).
+            instruction_token_cache: Optional shared cache for instruction
+                token counts, passed from ``SessionManager`` so cached counts
+                survive across session creates/restores within a daemon.
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
@@ -237,6 +242,9 @@ class JaatoServer:
         # Set via set_presentation_context() when the client sends
         # ClientConfigRequest with a presentation dict.
         self._presentation_context: Optional['PresentationContext'] = None
+
+        # Instruction token cache (shared across sessions in daemon mode)
+        self._instruction_token_cache = instruction_token_cache
 
         # Session-specific environment variables (isolated per session)
         # These are loaded from the session's .env file and NOT applied to
@@ -761,7 +769,8 @@ class JaatoServer:
             self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
             with self._with_session_env():
                 self._jaato = JaatoClient(provider_name=provider_to_use,
-                                          workspace_path=self._workspace_path)
+                                          workspace_path=self._workspace_path,
+                                          instruction_token_cache=self._instruction_token_cache)
                 # Pass project/location for providers that need them (Google/Vertex)
                 # Other providers ignore these and use their own env vars
                 self._jaato.connect(project_id, location, model_name)

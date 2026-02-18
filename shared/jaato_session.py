@@ -33,7 +33,10 @@ from .instruction_budget import (
     SystemChildType,
     DEFAULT_SYSTEM_POLICIES,
     GCPolicy,
+    PluginToolType,
+    DEFAULT_TOOL_POLICIES,
 )
+from .instruction_token_cache import InstructionTokenCache
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
@@ -89,6 +92,23 @@ class _ToolExecutionResult:
     success: bool
     error_message: Optional[str]
     plugin_type: str
+
+
+@dataclass
+class _TokenCountRequest:
+    """A pending token-count request for a single instruction text.
+
+    Used during two-phase instruction budget population: Phase 1 resolves
+    counts from cache or estimates, Phase 2 refines cache misses via
+    background ``provider.count_tokens()`` calls.
+    """
+    text: str
+    source: InstructionSource
+    child_key: str
+    gc_policy: GCPolicy
+    label: str
+    token_count: int = 0
+    is_estimate: bool = False
 
 
 class JaatoSession:
@@ -267,6 +287,10 @@ class JaatoSession:
         # Tracks whether the current turn is "complex" (multiple model responses with tool calls)
         self._turn_model_response_count: int = 0
         self._turn_had_tool_calls: bool = False
+
+        # Background thread for Phase 2 instruction token counting.
+        # Set by _start_background_token_counting(), joined before GC.
+        self._budget_counting_thread: Optional[threading.Thread] = None
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -1102,11 +1126,13 @@ class JaatoSession:
         )
 
     def _count_tokens(self, text: str) -> int:
-        """Count tokens using provider if available, else estimate.
+        """Count tokens using cache, provider, or estimate (in that order).
 
-        Uses the provider's count_tokens() API when available (Google GenAI,
-        Anthropic) for accurate counts. Falls back to estimate_tokens()
-        (chars/4 approximation) for providers without token counting APIs.
+        Lookup order:
+        1. ``InstructionTokenCache`` — instant, shared across sessions.
+        2. ``provider.count_tokens()`` — accurate HTTP call; result is
+           stored in the cache for future hits.
+        3. ``estimate_tokens()`` — chars/4 approximation fallback.
 
         Args:
             text: The text to count tokens for.
@@ -1116,11 +1142,21 @@ class JaatoSession:
         """
         if not text:
             return 0
+
+        # 1. Check instruction token cache
+        cache = self._runtime.instruction_token_cache
+        provider_name = self._provider_name_override or self._runtime.provider_name
+        cached = cache.get(provider_name, text)
+        if isinstance(cached, int):
+            return cached
+
+        # 2. Try provider API
         if self._provider and hasattr(self._provider, 'count_tokens'):
             try:
                 result = self._provider.count_tokens(text)
                 # Ensure we got an int (handles mocked providers returning MagicMock)
                 if isinstance(result, int):
+                    cache.put(provider_name, text, result)
                     return result
                 else:
                     self._trace(
@@ -1132,9 +1168,15 @@ class JaatoSession:
                     f"count_tokens FAILED ({type(e).__name__}: {e}), "
                     f"falling back to estimate (text length: {len(text)} chars)"
                 )
-        estimate = estimate_tokens(text)
-        self._trace(f"count_tokens: using estimate={estimate} (from {len(text)} chars)")
-        return estimate
+
+        # 3. Estimate fallback
+        est = estimate_tokens(text)
+        self._trace(f"count_tokens: using estimate={est} (from {len(text)} chars)")
+        return est
+
+    # ------------------------------------------------------------------
+    # Two-phase instruction budget population
+    # ------------------------------------------------------------------
 
     def _populate_instruction_budget(
         self,
@@ -1142,12 +1184,16 @@ class JaatoSession:
     ) -> None:
         """Populate instruction budget with token counts by source layer.
 
-        Called after configure() to track token usage from:
-        - SYSTEM: Framework constants (task completion, parallel tools guidance)
-        - SESSION: User-provided system_instructions parameter
-        - PLUGIN: Per-tool system instructions (with children per-tool)
-        - ENRICHMENT: Enrichment pipeline additions
-        - CONVERSATION: Message history (initially 0, updated per turn)
+        Uses a two-phase approach for fast session creation:
+
+        **Phase 1 (synchronous, instant):** Build budget structure using
+        cached counts (from ``InstructionTokenCache``) or ``estimate_tokens()``
+        (chars/4).  Emit initial budget event.  Session is immediately usable.
+
+        **Phase 2 (background threads):** For cache misses only, fire
+        ``provider.count_tokens()`` calls in a ``ThreadPoolExecutor``.  Once
+        all futures complete, update budget entries with accurate counts and
+        emit a refined budget event.
 
         Args:
             session_instructions: The user-provided system_instructions from configure().
@@ -1174,7 +1220,59 @@ class JaatoSession:
             context_limit=context_limit,
         )
 
-        # SYSTEM: Track as children (base, client, framework)
+        # --- Collect phase: gather all texts that need counting ---
+        requests = self._collect_instruction_texts(session_instructions)
+
+        # --- Resolve phase: use cache or estimate for each request ---
+        cache = self._runtime.instruction_token_cache
+        provider_name = self._provider_name_override or self._runtime.provider_name
+        cache_misses: List[_TokenCountRequest] = []
+
+        for req in requests:
+            cached = cache.get(provider_name, req.text)
+            if isinstance(cached, int):
+                req.token_count = cached
+                req.is_estimate = False
+            else:
+                req.token_count = estimate_tokens(req.text)
+                req.is_estimate = True
+                cache_misses.append(req)
+
+        # --- Apply phase: build budget from resolved counts ---
+        self._apply_instruction_counts(requests, context_limit)
+
+        # --- Background phase: refine cache misses with provider ---
+        has_count_tokens = (
+            self._provider is not None
+            and hasattr(self._provider, 'count_tokens')
+        )
+        if cache_misses and has_count_tokens:
+            self._start_background_token_counting(
+                cache_misses, provider_name, context_limit
+            )
+        else:
+            if cache_misses:
+                self._trace(
+                    f"BUDGET_CALC: {len(cache_misses)} cache misses but no "
+                    f"count_tokens API — estimates are final"
+                )
+
+    def _collect_instruction_texts(
+        self,
+        session_instructions: Optional[str],
+    ) -> List['_TokenCountRequest']:
+        """Collect all instruction texts that need token counting.
+
+        Gathers texts from SYSTEM children (base, client, framework) and
+        PLUGIN children (per-plugin, per-formatter) into a flat list of
+        ``_TokenCountRequest`` objects.
+
+        Args:
+            session_instructions: The user-provided system_instructions from configure().
+
+        Returns:
+            List of ``_TokenCountRequest`` — one per instruction text.
+        """
         from .jaato_runtime import (
             _TASK_COMPLETION_INSTRUCTION,
             _PARALLEL_TOOL_GUIDANCE,
@@ -1182,134 +1280,234 @@ class JaatoSession:
             _is_parallel_tools_enabled,
         )
 
-        total_system_tokens = 0
+        requests: List[_TokenCountRequest] = []
+
+        # --- SYSTEM children ---
 
         # 1. Base instructions from .jaato/instructions/ (or legacy single file)
         base_instructions = getattr(self._runtime, '_base_system_instructions', None)
-        self._trace(f"BUDGET_CALC: Counting base instructions tokens "
-                    f"({len(base_instructions) if base_instructions else 0} chars)...")
-        base_tokens = self._count_tokens(base_instructions) if base_instructions else 0
-        self._trace(f"BUDGET_CALC: Base instructions = {base_tokens} tokens")
-        if base_tokens > 0:
-            self._instruction_budget.add_child(
-                InstructionSource.SYSTEM,
-                SystemChildType.BASE.value,
-                base_tokens,
-                DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
+        if base_instructions:
+            requests.append(_TokenCountRequest(
+                text=base_instructions,
+                source=InstructionSource.SYSTEM,
+                child_key=SystemChildType.BASE.value,
+                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
                 label="Base Instructions",
-            )
-            total_system_tokens += base_tokens
+            ))
 
         # 2. Client-provided session instructions (programmatic)
-        self._trace(f"BUDGET_CALC: Counting client instructions tokens "
-                    f"({len(session_instructions) if session_instructions else 0} chars)...")
-        client_tokens = self._count_tokens(session_instructions) if session_instructions else 0
-        self._trace(f"BUDGET_CALC: Client instructions = {client_tokens} tokens")
-        if client_tokens > 0:
-            self._instruction_budget.add_child(
-                InstructionSource.SYSTEM,
-                SystemChildType.CLIENT.value,
-                client_tokens,
-                DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
+        if session_instructions:
+            requests.append(_TokenCountRequest(
+                text=session_instructions,
+                source=InstructionSource.SYSTEM,
+                child_key=SystemChildType.CLIENT.value,
+                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
                 label="Client Instructions",
-            )
-            total_system_tokens += client_tokens
+            ))
 
-        # 3. Framework constants (task completion, parallel tool guidance, turn summary)
-        self._trace("BUDGET_CALC: Counting framework constants tokens...")
-        framework_tokens = self._count_tokens(_TASK_COMPLETION_INSTRUCTION)
+        # 3. Framework constants (concatenated into one request)
+        framework_parts = [_TASK_COMPLETION_INSTRUCTION]
         if _is_parallel_tools_enabled():
-            framework_tokens += self._count_tokens(_PARALLEL_TOOL_GUIDANCE)
-        framework_tokens += self._count_tokens(_TURN_SUMMARY_INSTRUCTION)
-        self._trace(f"BUDGET_CALC: Framework constants = {framework_tokens} tokens")
-        self._instruction_budget.add_child(
-            InstructionSource.SYSTEM,
-            SystemChildType.FRAMEWORK.value,
-            framework_tokens,
-            DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
+            framework_parts.append(_PARALLEL_TOOL_GUIDANCE)
+        framework_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        framework_text = "\n\n".join(framework_parts)
+        requests.append(_TokenCountRequest(
+            text=framework_text,
+            source=InstructionSource.SYSTEM,
+            child_key=SystemChildType.FRAMEWORK.value,
+            gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
             label="Framework",
-        )
-        total_system_tokens += framework_tokens
+        ))
 
-        self._instruction_budget.update_tokens(InstructionSource.SYSTEM, total_system_tokens)
+        # --- PLUGIN children ---
 
-        # PLUGIN: Per-tool system instructions
-        self._trace("BUDGET_CALC: Counting plugin instruction tokens...")
-        plugin_tokens = 0
         if self._runtime.registry:
-            plugin_entry = self._instruction_budget.get_entry(InstructionSource.PLUGIN)
             for plugin_name in self._runtime.registry._exposed:
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'get_system_instructions'):
                     instr = plugin.get_system_instructions()
                     if instr:
-                        self._trace(f"BUDGET_CALC:   Plugin '{plugin_name}' "
-                                    f"({len(instr)} chars)...")
-                        tokens = self._count_tokens(instr)
-                        self._trace(f"BUDGET_CALC:   Plugin '{plugin_name}' "
-                                    f"= {tokens} tokens")
-                        plugin_tokens += tokens
-                        # Add as child entry for drill-down
-                        from .instruction_budget import PluginToolType, DEFAULT_TOOL_POLICIES
-                        # Determine if core or discoverable
                         discoverability = getattr(plugin, 'discoverability', 'core')
-                        tool_type = PluginToolType.CORE if discoverability == 'core' else PluginToolType.DISCOVERABLE
-                        gc_policy = DEFAULT_TOOL_POLICIES[tool_type]
-                        self._instruction_budget.add_child(
-                            InstructionSource.PLUGIN,
-                            plugin_name,
-                            tokens,
-                            gc_policy,
-                            label=plugin_name,
+                        tool_type = (
+                            PluginToolType.CORE
+                            if discoverability == 'core'
+                            else PluginToolType.DISCOVERABLE
                         )
+                        requests.append(_TokenCountRequest(
+                            text=instr,
+                            source=InstructionSource.PLUGIN,
+                            child_key=plugin_name,
+                            gc_policy=DEFAULT_TOOL_POLICIES[tool_type],
+                            label=plugin_name,
+                        ))
+
         # Formatter pipeline instructions (output rendering capabilities)
-        # Formatters are not tool plugins but contribute system instructions
-        # (e.g., mermaid rendering hints). Track per-formatter for drill-down.
         formatter_pipeline = getattr(self._runtime, '_formatter_pipeline', None)
         if formatter_pipeline and hasattr(formatter_pipeline, '_formatters'):
             for formatter in formatter_pipeline._formatters:
                 if hasattr(formatter, 'get_system_instructions'):
                     instr = formatter.get_system_instructions()
                     if instr:
-                        tokens = self._count_tokens(instr)
-                        plugin_tokens += tokens
-                        self._instruction_budget.add_child(
-                            InstructionSource.PLUGIN,
-                            formatter.name,
-                            tokens,
-                            GCPolicy.PRESERVABLE,
+                        requests.append(_TokenCountRequest(
+                            text=instr,
+                            source=InstructionSource.PLUGIN,
+                            child_key=formatter.name,
+                            gc_policy=GCPolicy.PRESERVABLE,
                             label=formatter.name,
-                        )
+                        ))
 
-        self._instruction_budget.update_tokens(InstructionSource.PLUGIN, plugin_tokens)
-        self._trace(f"BUDGET_CALC: Total plugin instructions = {plugin_tokens} tokens")
+        return requests
 
-        # ENRICHMENT: Enrichment pipeline additions
-        # The enrichment tokens are included in the combined system instruction
-        # but we can estimate them by subtracting known components
-        # For now, track as 0 - will be populated by enrichment pipeline
+    def _apply_instruction_counts(
+        self,
+        requests: List['_TokenCountRequest'],
+        context_limit: int,
+    ) -> None:
+        """Build budget children and parent totals from resolved token counts.
+
+        Called once in Phase 1 (with estimates/cached values) and again after
+        Phase 2 completes (with accurate counts for previously-estimated entries).
+
+        Args:
+            requests: List of resolved ``_TokenCountRequest`` objects.
+            context_limit: Context window size for percentage logging.
+        """
+        # Group by source to compute parent totals
+        source_totals: Dict[InstructionSource, int] = {}
+
+        for req in requests:
+            source_totals.setdefault(req.source, 0)
+            source_totals[req.source] += req.token_count
+
+            # Check if child already exists (Phase 2 update path)
+            parent_entry = self._instruction_budget.get_entry(req.source)
+            existing = parent_entry.children.get(req.child_key) if parent_entry else None
+            if existing is not None:
+                existing.tokens = req.token_count
+            else:
+                if req.token_count > 0:
+                    self._instruction_budget.add_child(
+                        req.source,
+                        req.child_key,
+                        req.token_count,
+                        req.gc_policy,
+                        label=req.label,
+                    )
+
+        # Update parent totals
+        for source, total in source_totals.items():
+            self._instruction_budget.update_tokens(source, total)
+
+        # ENRICHMENT and CONVERSATION start at 0
         self._instruction_budget.update_tokens(InstructionSource.ENRICHMENT, 0)
-
-        # CONVERSATION: Message history (initially 0)
         self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, 0)
 
-        # Summary
-        total_initial = total_system_tokens + plugin_tokens
+        # Log summary
+        total_initial = sum(source_totals.values())
+        estimate_count = sum(1 for r in requests if r.is_estimate)
         try:
             pct = (total_initial / context_limit * 100) if context_limit else 0
             self._trace(
-                f"BUDGET_CALC: Initial budget complete — system={total_system_tokens}, "
-                f"plugins={plugin_tokens}, total={total_initial} tokens "
-                f"(context limit: {context_limit}, {pct:.1f}% used)"
+                f"BUDGET_CALC: Budget {'updated' if any(not r.is_estimate for r in requests) else 'initial'} — "
+                f"total={total_initial} tokens ({pct:.1f}% of {context_limit}), "
+                f"estimates={estimate_count}/{len(requests)}"
             )
         except (TypeError, ValueError):
             self._trace(
-                f"BUDGET_CALC: Initial budget complete — system={total_system_tokens}, "
-                f"plugins={plugin_tokens}, total={total_initial} tokens"
+                f"BUDGET_CALC: Budget applied — total={total_initial} tokens, "
+                f"estimates={estimate_count}/{len(requests)}"
             )
 
         # Emit budget update event
         self._emit_instruction_budget_update()
+
+    def _start_background_token_counting(
+        self,
+        cache_misses: List['_TokenCountRequest'],
+        provider_name: str,
+        context_limit: int,
+    ) -> None:
+        """Fire background threads to get accurate token counts for cache misses.
+
+        Creates a ``ThreadPoolExecutor`` inside a daemon thread.  Each worker
+        calls ``provider.count_tokens(text)`` and stores the result in the
+        ``InstructionTokenCache``.  After all futures complete, updates budget
+        entries with accurate counts and emits a refined budget event.
+
+        Args:
+            cache_misses: Requests whose counts are currently estimates.
+            provider_name: Provider name for cache keying.
+            context_limit: Context window size (for logging).
+        """
+        self._trace(
+            f"BUDGET_CALC: Starting background token counting for "
+            f"{len(cache_misses)} cache misses"
+        )
+
+        provider = self._provider
+        cache = self._runtime.instruction_token_cache
+
+        def _background_count() -> None:
+            max_workers = min(len(cache_misses), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                def _count_one(req: _TokenCountRequest) -> None:
+                    try:
+                        result = provider.count_tokens(req.text)
+                        if isinstance(result, int):
+                            cache.put(provider_name, req.text, result)
+                            req.token_count = result
+                            req.is_estimate = False
+                        else:
+                            self._trace(
+                                f"BUDGET_BG: count_tokens for '{req.child_key}' "
+                                f"returned non-int ({type(result).__name__}), "
+                                f"keeping estimate"
+                            )
+                    except Exception as e:
+                        self._trace(
+                            f"BUDGET_BG: count_tokens for '{req.child_key}' "
+                            f"failed ({type(e).__name__}: {e}), keeping estimate"
+                        )
+
+                futures = [pool.submit(_count_one, req) for req in cache_misses]
+                for f in futures:
+                    f.result()  # propagate exceptions to log
+
+            # Update budget entries for refined counts
+            refined = [r for r in cache_misses if not r.is_estimate]
+            if refined:
+                self._trace(
+                    f"BUDGET_BG: Refined {len(refined)}/{len(cache_misses)} counts, "
+                    f"updating budget entries"
+                )
+                # Update each refined child entry directly and recompute parent totals
+                for req in refined:
+                    parent_entry = self._instruction_budget.get_entry(req.source)
+                    if parent_entry and req.child_key in parent_entry.children:
+                        parent_entry.children[req.child_key].tokens = req.token_count
+
+                # Recompute parent tokens from children for affected sources
+                affected_sources = {r.source for r in refined}
+                for source in affected_sources:
+                    entry = self._instruction_budget.get_entry(source)
+                    if entry and entry.children:
+                        new_total = sum(c.tokens for c in entry.children.values())
+                        entry.tokens = new_total
+
+                self._emit_instruction_budget_update()
+            else:
+                self._trace(
+                    f"BUDGET_BG: No counts refined (all provider calls failed), "
+                    f"keeping estimates"
+                )
+
+        thread = threading.Thread(
+            target=_background_count,
+            name=f"budget-count-{self._agent_id}",
+            daemon=True,
+        )
+        self._budget_counting_thread = thread
+        thread.start()
 
     def _emit_instruction_budget_update(self) -> None:
         """Emit instruction budget update via callback and/or UI hooks."""
@@ -2191,6 +2389,14 @@ NOTES
         """Perform GC after turn if threshold was crossed during streaming."""
         if not self._gc_plugin or not self._gc_config:
             return None
+
+        # Ensure background token counting is complete before GC so
+        # eviction decisions use accurate counts, not estimates.
+        if self._budget_counting_thread and self._budget_counting_thread.is_alive():
+            self._trace("PROACTIVE_GC: Waiting for background token counting to finish...")
+            self._budget_counting_thread.join(timeout=5.0)
+            if self._budget_counting_thread.is_alive():
+                self._trace("PROACTIVE_GC: Background counting still running after 5s, proceeding with estimates")
 
         context_usage = self.get_context_usage()
         history = self.get_history()
