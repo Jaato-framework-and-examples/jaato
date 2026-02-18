@@ -68,7 +68,7 @@ class MultimodalPlugin:
     ]
 
     def __init__(self):
-        self._base_path: Path = Path.cwd()
+        self._base_path: Optional[Path] = None
         self._max_image_size_mb: float = 10.0
         self._initialized = False
         # Track detected images from last prompt enrichment
@@ -103,6 +103,16 @@ class MultimodalPlugin:
             self._max_image_size_mb = float(config['max_image_size_mb'])
         self._initialized = True
         self._trace(f"initialize: base_path={self._base_path}, max_size={self._max_image_size_mb}MB")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Update the base path to the client's workspace directory.
+
+        Called by PluginRegistry.set_workspace_path() when a session binds
+        to a specific workspace.  Re-resolves _base_path so that relative
+        image references resolve against the workspace, not the server CWD.
+        """
+        self._base_path = Path(path)
+        self._trace(f"set_workspace_path: base_path={self._base_path}")
 
     def shutdown(self) -> None:
         """Shutdown the multimodal plugin."""
@@ -189,15 +199,11 @@ class MultimodalPlugin:
         if path.is_absolute():
             return path
 
-        # Try relative to base_path
-        resolved = self._base_path / path
-        if resolved.exists():
-            return resolved.resolve()
-
-        # Try relative to cwd
-        resolved = Path.cwd() / path
-        if resolved.exists():
-            return resolved.resolve()
+        # Try relative to base_path (workspace)
+        if self._base_path is not None:
+            resolved = self._base_path / path
+            if resolved.exists():
+                return resolved.resolve()
 
         return None
 

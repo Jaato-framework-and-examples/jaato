@@ -1071,9 +1071,10 @@ class MCPToolPlugin:
         if self._config_path:
             path = self._config_path
         else:
-            # Default to workspace or current directory
-            workspace = self._workspace_path or os.getcwd()
-            path = os.path.join(workspace, '.mcp.json')
+            # Default to workspace directory
+            if not self._workspace_path:
+                return "Cannot save config: no workspace path configured"
+            path = os.path.join(self._workspace_path, '.mcp.json')
 
         try:
             with open(path, 'w', encoding='utf-8') as f:
@@ -1194,12 +1195,11 @@ class MCPToolPlugin:
         3. .mcp.json in current working directory (fallback)
         4. ~/.mcp.json in home directory
         """
-        # Use workspace_path if set, otherwise fall back to cwd
-        workspace = self._workspace_path or os.getcwd()
-        default_paths = [
-            os.path.join(workspace, '.mcp.json'),
-            os.path.expanduser('~/.mcp.json')
-        ]
+        # Use workspace_path if set; skip workspace-relative path otherwise
+        default_paths = []
+        if self._workspace_path:
+            default_paths.append(os.path.join(self._workspace_path, '.mcp.json'))
+        default_paths.append(os.path.expanduser('~/.mcp.json'))
         if registry_path:
             paths = [registry_path] + default_paths
         else:

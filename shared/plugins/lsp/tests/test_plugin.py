@@ -633,9 +633,9 @@ class TestConfigLoading:
             with open(config_path, "w") as f:
                 json.dump(config, f)
 
-            # Patch getcwd to return our temp dir
-            with patch("os.getcwd", return_value=tmpdir):
-                plugin._load_config_cache(force=True)
+            # Set workspace path instead of patching getcwd
+            plugin.set_workspace_path(tmpdir)
+            plugin._load_config_cache(force=True)
 
             assert "languageServers" in plugin._config_cache
             assert "python" in plugin._config_cache["languageServers"]

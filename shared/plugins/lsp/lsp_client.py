@@ -409,7 +409,7 @@ class LSPClient:
 
     async def _initialize(self) -> None:
         """Send initialize request to server."""
-        root_uri = self.config.root_uri or f"file://{os.getcwd()}"
+        root_uri = self.config.root_uri or "file:///"
         workspace_name = os.path.basename(root_uri.replace("file://", "")) or "workspace"
 
         params = {

@@ -45,6 +45,7 @@ class SlashCommandPlugin:
 
     def __init__(self):
         self._commands_dir: str = DEFAULT_COMMANDS_DIR
+        self._workspace_path: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
 
@@ -70,16 +71,32 @@ class SlashCommandPlugin:
         self._initialized = True
         self._trace(f"initialize: commands_dir={self._commands_dir}")
 
+    def set_workspace_path(self, path: str) -> None:
+        """Update the workspace path for resolving the commands directory.
+
+        Called by PluginRegistry.set_workspace_path() when a session binds
+        to a specific workspace.
+        """
+        self._workspace_path = path
+        self._trace(f"set_workspace_path: {path}")
+
     def shutdown(self) -> None:
         """Shutdown the slash command plugin."""
         self._trace("shutdown")
         self._initialized = False
 
-    def get_commands_dir(self) -> Path:
-        """Get the absolute path to the commands directory."""
+    def get_commands_dir(self) -> Optional[Path]:
+        """Get the absolute path to the commands directory.
+
+        Returns:
+            Absolute Path to the commands directory, or None if no workspace
+            is set and the commands_dir is relative.
+        """
         commands_path = Path(self._commands_dir)
         if not commands_path.is_absolute():
-            commands_path = Path.cwd() / commands_path
+            if self._workspace_path is None:
+                return None
+            commands_path = Path(self._workspace_path) / commands_path
         return commands_path
 
     def list_available_commands(self) -> List[str]:
@@ -89,7 +106,7 @@ class SlashCommandPlugin:
             List of command names (filenames without full path)
         """
         commands_path = self.get_commands_dir()
-        if not commands_path.exists():
+        if commands_path is None or not commands_path.exists():
             return []
 
         commands = []
@@ -250,6 +267,11 @@ If the command file is not found, inform the user and suggest listing available 
 
         # Build path to command file
         commands_path = self.get_commands_dir()
+        if commands_path is None:
+            return {
+                "error": "No workspace path configured — cannot resolve commands directory",
+                "status": "no_workspace"
+            }
         command_file = commands_path / command_name
 
         # Check if commands directory exists
