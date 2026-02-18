@@ -188,7 +188,7 @@ presentation = {
 }
 ```
 
-### Telegram Bot (example)
+### Chat Client (Telegram, Slack, WhatsApp, …)
 ```python
 PresentationContext(
     content_width=45,
@@ -197,7 +197,7 @@ PresentationContext(
     supports_code_blocks=True,
     supports_images=True,
     supports_expandable_content=True,  # inline keyboard buttons
-    client_type="telegram",
+    client_type=ClientType.CHAT,
 )
 ```
 
@@ -211,7 +211,7 @@ PresentationContext(
     supports_images=True,
     supports_mermaid=True,
     supports_expandable_content=True,  # <details> blocks
-    client_type="web",
+    client_type=ClientType.WEB,
 )
 ```
 
@@ -223,7 +223,7 @@ PresentationContext(
     supports_tables=False,
     supports_code_blocks=False,
     supports_images=False,
-    client_type="api",
+    client_type=ClientType.API,
 )
 ```
 
