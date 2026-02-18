@@ -206,7 +206,7 @@ The 40+ event types are organized into functional categories:
 │       ├──► AgentOutputEvent(s) ─── (streaming text chunks)          │
 │       │    ├─ source: "model" | "tool" | "system" | plugin_name    │
 │       │    ├─ text: "Let me read that file."                        │
-│       │    └─ mode: "write" (new block) | "append" (continue)      │
+│       │    └─ mode: "write" (new) | "append" (continue) | "flush"  │
 │       │                                                              │
 │       ├──► ToolCallStartEvent / ToolCallEndEvent (tool activity)    │
 │       │                                                              │
@@ -224,7 +224,7 @@ The 40+ event types are organized into functional categories:
 | Event | Key Fields | When Emitted |
 |-------|------------|--------------|
 | `AgentCreatedEvent` | `agent_id`, `agent_type`, `profile_name`, `parent_agent_id` | New agent (main or subagent) is created |
-| `AgentOutputEvent` | `agent_id`, `source`, `text`, `mode` | Each streaming text chunk from model/tool/system |
+| `AgentOutputEvent` | `agent_id`, `source`, `text`, `mode` | Each streaming text chunk from model/tool/system. See [Streaming Modes](#streaming-modes-writeappendflush) below. |
 | `AgentStatusChangedEvent` | `agent_id`, `status`, `error` | Agent transitions between active/idle/done/error |
 | `AgentCompletedEvent` | `agent_id`, `success`, `token_usage`, `turns_used` | Agent task finishes |
 
@@ -237,6 +237,39 @@ The 40+ event types are organized into functional categories:
 | `AgentStatusChanged(active)` | Status bar | Starts spinner animation, auto-selects agent tab |
 | `AgentStatusChanged(done)` | Status bar | Stops spinner |
 | `AgentCompleted` | Agent registry | Marks agent as completed |
+
+#### Streaming Modes (write/append/flush)
+
+The `mode` field on `AgentOutputEvent` controls how the client should handle each chunk:
+
+| Mode | `text` | Meaning |
+|------|--------|---------|
+| `"write"` | non-empty | Start a **new** output block. Previous block (if any) is finalized. |
+| `"append"` | non-empty | Continue appending to the **current** output block. |
+| `"flush"` | empty | **Streaming text is done.** Finalize buffered output now — tool calls are about to start. |
+
+**The `"flush"` signal** is the only way to detect that model text streaming has ended within a turn. There is no separate "StreamEndEvent". The session emits `flush` immediately before executing tool calls (`jaato_session.py`), giving clients a synchronization point to:
+
+- Finalize and render buffered text as one piece
+- Transition the UI from "streaming text" to "executing tools" state
+- Separate text output from tool output in non-streaming UIs (e.g., Telegram, Slack)
+
+**Important:** If the model responds with **text only** (no tool calls), no `flush` is emitted — the next event is `TurnCompletedEvent` directly. Clients must also flush their buffers on `TurnCompletedEvent`.
+
+**Canonical event sequence within a single model response:**
+
+```
+AgentOutputEvent(source="model", mode="write")     ← new text block
+AgentOutputEvent(source="model", mode="append")    ← more chunks...
+AgentOutputEvent(source="model", mode="append")    ← ...
+AgentOutputEvent(source="model", mode="flush")     ← ⬛ text done, tools next
+ToolCallStartEvent(tool_name="...")                 ← tool execution begins
+ToolCallEndEvent(...)
+...                                                 ← more tools if parallel
+TurnProgressEvent(...)                              ← token accounting
+─── model may loop back (text → flush → tools) if tool results trigger more output ───
+TurnCompletedEvent(...)                             ← turn fully done
+```
 
 ---
 
@@ -888,6 +921,10 @@ A full turn from user prompt to model completion, showing every event emitted:
 │  │   → Client streams text to output panel                          │
 │  │                                                                   │
 │  ▼                                                                   │
+│  AgentOutputEvent(source="system", text="", mode="flush")            │
+│  │   → Client finalizes buffered text (streaming text is done)      │
+│  │                                                                   │
+│  ▼                                                                   │
 │  ToolCallStartEvent(tool_name="readFile",                            │
 │  │                   tool_args={path:"src/auth.py"}, call_id="tc-1")│
 │  │   → Client shows tool in tree                                    │
@@ -904,6 +941,10 @@ A full turn from user prompt to model completion, showing every event emitted:
 │  ▼                                                                   │
 │  AgentOutputEvent(source="model", text="I'll add logging...",       │
 │  │                mode="write")                                      │
+│  │                                                                   │
+│  ▼                                                                   │
+│  AgentOutputEvent(source="system", text="", mode="flush")            │
+│  │   → Client finalizes buffered text before tool execution         │
 │  │                                                                   │
 │  ▼                                                                   │
 │  ToolCallStartEvent(tool_name="updateFile", call_id="tc-2")         │
@@ -1074,7 +1115,75 @@ The TUI client uses a debounced refresh mechanism to balance responsiveness with
 
 ---
 
-## Part 12: Related Documentation
+## Part 12: Client Implementation Guide (Output Buffering)
+
+Custom clients (Telegram bots, Slack integrations, web UIs, etc.) that cannot render incremental streaming must buffer output and emit it in discrete blocks. This section describes the canonical buffering pattern.
+
+### The Problem
+
+The server emits `AgentOutputEvent` chunks as they stream from the model — potentially dozens per second. Clients like Telegram cannot update a message per chunk. They need to know **when text is done** so they can send one complete message, followed by tool call information.
+
+### Buffering Pattern
+
+```python
+from jaato_sdk.events import (
+    AgentOutputEvent, ToolCallStartEvent, ToolCallEndEvent,
+    TurnCompletedEvent, PermissionInputModeEvent,
+)
+
+text_buffer: list[str] = []
+tool_calls: list[dict] = []
+
+async for event in client.events():
+
+    # --- Text streaming ---
+    if isinstance(event, AgentOutputEvent) and event.source == "model":
+        if event.mode == "flush":
+            # Model text is done — emit buffered text now
+            if text_buffer:
+                send_message("".join(text_buffer))
+                text_buffer.clear()
+        elif event.mode in ("write", "append"):
+            text_buffer.append(event.text)
+
+    # --- Tool execution ---
+    elif isinstance(event, ToolCallStartEvent):
+        tool_calls.append({"name": event.tool_name, "args": event.tool_args})
+
+    elif isinstance(event, ToolCallEndEvent):
+        # Update tool status, show summary, etc.
+        pass
+
+    # --- Permission requests ---
+    elif isinstance(event, PermissionInputModeEvent):
+        # Show permission UI, collect response, then:
+        await client.respond_to_permission(
+            request_id=event.request_id,
+            response=user_choice,  # "y", "n", "a", "never", etc.
+        )
+
+    # --- Turn completed ---
+    elif isinstance(event, TurnCompletedEvent):
+        # Flush any remaining text (text-only responses skip "flush")
+        if text_buffer:
+            send_message("".join(text_buffer))
+            text_buffer.clear()
+        # Show tool call summary if desired
+        if tool_calls:
+            send_tool_summary(tool_calls)
+            tool_calls.clear()
+```
+
+### Key Rules
+
+1. **Always flush on `TurnCompletedEvent`** — text-only responses (no tool calls) skip the `"flush"` signal and go straight to turn completion.
+2. **`mode="flush"` has empty `text`** — don't append it to the buffer. It's a control signal, not content.
+3. **Multiple flush cycles per turn** — a turn with tool calls may loop: text → flush → tools → text → flush → tools → turn completed. Reset your text buffer on each flush.
+4. **`source` filtering matters** — buffer `source="model"` text. Other sources (`"system"`, `"tool"`, plugin names) carry different content (tool output, system messages) that may need separate handling.
+
+---
+
+## Part 13: Related Documentation
 
 | Document | Focus |
 |----------|-------|
@@ -1087,7 +1196,7 @@ The TUI client uses a debounced refresh mechanism to balance responsiveness with
 
 ---
 
-## Part 13: Color Coding Suggestion for Infographic
+## Part 14: Color Coding Suggestion for Infographic
 
 - **Blue:** Server → Client events (notifications, state updates)
 - **Green:** Agent lifecycle events (created, output, status, completed)
