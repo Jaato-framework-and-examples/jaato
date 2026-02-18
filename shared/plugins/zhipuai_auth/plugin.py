@@ -292,13 +292,19 @@ class ZhipuAIAuthPlugin:
         return ""
 
     def _cmd_key(self, api_key: str) -> str:
-        """Handle the key command - validate and store API key."""
+        """Handle the key command - validate and store API key.
+
+        Resolves the effective base URL from environment / stored credentials
+        so the validation request hits the same endpoint the provider will use.
+        Shows differentiated error messages for authentication vs network
+        failures.
+        """
         from ..model_provider.zhipuai.auth import (
             login_with_key,
             validate_api_key,
             get_stored_api_key,
         )
-        from ..model_provider.zhipuai.env import resolve_api_key
+        from ..model_provider.zhipuai.env import resolve_api_key, resolve_base_url
 
         if not api_key:
             self._emit("Error: No API key provided.\n")
@@ -313,13 +319,17 @@ class ZhipuAIAuthPlugin:
 
         self._emit("Validating API key...\n")
 
+        # Use the same base URL the provider would use
+        base_url = resolve_base_url()
+
         # Validate the key
-        if validate_api_key(api_key):
+        valid, detail = validate_api_key(api_key, base_url)
+        if valid:
             # Store it
             def on_message(msg: str) -> None:
                 self._emit(f"{msg}\n")
 
-            result = login_with_key(api_key, on_message=on_message)
+            result = login_with_key(api_key, base_url=base_url, on_message=on_message)
             if result:
                 self._emit("\n")
                 self._emit("Successfully authenticated with Z.AI.\n")
@@ -329,14 +339,22 @@ class ZhipuAIAuthPlugin:
             else:
                 self._emit("\nFailed to store credentials.\n")
         else:
-            self._emit("\nAPI key validation failed.\n\n")
-            self._emit("Please check that:\n")
-            self._emit("  - The key is correct and complete\n")
-            self._emit("  - Your Z.AI account is active\n")
-            self._emit("  - You have an active GLM Coding Plan subscription\n\n")
-            self._emit("Get your key from:\n")
-            self._emit("  https://z.ai/model-api (International)\n")
-            self._emit("  https://open.bigmodel.cn/ (China)\n")
+            if detail.startswith("network_error"):
+                self._emit("\nCould not reach the Z.AI API.\n\n")
+                self._emit(f"Detail: {detail}\n\n")
+                self._emit("Please check that:\n")
+                self._emit("  - You have internet connectivity\n")
+                self._emit("  - api.z.ai is reachable from your network\n")
+                self._emit("  - No firewall or proxy is blocking the request\n")
+            else:
+                self._emit("\nAPI key validation failed.\n\n")
+                self._emit("Please check that:\n")
+                self._emit("  - The key is correct and complete\n")
+                self._emit("  - Your Z.AI account is active\n")
+                self._emit("  - You have an active GLM Coding Plan subscription\n\n")
+                self._emit("Get your key from:\n")
+                self._emit("  https://z.ai/model-api (International)\n")
+                self._emit("  https://open.bigmodel.cn/ (China)\n")
 
         return ""
 
