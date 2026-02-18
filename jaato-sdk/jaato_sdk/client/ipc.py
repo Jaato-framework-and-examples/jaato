@@ -510,7 +510,6 @@ class IPCClient:
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
-            terminal_width=content_width,
             working_dir=working_dir,
             env_file=env_file_abs,
             presentation=presentation,

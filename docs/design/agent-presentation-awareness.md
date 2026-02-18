@@ -126,13 +126,12 @@ The client can collapse wide or long content behind an expandable control. You m
 @dataclass
 class ClientConfigRequest(Event):
     # ... existing fields ...
-    terminal_width: Optional[int] = None     # backwards compat
-    presentation: Optional[Dict[str, Any]] = None  # NEW
+    presentation: Optional[Dict[str, Any]] = None
 ```
 
-Backwards-compatible: old clients send `terminal_width` only. New clients send
-the `presentation` dict. Server falls back to `terminal_width`-only when no
-presentation dict is present.
+The `presentation` dict replaces the old `terminal_width` field.  The client
+sends a full capabilities dict; the server constructs a `PresentationContext`
+from it.
 
 #### 2. `JaatoSession` — Storage and propagation
 

@@ -977,19 +977,15 @@ class ClientConfigRequest(Event):
     Sent after connection to apply client-specific settings like trace paths.
     The server applies these settings to the session/plugins.
 
-    The optional ``presentation`` dict carries client display capabilities
+    The ``presentation`` dict carries client display capabilities
     (see ``PresentationContext`` in ``shared.plugins.model_provider.types``).
-    When present, the server constructs a ``PresentationContext`` and injects
-    display-constraint hints into the model's system instructions.  If only
-    ``terminal_width`` is provided (backwards compat), a default context with
-    that width is constructed.
+    The server constructs a ``PresentationContext`` and injects display-constraint
+    hints into the model's system instructions.
     """
     type: EventType = field(default=EventType.CLIENT_CONFIG)
     # Environment overrides from client's .env
     trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
     provider_trace_log: Optional[str] = None  # PROVIDER_TRACE_LOG
-    # Terminal width for formatting (enrichment notifications)
-    terminal_width: Optional[int] = None
     # Client's working directory (for finding config files like .lsp.json)
     working_dir: Optional[str] = None
     # Path to client's .env file - server loads this for session creation
