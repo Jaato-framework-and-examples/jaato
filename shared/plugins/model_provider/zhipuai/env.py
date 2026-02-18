@@ -1,7 +1,8 @@
 """Environment variable resolution for Zhipu AI provider.
 
-Zhipu AI (Z.AI) is a Chinese AI company offering the GLM family of models.
-This provider uses the Anthropic-compatible API for GLM Coding Plan users.
+Zhipu AI (Z.AI) is a Chinese AI company offering the GLM family of models
+(GLM-5, GLM-4.7, GLM-4.6, GLM-4.5, etc.).  This provider uses the
+Anthropic-compatible API for GLM Coding Plan users.
 """
 
 import os
