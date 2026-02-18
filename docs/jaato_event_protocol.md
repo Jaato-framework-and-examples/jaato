@@ -225,8 +225,8 @@ The 40+ event types are organized into functional categories:
 |-------|------------|--------------|
 | `AgentCreatedEvent` | `agent_id`, `agent_type`, `profile_name`, `parent_agent_id` | New agent (main or subagent) is created |
 | `AgentOutputEvent` | `agent_id`, `source`, `text`, `mode` | Each streaming text chunk from model/tool/system. See [Streaming Modes](#streaming-modes-writeappendflush) below. |
-| `AgentStatusChangedEvent` | `agent_id`, `status`, `error` | Agent transitions between active/idle/done/error |
-| `AgentCompletedEvent` | `agent_id`, `success`, `token_usage`, `turns_used` | Agent task finishes |
+| `AgentStatusChangedEvent` | `agent_id`, `status`, `error` | Agent transitions between active/idle/done/error. **For the main agent, `status="done"` or `"idle"` is the completion signal** — see note below. |
+| `AgentCompletedEvent` | `agent_id`, `success`, `token_usage`, `turns_used` | **Subagent** task finishes. Not emitted for the main agent. |
 
 **Client Reaction (Rich Client):**
 
@@ -235,8 +235,8 @@ The 40+ event types are organized into functional categories:
 | `AgentCreated` | Agent tabs | Registers agent, shows help text for main agent |
 | `AgentOutput` | Output panel | Appends/extends text in agent's output buffer |
 | `AgentStatusChanged(active)` | Status bar | Starts spinner animation, auto-selects agent tab |
-| `AgentStatusChanged(done)` | Status bar | Stops spinner |
-| `AgentCompleted` | Agent registry | Marks agent as completed |
+| `AgentStatusChanged(done/idle)` | Status bar | Stops spinner. **This is the main agent's completion signal.** |
+| `AgentCompleted` | Agent registry | Marks subagent as completed (not emitted for main agent) |
 
 #### Streaming Modes (write/append/flush)
 
@@ -259,16 +259,19 @@ The `mode` field on `AgentOutputEvent` controls how the client should handle eac
 **Canonical event sequence within a single model response:**
 
 ```
-AgentOutputEvent(source="model", mode="write")     ← new text block
-AgentOutputEvent(source="model", mode="append")    ← more chunks...
-AgentOutputEvent(source="model", mode="append")    ← ...
+AgentStatusChangedEvent(status="active")            ← agent starts processing
+AgentOutputEvent(source="model", mode="write")      ← new text block
+AgentOutputEvent(source="model", mode="append")     ← more chunks...
+AgentOutputEvent(source="model", mode="append")     ← ...
 AgentOutputEvent(source="system", text="", mode="flush")  ← text done, tools next
-ToolCallStartEvent(tool_name="...")                 ← tool execution begins
+ToolCallStartEvent(tool_name="...")                  ← tool execution begins
 ToolCallEndEvent(...)
-...                                                 ← more tools if parallel
-TurnProgressEvent(...)                              ← token accounting
+...                                                  ← more tools if parallel
+TurnProgressEvent(...)                               ← token accounting
 ─── model may loop back (text → flush → tools) if tool results trigger more output ───
-TurnCompletedEvent(...)                             ← turn fully done
+TurnCompletedEvent(...)                              ← turn fully done (NOT terminal)
+ContextUpdatedEvent(...)                             ← cumulative token usage
+AgentStatusChangedEvent(status="done"|"idle")        ← ✅ TERMINAL for main agent
 ```
 
 ---
@@ -1128,6 +1131,7 @@ The server emits `AgentOutputEvent` chunks as they stream from the model — pot
 ```python
 from jaato_sdk.events import (
     AgentOutputEvent, AgentCompletedEvent,
+    AgentStatusChangedEvent,
     ToolCallStartEvent, ToolCallEndEvent,
     TurnCompletedEvent, PermissionInputModeEvent,
 )
@@ -1178,9 +1182,21 @@ async for event in client.events():
             tool_calls.clear()
         # Continue looping — multi-turn flows emit multiple TurnCompletedEvents
 
-    # --- Agent completed (TERMINAL — exit the loop) ---
+    # --- Agent status changed (TERMINAL for main agent) ---
+    elif isinstance(event, AgentStatusChangedEvent):
+        if event.status in ("done", "idle"):
+            # Main agent finished — "done" = all work complete,
+            # "idle" = waiting for next user input.
+            # Both mean the current response is finished.
+            if text_buffer:
+                send_message("".join(text_buffer))
+                text_buffer.clear()
+            break
+
+    # --- Agent completed (TERMINAL for subagents) ---
     elif isinstance(event, AgentCompletedEvent):
-        # Flush any remaining buffers
+        # Only emitted for subagents, not the main agent.
+        # Kept as a safety net.
         if text_buffer:
             send_message("".join(text_buffer))
             text_buffer.clear()
@@ -1200,11 +1216,13 @@ These are real bugs encountered in production client implementations:
 
 1. **Flush `source` is `"system"`, not `"model"`** — The SDK emits flush as `on_output("system", "", "flush")`. If your client checks `source == "model"` before checking `mode == "flush"`, the flush signal is silently dropped and text is never finalized before tool execution. **Always check `mode == "flush"` before filtering on `source`.**
 
-2. **`TurnCompletedEvent` is NOT terminal** — In multi-turn agentic flows (model responds → calls tool → model responds again), multiple `TurnCompletedEvent`s are emitted before the final `AgentCompletedEvent`. **Do not break your event loop on `TurnCompletedEvent`.** Only `AgentCompletedEvent` signals the end of the interaction.
+2. **`TurnCompletedEvent` is NOT terminal** — In multi-turn agentic flows (model responds → calls tool → model responds again), multiple `TurnCompletedEvent`s are emitted before the response is complete. **Do not break your event loop on `TurnCompletedEvent`.**
 
-3. **Guard against empty text before sending** — Flush can fire before any model text arrives (when the model's first action is a tool call with no preamble). If your client sends/edits a message on every flush, an empty accumulated buffer will cause errors (e.g., Telegram rejects empty messages). **Check that accumulated text is non-empty before sending.**
+3. **The main agent's completion signal is `AgentStatusChangedEvent(status="done"|"idle")`, NOT `AgentCompletedEvent`** — The server only emits `AgentCompletedEvent` for subagents. For the main agent, `AgentStatusChangedEvent` with `status="done"` (all work complete) or `status="idle"` (waiting for next user input) is the terminal event. **If your event loop only breaks on `AgentCompletedEvent`, it will hang forever on main agent interactions.**
 
-4. **Permission events can arrive without preceding model text** — The model may invoke a tool immediately without saying anything first. Your client should handle `PermissionInputModeEvent` arriving before any `AgentOutputEvent(source="model")` — don't assume there is always text to flush before a permission placeholder.
+4. **Guard against empty text before sending** — Flush can fire before any model text arrives (when the model's first action is a tool call with no preamble). If your client sends/edits a message on every flush, an empty accumulated buffer will cause errors (e.g., Telegram rejects empty messages). **Check that accumulated text is non-empty before sending.**
+
+5. **Permission events can arrive without preceding model text** — The model may invoke a tool immediately without saying anything first. Your client should handle `PermissionInputModeEvent` arriving before any `AgentOutputEvent(source="model")` — don't assume there is always text to flush before a permission placeholder.
 
 ---
 
