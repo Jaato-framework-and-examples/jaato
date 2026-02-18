@@ -17,6 +17,7 @@ from datetime import datetime
 from .jaato_runtime import JaatoRuntime
 from .jaato_session import JaatoSession
 from .token_accounting import TokenLedger
+from .instruction_token_cache import InstructionTokenCache
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
@@ -90,7 +91,8 @@ class JaatoClient:
     """
 
     def __init__(self, provider_name: Optional[str] = None,
-                 workspace_path: Optional[str] = None):
+                 workspace_path: Optional[str] = None,
+                 instruction_token_cache: Optional[InstructionTokenCache] = None):
         """Initialize JaatoClient with specified provider.
 
         Args:
@@ -99,11 +101,15 @@ class JaatoClient:
             workspace_path: Explicit workspace directory path. When running as
                 a daemon, the process cwd differs from the client's workspace.
                 Passed through to ``JaatoRuntime`` for instruction loading.
+            instruction_token_cache: Optional shared cache for instruction token
+                counts.  When provided (e.g. from ``SessionManager``), cached
+                counts survive across session creates/restores.
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
         self._provider_name: Optional[str] = provider_name or get_default_provider()
         self._workspace_path: Optional[str] = workspace_path
+        self._instruction_token_cache: Optional[InstructionTokenCache] = instruction_token_cache
 
         # Store model name for session creation
         self._model_name: Optional[str] = None
@@ -345,8 +351,11 @@ class JaatoClient:
         # Create runtime and connect
         from pathlib import Path as _Path
         ws = _Path(self._workspace_path) if self._workspace_path else None
-        self._runtime = JaatoRuntime(provider_name=self._provider_name,
-                                     workspace_path=ws)
+        self._runtime = JaatoRuntime(
+            provider_name=self._provider_name,
+            workspace_path=ws,
+            instruction_token_cache=self._instruction_token_cache,
+        )
         self._runtime.connect(project, location)
 
         # Store for reference and session creation

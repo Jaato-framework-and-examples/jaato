@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
+from .instruction_token_cache import InstructionTokenCache
 from .plugins.model_provider.types import ToolSchema
 from .plugins.model_provider.base import ProviderConfig
 from .plugins.model_provider import load_provider
@@ -115,7 +116,8 @@ class JaatoRuntime:
     """
 
     def __init__(self, provider_name: str = "google_genai",
-                 workspace_path: Optional[Path] = None):
+                 workspace_path: Optional[Path] = None,
+                 instruction_token_cache: Optional[InstructionTokenCache] = None):
         """Initialize JaatoRuntime.
 
         Args:
@@ -124,6 +126,11 @@ class JaatoRuntime:
                 When running as a daemon, the process cwd may differ from the
                 client's workspace, so callers should pass the workspace path
                 explicitly. Falls back to ``Path.cwd()`` when not provided.
+            instruction_token_cache: Optional shared cache for instruction token
+                counts.  When provided (e.g. from ``SessionManager``), cached
+                counts survive across session creates/restores within the same
+                daemon process.  When ``None``, a new per-runtime cache is
+                created.
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
@@ -155,6 +162,11 @@ class JaatoRuntime:
         # Base system instructions (loaded from .jaato/instructions/ or legacy single file)
         self._base_system_instructions: Optional[str] = None
         self._load_base_system_instructions()
+
+        # Content-addressed token count cache (shared across sessions)
+        self._instruction_token_cache: InstructionTokenCache = (
+            instruction_token_cache or InstructionTokenCache()
+        )
 
         # Connection state
         self._connected: bool = False
@@ -279,6 +291,16 @@ class JaatoRuntime:
     def telemetry(self) -> TelemetryPlugin:
         """Get the telemetry plugin."""
         return self._telemetry
+
+    @property
+    def instruction_token_cache(self) -> InstructionTokenCache:
+        """Get the instruction token cache.
+
+        Shared across all sessions created from this runtime.  In daemon
+        mode the same cache instance is passed from ``SessionManager`` so
+        counts survive across session creates and restores.
+        """
+        return self._instruction_token_cache
 
     def set_formatter_pipeline(self, pipeline: Any) -> None:
         """Set the formatter pipeline for collecting formatter instructions.

@@ -122,7 +122,8 @@ class TestJaatoClientConnect:
         client.connect(model="gpt-4o")
 
         mock_runtime_class.assert_called_once_with(provider_name="github_models",
-                                                         workspace_path=None)
+                                                         workspace_path=None,
+                                                         instruction_token_cache=None)
 
     @patch('shared.jaato_client.JaatoRuntime')
     def test_connect_with_project_and_location(self, mock_runtime_class):
