@@ -125,6 +125,7 @@
     # Enums
     Role,
     FinishReason,
+    ClientType,
 
     # Message types
     Message,
@@ -138,6 +139,9 @@
     # Response types
     ProviderResponse,
     TokenUsage,
+
+    # Display context
+    PresentationContext,
 
     # Attachments
     Attachment,
@@ -218,11 +222,52 @@
               </tr>
             </tbody>
           </table>
+
+          <h3>ClientType</h3>
+          <p>
+            Presentation-layer category for <code>PresentationContext</code>.
+            Describes the <em>kind</em> of display surface, not specific apps &mdash;
+            a Telegram bot and a Slack bot are both <code>CHAT</code>.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Value</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ClientType.TERMINAL</code></td>
+                <td>TUI / CLI (rich text, fixed-width)</td>
+              </tr>
+              <tr>
+                <td><code>ClientType.WEB</code></td>
+                <td>Browser-based UI (HTML, responsive)</td>
+              </tr>
+              <tr>
+                <td><code>ClientType.CHAT</code></td>
+                <td>Messaging platform (Telegram, Slack, WhatsApp, &hellip;)</td>
+              </tr>
+              <tr>
+                <td><code>ClientType.API</code></td>
+                <td>Headless / programmatic (plain text)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">String Enum</div>
+            <code>ClientType</code> inherits from <code>str</code>, so
+            <code>ClientType.CHAT == "chat"</code> is <code>True</code>.
+            Invalid values raise <code>ValueError</code>.
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Using enums</div>
           <div class="code-block">
-            <pre><code class="language-python">from jaato import Role, FinishReason, Message
+            <pre><code class="language-python">from jaato import Role, FinishReason, ClientType, Message
 
 # Create message with role
 msg = Message.from_text(Role.USER, "Hello!")
@@ -923,6 +968,150 @@ try:
 except CancelledException:
     print("Retries cancelled")
     # stats.attempts shows how many were tried</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- PresentationContext -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="presentation-context">PresentationContext</h2>
+          <p>
+            Display capabilities and constraints of the connected client.
+            Assembled by each client at connection time and transmitted to the
+            server via <code>ClientConfigRequest.presentation</code>.
+            The model receives a compact instruction block derived from this
+            context, letting it adapt output format (e.g. vertical key-value
+            lists on narrow screens, full tables on wide ones).
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">content_width</span>
+              <span class="param-type">int</span>
+              <div class="param-desc">Available character width for content</div>
+              <div class="param-default">Default: <code>80</code></div>
+            </li>
+            <li>
+              <span class="param-name">content_height</span>
+              <span class="param-type">Optional[int]</span>
+              <div class="param-desc">Available line height (if known)</div>
+            </li>
+            <li>
+              <span class="param-name">supports_markdown</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client renders markdown</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_tables</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client renders markdown tables</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_code_blocks</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client renders fenced code blocks</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_images</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client can display inline images</div>
+              <div class="param-default">Default: <code>False</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_rich_text</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client renders bold, italic, etc.</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_unicode</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client can display Unicode characters</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_mermaid</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client renders Mermaid diagrams</div>
+              <div class="param-default">Default: <code>False</code></div>
+            </li>
+            <li>
+              <span class="param-name">supports_expandable_content</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Client has expand/collapse widgets for overflow</div>
+              <div class="param-default">Default: <code>False</code></div>
+            </li>
+            <li>
+              <span class="param-name">client_type</span>
+              <span class="param-type">ClientType</span>
+              <div class="param-desc">Presentation surface category</div>
+              <div class="param-default">Default: <code>ClientType.TERMINAL</code></div>
+            </li>
+          </ul>
+
+          <h3>Methods</h3>
+          <div class="method-signature">
+            <span class="method-name">to_system_instruction</span>() -> <span class="type">str</span>
+          </div>
+          <p>Generate the compact display-context block injected into system instructions.</p>
+
+          <div class="method-signature">
+            <span class="method-name">to_dict</span>() -> <span class="type">Dict[str, Any]</span>
+          </div>
+          <p>Serialize for event transport. <code>client_type</code> is serialized as its string value.</p>
+
+          <div class="method-signature">
+            <span class="method-name">PresentationContext.from_dict</span>(<span class="param">data</span>: <span class="type">Dict</span>) -> <span class="type">PresentationContext</span>
+          </div>
+          <p>Construct from a dict (e.g. from <code>ClientConfigRequest.presentation</code>).</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Client declarations</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import PresentationContext, ClientType
+
+# TUI terminal
+ctx = PresentationContext(
+    content_width=terminal_width - 4,
+    client_type=ClientType.TERMINAL,
+)
+
+# Chat bot (Telegram, Slack, …)
+ctx = PresentationContext(
+    content_width=45,
+    supports_tables=False,
+    supports_images=True,
+    supports_expandable_content=True,
+    client_type=ClientType.CHAT,
+)
+
+# Headless API
+ctx = PresentationContext(
+    content_width=120,
+    supports_markdown=False,
+    supports_tables=False,
+    supports_code_blocks=False,
+    supports_images=False,
+    client_type=ClientType.API,
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Setting on client/session</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Via JaatoClient
+client.set_presentation_context(ctx)
+
+# Via JaatoSession
+session.set_presentation_context(ctx)
+
+# Serialization round-trip
+d = ctx.to_dict()       # {"content_width": 45, "client_type": "chat", ...}
+ctx2 = PresentationContext.from_dict(d)</code></pre>
           </div>
         </div>
       </section>

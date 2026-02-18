@@ -53,6 +53,8 @@ from jaato_sdk.events import (
     HistoryRequest,
     HistoryEvent,
     ClientConfigRequest,
+    ClientType,
+    PresentationContext,
     SessionInfoEvent,
 )
 
@@ -479,6 +481,14 @@ class IPCClient:
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
+        # Build presentation context describing TUI terminal capabilities.
+        # This is transmitted to the server so the model can adapt its output
+        # (e.g. avoid wide tables on narrow terminals).
+        presentation = PresentationContext(
+            content_width=content_width,
+            client_type=ClientType.TERMINAL,
+        )
+
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
 
@@ -494,9 +504,9 @@ class IPCClient:
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
-            terminal_width=content_width,
             working_dir=working_dir,
             env_file=env_file_abs,
+            presentation=presentation.to_dict(),
         ))
 
     async def _start_server(self) -> bool:
