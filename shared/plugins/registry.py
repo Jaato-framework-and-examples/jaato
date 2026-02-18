@@ -133,6 +133,8 @@ class PluginRegistry:
         self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
         # Workspace path for plugins that need it
         self._workspace_path: Optional[str] = None
+        # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
+        self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
 
     def set_output_callback(
         self,
@@ -627,6 +629,7 @@ class PluginRegistry:
             if config:
                 self._configs[name] = config
             self._exposed.add(name)
+            self._tool_plugin_cache.clear()
             # Wire up plugin with registry for authorized external paths
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
@@ -636,6 +639,7 @@ class PluginRegistry:
             plugin.shutdown()
             plugin.initialize(config)
             self._configs[name] = config
+            self._tool_plugin_cache.clear()
             # Re-wire after re-initialization
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
@@ -655,6 +659,7 @@ class PluginRegistry:
             self._plugins[name].shutdown()
             self._exposed.discard(name)
             self._configs.pop(name, None)
+            self._tool_plugin_cache.clear()
 
     def expose_all(
         self,
@@ -1185,8 +1190,11 @@ class PluginRegistry:
     def get_plugin_for_tool(self, tool_name: str) -> Optional['ToolPlugin']:
         """Get the plugin that provides a specific tool.
 
-        This is useful for the permission system to call plugin-specific
-        formatting methods when displaying tool execution requests.
+        Uses a lazy cache (``_tool_plugin_cache``) that is populated on first
+        lookup and invalidated when plugins are exposed/unexposed.  For dynamic
+        plugins (e.g. MCP after ``mcp reload``), a cache hit is validated by
+        checking the tool still exists in the plugin's executors; a stale entry
+        is evicted and the full scan re-runs.
 
         Args:
             tool_name: Name of the tool to look up.
@@ -1194,19 +1202,38 @@ class PluginRegistry:
         Returns:
             The ToolPlugin instance that provides this tool, or None if not found.
         """
-        _trace(f" get_plugin_for_tool: looking for '{tool_name}' in {len(self._exposed)} exposed plugins: {list(self._exposed)}")
+        # Fast path: cached lookup
+        cached = self._tool_plugin_cache.get(tool_name)
+        if cached is not None:
+            # Validate the cache entry — the plugin may have dropped this tool
+            # (e.g. MCP reload removed a server).
+            if tool_name in cached.get_executors():
+                return cached
+            # Stale entry — evict and fall through to full scan
+            del self._tool_plugin_cache[tool_name]
+
+        # Slow path: scan all exposed plugins
+        _trace(f" get_plugin_for_tool: cache miss for '{tool_name}', scanning {len(self._exposed)} plugins")
         for name in self._exposed:
             try:
                 plugin = self._plugins[name]
                 executors = plugin.get_executors()
-                _trace(f" get_plugin_for_tool: plugin '{name}' has {len(executors)} executors")
                 if tool_name in executors:
                     _trace(f" get_plugin_for_tool: FOUND '{tool_name}' in plugin '{name}'")
+                    self._tool_plugin_cache[tool_name] = plugin
                     return plugin
             except Exception as exc:
                 _trace(f" get_plugin_for_tool: error getting executors from '{name}': {exc}", include_traceback=True)
         _trace(f" get_plugin_for_tool: '{tool_name}' NOT FOUND in any plugin")
         return None
+
+    def invalidate_tool_cache(self) -> None:
+        """Clear the tool-to-plugin lookup cache.
+
+        Call this when a plugin's executor set changes outside the normal
+        expose/unexpose lifecycle (e.g. after ``mcp reload``).
+        """
+        self._tool_plugin_cache.clear()
 
     def list_skipped_plugins(self) -> Dict[str, List[str]]:
         """List plugins that were skipped due to model requirements.
