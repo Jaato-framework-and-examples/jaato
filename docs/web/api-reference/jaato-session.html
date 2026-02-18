@@ -637,6 +637,16 @@ if session.supports_thinking():
             <span class="method-name">set_terminal_width</span>(<span class="param">width</span>: <span class="type">int</span>) -> <span class="type">None</span>
           </div>
           <p>Set terminal width for formatting.</p>
+
+          <h3>set_presentation_context</h3>
+          <div class="method-signature">
+            <span class="method-name">set_presentation_context</span>(<span class="param">ctx</span>: <span class="type">PresentationContext</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set display capabilities for this session. Injected into the model's
+            system instructions. Also updates <code>terminal_width</code> for
+            backwards compatibility. See <a href="types.html#presentation-context">PresentationContext</a>.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">UI hooks</div>
@@ -653,7 +663,14 @@ class MyHooks(AgentUIHooks):
 
 # Set hooks on session
 session.set_ui_hooks(MyHooks(), agent_id="sub_1")
-session.set_terminal_width(120)</code></pre>
+session.set_terminal_width(120)
+
+# Or set full presentation context
+from jaato import PresentationContext, ClientType
+session.set_presentation_context(PresentationContext(
+    content_width=120,
+    client_type=ClientType.TERMINAL,
+))</code></pre>
           </div>
         </div>
       </section>
