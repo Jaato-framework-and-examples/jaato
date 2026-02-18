@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from shared.http import get_url_opener
 from .env import DEFAULT_ZHIPUAI_BASE_URL
 
 
@@ -191,7 +192,8 @@ def validate_api_key(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        opener = get_url_opener(test_url)
+        with opener.open(req, timeout=30) as response:
             return (True, "")
     except urllib.error.HTTPError as e:
         # 401/403 means invalid key
