@@ -3455,7 +3455,9 @@ class PTDisplay:
     def _is_comment_option(option) -> bool:
         """Check if a permission option is the comment option.
 
-        Handles both dict (from event serialization) and object formats.
+        Handles both dict (from IPC event serialization, keys: ``key``,
+        ``label``, ``action``) and object formats (attrs: ``short``,
+        ``full``, ``decision``).
 
         Args:
             option: A permission response option (dict or object).
@@ -3464,7 +3466,15 @@ class PTDisplay:
             True if this option represents the comment/feedback action.
         """
         if isinstance(option, dict):
-            return option.get('decision') == 'comment' or option.get('short') == 'c'
+            # IPC dicts use 'action' for the decision and 'key' for the
+            # shortcut; fall back to 'decision'/'short' for direct-mode dicts.
+            action = option.get('action', option.get('decision', ''))
+            if hasattr(action, 'value'):
+                action = action.value
+            if action == 'comment':
+                return True
+            short = option.get('key', option.get('short', ''))
+            return short == 'c'
         decision = getattr(option, 'decision', None)
         if decision is not None:
             # Handle both enum and string values
