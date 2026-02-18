@@ -580,6 +580,7 @@ class PTDisplay:
         self._waiting_for_channel_input: bool = False
         self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
         self._last_valid_permission_input: str = ""  # Track last valid input for reverting
+        self._saved_input_text: Optional[str] = None  # User's input text saved during permission prompts
 
         # Permission keyboard navigation state
         self._permission_response_options: Optional[list] = None  # Current response options
@@ -3514,6 +3515,12 @@ class PTDisplay:
         The valid response options are provided by the permission plugin,
         making it the single source of truth for what responses are valid.
 
+        When entering permission mode (waiting=True), any text the user was
+        typing in the input field is saved to ``_saved_input_text`` and the
+        buffer is cleared so the user can respond to the permission prompt.
+        When leaving permission mode (waiting=False), the saved text is
+        restored so the user can continue composing their message.
+
         Args:
             waiting: True if waiting for channel input, False otherwise.
             response_options: List of PermissionResponseOption objects from the
@@ -3522,18 +3529,39 @@ class PTDisplay:
         """
         self._waiting_for_channel_input = waiting
         self._comment_mode_active = False  # Always reset comment mode on state change
-        # Compute valid prefixes for keystroke filtering
         if waiting and response_options:
+            # Permission mode: back up whatever the user was typing so it
+            # can be restored after the permission prompt is resolved, then
+            # clear the buffer and set up keystroke validation.
+            current_text = self._input_buffer.text
+            if current_text:
+                self._saved_input_text = current_text
+            self._input_buffer.text = ""
+            self._input_buffer.cursor_position = 0
             self._valid_input_prefixes = self._compute_valid_prefixes(response_options)
             self._last_valid_permission_input = ""  # Reset for new permission prompt
             # Store options for keyboard navigation
             self._permission_response_options = response_options
             self._permission_focus_index = 0  # Default focus on first option (yes)
-        else:
+        elif waiting:
+            # Non-permission waiting (clarification, auth, reference selection):
+            # clear any stale permission state but leave the input buffer as-is
             self._valid_input_prefixes = set()
             self._last_valid_permission_input = ""
             self._permission_response_options = None
             self._permission_focus_index = 0
+        else:
+            # Leaving waiting mode: restore the user's previously saved input
+            # text so they can continue composing their message
+            saved = self._saved_input_text
+            self._saved_input_text = None
+            self._valid_input_prefixes = set()
+            self._last_valid_permission_input = ""
+            self._permission_response_options = None
+            self._permission_focus_index = 0
+            if saved:
+                self._input_buffer.text = saved
+                self._input_buffer.cursor_position = len(saved)
         # Update output buffer with focus state for inline highlighting (use correct buffer)
         buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
         if buffer:
