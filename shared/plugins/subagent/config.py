@@ -45,8 +45,9 @@ def expand_variables(
 
     # Add default context variables
     # Use workspace_root_override if provided, otherwise auto-detect
+    effective_cwd = workspace_root_override or os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
     default_context = {
-        'cwd': os.getcwd(),
+        'cwd': effective_cwd,
         'workspaceRoot': _find_workspace_root(workspace_root_override),
         'HOME': os.environ.get('HOME', ''),
         'USER': os.environ.get('USER', ''),
@@ -103,7 +104,8 @@ def _resolve_workspace_path(path: str) -> str:
     """
     p = Path(path)
     if not p.is_absolute():
-        p = Path.cwd() / p
+        workspace = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+        p = Path(workspace) / p
     return str(p.resolve())
 
 
@@ -367,7 +369,7 @@ def discover_profiles(
         Dict mapping profile names to SubagentProfile instances.
     """
     if base_path is None:
-        base_path = os.getcwd()
+        base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
 
     # Resolve the profiles directory path
     profiles_path = Path(profiles_dir)

@@ -236,7 +236,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
 def load_config(
     path: Optional[str] = None,
     env_var: str = "FILESYSTEM_QUERY_CONFIG_PATH",
-    runtime_config: Optional[Dict[str, Any]] = None
+    runtime_config: Optional[Dict[str, Any]] = None,
+    base_path: Optional[str] = None
 ) -> FilesystemQueryConfig:
     """Load and validate a filesystem_query configuration.
 
@@ -249,6 +250,9 @@ def load_config(
         path: Direct path to config file. If None, uses env_var or defaults.
         env_var: Environment variable name for config path.
         runtime_config: Runtime configuration dict passed to initialize().
+        base_path: Base directory for resolving default config locations.
+                   Used instead of CWD in daemon mode where CWD is the
+                   server's directory, not the client's workspace.
 
     Returns:
         FilesystemQueryConfig instance with merged configuration.
@@ -280,9 +284,10 @@ def load_config(
             config_path = Path(env_path)
         else:
             # Try default locations
+            cwd = Path(base_path) if base_path else Path(os.environ.get('JAATO_WORKSPACE_ROOT') or Path.cwd())
             default_paths = [
-                Path.cwd() / ".jaato" / "filesystem_query.json",
-                Path.cwd() / "filesystem_query.json",
+                cwd / ".jaato" / "filesystem_query.json",
+                cwd / "filesystem_query.json",
                 Path.home() / ".config" / "jaato" / "filesystem_query.json",
             ]
             for default_path in default_paths:

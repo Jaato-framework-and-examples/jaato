@@ -47,7 +47,7 @@ class EnvironmentPlugin:
         return getattr(_thread_local, 'session', None)
 
     def __init__(self):
-        pass  # No instance state needed - session is in thread-local
+        self._workspace_path: Optional[str] = None
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Called by registry with configuration."""
@@ -58,6 +58,18 @@ class EnvironmentPlugin:
         # Clear thread-local session for current thread
         if hasattr(_thread_local, 'session'):
             _thread_local.session = None
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set the workspace root path for CWD reporting.
+
+        Called by the PluginRegistry when broadcasting workspace path
+        to all plugins. In daemon mode, os.getcwd() returns the server's
+        directory — this method provides the client's actual workspace.
+
+        Args:
+            path: Absolute path to the workspace root directory.
+        """
+        self._workspace_path = path
 
     def set_session(self, session: 'JaatoSession') -> None:
         """Receive session reference for context usage queries.
@@ -142,7 +154,7 @@ class EnvironmentPlugin:
             result["arch"] = self._get_arch_info()
 
         if aspect in ("cwd", "all"):
-            result["cwd"] = normalize_path(os.getcwd())
+            result["cwd"] = normalize_path(self._workspace_path or os.getcwd())
 
         if aspect in ("terminal", "all"):
             result["terminal"] = self._get_terminal_info()
