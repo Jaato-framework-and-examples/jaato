@@ -479,6 +479,22 @@ class IPCClient:
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
+        # Build presentation context describing TUI terminal capabilities.
+        # This is transmitted to the server so the model can adapt its output
+        # (e.g. avoid wide tables on narrow terminals).
+        presentation = {
+            "content_width": content_width,
+            "supports_markdown": True,
+            "supports_tables": True,
+            "supports_code_blocks": True,
+            "supports_images": False,
+            "supports_rich_text": True,
+            "supports_unicode": True,
+            "supports_mermaid": False,
+            "supports_expandable_content": False,
+            "client_type": "terminal",
+        }
+
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
 
@@ -497,6 +513,7 @@ class IPCClient:
             terminal_width=content_width,
             working_dir=working_dir,
             env_file=env_file_abs,
+            presentation=presentation,
         ))
 
     async def _start_server(self) -> bool:

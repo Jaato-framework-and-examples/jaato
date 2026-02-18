@@ -1,6 +1,6 @@
 # Agent Presentation Awareness
 
-**Status:** Brainstorm / RFC
+**Status:** Implemented (Phase 1 + 2)
 **Date:** 2025-02-18
 **Problem:** Agents generate output (tables, code blocks, diagrams) without
 knowing the display constraints of the client, leading to broken rendering on
@@ -21,9 +21,9 @@ with no knowledge of:
 3. **Content strategy** — even if the client *can* render a table, a narrow
    viewport might be better served by a vertical key-value list or a summary.
 
-### Current State
+### Current State (Before This Change)
 
-The plumbing for `terminal_width` already exists end-to-end:
+The plumbing for `terminal_width` already existed end-to-end:
 
 ```
 Client (IPC/WS)
@@ -35,11 +35,11 @@ Client (IPC/WS)
   → FormatterPipeline.set_console_width()
 ```
 
-**Gap:** `_terminal_width` is used exclusively for **client-side formatting**
-(enrichment notifications, formatter pipeline). It is **never injected into the
-model's system instructions**, so the model has zero awareness of the display.
+**Gap:** `_terminal_width` was used exclusively for **client-side formatting**
+(enrichment notifications, formatter pipeline). It was **never injected into the
+model's system instructions**, so the model had zero awareness of the display.
 
-There is also no concept of **capabilities** beyond width.
+There was also no concept of **capabilities** beyond width.
 
 ---
 
@@ -47,152 +47,125 @@ There is also no concept of **capabilities** beyond width.
 
 ### Data Model
 
+Defined in `shared/plugins/model_provider/types.py`:
+
 ```python
 @dataclass
 class PresentationContext:
-    """Display capabilities and constraints of the connected client.
-
-    Assembled by the client at connection time and sent to the server.
-    Used in two places:
-      1. System instructions — so the model adapts its output format.
-      2. Formatter pipeline — as a safety net for client-side reformatting.
-    """
-
     # ── Dimensions ──────────────────────────────────────────────
     content_width: int = 80
-    content_height: Optional[int] = None   # None = unlimited scroll
+    content_height: Optional[int] = None
 
     # ── Format capabilities ─────────────────────────────────────
     supports_markdown: bool = True
-    supports_tables: bool = True           # markdown pipe-tables
-    supports_code_blocks: bool = True      # fenced ``` blocks
-    supports_images: bool = False          # inline image rendering
-    supports_rich_text: bool = True        # bold, italic, links
-    supports_unicode: bool = True          # wide chars, emoji
-    supports_mermaid: bool = False         # diagram rendering
+    supports_tables: bool = True
+    supports_code_blocks: bool = True
+    supports_images: bool = False
+    supports_rich_text: bool = True
+    supports_unicode: bool = True
+    supports_mermaid: bool = False
+    supports_expandable_content: bool = False
 
     # ── Client hint ─────────────────────────────────────────────
-    client_type: str = "terminal"          # terminal | web | telegram | slack | api
+    client_type: str = "terminal"
 ```
+
+### `supports_expandable_content`
+
+Some presentation layers (Telegram inline keyboards, web `<details>` blocks,
+TUI scrollable panels) can collapse overflow behind an expand/click affordance.
+When `supports_expandable_content = True`:
+
+- The model is told it may use full-width tables and detailed output freely.
+- The **client** is responsible for detecting overflow and wrapping it in its
+  native expandable widget.
+- This keeps the overflow UX decision in the client where it belongs — the model
+  produces content, the client decides how to present overflow.
+
+When `False` (the default), the model is given width constraints and asked to
+adapt its formatting (vertical lists, compact tables, etc.).
 
 ### System Instruction Generation
 
-`PresentationContext` generates a compact instruction block:
+`PresentationContext.to_system_instruction()` generates a compact instruction
+block injected as step 5 in `get_system_instructions()`:
 
-```python
-def to_system_instruction(self) -> str:
-    """Generate display-context system instructions for the model."""
-    lines = [f"## Display Context",
-             f"Output width: {self.content_width} characters."]
+**Narrow display (< 60 chars):**
+```
+## Display Context
+Output width: 45 characters.
+This is a NARROW display. Avoid markdown tables — use vertical key: value lists instead. Keep lines under 45 characters.
+Markdown tables are NOT supported. Use bullet lists or indented key: value pairs.
+```
 
-    if self.content_width < 60:
-        lines.append(
-            "This is a NARROW display. Avoid markdown tables — "
-            "use vertical key: value lists instead. "
-            "Keep lines under {self.content_width} characters."
-        )
-    elif self.content_width < 100:
-        lines.append(
-            "Prefer compact tables (≤3-4 columns). "
-            "For wider data, use key: value format."
-        )
+**Medium display (60-99 chars):**
+```
+## Display Context
+Output width: 80 characters.
+Prefer compact tables (3-4 columns max). For wider data, use vertical key: value format.
+```
 
-    if not self.supports_tables:
-        lines.append("Markdown tables are NOT supported. Use lists or indented text.")
+**Wide display (100+ chars):**
+```
+## Display Context
+Output width: 180 characters.
+```
 
-    if not self.supports_code_blocks:
-        lines.append("Fenced code blocks are NOT supported. Indent code with 4 spaces.")
-
-    if self.supports_images:
-        lines.append("Inline images are supported (the client can render them).")
-
-    if not self.supports_markdown:
-        lines.append("Markdown is NOT supported. Use plain text only.")
-
-    return "\n".join(lines)
+**Expandable-content client:**
+```
+## Display Context
+Output width: 45 characters.
+The client can collapse wide or long content behind an expandable control. You may use full-width tables and detailed output freely.
 ```
 
 ### Integration Points
 
-#### 1. Wire into `ClientConfigRequest`
-
-Extend the existing event with optional presentation fields:
+#### 1. `ClientConfigRequest` — Event transport
 
 ```python
 @dataclass
 class ClientConfigRequest(Event):
     # ... existing fields ...
-    terminal_width: Optional[int] = None
-
-    # New: presentation capabilities
-    presentation: Optional[Dict[str, Any]] = None
-    # Keys: content_width, supports_tables, supports_code_blocks,
-    #        supports_images, client_type, ...
+    terminal_width: Optional[int] = None     # backwards compat
+    presentation: Optional[Dict[str, Any]] = None  # NEW
 ```
 
-Backwards-compatible: old clients send `terminal_width` only, which still works.
-New clients send `presentation` dict with richer info. Server falls back to
-constructing a default `PresentationContext(content_width=terminal_width)` when
-only `terminal_width` is present.
+Backwards-compatible: old clients send `terminal_width` only. New clients send
+the `presentation` dict. Server falls back to `terminal_width`-only when no
+presentation dict is present.
 
-#### 2. Store on `JaatoSession`
+#### 2. `JaatoSession` — Storage and propagation
 
 ```python
 class JaatoSession:
-    def __init__(self, ...):
-        self._presentation_context: PresentationContext = PresentationContext()
+    self._presentation_context: Optional[PresentationContext] = None
 
     def set_presentation_context(self, ctx: PresentationContext) -> None:
         self._presentation_context = ctx
-        self._terminal_width = ctx.content_width  # keep backwards compat
+        self._terminal_width = ctx.content_width  # backwards compat
 ```
 
-#### 3. Inject into System Instructions
+Propagation chain: `JaatoServer.set_presentation_context()` →
+`JaatoClient.set_presentation_context()` → `JaatoSession.set_presentation_context()`
 
-In `JaatoRuntime.get_system_instructions()`, add a new assembly step between
-step 4 (formatter pipeline) and step 5 (task completion):
+#### 3. `JaatoRuntime.get_system_instructions()` — Injection
+
+New parameter `presentation_context` accepted. Injected as step 5 in the
+assembly pipeline (between formatter pipeline and task completion instruction):
 
 ```python
-# 4.5 Presentation context (display capabilities)
-if self._presentation_context:
-    ctx_instruction = self._presentation_context.to_system_instruction()
+# 5. Presentation context (client display constraints and capabilities)
+if presentation_context is not None:
+    ctx_instruction = presentation_context.to_system_instruction()
     if ctx_instruction:
         result_parts.append(ctx_instruction)
 ```
 
-Since `get_system_instructions()` lives on the runtime (shared), the context
-should be passed as a parameter rather than stored on the runtime:
+#### 4. `SessionManager` — Server-side construction
 
-```python
-def get_system_instructions(
-    self,
-    plugin_names=None,
-    additional=None,
-    presentation_context=None,   # NEW
-) -> Optional[str]:
-```
-
-The session calls it with its own context:
-
-```python
-instructions = self._runtime.get_system_instructions(
-    plugin_names=...,
-    additional=...,
-    presentation_context=self._presentation_context,
-)
-```
-
-#### 4. Formatter Pipeline Safety Net
-
-Add a `TableReformatter` stage to the formatter pipeline that:
-- Detects markdown tables in model output
-- Measures their rendered width
-- If wider than `content_width`, applies a reformatting strategy:
-  - **Truncate cells** — `some long val...`
-  - **Transpose** — flip rows/columns for narrow displays
-  - **Vertical list** — convert each row to a key: value block
-
-This is a safety net for when the model ignores the system instruction hint.
+`_apply_client_config()` and `_apply_client_config_to_server()` construct
+`PresentationContext` from the event's `presentation` dict and call
+`server.set_presentation_context()`.
 
 ---
 
@@ -202,43 +175,48 @@ Each client type creates its context at connection time:
 
 ### TUI Client (terminal)
 ```python
-PresentationContext(
-    content_width=shutil.get_terminal_size().columns - 6,
-    supports_markdown=True,
-    supports_tables=True,
-    supports_code_blocks=True,
-    supports_mermaid=has_sixel,
-    supports_unicode=True,
-    client_type="terminal",
-)
+presentation = {
+    "content_width": terminal_width - 4,
+    "supports_markdown": True,
+    "supports_tables": True,
+    "supports_code_blocks": True,
+    "supports_images": False,
+    "supports_rich_text": True,
+    "supports_unicode": True,
+    "supports_mermaid": False,
+    "supports_expandable_content": False,
+    "client_type": "terminal",
+}
 ```
 
-### Telegram Bot
+### Telegram Bot (example)
 ```python
 PresentationContext(
-    content_width=45,         # typical mobile viewport
-    supports_markdown=True,   # limited: bold, italic, code, links
-    supports_tables=False,    # monospace pipe-tables break on mobile
+    content_width=45,
+    supports_markdown=True,
+    supports_tables=False,
     supports_code_blocks=True,
-    supports_images=True,     # can send images as separate messages
+    supports_images=True,
+    supports_expandable_content=True,  # inline keyboard buttons
     client_type="telegram",
 )
 ```
 
-### Web Client
+### Web Client (example)
 ```python
 PresentationContext(
-    content_width=100,        # responsive, but reasonable default
+    content_width=100,
     supports_markdown=True,
     supports_tables=True,
     supports_code_blocks=True,
     supports_images=True,
     supports_mermaid=True,
+    supports_expandable_content=True,  # <details> blocks
     client_type="web",
 )
 ```
 
-### Plain API / Headless
+### Plain API / Headless (example)
 ```python
 PresentationContext(
     content_width=120,
@@ -254,17 +232,15 @@ PresentationContext(
 
 ## Dynamic Updates
 
-Terminal resize is already handled (`SIGWINCH` → width update). Extend this to
-update the full `PresentationContext`:
+Terminal resize is already handled (`SIGWINCH` → width update). The same
+`ClientConfigRequest` mechanism can send updated presentation context:
 
 ```python
-# In TUI client, on terminal resize:
-new_ctx = PresentationContext(content_width=new_width, ...)
-await client.send_event(ClientConfigRequest(presentation=asdict(new_ctx)))
+# In a client, on viewport resize:
+await client.send_event(ClientConfigRequest(
+    presentation=new_context.to_dict()
+))
 ```
-
-The server updates the session's context and, on the next turn, the model sees
-the updated display constraints in its system instructions.
 
 **Important:** Mid-turn updates only affect the *next* turn's system
 instructions, not the current one. This is acceptable — the model is already
@@ -278,69 +254,37 @@ The presentation context instruction block is compact:
 
 | Scenario | Instruction Size |
 |----------|-----------------|
-| Wide terminal (default) | ~30 tokens (just width mention) |
-| Narrow mobile | ~80 tokens (width + table/list guidance) |
-| No-markdown API | ~60 tokens (width + format restrictions) |
+| Wide terminal (default) | ~15 tokens (just width mention) |
+| Narrow mobile | ~60 tokens (width + table/list guidance) |
+| Expandable-content client | ~40 tokens (width + expandable note) |
+| No-markdown API | ~50 tokens (width + format restrictions) |
 
 This is negligible compared to tool schemas (~2000+ tokens) and base system
 instructions (~500+ tokens).
 
 ---
 
-## Alternative Considered: Client-Only Reformatting
+## Overflow Handling Philosophy
 
-**Why not just reformat on the client side?**
+**The model decides *what* to output. The client decides *how* to present overflow.**
 
-Client-side reformatting can fix **layout** (wrap cells, truncate columns) but
-cannot fix **content strategy**. Only the model can decide:
-
-- "This 10-column table would be better as a 3-column summary on a narrow screen"
-- "Instead of a table, let me describe the top 3 results in prose"
-- "Let me group by status and show counts instead of listing all 50 rows"
-
-The hybrid approach (model hints + client safety net) gives the best results.
-
----
-
-## Implementation Phases
-
-### Phase 1: System Instruction Injection (Minimum Viable)
-- Add `PresentationContext` dataclass
-- Wire `to_system_instruction()` into `get_system_instructions()`
-- Pass `content_width` (already available) to construct default context
-- **Result:** Model starts adapting tables to terminal width
-
-### Phase 2: Extended Client Capabilities
-- Extend `ClientConfigRequest` with `presentation` dict
-- TUI client sends full capabilities
-- Add client_type-specific defaults
-
-### Phase 3: Formatter Pipeline Safety Net
-- Add `TableReformatter` to formatter pipeline
-- Detect too-wide tables in output stream
-- Apply truncation/transposition as fallback
-
-### Phase 4: Dynamic Context Updates
-- Handle resize events updating presentation context
-- Support mid-session client capability changes (e.g., window → mobile view)
+- On narrow displays without expandable content: the model is asked to use
+  compact formats (vertical lists, fewer columns).
+- On displays with expandable content: the model outputs freely, and the client
+  wraps overflow in its native expand/collapse widget (Telegram inline buttons,
+  `<details>`, scrollable TUI panel, etc.).
+- Server-side table reformatting (TableReformatter) was explicitly rejected in
+  favour of this approach — each client knows its own UX idioms best.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Should presentation context live on Runtime or Session?**
-   Session (recommended) — different subagents could have different output targets
-   (e.g., main agent writes to TUI, subagent writes to a file).
+1. **Presentation context lives on Session** (not Runtime) — different subagents
+   could have different output targets.
 
-2. **Should we include a `max_table_columns` hint?**
-   Probably yes for narrow displays. `content_width=45` + `max_table_columns=3`
-   gives the model a clearer constraint.
+2. **Instruction verbosity:** Minimal. One line for width, one line per disabled
+   capability. No lectures.
 
-3. **How verbose should the instruction be?**
-   Minimal. One line for width, one line per disabled capability. The model
-   doesn't need a lecture — a concise constraint is enough.
-
-4. **Should the formatter pipeline rewrite tables in streaming mode?**
-   Tricky — table rows arrive incrementally. Likely need to buffer until the
-   table is complete (detect closing `|` row), then reformat. This is Phase 3
-   complexity.
+3. **Overflow UX:** Client-side, not pipeline-side. The `supports_expandable_content`
+   flag tells the model it can be generous with content.

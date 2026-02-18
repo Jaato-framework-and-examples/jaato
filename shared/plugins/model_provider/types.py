@@ -509,3 +509,149 @@ class ThinkingConfig:
             enabled=data.get("enabled", False),
             budget=data.get("budget", 10000)
         )
+
+
+@dataclass
+class PresentationContext:
+    """Display capabilities and constraints of the connected client.
+
+    Assembled by each client at connection time and transmitted to the server
+    via ``ClientConfigRequest.presentation``.  The server stores it on the
+    ``JaatoSession`` so that:
+
+    1. **System instructions** include a compact display-context block, letting
+       the model adapt its output format (e.g. vertical key-value lists instead
+       of wide tables on a narrow mobile screen).
+    2. **Formatter pipelines** can use the context for any client-side
+       reformatting they choose to implement.
+
+    Clients that support expandable/collapsible UI (Telegram inline keyboards,
+    HTML ``<details>`` blocks, TUI scrollable panels) should set
+    ``supports_expandable_content = True``.  When enabled, the model is *not*
+    asked to avoid wide content — instead the client is expected to collapse
+    overflow and offer a "show more" affordance.
+
+    Attributes:
+        content_width: Available content width in characters.
+        content_height: Available content height in lines (None = unlimited scroll).
+        supports_markdown: Whether the client renders markdown.
+        supports_tables: Whether markdown pipe-tables render acceptably.
+        supports_code_blocks: Whether fenced code blocks are rendered.
+        supports_images: Whether inline images can be displayed.
+        supports_rich_text: Whether bold/italic/links are rendered.
+        supports_unicode: Whether wide characters and emoji are safe.
+        supports_mermaid: Whether Mermaid diagrams are rendered.
+        supports_expandable_content: Whether the client can collapse overflow
+            behind an expand/click affordance (e.g. Telegram inline buttons,
+            HTML details, TUI panels).
+        client_type: Hint identifying the client kind.
+    """
+
+    # ── Dimensions ──────────────────────────────────────────────
+    content_width: int = 80
+    content_height: Optional[int] = None
+
+    # ── Format capabilities ─────────────────────────────────────
+    supports_markdown: bool = True
+    supports_tables: bool = True
+    supports_code_blocks: bool = True
+    supports_images: bool = False
+    supports_rich_text: bool = True
+    supports_unicode: bool = True
+    supports_mermaid: bool = False
+    supports_expandable_content: bool = False
+
+    # ── Client hint ─────────────────────────────────────────────
+    client_type: str = "terminal"
+
+    # ──────────────────────────────────────────────────────────
+
+    def to_system_instruction(self) -> str:
+        """Generate a compact display-context block for system instructions.
+
+        The returned string is appended to the model's system prompt so it
+        can make intelligent formatting decisions.  The instruction is kept
+        deliberately short (30-80 tokens) to minimise overhead.
+
+        Returns:
+            A multi-line instruction string describing display constraints.
+        """
+        lines: List[str] = [
+            "## Display Context",
+            f"Output width: {self.content_width} characters.",
+        ]
+
+        # ── Width-dependent guidance ────────────────────────────
+        if self.supports_expandable_content:
+            # Client handles overflow via expand/collapse UI — no need
+            # to restrict the model's formatting choices.
+            lines.append(
+                "The client can collapse wide or long content behind an "
+                "expandable control. You may use full-width tables and "
+                "detailed output freely."
+            )
+        elif self.content_width < 60:
+            lines.append(
+                "This is a NARROW display. Avoid markdown tables — "
+                "use vertical key: value lists instead. "
+                f"Keep lines under {self.content_width} characters."
+            )
+        elif self.content_width < 100:
+            lines.append(
+                "Prefer compact tables (3-4 columns max). "
+                "For wider data, use vertical key: value format."
+            )
+
+        # ── Capability restrictions ─────────────────────────────
+        if not self.supports_tables:
+            lines.append(
+                "Markdown tables are NOT supported. "
+                "Use bullet lists or indented key: value pairs."
+            )
+
+        if not self.supports_code_blocks:
+            lines.append(
+                "Fenced code blocks are NOT supported. "
+                "Indent code with 4 spaces instead."
+            )
+
+        if not self.supports_markdown:
+            lines.append("Markdown is NOT supported. Use plain text only.")
+
+        if self.supports_images:
+            lines.append("Inline images are supported.")
+
+        return "\n".join(lines)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dict for event transport."""
+        return {
+            "content_width": self.content_width,
+            "content_height": self.content_height,
+            "supports_markdown": self.supports_markdown,
+            "supports_tables": self.supports_tables,
+            "supports_code_blocks": self.supports_code_blocks,
+            "supports_images": self.supports_images,
+            "supports_rich_text": self.supports_rich_text,
+            "supports_unicode": self.supports_unicode,
+            "supports_mermaid": self.supports_mermaid,
+            "supports_expandable_content": self.supports_expandable_content,
+            "client_type": self.client_type,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PresentationContext':
+        """Create from a dict (e.g. deserialized from ClientConfigRequest)."""
+        return cls(
+            content_width=data.get("content_width", 80),
+            content_height=data.get("content_height"),
+            supports_markdown=data.get("supports_markdown", True),
+            supports_tables=data.get("supports_tables", True),
+            supports_code_blocks=data.get("supports_code_blocks", True),
+            supports_images=data.get("supports_images", False),
+            supports_rich_text=data.get("supports_rich_text", True),
+            supports_unicode=data.get("supports_unicode", True),
+            supports_mermaid=data.get("supports_mermaid", False),
+            supports_expandable_content=data.get("supports_expandable_content", False),
+            client_type=data.get("client_type", "terminal"),
+        )

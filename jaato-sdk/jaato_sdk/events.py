@@ -976,6 +976,13 @@ class ClientConfigRequest(Event):
 
     Sent after connection to apply client-specific settings like trace paths.
     The server applies these settings to the session/plugins.
+
+    The optional ``presentation`` dict carries client display capabilities
+    (see ``PresentationContext`` in ``shared.plugins.model_provider.types``).
+    When present, the server constructs a ``PresentationContext`` and injects
+    display-constraint hints into the model's system instructions.  If only
+    ``terminal_width`` is provided (backwards compat), a default context with
+    that width is constructed.
     """
     type: EventType = field(default=EventType.CLIENT_CONFIG)
     # Environment overrides from client's .env
@@ -988,6 +995,12 @@ class ClientConfigRequest(Event):
     # Path to client's .env file - server loads this for session creation
     # This provides all provider-related env vars (PROJECT_ID, JAATO_PROVIDER, etc.)
     env_file: Optional[str] = None
+    # Client display capabilities (PresentationContext as dict).
+    # Keys: content_width, content_height, supports_markdown, supports_tables,
+    #        supports_code_blocks, supports_images, supports_rich_text,
+    #        supports_unicode, supports_mermaid, supports_expandable_content,
+    #        client_type.
+    presentation: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================
