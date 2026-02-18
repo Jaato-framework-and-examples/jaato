@@ -938,8 +938,13 @@ will show you a preview and require approval before execution. Backups are autom
 
     # Tool executors
 
-    def _execute_read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_read_file(self, args: Dict[str, Any]) -> Any:
         """Execute readFile tool.
+
+        Returns file content as a plain string (with a metadata header) so that
+        provider converters never JSON-encode the body.  This prevents escaping
+        artefacts (e.g. ``\\"`` for ``"``) that would make a subsequent
+        ``updateFile`` fail to match the original text.
 
         Supports chunked reading via offset and limit parameters:
         - offset: Line number to start from (1-indexed, default: 1)
@@ -1033,24 +1038,21 @@ will show you a preview and require approval before execution. Backups are autom
                 actual_start = start_idx + 1
                 actual_end = min(start_idx + len(selected_lines), total_lines)
 
-                return {
-                    "path": normalize_result_path(path),
-                    "content": chunk_content,
-                    "size": len(chunk_content),
-                    "lines": len(selected_lines),
-                    "total_lines": total_lines,
-                    "start_line": actual_start,
-                    "end_line": actual_end,
-                    "has_more": has_more
-                }
+                header = (
+                    f"path: {normalize_result_path(path)} | "
+                    f"lines: {actual_start}-{actual_end} of {total_lines} | "
+                    f"size: {len(chunk_content)} | "
+                    f"has_more: {has_more}"
+                )
+                return f"{header}\n\n{chunk_content}"
             else:
                 # No chunking - return entire file
-                return {
-                    "path": normalize_result_path(path),
-                    "content": content,
-                    "size": len(content),
-                    "lines": total_lines
-                }
+                header = (
+                    f"path: {normalize_result_path(path)} | "
+                    f"lines: {total_lines} | "
+                    f"size: {len(content)}"
+                )
+                return f"{header}\n\n{content}"
         except OSError as e:
             return {"error": f"Failed to read file: {e}"}
 
