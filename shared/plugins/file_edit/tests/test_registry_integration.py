@@ -185,8 +185,8 @@ class TestRegistryFileEditExecution:
         executors = registry.get_exposed_executors()
         result = executors["readFile"]({"path": str(test_file)})
 
-        assert "error" not in result
-        assert result["content"] == "Hello, World!"
+        assert isinstance(result, str)
+        assert "Hello, World!" in result
 
         registry.unexpose_tool("file_edit")
 

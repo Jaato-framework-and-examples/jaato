@@ -4360,7 +4360,15 @@ NOTES
         fc: FunctionCall,
         executor_result: Any
     ) -> ToolResult:
-        """Build a ToolResult from executor output."""
+        """Build a ToolResult from executor output.
+
+        Handles three result shapes from executors:
+        1. ``(ok, result_data)`` tuple – explicit success/error flag.
+        2. Plain dict – treated as success.
+        3. Plain string – passed through **without** wrapping in a dict so
+           that provider converters send it as-is (avoiding JSON escaping of
+           file content, which breaks subsequent ``updateFile`` calls).
+        """
         # Executor returns (ok, result_dict) tuple
         if isinstance(executor_result, tuple) and len(executor_result) == 2:
             ok, result_data = executor_result
@@ -4374,6 +4382,27 @@ NOTES
             attachments = self._extract_multimodal_attachments(result_data)
             result_data = {k: v for k, v in result_data.items()
                           if not k.startswith('_multimodal') and k not in ('image_data',)}
+
+        # String results pass through directly so converters never
+        # JSON-encode them (which would escape quotes, backslashes, etc.).
+        if isinstance(result_data, str):
+            # Run string-level enrichment (template extraction, etc.)
+            if ok and self._runtime.registry:
+                enrichment = self._runtime.registry.enrich_tool_result(
+                    fc.name,
+                    result_data,
+                    output_callback=self._current_output_callback,
+                    terminal_width=self._terminal_width
+                )
+                result_data = enrichment.result
+
+            return ToolResult(
+                call_id=fc.id,
+                name=fc.name,
+                result=result_data,
+                is_error=not ok,
+                attachments=attachments
+            )
 
         # Build result dict
         if isinstance(result_data, dict):
