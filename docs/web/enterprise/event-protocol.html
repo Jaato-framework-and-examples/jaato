@@ -265,7 +265,7 @@
         </p>
         <ul>
           <li><strong><code>AgentCreatedEvent</code></strong> &mdash; Agent registered with ID, type, optional profile name and icon</li>
-          <li><strong><code>AgentOutputEvent</code></strong> &mdash; Streaming text chunks with source (<code>model</code>, <code>tool</code>, <code>system</code>), text, and mode (<code>write</code> for new block, <code>append</code> for continuation)</li>
+          <li><strong><code>AgentOutputEvent</code></strong> &mdash; Streaming text chunks with source (<code>model</code>, <code>tool</code>, <code>system</code>), text, and mode (<code>write</code>, <code>append</code>, or <code>flush</code>). See <a href="#streaming-modes">Streaming Modes</a> below.</li>
           <li><strong><code>AgentStatusChangedEvent</code></strong> &mdash; Transitions between <code>active</code>, <code>idle</code>, <code>done</code>, <code>error</code></li>
           <li><strong><code>AgentCompletedEvent</code></strong> &mdash; Final summary with token usage and turns used</li>
         </ul>
@@ -320,6 +320,110 @@
           <li><strong>No batching</strong> &mdash; Each event is serialized and transmitted individually</li>
           <li><strong>At-most-once delivery</strong> &mdash; Disconnected clients miss events (recovered via <code>emit_current_state</code>)</li>
         </ul>
+
+        <h2 id="streaming-modes">Streaming Modes (write / append / flush)</h2>
+        <p>
+          The <code>mode</code> field on <code>AgentOutputEvent</code> controls how the client should handle each chunk:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Mode</th><th><code>text</code></th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>"write"</code></td><td>non-empty</td><td>Start a <strong>new</strong> output block. Previous block (if any) is finalized.</td></tr>
+            <tr><td><code>"append"</code></td><td>non-empty</td><td>Continue appending to the <strong>current</strong> output block.</td></tr>
+            <tr><td><code>"flush"</code></td><td>empty</td><td><strong>Streaming text is done.</strong> Finalize buffered output now &mdash; tool calls are about to start.</td></tr>
+          </tbody>
+        </table>
+        <p>
+          The <code>"flush"</code> signal is the only way to detect that model text streaming has ended within a turn. There is no separate "StreamEndEvent". The session emits <code>flush</code> immediately before executing tool calls, giving clients a synchronization point to:
+        </p>
+        <ul>
+          <li>Finalize and render buffered text as one piece</li>
+          <li>Transition the UI from "streaming text" to "executing tools" state</li>
+          <li>Separate text output from tool output in non-streaming UIs (e.g., Telegram, Slack)</li>
+        </ul>
+        <p>
+          <strong>Important:</strong> If the model responds with <strong>text only</strong> (no tool calls), no <code>flush</code> is emitted &mdash; the next event is <code>TurnCompletedEvent</code> directly. Clients must also flush their buffers on <code>TurnCompletedEvent</code>.
+        </p>
+
+        <h3>Canonical Event Sequence Within a Single Model Response</h3>
+        <pre><code>AgentOutputEvent(source="model", mode="write")     &larr; new text block
+AgentOutputEvent(source="model", mode="append")    &larr; more chunks...
+AgentOutputEvent(source="model", mode="append")    &larr; ...
+AgentOutputEvent(source="model", mode="flush")     &larr; text done, tools next
+ToolCallStartEvent(tool_name="...")                 &larr; tool execution begins
+ToolCallEndEvent(...)
+...                                                 &larr; more tools if parallel
+TurnProgressEvent(...)                              &larr; token accounting
+&mdash; model may loop back (text &rarr; flush &rarr; tools) if tool results trigger more output &mdash;
+TurnCompletedEvent(...)                             &larr; turn fully done</code></pre>
+
+        <h2 id="client-buffering">Client Implementation Guide (Output Buffering)</h2>
+        <p>
+          Custom clients (Telegram bots, Slack integrations, web UIs, etc.) that cannot render incremental streaming must buffer output and emit it in discrete blocks. This section describes the canonical buffering pattern.
+        </p>
+
+        <h3>The Problem</h3>
+        <p>
+          The server emits <code>AgentOutputEvent</code> chunks as they stream from the model &mdash; potentially dozens per second. Clients like Telegram cannot update a message per chunk. They need to know <strong>when text is done</strong> so they can send one complete message, followed by tool call information.
+        </p>
+
+        <h3>Buffering Pattern</h3>
+        <pre><code>from jaato_sdk.events import (
+    AgentOutputEvent, ToolCallStartEvent, ToolCallEndEvent,
+    TurnCompletedEvent, PermissionInputModeEvent,
+)
+
+text_buffer: list[str] = []
+tool_calls: list[dict] = []
+
+async for event in client.events():
+
+    # --- Text streaming ---
+    if isinstance(event, AgentOutputEvent) and event.source == "model":
+        if event.mode == "flush":
+            # Model text is done — emit buffered text now
+            if text_buffer:
+                send_message("".join(text_buffer))
+                text_buffer.clear()
+        elif event.mode in ("write", "append"):
+            text_buffer.append(event.text)
+
+    # --- Tool execution ---
+    elif isinstance(event, ToolCallStartEvent):
+        tool_calls.append({"name": event.tool_name, "args": event.tool_args})
+
+    elif isinstance(event, ToolCallEndEvent):
+        # Update tool status, show summary, etc.
+        pass
+
+    # --- Permission requests ---
+    elif isinstance(event, PermissionInputModeEvent):
+        # Show permission UI, collect response, then:
+        await client.respond_to_permission(
+            request_id=event.request_id,
+            response=user_choice,  # "y", "n", "a", "never", etc.
+        )
+
+    # --- Turn completed ---
+    elif isinstance(event, TurnCompletedEvent):
+        # Flush any remaining text (text-only responses skip "flush")
+        if text_buffer:
+            send_message("".join(text_buffer))
+            text_buffer.clear()
+        # Show tool call summary if desired
+        if tool_calls:
+            send_tool_summary(tool_calls)
+            tool_calls.clear()</code></pre>
+
+        <h3>Key Rules</h3>
+        <ol>
+          <li><strong>Always flush on <code>TurnCompletedEvent</code></strong> &mdash; text-only responses (no tool calls) skip the <code>"flush"</code> signal and go straight to turn completion.</li>
+          <li><strong><code>mode="flush"</code> has empty <code>text</code></strong> &mdash; don't append it to the buffer. It's a control signal, not content.</li>
+          <li><strong>Multiple flush cycles per turn</strong> &mdash; a turn with tool calls may loop: text &rarr; flush &rarr; tools &rarr; text &rarr; flush &rarr; tools &rarr; turn completed. Reset your text buffer on each flush.</li>
+          <li><strong><code>source</code> filtering matters</strong> &mdash; buffer <code>source="model"</code> text. Other sources (<code>"system"</code>, <code>"tool"</code>, plugin names) carry different content (tool output, system messages) that may need separate handling.</li>
+        </ol>
 
       </section>
 
