@@ -47,9 +47,16 @@ There was also no concept of **capabilities** beyond width.
 
 ### Data Model
 
-Defined in `shared/plugins/model_provider/types.py`:
+Defined in `jaato-sdk/jaato_sdk/events.py`:
 
 ```python
+class ClientType(str, Enum):
+    """Presentation-layer categories."""
+    TERMINAL = "terminal"  # TUI / CLI (rich text, fixed-width)
+    WEB = "web"            # Browser-based UI (HTML, responsive)
+    CHAT = "chat"          # Messaging platform (Telegram, Slack, WhatsApp, …)
+    API = "api"            # Headless / programmatic (plain text)
+
 @dataclass
 class PresentationContext:
     # ── Dimensions ──────────────────────────────────────────────
@@ -67,7 +74,7 @@ class PresentationContext:
     supports_expandable_content: bool = False
 
     # ── Client hint ─────────────────────────────────────────────
-    client_type: str = "terminal"
+    client_type: ClientType = ClientType.TERMINAL
 ```
 
 ### `supports_expandable_content`
@@ -174,19 +181,23 @@ Each client type creates its context at connection time:
 
 ### TUI Client (terminal)
 ```python
-presentation = {
-    "content_width": terminal_width - 4,
-    "supports_markdown": True,
-    "supports_tables": True,
-    "supports_code_blocks": True,
-    "supports_images": False,
-    "supports_rich_text": True,
-    "supports_unicode": True,
-    "supports_mermaid": False,
-    "supports_expandable_content": False,
-    "client_type": "terminal",
-}
+PresentationContext(
+    content_width=terminal_width - 4,
+    supports_markdown=True,
+    supports_tables=True,
+    supports_code_blocks=True,
+    supports_images=False,
+    supports_rich_text=True,
+    supports_unicode=True,
+    supports_mermaid=False,
+    supports_expandable_content=False,
+    client_type=ClientType.TERMINAL,
+)
 ```
+
+> **Wire format:** `PresentationContext.to_dict()` serializes `client_type` as
+> its string value (e.g. `"terminal"`), so `ClientConfigRequest.presentation`
+> carries plain JSON. `PresentationContext.from_dict()` converts back.
 
 ### Chat Client (Telegram, Slack, WhatsApp, …)
 ```python

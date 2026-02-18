@@ -304,7 +304,7 @@ This separation ensures:
 ### Presentation Context (Agent Display Awareness)
 
 The model receives display constraints via `PresentationContext` (defined in
-`shared/plugins/model_provider/types.py`) so it adapts its output format.
+`jaato-sdk/jaato_sdk/events.py`) so it adapts its output format.
 
 **Data flow:**
 ```
@@ -317,6 +317,9 @@ Client → ClientConfigRequest.presentation (dict)
 
 **Key fields:** `content_width`, `supports_tables`, `supports_code_blocks`,
 `supports_images`, `supports_expandable_content`, `client_type`.
+
+`client_type` is a `ClientType` enum (`terminal`, `web`, `chat`, `api`) —
+values describe the presentation surface category, not specific apps.
 
 When `supports_expandable_content=True`, the model outputs freely and the
 **client** wraps overflow in its native expand/collapse widget (Telegram inline
