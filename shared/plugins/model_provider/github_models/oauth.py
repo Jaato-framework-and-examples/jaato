@@ -624,7 +624,8 @@ def _get_pending_auth_path(for_write: bool = False) -> Path:
     1. Project .jaato/ first
     2. Home ~/.jaato/ second
     """
-    project_path = Path.cwd() / ".jaato" / "github_pending_auth.json"
+    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    project_path = Path(workspace) / ".jaato" / "github_pending_auth.json"
     home_path = Path.home() / ".jaato" / "github_pending_auth.json"
 
     if for_write:
