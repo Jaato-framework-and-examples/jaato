@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from shared.http import get_url_opener
 from .env import DEFAULT_ZHIPUAI_BASE_URL
 
 
@@ -147,19 +148,28 @@ def get_stored_base_url() -> Optional[str]:
 def validate_api_key(
     api_key: str,
     base_url: Optional[str] = None,
-) -> bool:
+) -> tuple:
     """Validate an API key by making a test request.
+
+    Sends a minimal POST to the Anthropic-compatible ``/v1/messages``
+    endpoint.  The Anthropic SDK appends ``/v1/messages`` to the base URL
+    internally, so this function must do the same when using raw urllib.
 
     Args:
         api_key: Z.AI API key to validate.
-        base_url: Optional custom base URL.
+        base_url: Optional custom base URL (same format as
+            ``DEFAULT_ZHIPUAI_BASE_URL``, e.g.
+            ``https://api.z.ai/api/anthropic``).
 
     Returns:
-        True if API key is valid.
+        A ``(valid, error_detail)`` tuple.  ``valid`` is True when the key
+        is accepted.  ``error_detail`` is a human-readable hint when
+        ``valid`` is False (empty string on success).
     """
     url = base_url or DEFAULT_ZHIPUAI_BASE_URL
-    # Use messages endpoint with minimal request
-    test_url = f"{url.rstrip('/')}/messages"
+    # The Anthropic SDK appends /v1/messages to the base URL, so we
+    # must do the same when validating with raw urllib.
+    test_url = f"{url.rstrip('/')}/v1/messages"
 
     headers = {
         "Content-Type": "application/json",
@@ -182,18 +192,24 @@ def validate_api_key(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.status == 200
+        opener = get_url_opener(test_url)
+        with opener.open(req, timeout=30) as response:
+            return (True, "")
     except urllib.error.HTTPError as e:
-        # 401/403 means invalid key, anything else might be OK
+        # 401/403 means invalid key
         if e.code in (401, 403):
-            return False
-        # Other errors (400 for bad request, etc.) might indicate valid key
-        # but our test request was malformed - that's fine
-        return True
-    except Exception:
-        # Network errors - can't validate, assume invalid
-        return False
+            return (False, "authentication_error")
+        # Other HTTP errors (400 for bad request, etc.) indicate the key
+        # was accepted but the minimal test request was rejected — that's
+        # fine, the key itself is valid.
+        return (True, "")
+    except urllib.error.URLError as e:
+        # DNS / connection-refused / SSL errors
+        reason = str(e.reason) if hasattr(e, "reason") else str(e)
+        return (False, f"network_error: {reason}")
+    except Exception as e:
+        # Unexpected errors (timeout, etc.)
+        return (False, f"network_error: {e}")
 
 
 def login_interactive(
@@ -252,7 +268,8 @@ def login_interactive(
         on_message("")
         on_message("Validating API key...")
 
-    if validate_api_key(api_key, base_url):
+    valid, detail = validate_api_key(api_key, base_url)
+    if valid:
         credentials = ZhipuAICredentials(
             api_key=api_key,
             created_at=time.time(),
@@ -267,7 +284,13 @@ def login_interactive(
         return credentials
     else:
         if on_message:
-            on_message("API key validation failed. Please check your key and try again.")
+            if detail.startswith("network_error"):
+                on_message(
+                    "Could not reach the Z.AI API to validate your key. "
+                    f"({detail})"
+                )
+            else:
+                on_message("API key validation failed. Please check your key and try again.")
         return None
 
 
@@ -289,7 +312,8 @@ def login_with_key(
     if on_message:
         on_message("Validating API key...")
 
-    if validate_api_key(api_key, base_url):
+    valid, detail = validate_api_key(api_key, base_url)
+    if valid:
         credentials = ZhipuAICredentials(
             api_key=api_key,
             created_at=time.time(),
@@ -303,7 +327,13 @@ def login_with_key(
         return credentials
     else:
         if on_message:
-            on_message("API key validation failed.")
+            if detail.startswith("network_error"):
+                on_message(
+                    "Could not reach the Z.AI API to validate your key. "
+                    f"({detail})"
+                )
+            else:
+                on_message("API key validation failed.")
         return None
 
 
