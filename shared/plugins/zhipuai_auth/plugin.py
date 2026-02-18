@@ -71,7 +71,8 @@ class ZhipuAIAuthPlugin:
             return f" ({tokens // 1024}K)" if tokens else ""
 
         return [
-            {"name": "zhipuai/glm-4.7", "description": f"Latest flagship with native CoT reasoning{_ctx('glm-4.7')}"},
+            {"name": "zhipuai/glm-5", "description": f"Flagship MoE model, agentic engineering{_ctx('glm-5')}"},
+            {"name": "zhipuai/glm-4.7", "description": f"Flagship with native CoT reasoning{_ctx('glm-4.7')}"},
             {"name": "zhipuai/glm-4.7-flash", "description": f"Fast inference variant{_ctx('glm-4.7-flash')}"},
             {"name": "zhipuai/glm-4.6", "description": f"Previous flagship, strong coding{_ctx('glm-4.6')}"},
         ]
@@ -251,7 +252,8 @@ class ZhipuAIAuthPlugin:
             ("    ZHIPUAI_BASE_URL      Custom API endpoint (for enterprise users)", "dim"),
             ("", ""),
             ("AVAILABLE MODELS", "bold"),
-            ("    glm-4.7               Latest flagship with native CoT reasoning (200K)", "dim"),
+            ("    glm-5                 Flagship MoE model, agentic engineering (200K)", "dim"),
+            ("    glm-4.7               Flagship with native CoT reasoning (200K)", "dim"),
             ("    glm-4.7-flash         Fast inference variant (200K)", "dim"),
             ("    glm-4.7-flashx        Ultra-fast variant (200K)", "dim"),
             ("    glm-4.6               Previous flagship, strong coding (200K)", "dim"),
@@ -335,7 +337,7 @@ class ZhipuAIAuthPlugin:
                 self._emit("Successfully authenticated with Z.AI.\n")
                 self._emit("Your API key has been stored securely.\n\n")
                 self._emit("You can now use the zhipuai provider:\n")
-                self._emit("  model zhipuai/glm-4.7\n")
+                self._emit("  model zhipuai/glm-5\n")
             else:
                 self._emit("\nFailed to store credentials.\n")
         else:
