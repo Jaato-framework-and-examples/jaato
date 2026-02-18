@@ -75,7 +75,27 @@ class PresentationContext:
 
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
+
+    # ── Communication style ────────────────────────────────────
+    communication_style: Optional[CommunicationStyle] = None
 ```
+
+### `CommunicationStyle`
+
+```python
+class CommunicationStyle(str, Enum):
+    CONVERSATIONAL = "conversational"  # Short, frequent updates (chat-like)
+    NARRATIVE = "narrative"            # Thorough, structured responses
+```
+
+Controls how the model paces its output.  When `None` (the default), the
+effective style is inferred from `client_type`:
+
+- `CHAT` → `CONVERSATIONAL`
+- All others → `NARRATIVE`
+
+Clients may override explicitly — e.g. a terminal user who prefers frequent
+short updates can set `communication_style = CommunicationStyle.CONVERSATIONAL`.
 
 ### `supports_expandable_content`
 
@@ -103,6 +123,7 @@ block injected as step 5 in `get_system_instructions()`:
 Output width: 45 characters.
 This is a NARROW display. Avoid markdown tables — use vertical key: value lists instead. Keep lines under 45 characters.
 Markdown tables are NOT supported. Use bullet lists or indented key: value pairs.
+Communication style: narrative. Provide thorough, well-structured responses.
 ```
 
 **Medium display (60-99 chars):**
@@ -110,12 +131,14 @@ Markdown tables are NOT supported. Use bullet lists or indented key: value pairs
 ## Display Context
 Output width: 80 characters.
 Prefer compact tables (3-4 columns max). For wider data, use vertical key: value format.
+Communication style: narrative. Provide thorough, well-structured responses.
 ```
 
 **Wide display (100+ chars):**
 ```
 ## Display Context
 Output width: 180 characters.
+Communication style: narrative. Provide thorough, well-structured responses.
 ```
 
 **Expandable-content client:**
@@ -123,6 +146,15 @@ Output width: 180 characters.
 ## Display Context
 Output width: 45 characters.
 The client can collapse wide or long content behind an expandable control. You may use full-width tables and detailed output freely.
+Communication style: narrative. Provide thorough, well-structured responses.
+```
+
+**Chat client (conversational):**
+```
+## Display Context
+Output width: 45 characters.
+This is a NARROW display. Avoid markdown tables — use vertical key: value lists instead. Keep lines under 45 characters.
+Communication style: conversational. The user sees messages in a chat interface. Send short, frequent updates as you work rather than one large response at the end. Each message should be a self-contained progress update. Prefer multiple brief messages over a single long one.
 ```
 
 ### Integration Points
