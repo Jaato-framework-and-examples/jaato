@@ -175,8 +175,8 @@ class TestReadFileSandboxing:
             "path": os.path.join(workspace, "test.txt"),
         })
 
-        assert "error" not in result
-        assert result["content"] == "workspace file content"
+        assert isinstance(result, str)
+        assert "workspace file content" in result
 
     def test_read_file_outside_tmp_blocked(self, plugin_with_workspace):
         """Test reading a file outside /tmp returns not found."""
@@ -199,8 +199,8 @@ class TestReadFileSandboxing:
             "path": outside_file,
         })
 
-        assert "error" not in result
-        assert result["content"] == "external file content"
+        assert isinstance(result, str)
+        assert "external file content" in result
 
     def test_read_file_outside_workspace_authorized(self, plugin_with_workspace):
         """Test reading an authorized external file succeeds."""
@@ -215,8 +215,8 @@ class TestReadFileSandboxing:
             "path": outside_file,
         })
 
-        assert "error" not in result
-        assert result["content"] == "external file content"
+        assert isinstance(result, str)
+        assert "external file content" in result
 
 
 class TestAutoDetectWorkspace:
@@ -373,8 +373,8 @@ class TestPathResolution:
             "path": "subdir/test.txt",
         })
 
-        assert "error" not in result
-        assert result["content"] == "subdir file"
+        assert isinstance(result, str)
+        assert "subdir file" in result
 
     def test_remove_file_uses_resolved_path(self, plugin_with_workspace):
         """Test that removeFile resolves relative paths correctly."""
