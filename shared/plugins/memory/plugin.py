@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import (
@@ -35,11 +36,17 @@ class MemoryPlugin:
     """
 
     def __init__(self):
-        """Initialize the memory plugin."""
+        """Initialize the memory plugin.
+
+        Storage is created during initialize() with a relative path template.
+        When set_workspace_path() is called (by PluginRegistry broadcast),
+        storage is re-created under the correct workspace directory.
+        """
         self._name = "memory"
         self._storage: Optional[MemoryStorage] = None
         self._indexer: Optional[MemoryIndexer] = None
         self._agent_name: Optional[str] = None
+        self._storage_path_template: str = ".jaato/memories.jsonl"
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -60,15 +67,15 @@ class MemoryPlugin:
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
-        storage_path = config.get("storage_path", ".jaato/memories.jsonl")
+        self._storage_path_template = config.get("storage_path", ".jaato/memories.jsonl")
 
-        self._storage = MemoryStorage(storage_path)
+        self._storage = MemoryStorage(self._storage_path_template)
         self._indexer = MemoryIndexer()
 
         # Build index from existing memories
         existing_memories = self._storage.load_all()
         self._indexer.build_index(existing_memories)
-        self._trace(f"initialize: storage_path={storage_path}, memories={len(existing_memories)}")
+        self._trace(f"initialize: storage_path={self._storage_path_template}, memories={len(existing_memories)}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
@@ -77,6 +84,21 @@ class MemoryPlugin:
             self._indexer.clear()
         self._storage = None
         self._indexer = None
+
+    def set_workspace_path(self, path: str) -> None:
+        """Re-initialize storage under the correct workspace directory.
+
+        Called by PluginRegistry.set_workspace_path() broadcast after
+        plugin initialization. Resolves the relative storage path template
+        against the workspace root so that each client's memories are
+        isolated to its own workspace.
+        """
+        resolved = str(Path(path) / self._storage_path_template)
+        self._trace(f"set_workspace_path: {path} -> {resolved}")
+        self._storage = MemoryStorage(resolved)
+        self._indexer = MemoryIndexer()
+        existing = self._storage.load_all()
+        self._indexer.build_index(existing)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool declarations for memory operations.

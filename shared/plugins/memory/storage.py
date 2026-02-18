@@ -18,11 +18,18 @@ class MemoryStorage:
     def __init__(self, path: str):
         """Initialize storage with file path.
 
+        Directory creation is deferred to the first write operation
+        (save/update/delete) so that read-only usage against a
+        not-yet-existing path does not create stale directories
+        (e.g., before set_workspace_path corrects the storage location).
+
         Args:
             path: Path to JSONL file for storing memories
         """
         self.path = Path(path)
-        # Ensure parent directory exists
+
+    def _ensure_parent_dir(self) -> None:
+        """Create parent directory if it does not exist."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def save(self, memory: Memory) -> None:
@@ -31,6 +38,7 @@ class MemoryStorage:
         Args:
             memory: Memory object to store
         """
+        self._ensure_parent_dir()
         with open(self.path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(asdict(memory)) + '\n')
 
@@ -109,6 +117,7 @@ class MemoryStorage:
             all_memories.append(memory)
 
         # Rewrite entire file
+        self._ensure_parent_dir()
         with open(self.path, 'w', encoding='utf-8') as f:
             for mem in all_memories:
                 f.write(json.dumps(asdict(mem)) + '\n')
@@ -154,6 +163,7 @@ class MemoryStorage:
             return False  # Memory not found
 
         # Rewrite entire file
+        self._ensure_parent_dir()
         with open(self.path, 'w', encoding='utf-8') as f:
             for mem in all_memories:
                 f.write(json.dumps(asdict(mem)) + '\n')
