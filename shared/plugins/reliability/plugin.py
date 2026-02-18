@@ -149,56 +149,18 @@ class ReliabilityPlugin:
     # -------------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool schemas for model-callable tools."""
-        return [
-            ToolSchema(
-                name="reliability_status",
-                description="Check reliability status including tool trust, behavioral patterns, and model performance. Use to understand failure history, detect stall patterns, and compare model behavior.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "tool_name": {
-                            "type": "string",
-                            "description": "Specific tool to check (optional, shows all if omitted)"
-                        },
-                        "include_history": {
-                            "type": "boolean",
-                            "description": "Include recent failure history",
-                            "default": False
-                        },
-                        "include_patterns": {
-                            "type": "boolean",
-                            "description": "Include detected behavioral patterns (stalls, loops)",
-                            "default": False
-                        },
-                        "include_behavior": {
-                            "type": "boolean",
-                            "description": "Include model behavioral profile (stall rate, nudge effectiveness)",
-                            "default": False
-                        },
-                        "model_name": {
-                            "type": "string",
-                            "description": "Specific model to show behavior for (uses current model if omitted)"
-                        },
-                        "compare_models": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of two model names to compare behavior between"
-                        }
-                    }
-                }
-            ),
-        ]
+        """No model-callable tools — reliability is user-facing only."""
+        return []
 
     def get_executors(self) -> Dict[str, Callable]:
-        """Return executors for model-callable tools."""
+        """Return executors for user commands."""
         return {
-            "reliability_status": self._execute_status,
+            "reliability": self._execute_user_command,
         }
 
     def get_auto_approved_tools(self) -> List[str]:
-        """These tools don't need permission checks."""
-        return ["reliability_status"]
+        """User commands don't need permission checks."""
+        return ["reliability"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands."""
@@ -216,6 +178,11 @@ class ReliabilityPlugin:
     def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
         """Provide completions for reliability commands.
 
+        Follows the standard completion pattern: args[-1] is always partial
+        input being typed, earlier args are complete. So len(args)==1 means
+        the user is typing a subcommand (partial filter), len(args)==2 means
+        subcommand is complete and typing next arg, etc.
+
         Args:
             command: The command name (e.g., "reliability").
             args: Arguments typed so far after the command name.
@@ -223,60 +190,79 @@ class ReliabilityPlugin:
         if command != "reliability":
             return []
 
-        if len(args) == 0:
-            return [
-                CommandCompletion("status", "Show reliability status for all tools"),
-                CommandCompletion("recovery", "Set recovery mode (auto|ask)"),
-                CommandCompletion("reset", "Reset a tool to trusted state"),
-                CommandCompletion("history", "Show recent failure history"),
-                CommandCompletion("config", "Show current configuration"),
-                CommandCompletion("settings", "Show or save settings"),
-                CommandCompletion("model", "Model-specific reliability tracking"),
-                CommandCompletion("patterns", "Behavioral pattern detection"),
-                CommandCompletion("policies", "Manage file-based prerequisite policies"),
-                CommandCompletion("nudge", "Nudge injection settings"),
-                CommandCompletion("behavior", "Model behavioral profiles"),
-            ]
+        subcommands = [
+            CommandCompletion("status", "Show reliability status for all tools"),
+            CommandCompletion("recovery", "Set recovery mode (auto|ask)"),
+            CommandCompletion("reset", "Reset a tool to trusted state"),
+            CommandCompletion("history", "Show recent failure history"),
+            CommandCompletion("config", "Show current configuration"),
+            CommandCompletion("settings", "Show or save settings"),
+            CommandCompletion("model", "Model-specific reliability tracking"),
+            CommandCompletion("patterns", "Behavioral pattern detection"),
+            CommandCompletion("policies", "Manage file-based prerequisite policies"),
+            CommandCompletion("nudge", "Nudge injection settings"),
+            CommandCompletion("behavior", "Model behavioral profiles"),
+        ]
+
+        if not args:
+            return subcommands
 
         if len(args) == 1:
-            subcommand = args[0]
+            # Partial subcommand — filter by prefix
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        subcommand = args[0].lower()
+
+        if len(args) == 2:
+            partial = args[1].lower()
+
             if subcommand == "recovery":
-                return [
+                options = [
                     CommandCompletion("auto", "Automatically recover tools after cooldown"),
                     CommandCompletion("ask", "Prompt before recovering tools"),
                     CommandCompletion("save", "Save recovery setting"),
                 ]
-            elif subcommand == "reset":
-                # Return list of escalated/blocked tools
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "reset":
                 return [
                     CommandCompletion(key, f"Reset {state.tool_name} ({state.state.value})")
                     for key, state in self._tool_states.items()
                     if state.state in (TrustState.ESCALATED, TrustState.BLOCKED)
+                    and key.startswith(partial)
                 ]
-            elif subcommand == "settings":
-                return [
+
+            if subcommand == "settings":
+                options = [
                     CommandCompletion("show", "Show effective settings"),
                     CommandCompletion("save", "Save settings to workspace or user"),
                     CommandCompletion("clear", "Clear settings at a level"),
                 ]
-            elif subcommand == "model":
-                return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "model":
+                options = [
                     CommandCompletion("status", "Show model reliability summary"),
                     CommandCompletion("compare", "Compare model reliability"),
                     CommandCompletion("suggest", "Enable model switch suggestions"),
                     CommandCompletion("auto", "Enable automatic model switching"),
                     CommandCompletion("disabled", "Disable model switching"),
                 ]
-            elif subcommand == "patterns":
-                return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "patterns":
+                options = [
                     CommandCompletion("status", "Show pattern detection status"),
                     CommandCompletion("enable", "Enable pattern detection"),
                     CommandCompletion("disable", "Disable pattern detection"),
                     CommandCompletion("history", "Show detected patterns"),
                     CommandCompletion("clear", "Clear pattern history"),
                 ]
-            elif subcommand == "nudge":
-                return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "nudge":
+                options = [
                     CommandCompletion("status", "Show nudge injection status"),
                     CommandCompletion("off", "Disable nudge injection"),
                     CommandCompletion("gentle", "Only gentle reminders"),
@@ -284,73 +270,83 @@ class ReliabilityPlugin:
                     CommandCompletion("full", "All nudges including interrupts"),
                     CommandCompletion("history", "Show nudge history"),
                 ]
-            elif subcommand == "policies":
-                return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "policies":
+                options = [
                     CommandCompletion("status", "Show loaded file-based policies"),
                     CommandCompletion("reload", "Reload policies from config file"),
                     CommandCompletion("edit", "Open config file in external editor"),
                     CommandCompletion("path", "Show config file path"),
                 ]
-            elif subcommand == "behavior":
-                return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "behavior":
+                options = [
                     CommandCompletion("status", "Show behavioral profile summary"),
                     CommandCompletion("compare", "Compare behavioral profiles"),
                     CommandCompletion("patterns", "Show pattern breakdown by model"),
                 ]
+                return [c for c in options if c.value.startswith(partial)]
 
-        if len(args) == 2:
-            subcommand = args[0]
-            if subcommand == "recovery" and args[1] == "save":
-                return [
+        if len(args) == 3:
+            arg1 = args[1].lower()
+            partial = args[2].lower()
+
+            if subcommand == "recovery" and arg1 == "save":
+                options = [
                     CommandCompletion("workspace", "Save to workspace (.jaato/reliability.json)"),
                     CommandCompletion("user", "Save as user default (~/.jaato/reliability.json)"),
                 ]
-            elif subcommand == "settings":
-                arg = args[1]
-                if arg == "save":
-                    return [
+                return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "settings":
+                if arg1 == "save":
+                    options = [
                         CommandCompletion("workspace", "Save to workspace"),
                         CommandCompletion("user", "Save as user default"),
                     ]
-                elif arg == "clear":
-                    return [
+                    return [c for c in options if c.value.startswith(partial)]
+                if arg1 == "clear":
+                    options = [
                         CommandCompletion("workspace", "Clear workspace settings"),
                         CommandCompletion("session", "Clear session overrides"),
                     ]
-            elif subcommand == "model":
-                arg = args[1]
-                if arg == "status":
-                    # Return list of tracked models
+                    return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "model":
+                if arg1 == "status":
                     models = set(m for (m, _) in self._model_profiles.keys())
                     if self._current_model:
                         models.add(self._current_model)
                     return [
                         CommandCompletion(m, f"Show reliability for {m}")
                         for m in sorted(models)
+                        if m.startswith(partial)
                     ]
-                elif arg in ("suggest", "auto", "disabled"):
-                    return [
-                        CommandCompletion("save", "Save strategy setting"),
-                    ]
-            elif subcommand == "behavior":
-                arg = args[1]
-                if arg in ("status", "compare", "patterns"):
-                    # Return list of tracked behavioral profiles
+                if arg1 in ("suggest", "auto", "disabled"):
+                    options = [CommandCompletion("save", "Save strategy setting")]
+                    return [c for c in options if c.value.startswith(partial)]
+
+            if subcommand == "behavior":
+                if arg1 in ("status", "compare", "patterns"):
                     models = set(self._behavioral_profiles.keys())
                     if self._current_model:
                         models.add(self._current_model)
                     return [
                         CommandCompletion(m, f"Show behavioral profile for {m}")
                         for m in sorted(models)
+                        if m.startswith(partial)
                     ]
 
-        if len(args) == 3:
-            subcommand = args[0]
-            if subcommand == "model" and args[1] in ("suggest", "auto", "disabled") and args[2] == "save":
-                return [
+        if len(args) == 4:
+            if subcommand == "model" and args[1].lower() in ("suggest", "auto", "disabled") and args[2].lower() == "save":
+                partial = args[3].lower()
+                options = [
                     CommandCompletion("workspace", "Save to workspace"),
                     CommandCompletion("user", "Save as user default"),
                 ]
+                return [c for c in options if c.value.startswith(partial)]
 
         return []
 
@@ -1940,6 +1936,16 @@ class ReliabilityPlugin:
     # -------------------------------------------------------------------------
     # User Command Handler
     # -------------------------------------------------------------------------
+
+    def _execute_user_command(self, args: Dict[str, Any]) -> str:
+        """Executor bridge for the 'reliability' user command.
+
+        Extracts subcommand and args from the executor args dict and
+        delegates to handle_command().
+        """
+        subcommand = args.get("subcommand", "")
+        raw_args = args.get("args", "")
+        return self.handle_command(subcommand, raw_args)
 
     def handle_command(self, subcommand: str, args: str) -> str:
         """Handle user commands."""
