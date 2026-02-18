@@ -983,6 +983,21 @@ class ClientType(str, Enum):
     API = "api"            # Headless / programmatic (plain text)
 
 
+class CommunicationStyle(str, Enum):
+    """How the model should pace and structure its output.
+
+    ``CONVERSATIONAL``: Emit short, frequent messages as work progresses —
+    each message should be a self-contained update.  Ideal for chat platforms
+    where the user expects back-and-forth interaction.
+
+    ``NARRATIVE``: Produce thorough, well-structured responses once the work
+    is complete.  Suited for terminals, web UIs, and programmatic consumers
+    that can display longer content at once.
+    """
+    CONVERSATIONAL = "conversational"
+    NARRATIVE = "narrative"
+
+
 @dataclass
 class PresentationContext:
     """Display capabilities and constraints of the connected client.
@@ -1035,6 +1050,11 @@ class PresentationContext:
 
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
+
+    # ── Communication style ────────────────────────────────────
+    # When None, inferred from client_type: CHAT → CONVERSATIONAL,
+    # all others → NARRATIVE.  Clients may override explicitly.
+    communication_style: Optional['CommunicationStyle'] = None
 
     # ──────────────────────────────────────────────────────────
 
@@ -1091,6 +1111,30 @@ class PresentationContext:
         if self.supports_images:
             lines.append("Inline images are supported.")
 
+        # ── Communication style guidance ──────────────────────
+        effective_style = self.communication_style
+        if effective_style is None:
+            effective_style = (
+                CommunicationStyle.CONVERSATIONAL
+                if self.client_type == ClientType.CHAT
+                else CommunicationStyle.NARRATIVE
+            )
+
+        if effective_style == CommunicationStyle.CONVERSATIONAL:
+            lines.append(
+                "Communication style: conversational. "
+                "The user sees messages in a chat interface. "
+                "Send short, frequent updates as you work rather than "
+                "one large response at the end. Each message should be "
+                "a self-contained progress update. "
+                "Prefer multiple brief messages over a single long one."
+            )
+        else:
+            lines.append(
+                "Communication style: narrative. "
+                "Provide thorough, well-structured responses."
+            )
+
         return "\n".join(lines)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1107,6 +1151,7 @@ class PresentationContext:
             "supports_mermaid": self.supports_mermaid,
             "supports_expandable_content": self.supports_expandable_content,
             "client_type": self.client_type.value,
+            "communication_style": self.communication_style.value if self.communication_style else None,
         }
 
     @classmethod
@@ -1124,6 +1169,11 @@ class PresentationContext:
             supports_mermaid=data.get("supports_mermaid", False),
             supports_expandable_content=data.get("supports_expandable_content", False),
             client_type=ClientType(data.get("client_type", "terminal")),
+            communication_style=(
+                CommunicationStyle(data["communication_style"])
+                if data.get("communication_style")
+                else None
+            ),
         )
 
 

@@ -512,4 +512,5 @@ class ThinkingConfig:
 
 
 # Re-export from SDK so server-side code can import from either location.
+from jaato_sdk.events import CommunicationStyle  # noqa: F401
 from jaato_sdk.events import PresentationContext  # noqa: F401
