@@ -3,6 +3,7 @@
 import os
 from unittest import mock
 
+import httpx
 import pytest
 
 from shared.http.proxy import (
@@ -10,6 +11,8 @@ from shared.http.proxy import (
     _get_no_proxy_entries,
     _matches_no_proxy,
     generate_spnego_token,
+    get_httpx_client,
+    get_httpx_kwargs,
     should_bypass_proxy,
 )
 
@@ -216,3 +219,130 @@ class TestGenerateSpnegoTokenFallback:
             # Directly test: no windll → None
             result = _generate_spnego_token_sspi("proxy.corp.com")
             assert result is None
+
+
+# ============================================================
+# httpx Kerberos proxy integration tests
+# ============================================================
+
+
+class TestGetHttpxClientKerberos:
+    """Verify that get_httpx_client uses httpx.Proxy for Kerberos auth.
+
+    When JAATO_KERBEROS_PROXY is enabled, the SPNEGO Negotiate token must be
+    placed on an httpx.Proxy object (not as a regular client header) so it is
+    sent during the CONNECT tunnel handshake for HTTPS requests.
+
+    We verify by intercepting the httpx.Client constructor to inspect the
+    proxy kwarg, since httpx internals vary across versions.
+    """
+
+    def test_kerberos_uses_proxy_object(self):
+        """With Kerberos enabled, proxy kwarg should be an httpx.Proxy."""
+        env = {
+            "HTTPS_PROXY": "http://proxy.corp.com:8080",
+            "JAATO_KERBEROS_PROXY": "true",
+        }
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch(
+                "shared.http.proxy.generate_spnego_token",
+                return_value="fake_b64",
+            ):
+                with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                    client = get_httpx_client(timeout=5.0)
+
+                assert isinstance(captured["proxy"], httpx.Proxy)
+                # The Negotiate header must NOT be in top-level client headers.
+                client_headers = dict(captured.get("headers", {}))
+                assert "Proxy-Authorization" not in client_headers
+                client.close()
+
+    def test_kerberos_no_token_falls_back_to_url(self):
+        """When SPNEGO token generation fails, proxy is a plain URL string."""
+        env = {
+            "HTTPS_PROXY": "http://proxy.corp.com:8080",
+            "JAATO_KERBEROS_PROXY": "true",
+        }
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch(
+                "shared.http.proxy.generate_spnego_token",
+                return_value=None,
+            ):
+                with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                    client = get_httpx_client(timeout=5.0)
+
+                # Proxy should be a plain URL string, not a Proxy object
+                assert captured["proxy"] == "http://proxy.corp.com:8080"
+                client.close()
+
+    def test_no_kerberos_uses_plain_url(self):
+        """Without Kerberos, proxy is set from env as a plain URL string."""
+        env = {
+            "HTTPS_PROXY": "http://proxy.corp.com:8080",
+        }
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                client = get_httpx_client(timeout=5.0)
+
+            assert captured["proxy"] == "http://proxy.corp.com:8080"
+            client.close()
+
+
+class TestGetHttpxKwargsKerberos:
+    """Verify get_httpx_kwargs returns httpx.Proxy (not headers dict) for Kerberos."""
+
+    def test_kerberos_returns_proxy_object_no_headers_key(self):
+        """With Kerberos, returned dict should have Proxy object, no 'headers' key."""
+        env = {
+            "HTTPS_PROXY": "http://proxy.corp.com:8080",
+            "JAATO_KERBEROS_PROXY": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch(
+                "shared.http.proxy.generate_spnego_token",
+                return_value="fake_b64",
+            ):
+                kwargs = get_httpx_kwargs("https://api.github.com/test")
+                assert isinstance(kwargs["proxy"], httpx.Proxy)
+                # The auth header must NOT be a top-level key — it lives
+                # on the Proxy object so it's sent during CONNECT.
+                assert "headers" not in kwargs
+
+    def test_kerberos_no_token_returns_url_string(self):
+        """When token generation fails, proxy is a plain URL string."""
+        env = {
+            "HTTPS_PROXY": "http://proxy.corp.com:8080",
+            "JAATO_KERBEROS_PROXY": "true",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch(
+                "shared.http.proxy.generate_spnego_token",
+                return_value=None,
+            ):
+                kwargs = get_httpx_kwargs("https://api.github.com/test")
+                assert kwargs["proxy"] == "http://proxy.corp.com:8080"
+                assert "headers" not in kwargs
