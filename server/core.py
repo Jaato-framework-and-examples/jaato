@@ -2456,6 +2456,11 @@ class JaatoServer:
                         message=f"Model changed to: {self._model_name}",
                         style="info",
                     ))
+                    # Push updated model info so client toolbar refreshes
+                    self.emit(SessionInfoEvent(
+                        model_provider=self._model_provider,
+                        model_name=self._model_name,
+                    ))
 
             # Handle permission status change
             if command.lower() == "permissions":
