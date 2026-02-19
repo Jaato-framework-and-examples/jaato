@@ -48,8 +48,8 @@ from rich.align import Align
 from rich.table import Table
 from rich import box
 
-from shared.plugins.table_formatter.plugin import _display_width
-from shared.plugins.formatter_pipeline import PRERENDERED_LINE_PREFIX
+from display_width import _display_width
+from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
 from ui_utils import format_tool_arg_value, format_tool_args_summary
 from terminal_emulator import TerminalEmulator
 

@@ -47,12 +47,6 @@ from tool_output_popup import ToolOutputPopup
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings, format_key_for_display
 from theme import ThemeConfig, load_theme
-from shared.plugins.formatter_pipeline import create_pipeline
-from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
-from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
-from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
-from shared.plugins.table_formatter import create_plugin as create_table_formatter
-from shared.plugins.inline_markdown_formatter import create_plugin as create_inline_md_formatter
 
 
 def consolidate_fragments(fragments):
@@ -421,7 +415,6 @@ class PTDisplay:
         clipboard_config: Optional[ClipboardConfig] = None,
         keybinding_config: Optional[KeybindingConfig] = None,
         theme_config: Optional[ThemeConfig] = None,
-        server_formatted: bool = False,
     ):
         """Initialize the display.
 
@@ -436,8 +429,6 @@ class PTDisplay:
                               If not provided, loads from config files or uses defaults.
             theme_config: Optional ThemeConfig for UI theming.
                          If not provided, loads from config files or uses default dark theme.
-            server_formatted: If True, skip client-side formatting (server already formatted).
-                             Used in IPC mode where server handles syntax highlighting.
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -479,35 +470,15 @@ class PTDisplay:
         self._output_buffer.set_keybinding_config(self._keybinding_config)
         self._output_buffer.set_theme(self._theme)
 
-        # Formatter pipeline for output processing (syntax highlighting, diff coloring)
-        # Skip in server_formatted mode - server already handles formatting
+        # Formatter pipeline — server handles formatting, no client-side pipeline
         self._formatter_pipeline = None
-        self._code_block_formatter = None  # Keep reference for theme updates
-        self._inline_md_formatter = None  # Keep reference for theme updates
-        if not server_formatted:
-            self._formatter_pipeline = create_pipeline()
-            self._formatter_pipeline.register(create_hidden_filter())         # priority 5
-            self._formatter_pipeline.register(create_diff_formatter())        # priority 20
-            self._formatter_pipeline.register(create_table_formatter())       # priority 25
-            # Code block formatter with line numbers enabled
-            self._code_block_formatter = create_code_block_formatter()
-            self._code_block_formatter.initialize({"line_numbers": True})
-            self._code_block_formatter.set_syntax_theme(self._theme.name)  # Match UI theme
-            self._formatter_pipeline.register(self._code_block_formatter)     # priority 40
-            # Inline markdown formatter (bold, italic, code, links, strikethrough)
-            self._inline_md_formatter = create_inline_md_formatter()
-            self._apply_inline_md_theme(self._theme)
-            self._formatter_pipeline.register(self._inline_md_formatter)      # priority 45
-            self._formatter_pipeline.set_console_width(output_width)
-            self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
+        self._code_block_formatter = None
+        self._inline_md_formatter = None
 
         # Set keybinding config and theme on agent registry buffers too
         if self._agent_registry:
             self._agent_registry.set_keybinding_config_all(self._keybinding_config)
             self._agent_registry.set_theme_all(self._theme)
-            # Also set formatter pipeline on agent buffers (only if not server_formatted)
-            if self._formatter_pipeline:
-                self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)

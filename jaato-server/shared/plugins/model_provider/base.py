@@ -1,0 +1,602 @@
+"""Base protocol for Model Provider plugins.
+
+This module defines the interface that all model provider plugins must implement.
+Model providers encapsulate all SDK-specific logic for interacting with AI models
+(Google GenAI, Anthropic, OpenAI, etc.).
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runtime_checkable
+
+from jaato_sdk.plugins.model_provider.types import (
+    CancelledException,
+    CancelToken,
+    FunctionCall,
+    Message,
+    Part,
+    ProviderResponse,
+    ThinkingConfig,
+    ToolResult,
+    ToolSchema,
+    TokenUsage,
+)
+
+
+# Output callback type for real-time streaming
+# Parameters: (source: str, text: str, mode: str)
+#   source: "model" for model output, plugin name for plugin output
+#   text: The output text
+#   mode: "write" for new block, "append" to continue
+OutputCallback = Callable[[str, str, str], None]
+
+# Streaming callback type for token-level streaming
+# Parameters: (chunk: str) - the text chunk received from the model
+StreamingCallback = Callable[[str], None]
+
+# Thinking callback type for extended thinking content
+# Parameters: (thinking: str) - accumulated thinking content from the model
+# Called BEFORE text streaming begins, when thinking is complete
+ThinkingCallback = Callable[[str], None]
+
+# Usage update callback for real-time token accounting
+# Parameters: (usage: TokenUsage) - current token usage from streaming
+UsageUpdateCallback = Callable[[TokenUsage], None]
+
+# GC threshold callback for proactive garbage collection notifications
+# Parameters: (percent_used: float, threshold: float) - current and threshold percentages
+# Called when context usage crosses configured threshold during streaming
+GCThresholdCallback = Callable[[float, float], None]
+
+# Function call detected callback for streaming
+# Parameters: (function_call: FunctionCall) - the function call detected mid-stream
+# Called when a function call is detected during streaming, BEFORE any subsequent
+# text chunks are emitted. This allows the caller to insert tool tree markers
+# at the correct position between text blocks.
+FunctionCallDetectedCallback = Callable[[FunctionCall], None]
+
+
+# Authentication method type for Google GenAI provider
+GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
+
+
+@dataclass
+class ProviderConfig:
+    """Configuration for model provider initialization.
+
+    Providers may use different subsets of these fields depending on
+    their authentication requirements.
+
+    Attributes:
+        project: Cloud project ID (GCP, AWS, etc.).
+        location: Region/location for the service.
+        api_key: API key for authentication (if applicable).
+        credentials_path: Path to credentials file (if applicable).
+        use_vertex_ai: If True, use Vertex AI endpoint (requires project/location).
+            If False, use Google AI Studio endpoint (requires api_key).
+            Default is True for backwards compatibility.
+        auth_method: Authentication method to use. Options:
+            - "auto": Automatically detect from available credentials (default)
+            - "api_key": Use API key (Google AI Studio)
+            - "service_account_file": Use service account JSON file
+            - "adc": Use Application Default Credentials
+            - "impersonation": Use service account impersonation
+        target_service_account: Target service account email for impersonation.
+            Required when auth_method is "impersonation".
+        credentials: Pre-built credentials object (advanced usage).
+            When provided, this takes precedence over other auth methods.
+        extra: Provider-specific additional configuration.
+    """
+    project: Optional[str] = None
+    location: Optional[str] = None
+    api_key: Optional[str] = None
+    credentials_path: Optional[str] = None
+    use_vertex_ai: bool = True
+    auth_method: GoogleAuthMethod = "auto"
+    target_service_account: Optional[str] = None
+    credentials: Optional[Any] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class ModelProviderPlugin(Protocol):
+    """Protocol for Model Provider plugins.
+
+    Model providers encapsulate all interactions with a specific AI SDK:
+    - Connection and authentication
+    - Chat session management
+    - Message sending and function calling
+    - Token counting and context management
+    - History serialization for persistence
+
+    This follows the same pattern as GCPlugin and SessionPlugin.
+
+    Example implementation:
+        class GoogleGenAIProvider:
+            @property
+            def name(self) -> str:
+                return "google_genai"
+
+            def initialize(self, config: ProviderConfig) -> None:
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=config.project,
+                    location=config.location
+                )
+
+            def connect(self, model: str) -> None:
+                self._model_name = model
+
+            def send_message(self, message: str) -> ProviderResponse:
+                response = self._chat.send_message(message)
+                return self._convert_response(response)
+    """
+
+    @property
+    def name(self) -> str:
+        """Unique identifier for this provider (e.g., 'google_genai', 'anthropic')."""
+        ...
+
+    # ==================== Lifecycle ====================
+
+    def initialize(self, config: Optional[ProviderConfig] = None) -> None:
+        """Initialize the provider with configuration.
+
+        This is called once when the provider is first set up.
+        Establishes the SDK client connection.
+
+        Args:
+            config: Provider configuration with auth details.
+        """
+        ...
+
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message: Optional[Callable[[str], None]] = None
+    ) -> bool:
+        """Verify that authentication is configured and optionally trigger interactive login.
+
+        This should be called BEFORE configure_tools/create_session to ensure
+        credentials are available. For providers that support interactive login
+        (like Anthropic OAuth), this can trigger the login flow.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive login (e.g., browser-based OAuth). If False,
+                only check if credentials exist without prompting.
+            on_message: Optional callback for status messages during interactive
+                login (e.g., "Opening browser...", "Waiting for auth...").
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was not completed.
+
+        Raises:
+            APIKeyNotFoundError: If allow_interactive=False and no credentials found.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Clean up any resources held by the provider."""
+        ...
+
+    # ==================== Connection ====================
+
+    def connect(self, model: str) -> None:
+        """Set the model to use for this provider.
+
+        Args:
+            model: Model name/ID (e.g., 'gemini-2.5-flash', 'claude-sonnet-4-5-20250929').
+        """
+        ...
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if the provider is connected and ready."""
+        ...
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """Get the currently configured model name."""
+        ...
+
+    def list_models(self, prefix: Optional[str] = None) -> List[str]:
+        """List available models from this provider.
+
+        Args:
+            prefix: Optional filter prefix (e.g., 'gemini', 'claude').
+
+        Returns:
+            List of model names/IDs.
+        """
+        ...
+
+    # ==================== Session Management ====================
+
+    def create_session(
+        self,
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        history: Optional[List[Message]] = None
+    ) -> None:
+        """Create or reset the chat session.
+
+        Args:
+            system_instruction: System prompt for the model.
+            tools: List of available tools/functions.
+            history: Previous conversation history to restore.
+        """
+        ...
+
+    def get_history(self) -> List[Message]:
+        """Get the current conversation history.
+
+        Returns:
+            List of messages in provider-agnostic format.
+        """
+        ...
+
+    # ==================== Messaging ====================
+
+    def generate(self, prompt: str) -> ProviderResponse:
+        """Simple one-shot generation without session context.
+
+        Use this for basic prompts that don't need conversation history
+        or function calling.
+
+        Args:
+            prompt: The prompt text.
+
+        Returns:
+            ProviderResponse with the model's response.
+        """
+        ...
+
+    def send_message(
+        self,
+        message: str,
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send a user message and get a response.
+
+        Does NOT automatically execute function calls - that's the
+        responsibility of JaatoClient's orchestration loop.
+
+        Args:
+            message: The user's message text.
+            response_schema: Optional JSON Schema to constrain the model's
+                response format. When provided, the model will return JSON
+                conforming to this schema, and the response's structured_output
+                field will contain the parsed result. Not all providers support
+                this - check supports_structured_output() first.
+
+        Returns:
+            ProviderResponse with text and/or function calls.
+        """
+        ...
+
+    def send_message_with_parts(
+        self,
+        parts: List[Part],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send a message with multiple parts (text, images, etc.).
+
+        Use this for multimodal input where the user message contains
+        more than just text.
+
+        Args:
+            parts: List of Part objects forming the message.
+            response_schema: Optional JSON Schema to constrain the response.
+
+        Returns:
+            ProviderResponse with text and/or function calls.
+        """
+        ...
+
+    def send_tool_results(
+        self,
+        results: List[ToolResult],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send tool execution results back to the model.
+
+        Called after executing function calls to continue the conversation.
+
+        Args:
+            results: List of tool execution results.
+            response_schema: Optional JSON Schema to constrain the model's
+                response format. See send_message() for details.
+
+        Returns:
+            ProviderResponse with the model's next response.
+        """
+        ...
+
+    # ==================== Token Management ====================
+
+    def count_tokens(self, content: str) -> int:
+        """Count tokens for the given content.
+
+        Args:
+            content: Text to count tokens for.
+
+        Returns:
+            Token count.
+        """
+        ...
+
+    def get_context_limit(self) -> int:
+        """Get the context window size for the current model.
+
+        Returns:
+            Maximum tokens the model can handle.
+        """
+        ...
+
+    def get_token_usage(self) -> TokenUsage:
+        """Get token usage from the last response.
+
+        Returns:
+            TokenUsage with prompt/output/total counts.
+        """
+        ...
+
+    # ==================== Serialization ====================
+    # Used by SessionPlugin for persistence
+
+    def serialize_history(self, history: List[Message]) -> str:
+        """Serialize conversation history to a string.
+
+        Used by SessionPlugin to persist conversations.
+        The format should be provider-independent (e.g., JSON).
+
+        Args:
+            history: List of messages to serialize.
+
+        Returns:
+            Serialized string representation.
+        """
+        ...
+
+    def deserialize_history(self, data: str) -> List[Message]:
+        """Deserialize conversation history from a string.
+
+        Args:
+            data: Previously serialized history string.
+
+        Returns:
+            List of Message objects.
+        """
+        ...
+
+    # ==================== Capabilities ====================
+
+    def supports_structured_output(self) -> bool:
+        """Check if this provider supports structured output (response_schema).
+
+        When True, the provider can accept response_schema in send_message()
+        and send_tool_results() to constrain the model's output to valid JSON
+        matching the provided schema.
+
+        Returns:
+            True if structured output is supported.
+        """
+        ...
+
+    # ==================== Streaming & Cancellation ====================
+    # Optional streaming and cancellation support
+
+    def supports_streaming(self) -> bool:
+        """Check if this provider supports streaming responses.
+
+        When True, the provider can use send_message_streaming() for
+        real-time token delivery with optional cancellation support.
+
+        Returns:
+            True if streaming is supported, False otherwise.
+        """
+        ...
+
+    def send_message_streaming(
+        self,
+        message: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None
+    ) -> ProviderResponse:
+        """Send a message with streaming response and optional cancellation.
+
+        Streams the response token-by-token, calling on_chunk for each
+        piece of text as it arrives. Supports cancellation via CancelToken.
+
+        Args:
+            message: The user's message text.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+                If cancelled, streaming stops and partial response is returned.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. Called BEFORE any subsequent text
+                chunks are emitted, allowing the caller to insert tool tree
+                markers at the correct position between text blocks.
+            on_thinking: Optional callback invoked when extended thinking
+                content is available. Called BEFORE text streaming begins,
+                when the model's thinking phase is complete.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+            If cancelled mid-stream, contains partial text accumulated so far.
+
+        Raises:
+            CancelledException: If cancel_token was triggered (optional -
+                implementations may also return partial response instead).
+            RuntimeError: If no chat session exists.
+
+        Example:
+            token = CancelToken()
+            chunks = []
+
+            def on_chunk(text):
+                chunks.append(text)
+                print(text, end='', flush=True)
+
+            # In another thread, can call token.cancel() to stop
+            response = provider.send_message_streaming(
+                "Tell me a story",
+                on_chunk=on_chunk,
+                cancel_token=token
+            )
+        """
+        ...
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None
+    ) -> ProviderResponse:
+        """Send tool results with streaming response and optional cancellation.
+
+        Like send_tool_results() but with streaming output.
+
+        Args:
+            results: List of tool execution results.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. See send_message_streaming() for details.
+            on_thinking: Optional callback invoked when extended thinking
+                content is available. See send_message_streaming() for details.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        ...
+
+    def supports_stop(self) -> bool:
+        """Check if this provider supports mid-turn cancellation (stop).
+
+        Stop capability requires streaming support since cancellation is
+        implemented by breaking out of the streaming loop.
+
+        Returns:
+            True if stop/cancel is supported, False otherwise.
+        """
+        ...
+
+    # ==================== Agent Context ====================
+    # Optional agent identification for tracing
+
+    def set_agent_context(
+        self,
+        agent_type: str = "main",
+        agent_name: Optional[str] = None,
+        agent_id: str = "main"
+    ) -> None:
+        """Set agent context for trace identification.
+
+        This allows traces to identify which agent (main or subagent)
+        produced the trace, useful for debugging multi-agent scenarios.
+
+        Args:
+            agent_type: Type of agent ("main" or "subagent").
+            agent_name: Optional name for the agent (e.g., profile name).
+            agent_id: Unique identifier for the agent instance.
+        """
+        ...
+
+    # ==================== Thinking Mode ====================
+    # Optional extended thinking/reasoning support
+
+    def supports_thinking(self) -> bool:
+        """Check if this provider/model supports extended thinking.
+
+        Thinking mode enables extended reasoning capabilities:
+        - Anthropic: Extended thinking with visible reasoning traces
+        - Google Gemini: Thinking mode (Gemini 2.0+)
+
+        Returns:
+            True if thinking mode is supported, False otherwise.
+        """
+        ...
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set the thinking/reasoning mode configuration.
+
+        Dynamically enables or disables extended thinking for subsequent
+        API calls. Takes effect immediately for the next send_message().
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+                - enabled: Whether to use thinking mode
+                - budget: Token budget for thinking (provider-specific)
+
+        Note:
+            If the provider/model doesn't support thinking, this is a no-op.
+            Check supports_thinking() to verify capability first.
+        """
+        ...
+
+    # ==================== Error Classification for Retry ====================
+    # Optional methods for provider-specific error handling in retry logic
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry purposes.
+
+        Each provider knows its own error types and can provide precise
+        classification. If not implemented, the global fallback in
+        retry_utils.classify_error() is used.
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            Dict with keys:
+                - transient: True if error is transient (should retry)
+                - rate_limit: True if error is a rate limit (429)
+                - infra: True if error is infrastructure (503, 500)
+            Or None to use global fallback classification.
+
+        Example implementation:
+            def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+                if isinstance(exc, MyRateLimitError):
+                    return {"transient": True, "rate_limit": True, "infra": False}
+                if isinstance(exc, MyServerError):
+                    return {"transient": True, "rate_limit": False, "infra": True}
+                return None  # Use fallback
+        """
+        ...
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract retry-after hint from an exception.
+
+        Many APIs include a Retry-After header or equivalent in their
+        rate limit responses. Providers can extract this for better backoff.
+
+        Args:
+            exc: The exception to extract retry-after from.
+
+        Returns:
+            Suggested delay in seconds, or None if not available.
+
+        Example implementation:
+            def get_retry_after(self, exc: Exception) -> Optional[float]:
+                if hasattr(exc, 'retry_after'):
+                    return float(exc.retry_after)
+                return None
+        """
+        ...
+

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-tui"
-version = "0.1.3"
+version = "0.1.4"
 description = "Jaato TUI - Terminal user interface for jaato server"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ dependencies = [
     "rich>=13.0.0",
     "python-dotenv",
     "pyte>=0.8.0",  # Terminal emulator for tool output processing
-    "wcwidth",  # For table_formatter display width
+    "wcwidth",  # For display_width module
 ]
 
 [project.optional-dependencies]
@@ -51,19 +51,6 @@ packages = [
     "rich_client.clipboard",
     "rich_client.renderers",
     "rich_client.renderers.vision_capture",
-    # Shared modules included in TUI distribution (source stays in shared/ in repo).
-    # Lazy __init__.py files prevent heavy server-only imports from triggering.
-    "shared",
-    "shared.plugins",
-    "shared.plugins.formatter_pipeline",
-    "shared.plugins.code_block_formatter",
-    "shared.plugins.diff_formatter",
-    "shared.plugins.diff_formatter.renderers",
-    "shared.plugins.table_formatter",
-    "shared.plugins.inline_markdown_formatter",
-    "shared.plugins.hidden_content_filter",
-    "shared.plugins.code_validation_formatter",
-    "shared.plugins.todo",
 ]
 
 [tool.setuptools.package-data]
@@ -71,4 +58,3 @@ rich_client = ["themes/*.json"]
 
 [tool.setuptools.package-dir]
 rich_client = "."
-"shared" = "../shared"

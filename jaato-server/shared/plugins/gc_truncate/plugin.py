@@ -1,0 +1,288 @@
+"""Truncate GC Plugin - Simple turn-based garbage collection.
+
+This plugin implements the simplest GC strategy: remove oldest turns
+while preserving the most recent N turns. No summarization, minimal
+overhead, fast execution.
+
+Similar to Java's simple heap compaction - just remove the oldest data.
+"""
+
+import os
+import tempfile
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from jaato_sdk.plugins.model_provider.types import Message
+
+from ..gc import (
+    GCConfig,
+    GCPlugin,
+    GCRemovalItem,
+    GCResult,
+    GCTriggerReason,
+    Turn,
+    create_gc_notification_message,
+    estimate_history_tokens,
+    flatten_turns,
+    get_preserved_indices,
+    split_into_turns,
+)
+
+# Import for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from shared.instruction_budget import InstructionBudget
+
+from ...instruction_budget import InstructionSource
+
+from shared.trace import trace as _trace_write
+
+
+class TruncateGCPlugin:
+    """GC plugin that removes oldest turns to free context space.
+
+    This is the simplest and fastest GC strategy:
+    - Splits history into turns
+    - Removes oldest turns beyond the preservation limit
+    - Keeps recent N turns intact
+
+    Configuration options (via initialize()):
+        preserve_recent_turns: Override default from GCConfig
+        notify_on_gc: Whether to inject notification message (default: False)
+        notification_template: Custom notification message template
+
+    Example:
+        plugin = TruncateGCPlugin()
+        plugin.initialize({
+            "preserve_recent_turns": 10,
+            "notify_on_gc": True
+        })
+        client.set_gc_plugin(plugin, GCConfig(threshold_percent=75.0))
+    """
+
+    def __init__(self):
+        self._initialized = False
+        self._config: Dict[str, Any] = {}
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        _trace_write("GC_TRUNCATE", msg)
+
+    @property
+    def name(self) -> str:
+        """Plugin identifier."""
+        return "gc_truncate"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the plugin with configuration.
+
+        Args:
+            config: Optional configuration dict with:
+                - preserve_recent_turns: int - Override preservation count
+                - notify_on_gc: bool - Inject notification message (default: False)
+                - notification_template: str - Custom notification template
+        """
+        self._config = config or {}
+        self._agent_name = self._config.get("agent_name")
+        self._initialized = True
+        preserve = self._config.get("preserve_recent_turns", "default")
+        self._trace(f"initialize: preserve_recent_turns={preserve}")
+
+    def shutdown(self) -> None:
+        """Clean up resources."""
+        self._trace("shutdown")
+        self._config = {}
+        self._initialized = False
+
+    def should_collect(
+        self,
+        context_usage: Dict[str, Any],
+        config: GCConfig
+    ) -> Tuple[bool, Optional[GCTriggerReason]]:
+        """Check if garbage collection should be triggered.
+
+        Triggers based on:
+        1. Context usage exceeding threshold percentage
+        2. Turn count exceeding max_turns limit
+
+        Args:
+            context_usage: Current context window usage stats.
+            config: GC configuration with thresholds.
+
+        Returns:
+            Tuple of (should_collect, reason).
+        """
+        if not config.auto_trigger:
+            return False, None
+
+        # Check threshold percentage
+        percent_used = context_usage.get('percent_used', 0)
+        if percent_used >= config.threshold_percent:
+            self._trace(f"should_collect: triggered by threshold ({percent_used:.1f}% >= {config.threshold_percent}%)")
+            return True, GCTriggerReason.THRESHOLD
+
+        # Check turn limit
+        if config.max_turns is not None:
+            turns = context_usage.get('turns', 0)
+            if turns >= config.max_turns:
+                self._trace(f"should_collect: triggered by turn_limit ({turns} >= {config.max_turns})")
+                return True, GCTriggerReason.TURN_LIMIT
+
+        # Log why we're NOT triggering (helpful for debugging)
+        self._trace(
+            f"should_collect: not triggered - "
+            f"usage={percent_used:.1f}% < threshold={config.threshold_percent}%, "
+            f"turns={context_usage.get('turns', 0)}"
+        )
+        return False, None
+
+    def collect(
+        self,
+        history: List[Message],
+        context_usage: Dict[str, Any],
+        config: GCConfig,
+        reason: GCTriggerReason,
+        budget: Optional["InstructionBudget"] = None,
+    ) -> Tuple[List[Message], GCResult]:
+        """Perform garbage collection by truncating oldest turns.
+
+        Args:
+            history: Current conversation history.
+            context_usage: Current context window usage stats.
+            config: GC configuration.
+            reason: Why this collection was triggered.
+            budget: Optional instruction budget for policy-aware decisions.
+
+        Returns:
+            Tuple of (new_history, result) with removal_list for budget sync.
+        """
+        self._trace(f"collect: reason={reason.value}, history_len={len(history)}")
+        tokens_before = estimate_history_tokens(history)
+
+        # Split into turns
+        turns = split_into_turns(history)
+        total_turns = len(turns)
+
+        # Determine preservation count (plugin config overrides GCConfig)
+        preserve_count = self._config.get(
+            'preserve_recent_turns',
+            config.preserve_recent_turns
+        )
+
+        # Get indices to preserve
+        preserved_indices = get_preserved_indices(
+            total_turns,
+            preserve_count,
+            config.pinned_turn_indices
+        )
+
+        # Nothing to collect if all turns are preserved
+        if len(preserved_indices) >= total_turns:
+            self._trace(
+                f"collect: NO-OP - all {total_turns} turns preserved "
+                f"(preserve_recent_turns={preserve_count}). "
+                f"To actually remove context, either reduce preserve_recent_turns "
+                f"or add more turns to the conversation."
+            )
+
+            result = GCResult(
+                success=True,
+                items_collected=0,
+                tokens_before=tokens_before,
+                tokens_after=tokens_before,
+                plugin_name=self.name,
+                trigger_reason=reason,
+                details={
+                    "message": "All turns preserved, nothing to collect",
+                    "total_turns": total_turns,
+                    "preserve_count": preserve_count,
+                }
+            )
+
+            # Add no-op notification if configured
+            new_history = history
+            if self._config.get('notify_on_gc', False):
+                noop_template = self._config.get(
+                    'noop_notification_template',
+                    "GC triggered but all {total} turns preserved "
+                    "(preserve_recent_turns={preserve}). No context removed."
+                )
+                notification = noop_template.format(
+                    total=total_turns,
+                    preserve=preserve_count
+                )
+                result.notification = notification
+                notification_content = create_gc_notification_message(notification)
+                new_history = [notification_content] + list(history)
+
+            return new_history, result
+
+        # Filter turns - keep only preserved ones
+        kept_turns: List[Turn] = []
+        removed_count = 0
+        removal_list: List[GCRemovalItem] = []
+
+        for turn in turns:
+            if turn.index in preserved_indices:
+                kept_turns.append(turn)
+            else:
+                removed_count += 1
+                # Collect message IDs from the removed turn
+                message_ids = [msg.message_id for msg in turn.contents]
+                removal_list.append(GCRemovalItem(
+                    source=InstructionSource.CONVERSATION,
+                    child_key=f"turn_{turn.index}",
+                    tokens_freed=turn.estimated_tokens,
+                    reason="truncated",
+                    message_ids=message_ids,
+                ))
+
+        # Flatten back to history
+        new_history = flatten_turns(kept_turns)
+        tokens_after = estimate_history_tokens(new_history)
+
+        # Build result
+        result = GCResult(
+            success=True,
+            items_collected=removed_count,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            plugin_name=self.name,
+            trigger_reason=reason,
+            removal_list=removal_list,
+            details={
+                "turns_before": total_turns,
+                "turns_after": len(kept_turns),
+                "preserve_count": preserve_count,
+                "preserved_indices": list(preserved_indices),
+            }
+        )
+        self._trace(f"collect: removed={removed_count} turns, tokens {tokens_before}->{tokens_after}")
+
+        # Add notification if configured
+        notify_on_gc = self._config.get('notify_on_gc', False)
+        self._trace(f"collect: notify_on_gc={notify_on_gc}")
+        if notify_on_gc:
+            template = self._config.get(
+                'notification_template',
+                "Context cleaned: removed {removed} old turns, kept {kept} recent turns."
+            )
+            notification = template.format(
+                removed=removed_count,
+                kept=len(kept_turns),
+                tokens_freed=tokens_before - tokens_after
+            )
+            result.notification = notification
+            self._trace(f"collect: notification created: {notification}")
+
+            # Prepend notification to history
+            notification_content = create_gc_notification_message(notification)
+            new_history = [notification_content] + new_history
+
+        return new_history, result
+
+
+def create_plugin() -> TruncateGCPlugin:
+    """Factory function to create a TruncateGCPlugin instance."""
+    return TruncateGCPlugin()

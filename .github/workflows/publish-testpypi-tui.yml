@@ -53,8 +53,7 @@ jobs:
         working-directory: jaato-tui
 
       - name: Build package
-        # Wheel-only: the ../shared package-dir breaks sdist→wheel rebuild
-        run: python -m build --wheel .
+        run: python -m build .
         working-directory: jaato-tui
 
       - name: Publish to TestPyPI
