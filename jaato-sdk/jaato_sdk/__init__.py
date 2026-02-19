@@ -20,6 +20,7 @@ from jaato_sdk.events import (
     serialize_event,
     deserialize_event,
 )
+from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -41,6 +42,8 @@ __all__ = [
     "PresentationContext",
     "serialize_event",
     "deserialize_event",
+    # Constants
+    "PRERENDERED_LINE_PREFIX",
     # Trace
     "trace",
     "provider_trace",

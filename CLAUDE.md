@@ -37,22 +37,22 @@ python3 -m venv .venv
 
 ### Running Tests
 ```bash
-.venv/bin/pytest                          # All tests
-.venv/bin/pytest shared/tests/            # Core tests
-.venv/bin/pytest shared/plugins/cli/tests/ # Plugin tests
-.venv/bin/pytest -v                       # Verbose output
+.venv/bin/pytest                                        # All tests
+.venv/bin/pytest jaato-server/shared/tests/             # Core tests
+.venv/bin/pytest jaato-server/shared/plugins/cli/tests/ # Plugin tests
+.venv/bin/pytest -v                                     # Verbose output
 ```
 
 Test organization:
-- Core tests: `shared/tests/`
-- Plugin tests: `shared/plugins/<plugin>/tests/`
-- Provider tests: `shared/plugins/model_provider/<provider>/tests/`
+- Core tests: `jaato-server/shared/tests/`
+- Plugin tests: `jaato-server/shared/plugins/<plugin>/tests/`
+- Provider tests: `jaato-server/shared/plugins/model_provider/<provider>/tests/`
 
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for detailed diagrams and component interactions.
 
-### Server Components (`server/`)
+### Server Components (`jaato-server/server/`)
 
 The framework uses a server-first architecture where the server runs as a daemon and clients connect via IPC or WebSocket.
 
@@ -75,7 +75,7 @@ The framework uses a server-first architecture where the server runs as a daemon
 - **`server/ipc.py`**: Unix domain socket server (length-prefixed framing)
 - **`server/websocket.py`**: WebSocket server for remote clients
 
-### Core Components (`shared/`)
+### Core Components (`jaato-server/shared/`)
 
 - **jaato_client.py**: `JaatoClient` - Backwards-compatible facade wrapping `JaatoRuntime` + `JaatoSession`
   - `connect()`, `configure_tools()`, `send_message()` - core methods
@@ -98,7 +98,7 @@ The framework uses a server-first architecture where the server runs as a daemon
 
 - **token_accounting.py**: `TokenLedger` - Token usage tracking with rate-limit retries
 
-### Plugin System (`shared/plugins/`)
+### Plugin System (`jaato-server/shared/plugins/`)
 
 Three plugin types:
 

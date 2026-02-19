@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.2.5"
+version = "0.2.6"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -104,5 +104,5 @@ gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
 gc_budget = "shared.plugins.gc_budget:create_plugin"
 
 [tool.setuptools.packages.find]
-where = [".."]
-include = ["shared*", "server*"]
+where = ["."]
+include = ["shared*", "server*", "jaato*"]
