@@ -455,7 +455,14 @@ def get_requests_session() -> "requests.Session":
 
     ca_bundle = active_cert_bundle()
     if ca_bundle:
-        session.verify = ca_bundle
+        if os.path.isfile(ca_bundle):
+            session.verify = ca_bundle
+        else:
+            logger.warning(
+                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
+                "SSL_CERT_FILE). Falling back to default certificate verification.",
+                ca_bundle,
+            )
 
     if is_kerberos_proxy_enabled():
         proxy_url = get_proxy_url()
@@ -539,7 +546,14 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
 
     ca_bundle = active_cert_bundle()
     if ca_bundle:
-        client_kwargs.setdefault("verify", ca_bundle)
+        if os.path.isfile(ca_bundle):
+            client_kwargs.setdefault("verify", ca_bundle)
+        else:
+            logger.warning(
+                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
+                "SSL_CERT_FILE). Falling back to default certificate verification.",
+                ca_bundle,
+            )
 
     proxy_url = get_proxy_url()
     if proxy_url:
@@ -627,7 +641,14 @@ def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
 
     ca_bundle = active_cert_bundle()
     if ca_bundle:
-        client_kwargs.setdefault("verify", ca_bundle)
+        if os.path.isfile(ca_bundle):
+            client_kwargs.setdefault("verify", ca_bundle)
+        else:
+            logger.warning(
+                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
+                "SSL_CERT_FILE). Falling back to default certificate verification.",
+                ca_bundle,
+            )
 
     proxy_url = get_proxy_url()
     if proxy_url:
