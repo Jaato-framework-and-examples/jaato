@@ -165,7 +165,7 @@ Displays:
 
 View, save, or clear reliability **runtime settings** across persistence levels.
 
-> **Not to be confused with `policies`.** The `settings` and `policies` subcommands manage different files with different schemas. See [Configuration Files](#configuration-files) for the full picture.
+> **Interacts with `policies`.** Settings and policies use different files but share the nudge domain: policies define *what* nudges say and *when* patterns fire, while settings control *which* nudge types are actually delivered. See [Cross-File Interactions](#cross-file-interactions).
 
 ```
 reliability settings
@@ -393,7 +393,7 @@ Show the last N nudges (default: 10). Each entry shows timestamp, nudge type, th
 
 Manage file-based **prerequisite policies** and **pattern detection thresholds** — rules that enforce tool ordering (e.g., "read before edit") and tune loop detection sensitivity.
 
-> **Not to be confused with `settings`.** The `policies` subcommand manages `reliability-policies.json` (detection rules and prerequisite constraints). The `settings` subcommand manages `reliability.json` (runtime toggles like recovery mode and nudge level). See [Configuration Files](#configuration-files) for the full picture.
+> **Interacts with `settings` and `nudge`.** Policies define detection thresholds and nudge message templates, but the `nudge_level` setting (managed via `reliability nudge` or `reliability settings`) acts as a global filter that can suppress nudges defined here. See [Cross-File Interactions](#cross-file-interactions).
 
 ```
 reliability policies
@@ -547,6 +547,57 @@ User:       ~/.jaato/reliability.json            ← personal default settings
 ```
 
 **Why two files?** Settings are simple key-value toggles that change often during a session (`reliability nudge full`, `reliability recovery ask`). Policies are structured rules with thresholds and templates that are typically authored once and rarely change at runtime — hence the `edit` subcommand opening `$EDITOR`.
+
+### Cross-File Interactions
+
+The nudge system spans both files. Understanding the interaction prevents surprises where configured nudges are silently suppressed or fire unexpectedly.
+
+```
+reliability-policies.json                reliability.json
+┌──────────────────────────────┐         ┌──────────────────────┐
+│ pattern_detection:           │         │                      │
+│   thresholds that DETECT     │──fires──│                      │
+│   patterns                   │ pattern │ nudge_level           │
+│                              │         │ (off/gentle/direct/   │
+│ prerequisite_policies:       │         │  full)                │
+│   nudge_templates that       │         │                      │
+│   define WHAT to say and     │─────┐   │ Acts as global gate: │
+│   at what severity           │     │   │ only nudge types at  │
+│                              │     │   │ or below the level   │
+└──────────────────────────────┘     │   │ are delivered         │
+                                     │   └──────────┬───────────┘
+                                     │              │
+                                     ▼              ▼
+                               NudgeStrategy.should_inject()
+                                     │
+                          ┌──────────┴──────────┐
+                          │ Level allows type?   │
+                          │ gentle → gentle only │
+                          │ direct → gentle+direct│
+                          │ full   → all         │
+                          │ off    → none        │
+                          └──────────┬──────────┘
+                                     │
+                              YES ───┼─── NO
+                                     │      │
+                              delivered   silently
+                                          dropped
+```
+
+**Concrete scenario:** A prerequisite policy in `reliability-policies.json` defines `"severe": ["interrupt", "BLOCKED: ..."]`. The user then runs `reliability nudge gentle`. Now severe prerequisite violations are detected and the pattern fires, but the interrupt nudge is silently filtered out — only gentle reminders are delivered. The policy's escalation logic still advances the violation count, so when the user later runs `reliability nudge full`, the next violation immediately produces an interrupt (because the count already reached the severe threshold).
+
+**What lives where — full breakdown:**
+
+| Concern | Configured In | Managed By | Notes |
+|---------|--------------|-----------|-------|
+| When to detect a pattern | `reliability-policies.json` | `policies` | Thresholds like `error_retry_threshold` |
+| What message to show | `reliability-policies.json` | `policies` | `nudge_templates` on prerequisite policies |
+| Built-in pattern messages | Hardcoded in `nudge.py` | — | Default templates for `repetitive_calls`, `read_only_loop`, etc. |
+| Which nudge types to deliver | `reliability.json` | `settings` / `nudge` | `nudge_level` acts as global filter |
+| Whether nudges are enabled at all | `reliability.json` | `settings` | `nudge_enabled` toggle |
+| Whether detection is active | Session-only | `patterns enable/disable` | Not persisted to either file |
+| Recovery behavior | `reliability.json` | `settings` / `recovery` | `recovery_mode` (auto/ask) |
+| Model switching strategy | `reliability.json` | `settings` / `model` | `model_switch_strategy` |
 
 ### Trust States
 
