@@ -460,6 +460,7 @@ Available Models:
 | `NO_PROXY` | Standard no-proxy hosts (suffix matching) |
 | `JAATO_NO_PROXY` | Exact host matching for no-proxy (e.g., `github.com,api.github.com`) |
 | `JAATO_KERBEROS_PROXY` | Enable Kerberos/SPNEGO proxy auth (`true`/`false`) |
+| `JAATO_SSL_VERIFY` | SSL certificate verification (`true`/`false`, default: `true`). Set to `false` to disable — escape hatch for SSL-intercepting proxies. |
 
 **Kerberos Proxy Authentication:**
 For corporate proxies requiring SPNEGO/Negotiate authentication:
