@@ -20,6 +20,8 @@ When invoked without a subcommand, defaults to `status`.
 |------------|---------|
 | [`status`](#status) | Show escalated tools and their trust states |
 | [`recovery`](#recovery) | Set automatic or manual recovery mode |
+| [`remove`](#remove) | Remove a tool's schema from the model's context entirely |
+| [`restore`](#restore) | Restore a previously removed tool's schema to the model's context |
 | [`reset`](#reset) | Reset a tool (or all tools) to the trusted state |
 | [`history`](#history) | Show recent failure history |
 | [`config`](#config) | Show current escalation rule configuration |
@@ -60,7 +62,7 @@ reliability status
 
 **Output:**
 - If all tools are trusted: reports the count of tracked tools.
-- If any tools are escalated/blocked/recovering: lists each non-trusted tool with its state, recovery progress (if recovering), and escalation reason.
+- If any tools are escalated/blocked/recovering/removed: lists each non-trusted tool with its state, recovery progress (if recovering), and escalation reason.
 
 **Example output:**
 
@@ -73,8 +75,12 @@ Reliability Status:
   http_request|domain=api.example.com
     State: recovering (1/3)
     Reason: repeated timeouts
+  web_search
+    State: REMOVED (schema not in model context)
+    Removed at: 14:32:05
+    Use 'reliability restore web_search' to re-add
 ------------------------------------------------------------
-2 escalated, 14 trusted
+2 escalated, 1 removed, 14 trusted
 ```
 
 ---
@@ -107,6 +113,87 @@ reliability recovery auto save workspace
 ```
 
 **Defaults:** `auto`
+
+---
+
+## remove
+
+Remove a tool entirely from the model's context. Unlike `BLOCKED` (which denies execution but leaves the schema visible), `remove` strips the tool's schema and description from the tool list sent to the provider — the model cannot see, call, or reason about the tool.
+
+```
+reliability remove <tool_name>
+reliability remove <failure_key>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<tool_name>` | Name of the tool to remove (tab-completable from enabled tools) |
+| `<failure_key>` | Failure key for parameter-specific removal (e.g., `bash\|command=npm`) |
+
+**What happens:**
+
+1. The tool transitions to `REMOVED` trust state in the reliability tracker
+2. `registry.disable_tool(tool_name)` is called to strip the schema from the provider's tool list
+3. The session's tool cache is refreshed — the next model turn will not see the tool
+4. The removal reason and timestamp are recorded in failure history
+
+**Example:**
+
+```
+> reliability remove web_search
+
+Removed: web_search
+  State: REMOVED (schema stripped from model context)
+  The model can no longer see or call this tool.
+  Use 'reliability restore web_search' to re-add it.
+```
+
+**When to use `remove` vs other mechanisms:**
+
+| Command | Schema visible? | Execution allowed? | Use case |
+|---------|----------------|-------------------|----------|
+| `permissions blacklist <tool>` | Yes | No — denied at execution | Tool works but shouldn't be used in this context |
+| `reliability reset` (after BLOCKED) | Yes | Prompted — forced approval | Tool failed but may recover |
+| **`reliability remove <tool>`** | **No** | **N/A** | Tool is causing stall loops; model should forget it exists |
+| `tools disable <tool>` | No | N/A | Generic tool management (not tracked by reliability) |
+
+The key difference from `tools disable`: `reliability remove` records the removal in reliability state (visible in `status`, `history`), while `tools disable` is a generic toggle with no tracking. If a tool is removed via `reliability remove`, `reliability status` shows it as `REMOVED`; if removed via `tools disable`, reliability doesn't know about it.
+
+**Failure key removal:** When a failure key is given (e.g., `bash|command=npm`), the entire tool is removed from context (since schemas are per-tool, not per-parameter). The failure key is recorded so `reliability status` shows which parameter pattern triggered the removal.
+
+---
+
+## restore
+
+Restore a previously removed tool's schema to the model's context.
+
+```
+reliability restore <tool_name>
+reliability restore all
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<tool_name>` | Name of the tool to restore (tab-completable from removed tools) |
+| `all` | Restore all removed tools |
+
+**What happens:**
+
+1. `registry.enable_tool(tool_name)` is called to re-add the schema
+2. The tool transitions from `REMOVED` to `TRUSTED` — failure history is cleared
+3. The session's tool cache is refreshed — the next model turn sees the tool again
+
+To restore a tool but keep it escalated (requiring approval), use `restore` followed by manual escalation — there's no combined command for this. The assumption is that if you're restoring a tool, you want to give it a clean slate.
+
+**Example:**
+
+```
+> reliability restore web_search
+
+Restored: web_search
+  State: TRUSTED (schema re-added to model context)
+  Failure history cleared.
+```
 
 ---
 
@@ -621,6 +708,7 @@ reliability-policies.json                reliability.json
 | Which nudge types to deliver | `reliability.json` | `settings` / `nudge` | `nudge_level` acts as global filter |
 | Whether nudges are enabled at all | `reliability.json` | `settings` | `nudge_enabled` toggle |
 | Whether detection is active | Session-only | `patterns enable/disable` | Not persisted to either file |
+| Tool schema removal | Session-only | `remove` / `restore` | Not persisted — tools return on session restart |
 | Recovery behavior | `reliability.json` | `settings` / `recovery` | `recovery_mode` (auto/ask) |
 | Model switching strategy | `reliability.json` | `settings` / `model` | `model_switch_strategy` |
 
@@ -642,14 +730,21 @@ TRUSTED ──(threshold exceeded)──► ESCALATED ──(reset)──►┘
 BLOCKED ◄──(critical failure)──── TRUSTED/ESCALATED/RECOVERING
    │
    └──(manual reset only)──► TRUSTED
+
+REMOVED ◄──(reliability remove)──── any state
+   │
+   └──(reliability restore)──► TRUSTED
 ```
 
-| State | Behavior |
-|-------|----------|
-| `TRUSTED` | Normal operation; standard permission rules apply |
-| `ESCALATED` | Forces explicit user approval regardless of whitelist rules |
-| `RECOVERING` | Tracking consecutive successes; still requires approval |
-| `BLOCKED` | Permanent block for critical/security failures; manual reset only |
+| State | Schema visible? | Behavior |
+|-------|----------------|----------|
+| `TRUSTED` | Yes | Normal operation; standard permission rules apply |
+| `ESCALATED` | Yes | Forces explicit user approval regardless of whitelist rules |
+| `RECOVERING` | Yes | Tracking consecutive successes; still requires approval |
+| `BLOCKED` | Yes | Permanent block for critical/security failures; manual reset only |
+| `REMOVED` | **No** | Tool schema stripped from model context via `registry.disable_tool()`; model cannot see or call the tool. Entered via `reliability remove`, exited via `reliability restore`. |
+
+Note that `BLOCKED` and `REMOVED` serve different purposes: `BLOCKED` keeps the tool visible so the model can reason about *why* it's blocked (and the user sees escalation details in permission prompts), while `REMOVED` erases the tool from the model's world entirely — useful when the tool's mere presence causes stall patterns (e.g., the model repeatedly attempts a blocked tool, gets denied, and retries).
 
 ### Failure Keys
 
@@ -700,6 +795,8 @@ The reliability plugin wraps the existing permission plugin via `ReliabilityPerm
 - Failure history window
 - Recovery progress (if recovering)
 
+Tools in the `REMOVED` state bypass permission entirely — the model never generates a call because the schema isn't in its context. If the model somehow references a removed tool by name in its output text, no execution occurs.
+
 ---
 
 ## Tab Completion
@@ -708,8 +805,10 @@ All subcommands and arguments support tab completion:
 
 | Level | Context | Completions |
 |-------|---------|-------------|
-| 1 | `reliability <TAB>` | `status`, `recovery`, `reset`, `history`, `config`, `settings`, `model`, `patterns`, `policies`, `nudge`, `behavior` |
+| 1 | `reliability <TAB>` | `status`, `recovery`, `remove`, `restore`, `reset`, `history`, `config`, `settings`, `model`, `patterns`, `policies`, `nudge`, `behavior` |
 | 2 | `reliability recovery <TAB>` | `auto`, `ask`, `save` |
+| 2 | `reliability remove <TAB>` | Currently enabled tool names, escalated/blocked failure keys |
+| 2 | `reliability restore <TAB>` | Currently removed tool names, `all` |
 | 2 | `reliability reset <TAB>` | Currently escalated/blocked failure keys |
 | 2 | `reliability settings <TAB>` | `show`, `save`, `clear` |
 | 2 | `reliability model <TAB>` | `status`, `compare`, `suggest`, `auto`, `disabled` |
@@ -738,6 +837,10 @@ reliability                                    # Show status (default)
 reliability status                             # Same as above
 reliability recovery auto                      # Enable automatic recovery
 reliability recovery ask save workspace        # Set manual recovery, save to project
+reliability remove web_search                   # Remove tool from model context
+reliability remove bash|command=npm            # Remove (by failure key)
+reliability restore web_search                 # Restore removed tool
+reliability restore all                        # Restore all removed tools
 reliability reset all                          # Reset all tools to trusted
 reliability reset bash|command=npm             # Reset specific tool
 reliability history                            # Last 10 failures
