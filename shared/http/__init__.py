@@ -5,6 +5,7 @@ supporting:
 - Standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 - JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY suffix matching)
 - JAATO_KERBEROS_PROXY for Kerberos/SPNEGO proxy authentication
+- JAATO_SSL_VERIFY to disable SSL certificate verification (escape hatch)
 
 Usage:
     # For requests
@@ -22,12 +23,14 @@ Environment Variables:
     NO_PROXY: Standard no-proxy hosts (suffix matching)
     JAATO_NO_PROXY: Exact host matching for no-proxy
     JAATO_KERBEROS_PROXY: Enable Kerberos/SPNEGO proxy auth (true/false)
+    JAATO_SSL_VERIFY: SSL certificate verification (true/false, default: true)
 """
 
 from .proxy import (
     # Configuration
     get_proxy_url,
     is_kerberos_proxy_enabled,
+    is_ssl_verify_disabled,
     should_bypass_proxy,
     # requests support
     get_requests_session,
@@ -44,6 +47,7 @@ __all__ = [
     # Configuration
     "get_proxy_url",
     "is_kerberos_proxy_enabled",
+    "is_ssl_verify_disabled",
     "should_bypass_proxy",
     # requests support
     "get_requests_session",

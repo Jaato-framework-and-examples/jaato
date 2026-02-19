@@ -1,4 +1,4 @@
-"""Tests for shared.http.proxy — NO_PROXY / JAATO_NO_PROXY handling and SPNEGO."""
+"""Tests for shared.http.proxy — NO_PROXY / JAATO_NO_PROXY handling, SPNEGO, and SSL verify."""
 
 import os
 from unittest import mock
@@ -9,10 +9,13 @@ import pytest
 from shared.http.proxy import (
     _generate_spnego_token_sspi,
     _get_no_proxy_entries,
+    _get_ssl_verify_value,
     _matches_no_proxy,
     generate_spnego_token,
     get_httpx_client,
     get_httpx_kwargs,
+    get_requests_session,
+    is_ssl_verify_disabled,
     should_bypass_proxy,
 )
 
@@ -346,3 +349,131 @@ class TestGetHttpxKwargsKerberos:
                 kwargs = get_httpx_kwargs("https://api.github.com/test")
                 assert kwargs["proxy"] == "http://proxy.corp.com:8080"
                 assert "headers" not in kwargs
+
+
+# ============================================================
+# JAATO_SSL_VERIFY tests
+# ============================================================
+
+
+class TestIsSslVerifyDisabled:
+    """Test the is_ssl_verify_disabled() helper."""
+
+    def test_unset_returns_false(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert is_ssl_verify_disabled() is False
+
+    @pytest.mark.parametrize("value", ["false", "False", "FALSE", "0", "no", "No", "NO"])
+    def test_disabled_values(self, value):
+        with mock.patch.dict(os.environ, {"JAATO_SSL_VERIFY": value}, clear=True):
+            assert is_ssl_verify_disabled() is True
+
+    @pytest.mark.parametrize("value", ["true", "True", "1", "yes", "", "anything"])
+    def test_enabled_values(self, value):
+        with mock.patch.dict(os.environ, {"JAATO_SSL_VERIFY": value}, clear=True):
+            assert is_ssl_verify_disabled() is False
+
+
+class TestGetSslVerifyValue:
+    """Test the _get_ssl_verify_value() internal helper."""
+
+    def test_disabled_returns_false(self):
+        with mock.patch.dict(os.environ, {"JAATO_SSL_VERIFY": "false"}, clear=True):
+            assert _get_ssl_verify_value() is False
+
+    def test_disabled_takes_precedence_over_ca_bundle(self, tmp_path):
+        """JAATO_SSL_VERIFY=false wins even if a CA bundle is configured."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("cert")
+        env = {"JAATO_SSL_VERIFY": "false", "REQUESTS_CA_BUNDLE": str(ca)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            assert _get_ssl_verify_value() is False
+
+    def test_ca_bundle_returned_when_verify_not_disabled(self, tmp_path):
+        ca = tmp_path / "ca.pem"
+        ca.write_text("cert")
+        env = {"REQUESTS_CA_BUNDLE": str(ca)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            assert _get_ssl_verify_value() == str(ca)
+
+    def test_returns_none_when_nothing_set(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            assert _get_ssl_verify_value() is None
+
+    def test_missing_ca_bundle_returns_none(self):
+        env = {"REQUESTS_CA_BUNDLE": "/nonexistent/ca.pem"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            assert _get_ssl_verify_value() is None
+
+
+class TestSslVerifyHttpxClient:
+    """Verify get_httpx_client respects JAATO_SSL_VERIFY."""
+
+    def test_verify_false_passed_to_client(self):
+        """With JAATO_SSL_VERIFY=false, httpx.Client gets verify=False."""
+        env = {"JAATO_SSL_VERIFY": "false"}
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                client = get_httpx_client(timeout=5.0)
+
+            assert captured["verify"] is False
+            client.close()
+
+    def test_caller_override_preserved(self):
+        """Explicit verify= from caller wins over env var."""
+        env = {"JAATO_SSL_VERIFY": "false"}
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                # Caller explicitly passes verify=True — should not be overridden
+                client = get_httpx_client(timeout=5.0, verify=True)
+
+            assert captured["verify"] is True
+            client.close()
+
+    def test_default_verify_not_set_when_env_unset(self):
+        """When JAATO_SSL_VERIFY is not set and no CA bundle, verify kwarg is absent."""
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured.update(kwargs)
+            return original_init(self_client, **kwargs)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(httpx.Client, "__init__", capturing_init):
+                client = get_httpx_client(timeout=5.0)
+
+            assert "verify" not in captured
+            client.close()
+
+
+class TestSslVerifyRequestsSession:
+    """Verify get_requests_session respects JAATO_SSL_VERIFY."""
+
+    def test_verify_false_on_session(self):
+        with mock.patch.dict(os.environ, {"JAATO_SSL_VERIFY": "false"}, clear=True):
+            session = get_requests_session()
+            assert session.verify is False
+
+    def test_default_verify_unchanged(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            session = get_requests_session()
+            # requests.Session defaults verify to True
+            assert session.verify is True

@@ -4,6 +4,7 @@ Provides unified proxy support for requests and httpx with:
 - Standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 - JAATO_NO_PROXY for exact host matching
 - JAATO_KERBEROS_PROXY for Kerberos/SPNEGO proxy authentication
+- JAATO_SSL_VERIFY to disable SSL certificate verification (escape hatch)
 
 Platform Support for Kerberos:
 - Windows: Native SSPI via pyspnego, or ctypes secur32.dll fallback
@@ -29,6 +30,7 @@ ENV_HTTP_PROXY = "HTTP_PROXY"
 ENV_NO_PROXY = "NO_PROXY"
 ENV_JAATO_NO_PROXY = "JAATO_NO_PROXY"
 ENV_JAATO_KERBEROS_PROXY = "JAATO_KERBEROS_PROXY"
+ENV_JAATO_SSL_VERIFY = "JAATO_SSL_VERIFY"
 
 
 # ============================================================
@@ -77,6 +79,57 @@ def is_kerberos_proxy_enabled() -> bool:
     """
     value = os.environ.get(ENV_JAATO_KERBEROS_PROXY, "").lower()
     return value in ("true", "1", "yes")
+
+
+def is_ssl_verify_disabled() -> bool:
+    """Check if SSL certificate verification is disabled via environment.
+
+    Disabled when JAATO_SSL_VERIFY is set to 'false', '0', or 'no'.
+    When unset or any other value, verification remains enabled (the default).
+
+    This is intended as an escape hatch for environments where a corporate
+    proxy re-signs TLS traffic and adding the CA bundle is impractical.
+    It should not be used in production.
+
+    Returns:
+        True if SSL verification should be skipped.
+    """
+    value = os.environ.get(ENV_JAATO_SSL_VERIFY, "").lower()
+    return value in ("false", "0", "no")
+
+
+def _get_ssl_verify_value():
+    """Return the ``verify`` value to use for HTTP clients.
+
+    Checks, in order:
+    1. ``JAATO_SSL_VERIFY=false`` → ``False`` (disable verification)
+    2. ``REQUESTS_CA_BUNDLE`` / ``SSL_CERT_FILE`` → path string (custom CA)
+    3. Otherwise → ``None`` (let the library use its default)
+
+    Returns:
+        ``False``, a CA bundle path string, or ``None``.
+    """
+    if is_ssl_verify_disabled():
+        logger.warning(
+            "SSL certificate verification disabled via %s. "
+            "Do not use this in production.",
+            ENV_JAATO_SSL_VERIFY,
+        )
+        return False
+
+    from shared.ssl_helper import active_cert_bundle
+
+    ca_bundle = active_cert_bundle()
+    if ca_bundle:
+        if os.path.isfile(ca_bundle):
+            return ca_bundle
+        else:
+            logger.warning(
+                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
+                "SSL_CERT_FILE). Falling back to default certificate verification.",
+                ca_bundle,
+            )
+    return None
 
 
 def _get_jaato_no_proxy_hosts() -> list:
@@ -436,9 +489,10 @@ def get_requests_session() -> "requests.Session":
     """Create a requests Session with appropriate proxy and SSL configuration.
 
     Configures the session based on:
-    1. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
-    2. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
-    3. Standard proxy env vars (requests handles these automatically)
+    1. JAATO_SSL_VERIFY: When ``false``, disables certificate verification
+    2. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
+    3. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
+    4. Standard proxy env vars (requests handles these automatically)
 
     Note: The requests library checks NO_PROXY per-request even when
     session-level proxies are set, so NO_PROXY is respected.
@@ -449,20 +503,12 @@ def get_requests_session() -> "requests.Session":
         Configured requests.Session.
     """
     import requests
-    from shared.ssl_helper import active_cert_bundle
 
     session = requests.Session()
 
-    ca_bundle = active_cert_bundle()
-    if ca_bundle:
-        if os.path.isfile(ca_bundle):
-            session.verify = ca_bundle
-        else:
-            logger.warning(
-                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
-                "SSL_CERT_FILE). Falling back to default certificate verification.",
-                ca_bundle,
-            )
+    verify = _get_ssl_verify_value()
+    if verify is not None:
+        session.verify = verify
 
     if is_kerberos_proxy_enabled():
         proxy_url = get_proxy_url()
@@ -520,11 +566,12 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
     """Create an httpx Client with appropriate proxy and SSL configuration.
 
     Configures the client based on:
-    1. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
-    2. JAATO_KERBEROS_PROXY: Creates an ``httpx.Proxy`` with the SPNEGO
+    1. JAATO_SSL_VERIFY: When ``false``, disables certificate verification
+    2. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
+    3. JAATO_KERBEROS_PROXY: Creates an ``httpx.Proxy`` with the SPNEGO
        Negotiate token in its ``headers`` so the token is sent during the
        CONNECT tunnel handshake (required for HTTPS through a proxy).
-    3. Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY): Sets explicit
+    4. Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY): Sets explicit
        proxy URL on the client rather than relying on httpx env detection,
        which may not propagate correctly through all SDK code paths
 
@@ -542,18 +589,10 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
         Configured httpx.Client.
     """
     import httpx
-    from shared.ssl_helper import active_cert_bundle
 
-    ca_bundle = active_cert_bundle()
-    if ca_bundle:
-        if os.path.isfile(ca_bundle):
-            client_kwargs.setdefault("verify", ca_bundle)
-        else:
-            logger.warning(
-                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
-                "SSL_CERT_FILE). Falling back to default certificate verification.",
-                ca_bundle,
-            )
+    verify = _get_ssl_verify_value()
+    if verify is not None:
+        client_kwargs.setdefault("verify", verify)
 
     proxy_url = get_proxy_url()
     if proxy_url:
@@ -620,8 +659,8 @@ def get_httpx_kwargs(url: str) -> Dict[str, Any]:
 def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
     """Create an httpx AsyncClient with appropriate proxy and SSL configuration.
 
-    Same behaviour as :func:`get_httpx_client` — CA bundle, Kerberos SPNEGO
-    token, and proxy URL are applied automatically.
+    Same behaviour as :func:`get_httpx_client` — JAATO_SSL_VERIFY, CA bundle,
+    Kerberos SPNEGO token, and proxy URL are applied automatically.
 
     Same caveats regarding NO_PROXY: when explicit proxy config is set, it
     overrides httpx's env-based NO_PROXY handling.  Use
@@ -637,18 +676,10 @@ def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
         Configured httpx.AsyncClient.
     """
     import httpx
-    from shared.ssl_helper import active_cert_bundle
 
-    ca_bundle = active_cert_bundle()
-    if ca_bundle:
-        if os.path.isfile(ca_bundle):
-            client_kwargs.setdefault("verify", ca_bundle)
-        else:
-            logger.warning(
-                "SSL CA bundle not found: %s (from REQUESTS_CA_BUNDLE or "
-                "SSL_CERT_FILE). Falling back to default certificate verification.",
-                ca_bundle,
-            )
+    verify = _get_ssl_verify_value()
+    if verify is not None:
+        client_kwargs.setdefault("verify", verify)
 
     proxy_url = get_proxy_url()
     if proxy_url:

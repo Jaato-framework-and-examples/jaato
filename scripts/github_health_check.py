@@ -122,16 +122,28 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     from shared.http import (
         get_proxy_url,
         is_kerberos_proxy_enabled,
+        is_ssl_verify_disabled,
         get_httpx_client,
     )
     from shared.ssl_helper import active_cert_bundle
 
     # SSL
+    ssl_verify_off = is_ssl_verify_disabled()
+    if ssl_verify_off:
+        info("JAATO_SSL_VERIFY: false (certificate verification DISABLED)")
+        warn("SSL verification is disabled — do not use this in production")
+        results.record_pass("SSL verify configured (disabled via JAATO_SSL_VERIFY)")
+    else:
+        info("JAATO_SSL_VERIFY: true (default)")
+
     ca = active_cert_bundle()
     if ca:
         exists = os.path.isfile(ca)
         info(f"CA bundle: {ca} (exists={exists})")
-        if not exists:
+        if ssl_verify_off:
+            info("(CA bundle is ignored because SSL verification is disabled)")
+            results.record_pass("SSL CA bundle (ignored, verify=false)")
+        elif not exists:
             results.record_fail("SSL CA bundle", f"File not found: {ca}")
         else:
             results.record_pass("SSL CA bundle exists")
