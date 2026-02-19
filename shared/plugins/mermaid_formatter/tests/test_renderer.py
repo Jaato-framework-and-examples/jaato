@@ -31,6 +31,28 @@ def reset_caches():
     mod._kroki_available = None
 
 
+def _mock_httpx_client(status_code=200, content=b"", text=""):
+    """Create a mock httpx client context manager with a configured response.
+
+    Args:
+        status_code: HTTP status code for the response.
+        content: Raw bytes for response.content.
+        text: Text for response.text.
+
+    Returns:
+        Mock that can be used as get_httpx_client return value.
+    """
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.content = content
+    mock_response.text = text
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_response
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    return mock_client
+
+
 class TestFindMmdc:
     """Tests for mmdc binary discovery."""
 
@@ -122,173 +144,129 @@ class TestGetKrokiUrl:
 class TestCheckKroki:
     """Tests for kroki reachability check."""
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_available_when_200(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_available_when_200(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200)
+        mock_get_client.return_value = mock_client
 
         assert _check_kroki() is True
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_unavailable_on_error(self, mock_get_opener):
-        mock_opener = MagicMock()
-        mock_opener.open.side_effect = Exception("connection refused")
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_unavailable_on_error(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = Exception("connection refused")
+        mock_get_client.return_value = mock_client
         assert _check_kroki() is False
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_caches_result(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_caches_result(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200)
+        mock_get_client.return_value = mock_client
 
         _check_kroki()
         _check_kroki()
-        # Only called once due to caching
-        mock_opener.open.assert_called_once()
+        # Only called once due to caching (get_httpx_client called once)
+        mock_get_client.assert_called_once()
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_sends_test_diagram(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_sends_test_diagram(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200)
+        mock_get_client.return_value = mock_client
 
         _check_kroki()
 
         # Verify the request was a POST with diagram data
-        req = mock_opener.open.call_args[0][0]
-        assert req.method == "POST"
-        assert req.data == b"graph TD\n    A-->B"
-        assert req.get_header("Content-type") == "text/plain"
+        call_kwargs = mock_client.post.call_args
+        assert call_kwargs[1]["content"] == b"graph TD\n    A-->B"
+        assert call_kwargs[1]["headers"]["Content-Type"] == "text/plain"
 
 
 class TestRenderKroki:
     """Tests for kroki.io rendering."""
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_returns_png_on_success(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"\x89PNG fake data"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_returns_png_on_success(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200, content=b"\x89PNG fake data")
+        mock_get_client.return_value = mock_client
 
         result = _render_kroki("graph TD\n    A-->B", "default")
         assert result.png == b"\x89PNG fake data"
         assert result.error is None
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_returns_empty_on_network_error(self, mock_get_opener):
-        mock_opener = MagicMock()
-        mock_opener.open.side_effect = Exception("timeout")
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_returns_empty_on_network_error(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = Exception("timeout")
+        mock_get_client.return_value = mock_client
+
         result = _render_kroki("graph TD", "default")
         assert result.png is None
         assert result.error is None
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_returns_error_on_400(self, mock_get_opener):
-        import urllib.error
-        err = urllib.error.HTTPError(
-            "https://kroki.io/mermaid/png", 400, "Bad Request", {},
-            MagicMock(read=MagicMock(return_value=b"Error 400: SyntaxError: Parse error on line 3"))
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_returns_error_on_400(self, mock_get_client):
+        mock_client = _mock_httpx_client(
+            status_code=400,
+            text="Error 400: SyntaxError: Parse error on line 3",
         )
-        err.read = MagicMock(return_value=b"Error 400: SyntaxError: Parse error on line 3")
-        mock_opener = MagicMock()
-        mock_opener.open.side_effect = err
-        mock_get_opener.return_value = mock_opener
+        mock_get_client.return_value = mock_client
+
         result = _render_kroki("bad diagram", "default")
         assert result.png is None
         assert result.error is not None
         assert "SyntaxError" in result.error
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_injects_theme_directive(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"\x89PNG"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_injects_theme_directive(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200, content=b"\x89PNG")
+        mock_get_client.return_value = mock_client
 
         _render_kroki("graph TD\n    A-->B", "dark")
 
-        req = mock_opener.open.call_args[0][0]
-        body = req.data.decode("utf-8")
+        call_kwargs = mock_client.post.call_args
+        body = call_kwargs[1]["content"].decode("utf-8")
         assert "%%{init:" in body
         assert "'theme': 'dark'" in body
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_skips_theme_injection_when_already_present(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"\x89PNG"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_skips_theme_injection_when_already_present(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200, content=b"\x89PNG")
+        mock_get_client.return_value = mock_client
 
         source = "%%{init: {'theme': 'forest'}}%%\ngraph TD\n    A-->B"
         _render_kroki(source, "dark")
 
-        req = mock_opener.open.call_args[0][0]
-        body = req.data.decode("utf-8")
+        call_kwargs = mock_client.post.call_args
+        body = call_kwargs[1]["content"].decode("utf-8")
         # Should not double-inject theme
         assert body.count("%%{init:") == 1
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_no_theme_injection_for_default(self, mock_get_opener):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"\x89PNG"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_no_theme_injection_for_default(self, mock_get_client):
+        mock_client = _mock_httpx_client(status_code=200, content=b"\x89PNG")
+        mock_get_client.return_value = mock_client
 
         _render_kroki("graph TD\n    A-->B", "default")
 
-        req = mock_opener.open.call_args[0][0]
-        body = req.data.decode("utf-8")
+        call_kwargs = mock_client.post.call_args
+        body = call_kwargs[1]["content"].decode("utf-8")
         assert "%%{init:" not in body
 
-    @patch("shared.plugins.mermaid_formatter.renderer.get_url_opener")
-    def test_uses_custom_kroki_url(self, mock_get_opener, monkeypatch):
+    @patch("shared.plugins.mermaid_formatter.renderer.get_httpx_client")
+    def test_uses_custom_kroki_url(self, mock_get_client, monkeypatch):
         monkeypatch.setenv("JAATO_KROKI_URL", "http://localhost:8000")
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"\x89PNG"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
-        mock_get_opener.return_value = mock_opener
+        mock_client = _mock_httpx_client(status_code=200, content=b"\x89PNG")
+        mock_get_client.return_value = mock_client
 
         _render_kroki("graph TD", "default")
 
-        req = mock_opener.open.call_args[0][0]
-        assert req.full_url == "http://localhost:8000/mermaid/png"
+        call_args = mock_client.post.call_args
+        assert call_args[0][0] == "http://localhost:8000/mermaid/png"
 
 
 class TestRender:
