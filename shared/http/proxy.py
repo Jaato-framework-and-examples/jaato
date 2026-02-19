@@ -433,11 +433,12 @@ def generate_spnego_token(proxy_host: str) -> Optional[str]:
 # ============================================================
 
 def get_requests_session() -> "requests.Session":
-    """Create a requests Session with appropriate proxy configuration.
+    """Create a requests Session with appropriate proxy and SSL configuration.
 
     Configures the session based on:
-    1. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
-    2. Standard proxy env vars (requests handles these automatically)
+    1. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
+    2. JAATO_KERBEROS_PROXY: Adds SPNEGO token to headers
+    3. Standard proxy env vars (requests handles these automatically)
 
     Note: The requests library checks NO_PROXY per-request even when
     session-level proxies are set, so NO_PROXY is respected.
@@ -448,8 +449,13 @@ def get_requests_session() -> "requests.Session":
         Configured requests.Session.
     """
     import requests
+    from shared.ssl_helper import active_cert_bundle
 
     session = requests.Session()
+
+    ca_bundle = active_cert_bundle()
+    if ca_bundle:
+        session.verify = ca_bundle
 
     if is_kerberos_proxy_enabled():
         proxy_url = get_proxy_url()
@@ -504,13 +510,14 @@ def get_requests_kwargs(url: str) -> Dict[str, Any]:
 # ============================================================
 
 def get_httpx_client(**client_kwargs) -> "httpx.Client":
-    """Create an httpx Client with appropriate proxy configuration.
+    """Create an httpx Client with appropriate proxy and SSL configuration.
 
     Configures the client based on:
-    1. JAATO_KERBEROS_PROXY: Creates an ``httpx.Proxy`` with the SPNEGO
+    1. Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
+    2. JAATO_KERBEROS_PROXY: Creates an ``httpx.Proxy`` with the SPNEGO
        Negotiate token in its ``headers`` so the token is sent during the
        CONNECT tunnel handshake (required for HTTPS through a proxy).
-    2. Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY): Sets explicit
+    3. Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY): Sets explicit
        proxy URL on the client rather than relying on httpx env detection,
        which may not propagate correctly through all SDK code paths
 
@@ -519,12 +526,20 @@ def get_httpx_client(**client_kwargs) -> "httpx.Client":
     instead, which calls should_bypass_proxy().
 
     Args:
-        **client_kwargs: Additional kwargs to pass to httpx.Client
+        **client_kwargs: Additional kwargs to pass to httpx.Client.
+            Callers can override SSL via ``verify=False`` or
+            ``verify="/custom/path.pem"``; ``setdefault`` preserves
+            explicit overrides.
 
     Returns:
         Configured httpx.Client.
     """
     import httpx
+    from shared.ssl_helper import active_cert_bundle
+
+    ca_bundle = active_cert_bundle()
+    if ca_bundle:
+        client_kwargs.setdefault("verify", ca_bundle)
 
     proxy_url = get_proxy_url()
     if proxy_url:
@@ -589,23 +604,30 @@ def get_httpx_kwargs(url: str) -> Dict[str, Any]:
 # ============================================================
 
 def get_httpx_async_client(**client_kwargs) -> "httpx.AsyncClient":
-    """Create an httpx AsyncClient with appropriate proxy configuration.
+    """Create an httpx AsyncClient with appropriate proxy and SSL configuration.
 
-    Same behaviour as :func:`get_httpx_client` — when Kerberos is enabled,
-    the SPNEGO token is placed on an ``httpx.Proxy`` object so it is sent
-    during the CONNECT tunnel handshake for HTTPS URLs.
+    Same behaviour as :func:`get_httpx_client` — CA bundle, Kerberos SPNEGO
+    token, and proxy URL are applied automatically.
 
     Same caveats regarding NO_PROXY: when explicit proxy config is set, it
     overrides httpx's env-based NO_PROXY handling.  Use
     ``get_httpx_kwargs(url)`` for per-request bypass.
 
     Args:
-        **client_kwargs: Additional kwargs to pass to httpx.AsyncClient
+        **client_kwargs: Additional kwargs to pass to httpx.AsyncClient.
+            Callers can override SSL via ``verify=False`` or
+            ``verify="/custom/path.pem"``; ``setdefault`` preserves
+            explicit overrides.
 
     Returns:
         Configured httpx.AsyncClient.
     """
     import httpx
+    from shared.ssl_helper import active_cert_bundle
+
+    ca_bundle = active_cert_bundle()
+    if ca_bundle:
+        client_kwargs.setdefault("verify", ca_bundle)
 
     proxy_url = get_proxy_url()
     if proxy_url:
