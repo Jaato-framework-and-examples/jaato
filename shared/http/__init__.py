@@ -26,6 +26,21 @@ Environment Variables:
     JAATO_SSL_VERIFY: SSL certificate verification (true/false, default: true)
 """
 
+# Eagerly suppress urllib3 InsecureRequestWarning when SSL verification is
+# disabled.  This must happen before any ``requests``/``urllib3`` call so that
+# early HTTP traffic (e.g. cached Copilot token refresh during import) doesn't
+# emit per-request warnings.  The one-time log message in
+# ``_get_ssl_verify_value()`` is the intended notification channel.
+from .proxy import is_ssl_verify_disabled as _is_ssl_verify_disabled
+
+if _is_ssl_verify_disabled():
+    import warnings as _warnings
+    try:
+        from urllib3.exceptions import InsecureRequestWarning as _InsecureRequestWarning
+        _warnings.filterwarnings("ignore", category=_InsecureRequestWarning)
+    except ImportError:
+        pass
+
 from .proxy import (
     # Configuration
     get_proxy_url,
