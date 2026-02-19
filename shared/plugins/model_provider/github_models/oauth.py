@@ -17,7 +17,6 @@ import json
 import os
 import time
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -133,9 +132,8 @@ def _make_request(
 ) -> dict:
     """Make HTTP POST request and return JSON response.
 
-    Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
-    which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
-    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+    Uses the shared httpx client which handles proxy configuration,
+    Kerberos/SPNEGO authentication, and JAATO_NO_PROXY exact host matching.
 
     Args:
         url: Request URL.
@@ -148,39 +146,35 @@ def _make_request(
     Raises:
         RuntimeError: If request fails.
     """
-    from shared.http import get_url_opener
+    import httpx
+    from shared.http import get_httpx_client
 
     default_headers = {
         "Accept": "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": "jaato/1.0",
     }
     if headers:
         default_headers.update(headers)
 
-    encoded_data = urllib.parse.urlencode(data).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=encoded_data,
-        headers=default_headers,
-        method="POST",
-    )
-
     try:
-        opener = get_url_opener(url)
-        with opener.open(req, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else str(e)
+        with get_httpx_client(timeout=30.0) as client:
+            response = client.post(
+                url,
+                content=urllib.parse.urlencode(data),
+                headers={**default_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text
         try:
             error_data = json.loads(error_body)
             error_msg = error_data.get("error_description") or error_data.get("error") or error_body
         except json.JSONDecodeError:
             error_msg = error_body
-        raise RuntimeError(f"HTTP {e.code}: {error_msg}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Request failed: {e.reason}") from e
+        raise RuntimeError(f"HTTP {e.response.status_code}: {error_msg}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Request failed: {e}") from e
 
 
 def _make_get_request(
@@ -189,9 +183,8 @@ def _make_get_request(
 ) -> dict:
     """Make HTTP GET request and return JSON response.
 
-    Respects JAATO_NO_PROXY for exact host matching (unlike standard NO_PROXY
-    which does suffix matching). If JAATO_NO_PROXY is not set, falls back to
-    standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+    Uses the shared httpx client which handles proxy configuration,
+    Kerberos/SPNEGO authentication, and JAATO_NO_PROXY exact host matching.
 
     Args:
         url: Request URL.
@@ -203,7 +196,8 @@ def _make_get_request(
     Raises:
         RuntimeError: If request fails.
     """
-    from shared.http import get_url_opener
+    import httpx
+    from shared.http import get_httpx_client
 
     default_headers = {
         "Accept": "application/json",
@@ -212,26 +206,21 @@ def _make_get_request(
     if headers:
         default_headers.update(headers)
 
-    req = urllib.request.Request(
-        url,
-        headers=default_headers,
-        method="GET",
-    )
-
     try:
-        opener = get_url_opener(url)
-        with opener.open(req, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else str(e)
+        with get_httpx_client(timeout=30.0) as client:
+            response = client.get(url, headers=default_headers)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text
         try:
             error_data = json.loads(error_body)
             error_msg = error_data.get("error_description") or error_data.get("error") or error_body
         except json.JSONDecodeError:
             error_msg = error_body
-        raise RuntimeError(f"HTTP {e.code}: {error_msg}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Request failed: {e.reason}") from e
+        raise RuntimeError(f"HTTP {e.response.status_code}: {error_msg}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Request failed: {e}") from e
 
 
 def exchange_oauth_for_copilot_token(oauth_token: str) -> CopilotToken:

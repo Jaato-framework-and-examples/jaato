@@ -17,10 +17,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-import urllib.request
 from typing import NamedTuple, Optional
 
-from shared.http import get_url_opener
+from shared.http import get_httpx_client
 
 logger = logging.getLogger(__name__)
 
@@ -105,16 +104,14 @@ def _check_kroki() -> bool:
 
     url = f"{_get_kroki_url()}/mermaid/png"
     try:
-        req = urllib.request.Request(
-            url,
-            data=b"graph TD\n    A-->B",
-            headers={"Content-Type": "text/plain",
-                     "User-Agent": "jaato/1.0"},
-            method="POST",
-        )
-        opener = get_url_opener(url)
-        with opener.open(req, timeout=5) as resp:
-            _kroki_available = resp.status == 200
+        with get_httpx_client(timeout=5.0) as client:
+            resp = client.post(
+                url,
+                content=b"graph TD\n    A-->B",
+                headers={"Content-Type": "text/plain",
+                         "User-Agent": "jaato/1.0"},
+            )
+            _kroki_available = resp.status_code == 200
     except Exception:
         _kroki_available = False
 
@@ -207,29 +204,27 @@ def _render_kroki(source: str, theme: str) -> RenderResult:
     if theme != "default" and not source.lstrip().startswith("%%{"):
         source = f"%%{{init: {{'theme': '{theme}'}}}}%%\n{source}"
 
+    import httpx
+
     url = f"{_get_kroki_url()}/mermaid/png"
     try:
-        req = urllib.request.Request(
-            url,
-            data=source.encode("utf-8"),
-            headers={"Content-Type": "text/plain",
-                     "User-Agent": "jaato/1.0"},
-            method="POST",
-        )
-        opener = get_url_opener(url)
-        with opener.open(req, timeout=30) as resp:
-            if resp.status == 200:
-                return RenderResult(png=resp.read())
+        with get_httpx_client(timeout=30.0) as client:
+            resp = client.post(
+                url,
+                content=source.encode("utf-8"),
+                headers={"Content-Type": "text/plain",
+                         "User-Agent": "jaato/1.0"},
+            )
+            if resp.status_code == 200:
+                return RenderResult(png=resp.content)
+            if resp.status_code == 400:
+                body = resp.text
+                logger.debug("kroki rendering failed: %s %s", resp.status_code, body)
+                return RenderResult(error=_extract_kroki_error(body))
         return RenderResult()
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        logger.debug("kroki rendering failed: %s %s", e, body)
-        error = _extract_kroki_error(body) if e.code == 400 else None
-        return RenderResult(error=error)
+    except httpx.HTTPError as e:
+        logger.debug("kroki rendering failed: %s", e)
+        return RenderResult()
     except Exception as e:
         logger.debug("kroki rendering failed: %s", e)
         return RenderResult()
