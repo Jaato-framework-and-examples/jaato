@@ -163,7 +163,9 @@ Displays:
 
 ## settings
 
-View, save, or clear reliability settings across persistence levels.
+View, save, or clear reliability **runtime settings** across persistence levels.
+
+> **Not to be confused with `policies`.** The `settings` and `policies` subcommands manage different files with different schemas. See [Configuration Files](#configuration-files) for the full picture.
 
 ```
 reliability settings
@@ -389,7 +391,9 @@ Show the last N nudges (default: 10). Each entry shows timestamp, nudge type, th
 
 ## policies
 
-Manage file-based prerequisite policies — rules that enforce tool ordering (e.g., "read before edit").
+Manage file-based **prerequisite policies** and **pattern detection thresholds** — rules that enforce tool ordering (e.g., "read before edit") and tune loop detection sensitivity.
+
+> **Not to be confused with `settings`.** The `policies` subcommand manages `reliability-policies.json` (detection rules and prerequisite constraints). The `settings` subcommand manages `reliability.json` (runtime toggles like recovery mode and nudge level). See [Configuration Files](#configuration-files) for the full picture.
 
 ```
 reliability policies
@@ -522,6 +526,27 @@ Show pattern type breakdown by model. For each model, lists every detected patte
 ---
 
 ## Concepts
+
+### Configuration Files
+
+The reliability plugin uses **two separate JSON files**, each at workspace and user levels. Understanding which file controls what avoids confusion between the `settings` and `policies` subcommands.
+
+| File | Managed By | Content |
+|------|-----------|---------|
+| `.jaato/reliability.json` | `reliability settings` | Runtime toggles: `recovery_mode`, `nudge_level`, `nudge_enabled`, `model_switch_strategy`. Also stores persisted tool states and failure history. |
+| `.jaato/reliability-policies.json` | `reliability policies` | Pattern detection thresholds (repetitive call limits, retry limits, read-only loop limits) and prerequisite policy rules (tool ordering constraints). |
+
+Both files exist at two levels (workspace wins over user):
+
+```
+Workspace:  .jaato/reliability.json             ← project-specific runtime settings
+            .jaato/reliability-policies.json     ← project-specific detection rules
+
+User:       ~/.jaato/reliability.json            ← personal default settings
+            ~/.jaato/reliability-policies.json   ← personal baseline detection rules
+```
+
+**Why two files?** Settings are simple key-value toggles that change often during a session (`reliability nudge full`, `reliability recovery ask`). Policies are structured rules with thresholds and templates that are typically authored once and rarely change at runtime — hence the `edit` subcommand opening `$EDITOR`.
 
 ### Trust States
 
