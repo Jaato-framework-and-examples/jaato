@@ -17,13 +17,10 @@ Storage follows jaato convention:
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from shared.http import get_url_opener
 from .env import DEFAULT_ZHIPUAI_BASE_URL
 
 
@@ -145,6 +142,23 @@ def get_stored_base_url() -> Optional[str]:
     return None
 
 
+def _create_validation_client():
+    """Create an httpx client with proxy, Kerberos, and CA bundle support.
+
+    Uses the same pattern as the Anthropic provider's ``_create_http_client()``
+    so validation requests go through corporate proxies correctly.
+    """
+    from shared.ssl_helper import active_cert_bundle
+    from shared.http.proxy import get_httpx_client
+
+    kwargs = {}
+    ca_bundle = active_cert_bundle()
+    if ca_bundle:
+        kwargs["verify"] = ca_bundle
+
+    return get_httpx_client(**kwargs)
+
+
 def validate_api_key(
     api_key: str,
     base_url: Optional[str] = None,
@@ -152,8 +166,8 @@ def validate_api_key(
     """Validate an API key by making a test request.
 
     Sends a minimal POST to the Anthropic-compatible ``/v1/messages``
-    endpoint.  The Anthropic SDK appends ``/v1/messages`` to the base URL
-    internally, so this function must do the same when using raw urllib.
+    endpoint.  Uses the project's httpx client with full proxy, Kerberos,
+    and corporate CA bundle support.
 
     Args:
         api_key: Z.AI API key to validate.
@@ -166,9 +180,9 @@ def validate_api_key(
         is accepted.  ``error_detail`` is a human-readable hint when
         ``valid`` is False (empty string on success).
     """
+    import httpx
+
     url = base_url or DEFAULT_ZHIPUAI_BASE_URL
-    # The Anthropic SDK appends /v1/messages to the base URL, so we
-    # must do the same when validating with raw urllib.
     test_url = f"{url.rstrip('/')}/v1/messages"
 
     headers = {
@@ -177,38 +191,24 @@ def validate_api_key(
         "anthropic-version": "2023-06-01",
     }
 
-    # Minimal request body
-    body = json.dumps({
+    body = {
         "model": "glm-4.7",
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "hi"}],
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        test_url,
-        data=body,
-        headers=headers,
-        method="POST",
-    )
+    }
 
     try:
-        opener = get_url_opener(test_url)
-        with opener.open(req, timeout=30) as response:
-            return (True, "")
-    except urllib.error.HTTPError as e:
-        # 401/403 means invalid key
-        if e.code in (401, 403):
+        client = _create_validation_client()
+        response = client.post(test_url, headers=headers, json=body, timeout=30)
+        if response.status_code in (401, 403):
             return (False, "authentication_error")
-        # Other HTTP errors (400 for bad request, etc.) indicate the key
-        # was accepted but the minimal test request was rejected — that's
-        # fine, the key itself is valid.
+        # Any other status (200, 400, etc.) means the key was accepted
         return (True, "")
-    except urllib.error.URLError as e:
-        # DNS / connection-refused / SSL errors
-        reason = str(e.reason) if hasattr(e, "reason") else str(e)
-        return (False, f"network_error: {reason}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403):
+            return (False, "authentication_error")
+        return (True, "")
     except Exception as e:
-        # Unexpected errors (timeout, etc.)
         return (False, f"network_error: {e}")
 
 
