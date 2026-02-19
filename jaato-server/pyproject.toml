@@ -67,7 +67,7 @@ kaggle = [
     "kaggle>=1.5.0",
 ]
 kerberos = [
-    "pyspnego>=0.10.0",  # Kerberos/SPNEGO proxy authentication
+    "pyspnego[kerberos]>=0.10.0",  # Kerberos/SPNEGO proxy authentication (includes gssapi on Linux/macOS)
 ]
 all = [
     "jaato-server[dev,kaggle,kerberos]",

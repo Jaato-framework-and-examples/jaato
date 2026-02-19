@@ -1,80 +1,76 @@
 """Tests for Zhipu AI API key validation."""
 
 import json
-from unittest.mock import MagicMock, patch, call
-import urllib.error
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from ..auth import validate_api_key
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 
-# All tests mock get_url_opener so validate_api_key() uses the proxy-aware
-# opener from shared.http rather than bare urllib.request.urlopen().
-OPENER_PATCH = "shared.plugins.model_provider.zhipuai.auth.get_url_opener"
+# All tests mock _create_validation_client so validate_api_key() uses
+# a controlled httpx client rather than making real network requests.
+CLIENT_PATCH = "shared.plugins.model_provider.zhipuai.auth._create_validation_client"
 
 
-def _mock_opener_ok():
-    """Return a mock opener whose .open() returns a 200 response."""
-    mock_resp = MagicMock()
-    mock_resp.status = 200
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
+def _mock_client(status_code=200):
+    """Return a mock httpx client that returns the given status code."""
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = status_code
 
-    mock_opener = MagicMock()
-    mock_opener.open.return_value = mock_resp
-    return mock_opener
+    client = MagicMock()
+    client.post.return_value = mock_response
+    return client
 
 
 class TestValidateApiKey:
     """Tests for validate_api_key()."""
 
-    def test_uses_proxy_aware_opener(self):
-        """Must use get_url_opener() from shared.http, not bare urlopen."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+    def test_uses_proxy_aware_client(self):
+        """Must use _create_validation_client() for proxy/CA support."""
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client()
 
             validate_api_key("test-key")
 
-            # get_url_opener should be called with the test URL
-            expected_url = f"{DEFAULT_ZHIPUAI_BASE_URL}/v1/messages"
-            mock_get_opener.assert_called_once_with(expected_url)
-            mock_get_opener.return_value.open.assert_called_once()
+            mock_create.assert_called_once()
+            mock_create.return_value.post.assert_called_once()
 
     def test_url_includes_v1_prefix(self):
         """Validation request must hit /v1/messages, not /messages."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client()
 
             validate_api_key("test-key")
 
-            req = mock_get_opener.return_value.open.call_args[0][0]
-            assert req.full_url == f"{DEFAULT_ZHIPUAI_BASE_URL}/v1/messages"
+            call_args = mock_create.return_value.post.call_args
+            assert call_args[0][0] == f"{DEFAULT_ZHIPUAI_BASE_URL}/v1/messages"
 
     def test_custom_base_url(self):
         """Should use custom base URL when provided."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client()
 
             validate_api_key("test-key", base_url="https://custom.api.com")
 
-            req = mock_get_opener.return_value.open.call_args[0][0]
-            assert req.full_url == "https://custom.api.com/v1/messages"
+            call_args = mock_create.return_value.post.call_args
+            assert call_args[0][0] == "https://custom.api.com/v1/messages"
 
     def test_strips_trailing_slash_from_base_url(self):
         """Should strip trailing slash before appending /v1/messages."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client()
 
             validate_api_key("test-key", base_url="https://custom.api.com/")
 
-            req = mock_get_opener.return_value.open.call_args[0][0]
-            assert req.full_url == "https://custom.api.com/v1/messages"
+            call_args = mock_create.return_value.post.call_args
+            assert call_args[0][0] == "https://custom.api.com/v1/messages"
 
     def test_success_returns_true(self):
         """HTTP 200 should return (True, '')."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client(200)
 
             valid, detail = validate_api_key("test-key")
             assert valid is True
@@ -82,12 +78,8 @@ class TestValidateApiKey:
 
     def test_401_returns_auth_error(self):
         """HTTP 401 should return (False, 'authentication_error')."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_opener = MagicMock()
-            mock_opener.open.side_effect = urllib.error.HTTPError(
-                url="", code=401, msg="Unauthorized", hdrs={}, fp=None
-            )
-            mock_get_opener.return_value = mock_opener
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client(401)
 
             valid, detail = validate_api_key("bad-key")
             assert valid is False
@@ -95,12 +87,8 @@ class TestValidateApiKey:
 
     def test_403_returns_auth_error(self):
         """HTTP 403 should return (False, 'authentication_error')."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_opener = MagicMock()
-            mock_opener.open.side_effect = urllib.error.HTTPError(
-                url="", code=403, msg="Forbidden", hdrs={}, fp=None
-            )
-            mock_get_opener.return_value = mock_opener
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client(403)
 
             valid, detail = validate_api_key("bad-key")
             assert valid is False
@@ -108,24 +96,18 @@ class TestValidateApiKey:
 
     def test_400_returns_true(self):
         """HTTP 400 (bad request) means key was accepted; return True."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_opener = MagicMock()
-            mock_opener.open.side_effect = urllib.error.HTTPError(
-                url="", code=400, msg="Bad Request", hdrs={}, fp=None
-            )
-            mock_get_opener.return_value = mock_opener
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client(400)
 
             valid, detail = validate_api_key("test-key")
             assert valid is True
 
     def test_network_error_returns_detail(self):
-        """URLError (DNS/connection) should return network_error detail."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_opener = MagicMock()
-            mock_opener.open.side_effect = urllib.error.URLError(
-                reason="Name or service not known"
-            )
-            mock_get_opener.return_value = mock_opener
+        """Connection error should return network_error detail."""
+        with patch(CLIENT_PATCH) as mock_create:
+            client = MagicMock()
+            client.post.side_effect = httpx.ConnectError("Name or service not known")
+            mock_create.return_value = client
 
             valid, detail = validate_api_key("test-key")
             assert valid is False
@@ -134,10 +116,10 @@ class TestValidateApiKey:
 
     def test_timeout_returns_network_error(self):
         """Timeout should return network_error detail."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_opener = MagicMock()
-            mock_opener.open.side_effect = TimeoutError("timed out")
-            mock_get_opener.return_value = mock_opener
+        with patch(CLIENT_PATCH) as mock_create:
+            client = MagicMock()
+            client.post.side_effect = httpx.TimeoutException("timed out")
+            mock_create.return_value = client
 
             valid, detail = validate_api_key("test-key")
             assert valid is False
@@ -145,11 +127,26 @@ class TestValidateApiKey:
 
     def test_sends_correct_headers(self):
         """Should send x-api-key and anthropic-version headers."""
-        with patch(OPENER_PATCH) as mock_get_opener:
-            mock_get_opener.return_value = _mock_opener_ok()
+        with patch(CLIENT_PATCH) as mock_create:
+            mock_create.return_value = _mock_client()
 
             validate_api_key("my-secret-key")
 
-            req = mock_get_opener.return_value.open.call_args[0][0]
-            assert req.get_header("X-api-key") == "my-secret-key"
-            assert req.get_header("Anthropic-version") == "2023-06-01"
+            call_args = mock_create.return_value.post.call_args
+            headers = call_args[1]["headers"]
+            assert headers["x-api-key"] == "my-secret-key"
+            assert headers["anthropic-version"] == "2023-06-01"
+
+    def test_ssl_error_returns_network_error(self):
+        """SSL handshake failure should return network_error detail."""
+        with patch(CLIENT_PATCH) as mock_create:
+            client = MagicMock()
+            client.post.side_effect = httpx.ConnectError(
+                "[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] sslv3 alert handshake failure"
+            )
+            mock_create.return_value = client
+
+            valid, detail = validate_api_key("test-key")
+            assert valid is False
+            assert detail.startswith("network_error")
+            assert "SSL" in detail
