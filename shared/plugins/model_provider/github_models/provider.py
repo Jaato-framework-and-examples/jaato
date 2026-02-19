@@ -20,8 +20,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.request
-import urllib.error
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -630,23 +628,27 @@ class GitHubModelsProvider:
     def _fetch_models_from_api(self) -> Dict[str, ModelInfo]:
         """Fetch available models from the GitHub Models catalog API.
 
+        Uses the shared httpx client which handles proxy configuration,
+        Kerberos/SPNEGO authentication, and JAATO_NO_PROXY exact host matching.
+
         Returns:
             Dict mapping model IDs to ModelInfo, or empty dict on failure.
         """
-        from shared.http import get_url_opener
+        import httpx
+        from shared.http import get_httpx_client
 
         try:
-            req = urllib.request.Request(
-                CATALOG_API_ENDPOINT,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {self._token}",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-            )
-            opener = get_url_opener(CATALOG_API_ENDPOINT)
-            with opener.open(req, timeout=10) as response:
-                data = json.loads(response.read().decode('utf-8'))
+            with get_httpx_client(timeout=10.0) as client:
+                response = client.get(
+                    CATALOG_API_ENDPOINT,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "Authorization": f"Bearer {self._token}",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
 
             # Extract model info from the response
             # Response format: list of model objects with 'id', 'max_input_tokens', 'max_output_tokens'
@@ -699,15 +701,9 @@ class GitHubModelsProvider:
                         models[info.id] = info
 
             return models
-        except urllib.error.HTTPError:
-            # API error, return empty to trigger fallback
+        except (httpx.HTTPError, Exception):
+            # API or network error, return empty to trigger fallback
             return {}
-        except Exception:
-            # Network or parsing error
-            return {}
-        except Exception:
-            # Network or parsing error
-            return []
 
     # ==================== Session Management ====================
 

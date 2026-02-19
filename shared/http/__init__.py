@@ -7,17 +7,12 @@ supporting:
 - JAATO_KERBEROS_PROXY for Kerberos/SPNEGO proxy authentication
 
 Usage:
-    # For urllib
-    from shared.http import get_url_opener
-    opener = get_url_opener(url)
-    response = opener.open(request)
-
     # For requests
     from shared.http import get_requests_session
     session = get_requests_session()
     response = session.get(url)
 
-    # For httpx
+    # For httpx (preferred)
     from shared.http import get_httpx_client
     with get_httpx_client() as client:
         response = client.get(url)
@@ -34,13 +29,12 @@ from .proxy import (
     get_proxy_url,
     is_kerberos_proxy_enabled,
     should_bypass_proxy,
-    # urllib support
-    get_url_opener,
     # requests support
     get_requests_session,
     get_requests_kwargs,
     # httpx support
     get_httpx_client,
+    get_httpx_async_client,
     get_httpx_kwargs,
     # Low-level
     generate_spnego_token,
@@ -51,13 +45,12 @@ __all__ = [
     "get_proxy_url",
     "is_kerberos_proxy_enabled",
     "should_bypass_proxy",
-    # urllib support
-    "get_url_opener",
     # requests support
     "get_requests_session",
     "get_requests_kwargs",
     # httpx support
     "get_httpx_client",
+    "get_httpx_async_client",
     "get_httpx_kwargs",
     # Low-level
     "generate_spnego_token",

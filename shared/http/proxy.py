@@ -1,6 +1,6 @@
 """Proxy configuration and Kerberos authentication for HTTP clients.
 
-Provides unified proxy support for urllib, requests, and httpx with:
+Provides unified proxy support for requests and httpx with:
 - Standard proxy environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
 - JAATO_NO_PROXY for exact host matching
 - JAATO_KERBEROS_PROXY for Kerberos/SPNEGO proxy authentication
@@ -16,7 +16,6 @@ import base64
 import logging
 import os
 import urllib.parse
-import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -427,96 +426,6 @@ def generate_spnego_token(proxy_host: str) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Failed to generate SPNEGO token for {proxy_host}: {e}")
         return None
-
-
-# ============================================================
-# urllib Support
-# ============================================================
-
-class KerberosProxyHandler(urllib.request.BaseHandler):
-    """urllib handler for Kerberos proxy authentication.
-
-    Handles 407 Proxy Authentication Required responses by generating
-    SPNEGO tokens and retrying the request.
-    """
-
-    handler_order = 400
-
-    def __init__(self, proxy_url: str):
-        self.proxy_url = proxy_url
-        self.proxy_host, self.proxy_port, self.proxy_scheme = parse_proxy_url(proxy_url)
-
-    def http_error_407(self, req, fp, code, msg, hdrs):
-        """Handle 407 Proxy Authentication Required."""
-        from urllib.error import HTTPError
-
-        auth_header = hdrs.get("Proxy-Authenticate", "")
-        if "Negotiate" not in auth_header:
-            logger.debug(f"Proxy does not support Negotiate auth: {auth_header}")
-            raise HTTPError(req.full_url, code, msg, hdrs, fp)
-
-        token = generate_spnego_token(self.proxy_host)
-        if not token:
-            logger.debug("Failed to generate SPNEGO token")
-            raise HTTPError(req.full_url, code, msg, hdrs, fp)
-
-        logger.debug(f"Retrying with SPNEGO token for {self.proxy_host}")
-        req.add_header("Proxy-Authorization", f"Negotiate {token}")
-
-        return self.parent.open(req, timeout=req.timeout if hasattr(req, 'timeout') else None)
-
-    https_error_407 = http_error_407
-
-
-def get_url_opener(url: Optional[str] = None) -> urllib.request.OpenerDirector:
-    """Get an appropriate urllib opener.
-
-    Priority:
-    1. If url provided and JAATO_NO_PROXY matches (exact), bypass proxy
-    2. If JAATO_KERBEROS_PROXY=true, use Kerberos proxy authentication
-    3. Otherwise use default opener (standard proxy env vars)
-
-    Args:
-        url: Optional URL to check for bypass. If None, returns general opener.
-
-    Returns:
-        An OpenerDirector configured appropriately.
-    """
-    # Check bypass first
-    if url and should_bypass_proxy(url):
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-    # Check Kerberos proxy
-    if is_kerberos_proxy_enabled():
-        proxy_url = get_proxy_url()
-        if proxy_url:
-            proxy_host, _, _ = parse_proxy_url(proxy_url)
-            spnego_token = generate_spnego_token(proxy_host)
-
-            if spnego_token:
-                class PreAuthProxyHandler(urllib.request.ProxyHandler):
-                    def __init__(self, proxies, token):
-                        super().__init__(proxies)
-                        self.spnego_token = token
-
-                    def proxy_open(self, req, proxy, type):
-                        if not req.has_header("Proxy-Authorization"):
-                            req.add_header("Proxy-Authorization", f"Negotiate {self.spnego_token}")
-                        return super().proxy_open(req, proxy, type)
-
-                proxy_handler = PreAuthProxyHandler(
-                    {"http": proxy_url, "https": proxy_url},
-                    spnego_token
-                )
-                kerberos_handler = KerberosProxyHandler(proxy_url)
-                return urllib.request.build_opener(proxy_handler, kerberos_handler)
-            else:
-                proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-                kerberos_handler = KerberosProxyHandler(proxy_url)
-                return urllib.request.build_opener(proxy_handler, kerberos_handler)
-
-    # Default opener with standard proxy env vars
-    return urllib.request.build_opener()
 
 
 # ============================================================

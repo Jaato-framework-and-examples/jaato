@@ -210,5 +210,5 @@ def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[s
 from shared.http import (
     should_bypass_proxy,
     is_kerberos_proxy_enabled,
-    get_url_opener,
+    get_httpx_client,
 )

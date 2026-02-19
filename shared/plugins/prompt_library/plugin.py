@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 from ..model_provider.types import ToolSchema
 from ..base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
-from shared.http import get_url_opener
+from shared.http import get_httpx_client
 from shared.trace import trace as _trace_write
 
 # Type alias for output callback: (source, text, mode) -> None
@@ -890,21 +890,20 @@ class PromptLibraryPlugin:
         self._emit(f"Fetching: {url}...")
 
         try:
-            import urllib.request
-            import urllib.error
+            import httpx
+            from urllib.parse import urlparse
 
             # Determine filename from URL
-            from urllib.parse import urlparse
             parsed = urlparse(url)
             filename = Path(parsed.path).name
             if not filename or not filename.endswith('.md'):
                 filename = "fetched-prompt.md"
 
-            # Fetch the content (with Kerberos proxy support)
-            req = urllib.request.Request(url, headers={'User-Agent': 'jaato-prompt-fetch/1.0'})
-            opener = get_url_opener(url)
-            with opener.open(req, timeout=30) as response:
-                content = response.read().decode('utf-8')
+            # Fetch the content (with proxy/Kerberos support via shared httpx client)
+            with get_httpx_client(timeout=30.0) as client:
+                response = client.get(url, headers={'User-Agent': 'jaato-prompt-fetch/1.0'})
+                response.raise_for_status()
+                content = response.text
 
             # Validate content before saving
             validation_error = self._validate_content(content, source_url=url)
@@ -936,17 +935,17 @@ class PromptLibraryPlugin:
                     source_params=url
                 )
 
-        except urllib.error.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             return FetchResult(
                 success=False,
-                error=f"HTTP error: {e.code} {e.reason}",
+                error=f"HTTP error: {e.response.status_code}",
                 source_type="url",
                 source_params=url
             )
-        except urllib.error.URLError as e:
+        except httpx.HTTPError as e:
             return FetchResult(
                 success=False,
-                error=f"URL error: {e.reason}",
+                error=f"Request error: {e}",
                 source_type="url",
                 source_params=url
             )
@@ -1220,21 +1219,20 @@ class PromptLibraryPlugin:
 
         Tries download_url first, falls back to base64-encoded content.
         """
-        import urllib.request
-        import urllib.error
+        import httpx
 
-        # Try download_url first (with Kerberos proxy support)
+        # Try download_url first (with proxy/Kerberos support via shared httpx client)
         download_url = file_info.get('download_url')
         if download_url:
             try:
-                req = urllib.request.Request(
-                    download_url,
-                    headers={'User-Agent': 'jaato-prompt-fetch/1.0'}
-                )
-                opener = get_url_opener(download_url)
-                with opener.open(req, timeout=30) as response:
-                    return response.read().decode('utf-8')
-            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                with get_httpx_client(timeout=30.0) as client:
+                    response = client.get(
+                        download_url,
+                        headers={'User-Agent': 'jaato-prompt-fetch/1.0'},
+                    )
+                    response.raise_for_status()
+                    return response.text
+            except httpx.HTTPError as e:
                 self._trace(f"Failed to download from {download_url}: {e}")
 
         # Fall back to base64-encoded content
