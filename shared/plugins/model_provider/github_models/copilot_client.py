@@ -8,7 +8,7 @@ mirrors the Azure SDK interface for easy integration.
 """
 
 import json
-import requests
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -210,16 +210,16 @@ class CopilotClient:
             except Exception:
                 pass
 
-    def _create_session(self) -> requests.Session:
-        """Create requests session with appropriate proxy configuration.
+    def _create_session(self) -> httpx.Client:
+        """Create httpx client with appropriate proxy configuration.
 
-        Uses shared.http module for unified proxy/Kerberos configuration.
+        Uses shared.http module for unified proxy/Kerberos/SSL configuration.
 
         Returns:
-            Configured requests.Session.
+            Configured httpx.Client.
         """
-        from shared.http import get_requests_session
-        return get_requests_session()
+        from shared.http import get_httpx_client
+        return get_httpx_client(timeout=float(self._timeout))
 
     def _make_request(
         self,
@@ -230,25 +230,22 @@ class CopilotClient:
     ) -> Any:
         """Make HTTP request to Copilot API.
 
-        Supports multiple proxy configurations:
-        1. JAATO_NO_PROXY: Exact host matching to bypass proxy
-        2. JAATO_KERBEROS_PROXY: Kerberos/SPNEGO authentication with proxy
-        3. Standard proxy env vars (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
+        Proxy, SSL, and Kerberos configuration are handled at the client
+        level by ``get_httpx_client()`` (called in ``_create_session``).
 
         Args:
             url: Request URL
             data: JSON data for POST requests
             method: HTTP method
-            stream: If True, return response object for streaming
+            stream: If True, return response object for streaming.
+                    Caller must close the response when done.
 
         Returns:
-            Parsed JSON response or response object for streaming
+            Parsed JSON response, or an httpx.Response for streaming
 
         Raises:
             RuntimeError: If request fails
         """
-        from shared.http import should_bypass_proxy
-
         # Ensure token is valid before making request
         self._ensure_valid_token()
 
@@ -257,50 +254,55 @@ class CopilotClient:
             "Authorization": f"Bearer {self._token}",
         }
 
-        # Bypass proxy if URL matches NO_PROXY or JAATO_NO_PROXY
-        proxies = {} if should_bypass_proxy(url) else None
-
         try:
-            response = self._session.request(
-                method=method,
-                url=url,
-                json=data,
-                headers=headers,
-                stream=stream,
-                timeout=self._timeout,
-                proxies=proxies,
-            )
+            if stream:
+                # Build request and send with stream=True so the response
+                # body is not eagerly consumed.  Caller iterates and closes.
+                req = self._session.build_request(
+                    method, url, json=data, headers=headers,
+                )
+                response = self._session.send(req, stream=True)
+            else:
+                response = self._session.request(
+                    method=method,
+                    url=url,
+                    json=data,
+                    headers=headers,
+                )
             response.raise_for_status()
             if stream:
                 return response
             return response.json()
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             # On 401, try to refresh token and retry once
-            if e.response is not None and e.response.status_code == 401:
+            if e.response.status_code == 401:
                 old_token = self._token
                 self._force_token_refresh()
                 if self._token != old_token:
                     # Token was refreshed, retry the request
                     headers["Authorization"] = f"Bearer {self._token}"
                     try:
-                        response = self._session.request(
-                            method=method,
-                            url=url,
-                            json=data,
-                            headers=headers,
-                            stream=stream,
-                            timeout=self._timeout,
-                            proxies=proxies,
-                        )
+                        if stream:
+                            req = self._session.build_request(
+                                method, url, json=data, headers=headers,
+                            )
+                            response = self._session.send(req, stream=True)
+                        else:
+                            response = self._session.request(
+                                method=method,
+                                url=url,
+                                json=data,
+                                headers=headers,
+                            )
                         response.raise_for_status()
                         if stream:
                             return response
                         return response.json()
-                    except requests.exceptions.HTTPError:
+                    except httpx.HTTPStatusError:
                         pass  # Fall through to original error handling
 
-            status_code = e.response.status_code if e.response is not None else "unknown"
-            error_body = e.response.text if e.response is not None else str(e)
+            status_code = e.response.status_code
+            error_body = e.response.text
             try:
                 error_data = json.loads(error_body)
                 error_msg = error_data.get("error", {}).get("message", error_body)
@@ -327,7 +329,7 @@ class CopilotClient:
                 diagnostic = f" | Last messages: {msg_summary}"
 
             raise RuntimeError(f"Copilot API error (HTTP {status_code}): {error_msg}{diagnostic}") from e
-        except requests.exceptions.RequestException as e:
+        except httpx.HTTPError as e:
             from shared.ssl_helper import is_ssl_cert_failure, log_ssl_guidance
             if is_ssl_cert_failure(e):
                 log_ssl_guidance("Copilot API", e)
@@ -516,12 +518,9 @@ class CopilotClient:
 
         response = self._make_request(COPILOT_CHAT_ENDPOINT, payload, stream=True)
 
-        # Parse SSE stream using iter_lines for proper timeout handling
-        # Force UTF-8 encoding - SSE streams may not have charset in Content-Type,
-        # causing requests to default to ISO-8859-1 per HTTP/1.1 RFC
-        response.encoding = 'utf-8'
+        # Parse SSE stream
         try:
-            for line in response.iter_lines(decode_unicode=True):
+            for line in response.iter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):
@@ -782,12 +781,11 @@ class CopilotClient:
         response = self._make_request(COPILOT_RESPONSES_ENDPOINT, payload, stream=True)
 
         # Parse SSE stream
-        response.encoding = 'utf-8'
         try:
             # Accumulate function call data since it may come in pieces
             current_function_call: Optional[Dict[str, Any]] = None
 
-            for line in response.iter_lines(decode_unicode=True):
+            for line in response.iter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):

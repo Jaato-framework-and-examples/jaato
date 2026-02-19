@@ -16,7 +16,7 @@ from ...base import ProviderConfig
 class TestInitialization:
     """Tests for initialization."""
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_initialize_default_host(self, mock_anthropic, mock_get):
         """Should use default host when not configured."""
@@ -33,7 +33,7 @@ class TestInitialization:
         assert call_kwargs["base_url"] == DEFAULT_OLLAMA_HOST
         assert call_kwargs["api_key"] == "ollama"
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_initialize_custom_host(self, mock_anthropic, mock_get):
         """Should use custom host from config."""
@@ -48,7 +48,7 @@ class TestInitialization:
         # SDK adds /v1/messages to base_url, so we pass host directly
         assert call_kwargs["base_url"] == "http://remote:11434"
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     @patch.dict('os.environ', {'OLLAMA_HOST': 'http://envhost:11434'})
     def test_initialize_host_from_env(self, mock_anthropic, mock_get):
@@ -61,11 +61,11 @@ class TestInitialization:
 
         assert provider._host == "http://envhost:11434"
 
-    @patch('requests.get')
+    @patch('httpx.get')
     def test_initialize_connection_error(self, mock_get):
         """Should raise OllamaConnectionError if server not running."""
-        import requests
-        mock_get.side_effect = requests.exceptions.ConnectionError()
+        import httpx
+        mock_get.side_effect = httpx.ConnectError("Connection refused")
 
         provider = OllamaProvider()
         with pytest.raises(OllamaConnectionError) as exc_info:
@@ -74,7 +74,7 @@ class TestInitialization:
         assert DEFAULT_OLLAMA_HOST in str(exc_info.value)
         assert "ollama serve" in str(exc_info.value)
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_caching_disabled(self, mock_anthropic, mock_get):
         """Should have caching disabled (not supported by Ollama)."""
@@ -87,7 +87,7 @@ class TestInitialization:
         # Should still be disabled
         assert provider._enable_caching is False
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_thinking_disabled(self, mock_anthropic, mock_get):
         """Should have thinking disabled (not supported by Ollama)."""
@@ -104,7 +104,7 @@ class TestInitialization:
 class TestConnection:
     """Tests for model connection."""
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_connect_existing_model(self, mock_anthropic, mock_get):
         """Should connect to an existing model."""
@@ -123,7 +123,7 @@ class TestConnection:
         assert provider.model_name == "qwen3:32b"
         assert provider.is_connected is True
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_connect_nonexistent_model(self, mock_anthropic, mock_get):
         """Should raise OllamaModelNotFoundError for missing model."""
@@ -141,7 +141,7 @@ class TestConnection:
         assert "nonexistent" in str(exc_info.value)
         assert "ollama pull" in str(exc_info.value)
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_connect_with_latest_tag(self, mock_anthropic, mock_get):
         """Should connect when model has :latest tag in Ollama."""
@@ -156,7 +156,7 @@ class TestConnection:
 
         assert provider.model_name == "llama3"
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_connect_memory_error(self, mock_anthropic, mock_get):
         """Should raise RuntimeError with helpful message on memory error."""
@@ -185,7 +185,7 @@ class TestConnection:
 class TestModelListing:
     """Tests for model listing."""
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_list_models(self, mock_anthropic, mock_get):
         """Should list all available models."""
@@ -205,7 +205,7 @@ class TestModelListing:
         assert len(models) == 3
         assert "qwen3:32b" in models
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_list_models_with_prefix(self, mock_anthropic, mock_get):
         """Should filter models by prefix."""
@@ -229,7 +229,7 @@ class TestModelListing:
 class TestContextLimit:
     """Tests for context limit handling."""
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_default_context_limit(self, mock_anthropic, mock_get):
         """Should return default context limit."""
@@ -241,7 +241,7 @@ class TestContextLimit:
 
         assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_custom_context_limit(self, mock_anthropic, mock_get):
         """Should use custom context limit from config."""
@@ -257,7 +257,7 @@ class TestContextLimit:
 class TestVerifyAuth:
     """Tests for auth verification."""
 
-    @patch('requests.get')
+    @patch('httpx.get')
     @patch('anthropic.Anthropic')
     def test_verify_auth_success(self, mock_anthropic, mock_get):
         """Should return True when Ollama is accessible."""
@@ -273,11 +273,11 @@ class TestVerifyAuth:
         assert result is True
         assert any("Connected" in m for m in messages)
 
-    @patch('requests.get')
+    @patch('httpx.get')
     def test_verify_auth_failure(self, mock_get):
         """Should return False when Ollama is not accessible."""
-        import requests
-        mock_get.side_effect = requests.exceptions.ConnectionError()
+        import httpx
+        mock_get.side_effect = httpx.ConnectError("Connection refused")
 
         provider = OllamaProvider()
         provider._host = DEFAULT_OLLAMA_HOST

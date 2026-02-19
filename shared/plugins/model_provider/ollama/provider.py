@@ -21,7 +21,7 @@ Environment variables:
 import logging
 from typing import Any, Dict, List, Optional
 
-import requests
+import httpx
 
 from ..anthropic.provider import AnthropicProvider
 from ..base import ProviderConfig
@@ -166,13 +166,13 @@ class OllamaProvider(AnthropicProvider):
     def _verify_connectivity(self) -> None:
         """Verify Ollama server is running and accessible."""
         try:
-            response = requests.get(f"{self._host}/api/tags", timeout=5)
+            response = httpx.get(f"{self._host}/api/tags", timeout=5)
             response.raise_for_status()
-        except requests.exceptions.ConnectionError:
+        except httpx.ConnectError:
             raise OllamaConnectionError(self._host)
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             raise OllamaConnectionError(self._host, "Connection timed out")
-        except requests.exceptions.RequestException as e:
+        except httpx.HTTPError as e:
             raise OllamaConnectionError(self._host, str(e))
 
     def _verify_model_responds(self) -> None:
@@ -212,12 +212,12 @@ class OllamaProvider(AnthropicProvider):
             True if Ollama server is accessible.
         """
         try:
-            response = requests.get(f"{self._host}/api/tags", timeout=5)
+            response = httpx.get(f"{self._host}/api/tags", timeout=5)
             response.raise_for_status()
             if on_message:
                 on_message(f"Connected to Ollama at {self._host}")
             return True
-        except requests.exceptions.RequestException:
+        except httpx.HTTPError:
             if on_message:
                 on_message(f"Cannot connect to Ollama at {self._host}")
             return False
@@ -264,11 +264,11 @@ class OllamaProvider(AnthropicProvider):
     def _get_local_models(self) -> List[str]:
         """Get list of models available in Ollama."""
         try:
-            response = requests.get(f"{self._host}/api/tags", timeout=10)
+            response = httpx.get(f"{self._host}/api/tags", timeout=10)
             response.raise_for_status()
             data = response.json()
             return [model["name"] for model in data.get("models", [])]
-        except requests.exceptions.RequestException as e:
+        except httpx.HTTPError as e:
             logger.warning(f"Failed to list Ollama models: {e}")
             return []
 

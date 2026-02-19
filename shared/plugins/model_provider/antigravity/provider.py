@@ -19,7 +19,7 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import requests
+import httpx
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -611,7 +611,7 @@ class AntigravityProvider:
 
         return False
 
-    def _handle_api_error(self, response: requests.Response) -> None:
+    def _handle_api_error(self, response: httpx.Response) -> None:
         """Handle API error responses.
 
         Args:
@@ -663,8 +663,12 @@ class AntigravityProvider:
         request_body: Dict[str, Any],
         streaming: bool = False,
         cancel_token: Optional[CancelToken] = None,
-    ) -> requests.Response:
+    ) -> httpx.Response:
         """Make an API request with retry logic.
+
+        Uses ``get_httpx_client()`` for unified proxy/SSL/Kerberos
+        configuration.  For streaming requests the response body is not
+        eagerly consumed — the caller iterates and closes.
 
         Args:
             request_body: The request body.
@@ -699,32 +703,47 @@ class AntigravityProvider:
                 else:
                     url = f"{endpoint}/v1beta/models/{self._api_model}:generateContent"
 
-                from shared.http import get_requests_kwargs
-                proxy_kwargs = get_requests_kwargs(url)
+                from shared.http import get_httpx_client
 
-                response = requests.post(
-                    url,
-                    json=request_body,
-                    headers=headers,
-                    timeout=120,
-                    stream=streaming,
-                    **proxy_kwargs,
-                )
+                # For streaming, we must NOT close the client before the
+                # caller finishes iterating — so avoid the context manager.
+                client = get_httpx_client(timeout=120.0)
+                try:
+                    if streaming:
+                        req = client.build_request(
+                            "POST", url, json=request_body, headers=headers,
+                        )
+                        response = client.send(req, stream=True)
+                    else:
+                        response = client.post(
+                            url, json=request_body, headers=headers,
+                        )
 
-                if response.status_code == 200:
-                    return response
+                    if response.status_code == 200:
+                        return response
 
-                # Handle specific errors that shouldn't trigger endpoint rotation
-                if response.status_code in (401, 403, 429):
-                    self._handle_api_error(response)
+                    # Eagerly read the body for non-200 so we can inspect it
+                    if streaming:
+                        response.read()
 
-                last_error = APIError(
-                    message=f"Request failed ({response.status_code})",
-                    status_code=response.status_code,
-                    response_body=response.text,
-                )
+                    # Handle specific errors that shouldn't trigger endpoint rotation
+                    if response.status_code in (401, 403, 429):
+                        self._handle_api_error(response)
 
-            except requests.exceptions.RequestException as e:
+                    last_error = APIError(
+                        message=f"Request failed ({response.status_code})",
+                        status_code=response.status_code,
+                        response_body=response.text,
+                    )
+                except httpx.HTTPError:
+                    raise
+                except AntigravityProviderError:
+                    raise
+                except Exception:
+                    client.close()
+                    raise
+
+            except httpx.HTTPError as e:
                 last_error = EndpointError(f"Request failed: {e}", tried_endpoints=[endpoint])
 
         if last_error:
@@ -1051,7 +1070,7 @@ class AntigravityProvider:
 
     def _process_stream(
         self,
-        response: requests.Response,
+        response: httpx.Response,
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
@@ -1060,7 +1079,7 @@ class AntigravityProvider:
         """Process a streaming SSE response.
 
         Args:
-            response: The HTTP response object.
+            response: The HTTP response object (streamed, not yet consumed).
             on_chunk: Callback for text chunks.
             cancel_token: Optional cancellation token.
             on_usage_update: Callback for usage updates.
@@ -1077,7 +1096,7 @@ class AntigravityProvider:
         function_calls: List[FunctionCall] = []
 
         try:
-            for line in response.iter_lines(decode_unicode=True):
+            for line in response.iter_lines():
                 if cancel_token and cancel_token.is_cancelled:
                     # Flush accumulated text before returning
                     if accumulated_text:
@@ -1138,7 +1157,7 @@ class AntigravityProvider:
                 if chunk_finish:
                     finish_reason = chunk_finish
 
-        except requests.exceptions.RequestException as e:
+        except httpx.HTTPError as e:
             raise StreamingError(f"Stream error: {e}")
 
         # Flush remaining text
