@@ -115,6 +115,15 @@ def _get_ssl_verify_value():
             "Do not use this in production.",
             ENV_JAATO_SSL_VERIFY,
         )
+        # Suppress urllib3's per-request InsecureRequestWarning — we already
+        # logged the warning once above and repeating it on every HTTP call
+        # just adds noise.
+        import warnings
+        try:
+            from urllib3.exceptions import InsecureRequestWarning
+            warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        except ImportError:
+            pass
         return False
 
     from shared.ssl_helper import active_cert_bundle
