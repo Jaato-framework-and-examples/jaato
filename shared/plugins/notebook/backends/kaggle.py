@@ -39,7 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
+import httpx
 
 from .base import NotebookBackend
 from ..types import (
@@ -155,13 +155,11 @@ class KaggleBackend(NotebookBackend):
         auth_type = 'Bearer' if 'Bearer' in str(headers) else 'Basic' if 'Basic' in str(headers) else 'none'
         self._trace(f"REST status API: {url} (auth: {auth_type})")
 
-        from shared.http import get_requests_kwargs
-        proxy_kwargs = get_requests_kwargs(url)
-        if 'headers' in proxy_kwargs:
-            headers.update(proxy_kwargs.pop('headers'))
+        from shared.http import get_httpx_client
 
         try:
-            resp = requests.get(url, headers=headers, timeout=30, **proxy_kwargs)
+            with get_httpx_client(timeout=30.0) as client:
+                resp = client.get(url, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 status = data.get("status") or data.get("result", {}).get("status")
@@ -192,55 +190,50 @@ class KaggleBackend(NotebookBackend):
         headers = self._get_auth_headers()
         self._trace(f"REST output API: {url}")
 
-        from shared.http import get_requests_kwargs
-        proxy_kwargs = get_requests_kwargs(url)
-        if 'headers' in proxy_kwargs:
-            headers.update(proxy_kwargs.pop('headers'))
+        from shared.http import get_httpx_client
 
         try:
-            resp = requests.get(url, headers=headers, timeout=60, **proxy_kwargs)
-            if resp.status_code == 200:
-                # Response might be JSON with file list and download URLs
-                # or it might be the actual file content
-                content_type = resp.headers.get("Content-Type", "")
+            with get_httpx_client(timeout=60.0) as client:
+                resp = client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    # Response might be JSON with file list and download URLs
+                    # or it might be the actual file content
+                    content_type = resp.headers.get("Content-Type", "")
 
-                if "application/json" in content_type:
-                    data = resp.json()
-                    # Handle JSON response with file list
-                    files = data.get("files", [])
-                    log = data.get("log", "")
+                    if "application/json" in content_type:
+                        data = resp.json()
+                        # Handle JSON response with file list
+                        files = data.get("files", [])
+                        log = data.get("log", "")
 
-                    # Save log if present
-                    if log:
-                        log_path = os.path.join(output_dir, "output.log")
-                        with open(log_path, "w") as f:
-                            f.write(log)
+                        # Save log if present
+                        if log:
+                            log_path = os.path.join(output_dir, "output.log")
+                            with open(log_path, "w") as f:
+                                f.write(log)
+                            return True
+
+                        # Download individual files
+                        for file_info in files:
+                            file_url = file_info.get("url")
+                            file_name = file_info.get("name", "output")
+                            if file_url:
+                                file_resp = client.get(file_url, headers=headers, timeout=60)
+                                if file_resp.status_code == 200:
+                                    file_path = os.path.join(output_dir, file_name)
+                                    with open(file_path, "wb") as f:
+                                        f.write(file_resp.content)
+
+                        return len(files) > 0 or bool(log)
+                    else:
+                        # Binary content - save directly
+                        output_path = os.path.join(output_dir, "output.log")
+                        with open(output_path, "wb") as f:
+                            f.write(resp.content)
                         return True
-
-                    # Download individual files
-                    for file_info in files:
-                        file_url = file_info.get("url")
-                        file_name = file_info.get("name", "output")
-                        if file_url:
-                            file_proxy_kwargs = get_requests_kwargs(file_url)
-                            if 'headers' in file_proxy_kwargs:
-                                headers.update(file_proxy_kwargs.pop('headers'))
-                            file_resp = requests.get(file_url, headers=headers, timeout=60, **file_proxy_kwargs)
-                            if file_resp.status_code == 200:
-                                file_path = os.path.join(output_dir, file_name)
-                                with open(file_path, "wb") as f:
-                                    f.write(file_resp.content)
-
-                    return len(files) > 0 or bool(log)
                 else:
-                    # Binary content - save directly
-                    output_path = os.path.join(output_dir, "output.log")
-                    with open(output_path, "wb") as f:
-                        f.write(resp.content)
-                    return True
-            else:
-                self._trace(f"REST output API error: {resp.status_code} {resp.text[:200]}")
-                return False
+                    self._trace(f"REST output API error: {resp.status_code} {resp.text[:200]}")
+                    return False
         except Exception as e:
             self._trace(f"REST output API request failed: {e}")
             return False
