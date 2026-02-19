@@ -161,6 +161,12 @@ class SessionManager:
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
 
+        # Callback invoked when a client is assigned to a session.
+        # Called with (client_id, session_id) BEFORE the SessionInfoEvent is
+        # emitted, so that the IPC server knows the mapping before the client
+        # receives the event and potentially sends a follow-up request.
+        self._on_client_session_assigned: Optional[Callable[[str, str], None]] = None
+
         # Workspace file monitors keyed by session_id
         self._workspace_monitors: Dict[str, WorkspaceMonitor] = {}
 
@@ -200,6 +206,32 @@ class SessionManager:
             callback: Called with (client_id, event) for each event.
         """
         self._event_callback = callback
+
+    def set_client_session_assigned_callback(
+        self,
+        callback: Callable[[str, str], None],
+    ) -> None:
+        """Set callback invoked when a client is assigned to a session.
+
+        The callback is called with (client_id, session_id) BEFORE the
+        SessionInfoEvent is emitted to the client.  This allows the IPC
+        server to update its client-session mapping so that any follow-up
+        request the client sends after receiving the SessionInfoEvent will
+        already have the session_id available on the server side.
+
+        Args:
+            callback: Called with (client_id, session_id).
+        """
+        self._on_client_session_assigned = callback
+
+    def _notify_client_session_assigned(self, client_id: str, session_id: str) -> None:
+        """Notify that a client has been assigned to a session.
+
+        Called internally before emitting SessionInfoEvent so the IPC
+        server's client record is updated before the client can respond.
+        """
+        if self._on_client_session_assigned:
+            self._on_client_session_assigned(client_id, session_id)
 
     def _emit_to_client(self, client_id: str, event: Event) -> None:
         """Emit an event to a specific client."""
@@ -646,6 +678,11 @@ class SessionManager:
         # Note: We don't call emit_current_state() here because the client
         # already received all events during initialize() via direct emission.
 
+        # Notify IPC server of the client-session mapping BEFORE emitting
+        # SessionInfoEvent so any follow-up request from the client will
+        # already have the session_id available on the server side.
+        self._notify_client_session_assigned(client_id, session_id)
+
         # Send SessionInfoEvent to confirm session creation.  When auth is
         # pending the tool/model lists may be incomplete, but the client
         # needs the session_id immediately.  on_auth_complete() will send
@@ -802,6 +839,11 @@ class SessionManager:
                 skip_session_info=True,
                 clear_stale_pending_requests=True
             )
+
+        # Notify IPC server of the client-session mapping BEFORE emitting
+        # SessionInfoEvent so any follow-up request from the client will
+        # already have the session_id available on the server side.
+        self._notify_client_session_assigned(client_id, session_id)
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
@@ -1647,6 +1689,10 @@ class SessionManager:
                         lambda e: self._emit_to_client(client_id, e),
                         skip_session_info=True
                     )
+                    # Notify IPC server of the client-session mapping BEFORE
+                    # emitting SessionInfoEvent so any follow-up request from
+                    # the client will already have the session_id available.
+                    self._notify_client_session_assigned(client_id, session.session_id)
                     # Send complete SessionInfoEvent with state snapshot
                     self._emit_to_client(client_id, self._build_session_info_event(session))
                     return session.session_id

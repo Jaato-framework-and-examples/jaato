@@ -191,6 +191,14 @@ class JaatoDaemon:
         # Set up event routing
         self._session_manager.set_event_callback(self._route_event)
 
+        # Set up early client-session mapping so the IPC server knows the
+        # session_id before SessionInfoEvent reaches the client.  Without
+        # this, a fast client could send a follow-up request before
+        # set_client_session() is called in the command handler.
+        self._session_manager.set_client_session_assigned_callback(
+            self._assign_client_session
+        )
+
         # Discover session-independent plugins (auth plugins).
         # These are loaded at daemon startup so their commands are available
         # before any session/provider connection exists.
@@ -411,8 +419,10 @@ class JaatoDaemon:
                         session_env=session_env,
                     )
                     logger.info(f"Session {new_session_id} created and context set")
-                    if self._ipc_server:
-                        self._ipc_server.set_client_session(client_id, new_session_id)
+                    # Note: set_client_session is now called inside
+                    # SessionManager.create_session() via the
+                    # client_session_assigned callback, before
+                    # SessionInfoEvent is emitted.
                 else:
                     self._hint_available_auth_providers(client_id)
                 return
@@ -474,8 +484,9 @@ class JaatoDaemon:
                             set_logging_context(
                                 session_env=attached.server.get_all_session_env(),
                             )
-                        if self._ipc_server:
-                            self._ipc_server.set_client_session(client_id, target_session_id)
+                        # Note: set_client_session is now called inside
+                        # SessionManager.attach_session() via the
+                        # client_session_assigned callback.
                 return
 
             elif cmd == "session.list":
@@ -516,8 +527,9 @@ class JaatoDaemon:
                             workspace_path=workspace_path,
                             session_env=default_session.server.get_all_session_env(),
                         )
-                    if self._ipc_server:
-                        self._ipc_server.set_client_session(client_id, default_session_id)
+                    # Note: set_client_session is now called inside
+                    # SessionManager.get_or_create_default() via the
+                    # client_session_assigned callback.
                 else:
                     # Session creation failed (e.g., missing MODEL_NAME).
                     # List available auth providers so the user knows how to
@@ -700,8 +712,8 @@ class JaatoDaemon:
                 # User chose to switch to session's workspace
                 # Attach without passing workspace_path (use session's workspace)
                 if self._session_manager.attach_session(client_id, target_session_id):
-                    if self._ipc_server:
-                        self._ipc_server.set_client_session(client_id, target_session_id)
+                    # Note: set_client_session is called inside
+                    # attach_session() via the callback.
                     self._route_event(client_id, WorkspaceMismatchResolvedEvent(
                         request_id=event.request_id,
                         session_id=target_session_id,
@@ -774,6 +786,16 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server.queue_event(client_id, event)
         # WebSocket routing would be added here
+
+    def _assign_client_session(self, client_id: str, session_id: str) -> None:
+        """Assign a client to a session on the IPC server.
+
+        Called by SessionManager BEFORE emitting SessionInfoEvent so the
+        IPC server's client record has the session_id set before the client
+        can react to the event and send follow-up requests.
+        """
+        if self._ipc_server:
+            self._ipc_server.set_client_session(client_id, session_id)
 
     def _discover_daemon_plugins(self) -> None:
         """Discover session-independent plugins at daemon startup.
@@ -1025,8 +1047,8 @@ class JaatoDaemon:
                     client_id=client_id,
                     workspace_path=workspace_path,
                 )
-                if self._ipc_server:
-                    self._ipc_server.set_client_session(client_id, session_id)
+                # Note: set_client_session is called inside
+                # create_session() via the callback.
 
                 self._route_event(client_id, SystemMessageEvent(
                     message=f"Session created with {provider_name} / {model_name}",
