@@ -30,6 +30,23 @@ When invoked without a subcommand, defaults to `status`.
 | [`policies`](#policies) | File-based prerequisite policy management |
 | [`behavior`](#behavior) | Model behavioral profile analysis |
 
+### Shortcut Subcommands vs. Settings
+
+Three subcommands — `recovery`, `nudge`, and `model` — are **convenience shortcuts** into values that also live in `settings`. They modify the same underlying state:
+
+| Shortcut Command | Equivalent Setting | Stored In |
+|------------------|--------------------|-----------|
+| `reliability recovery auto` | `recovery_mode = auto` | `reliability.json` |
+| `reliability recovery ask` | `recovery_mode = ask` | `reliability.json` |
+| `reliability nudge off\|gentle\|direct\|full` | `nudge_level = ...` | `reliability.json` |
+| `reliability model suggest\|auto\|disabled` | `model_switch_strategy = ...` | `reliability.json` |
+
+All three write to session state. `reliability settings show` will reflect the value set by any of them. `reliability settings save workspace` will persist all of them at once.
+
+The shortcut subcommands exist because `reliability nudge gentle` is more ergonomic than remembering the setting name, and they bundle extra context (e.g., `nudge status` shows injection history, `model status` shows per-model reliability data) that `settings show` doesn't.
+
+**Important:** the shortcuts set session-level overrides. They do **not** auto-persist to disk. To make a change permanent, either use the shortcut's own `save` argument (e.g., `reliability recovery auto save workspace`) or use `reliability settings save workspace` to persist all current session values.
+
 ---
 
 ## status
@@ -65,6 +82,8 @@ Reliability Status:
 ## recovery
 
 View or set the recovery mode, which controls how escalated tools return to the trusted state.
+
+> **Shortcut into `settings`.** `reliability recovery auto|ask` sets `recovery_mode` in session state — the same value shown by `reliability settings show`. See [Shortcut Subcommands vs. Settings](#shortcut-subcommands-vs-settings).
 
 ```
 reliability recovery
@@ -166,6 +185,8 @@ Displays:
 View, save, or clear reliability **runtime settings** across persistence levels.
 
 > **Interacts with `policies`.** Settings and policies use different files but share the nudge domain: policies define *what* nudges say and *when* patterns fire, while settings control *which* nudge types are actually delivered. See [Cross-File Interactions](#cross-file-interactions).
+>
+> **Shared with shortcut subcommands.** The values in this bag (`nudge_level`, `recovery_mode`, `model_switch_strategy`) are also set by `reliability nudge`, `reliability recovery`, and `reliability model`. Those shortcuts write session-level overrides that `settings show` reflects and `settings save` persists. See [Shortcut Subcommands vs. Settings](#shortcut-subcommands-vs-settings).
 
 ```
 reliability settings
@@ -205,6 +226,8 @@ Settings are resolved in this order (highest to lowest priority):
 ## model
 
 Manage model-specific reliability tracking and model switching behavior.
+
+> **Shortcut into `settings`.** `reliability model suggest|auto|disabled` sets `model_switch_strategy` in session state — the same value shown by `reliability settings show`. See [Shortcut Subcommands vs. Settings](#shortcut-subcommands-vs-settings).
 
 ```
 reliability model
@@ -335,6 +358,8 @@ Severity escalates automatically as the same pattern repeats within a session.
 ## nudge
 
 Control the intensity of nudge injection — the mechanism that injects guidance into the model's context when patterns are detected.
+
+> **Shortcut into `settings`.** `reliability nudge <level>` sets `nudge_level` in session state — the same value shown by `reliability settings show`. See [Shortcut Subcommands vs. Settings](#shortcut-subcommands-vs-settings).
 
 ```
 reliability nudge
