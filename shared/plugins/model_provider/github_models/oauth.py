@@ -133,7 +133,8 @@ def _make_request(
     """Make HTTP POST request and return JSON response.
 
     Uses the shared httpx client which handles proxy configuration,
-    Kerberos/SPNEGO authentication, and JAATO_NO_PROXY exact host matching.
+    SSL certificate bundles, Kerberos/SPNEGO authentication, and
+    JAATO_NO_PROXY exact host matching.
 
     Args:
         url: Request URL.
@@ -174,6 +175,9 @@ def _make_request(
             error_msg = error_body
         raise RuntimeError(f"HTTP {e.response.status_code}: {error_msg}") from e
     except httpx.HTTPError as e:
+        from shared.ssl_helper import is_ssl_cert_failure, log_ssl_guidance
+        if is_ssl_cert_failure(e):
+            log_ssl_guidance("GitHub OAuth", e)
         raise RuntimeError(f"Request failed: {e}") from e
 
 
@@ -184,7 +188,8 @@ def _make_get_request(
     """Make HTTP GET request and return JSON response.
 
     Uses the shared httpx client which handles proxy configuration,
-    Kerberos/SPNEGO authentication, and JAATO_NO_PROXY exact host matching.
+    SSL certificate bundles, Kerberos/SPNEGO authentication, and
+    JAATO_NO_PROXY exact host matching.
 
     Args:
         url: Request URL.
@@ -220,6 +225,9 @@ def _make_get_request(
             error_msg = error_body
         raise RuntimeError(f"HTTP {e.response.status_code}: {error_msg}") from e
     except httpx.HTTPError as e:
+        from shared.ssl_helper import is_ssl_cert_failure, log_ssl_guidance
+        if is_ssl_cert_failure(e):
+            log_ssl_guidance("GitHub OAuth", e)
         raise RuntimeError(f"Request failed: {e}") from e
 
 

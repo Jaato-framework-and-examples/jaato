@@ -328,6 +328,9 @@ class CopilotClient:
 
             raise RuntimeError(f"Copilot API error (HTTP {status_code}): {error_msg}{diagnostic}") from e
         except requests.exceptions.RequestException as e:
+            from shared.ssl_helper import is_ssl_cert_failure, log_ssl_guidance
+            if is_ssl_cert_failure(e):
+                log_ssl_guidance("Copilot API", e)
             raise RuntimeError(f"Copilot API request failed: {e}") from e
 
     def list_models(self) -> List[str]:

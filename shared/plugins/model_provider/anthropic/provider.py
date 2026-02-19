@@ -282,10 +282,9 @@ class AnthropicProvider:
     def _create_http_client(self) -> Optional[Any]:
         """Create a custom httpx client if proxy or SSL configuration is needed.
 
-        Returns an httpx.Client configured with:
-        - Corporate CA certificates (via REQUESTS_CA_BUNDLE / SSL_CERT_FILE)
-        - Kerberos/SPNEGO proxy authentication (via JAATO_KERBEROS_PROXY)
-        - Standard proxy env vars (HTTPS_PROXY, HTTP_PROXY)
+        Returns an httpx.Client configured with corporate CA certificates,
+        Kerberos/SPNEGO proxy auth, and standard proxy env vars — all handled
+        centrally by ``get_httpx_client()``.
 
         Returns None if no custom configuration is needed, letting the
         Anthropic SDK create its own default client.
@@ -304,11 +303,7 @@ class AnthropicProvider:
         if not ca_bundle and not kerberos_enabled and not proxy_url:
             return None  # Let SDK create its own client with default settings
 
-        kwargs = {}
-        if ca_bundle:
-            kwargs["verify"] = ca_bundle
-
-        return get_httpx_client(**kwargs)
+        return get_httpx_client()
 
     def _create_client(self):
         """Create Anthropic client with appropriate auth method.
