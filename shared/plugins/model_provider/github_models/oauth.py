@@ -179,6 +179,19 @@ def _make_request(
         if is_ssl_cert_failure(e):
             log_ssl_guidance("GitHub OAuth", e)
         raise RuntimeError(f"Request failed: {e}") from e
+    except OSError as e:
+        # Catch filesystem errors (e.g., SSL cert bundle file not found).
+        # httpx raises FileNotFoundError when the verify= path doesn't exist,
+        # and this is not a subclass of httpx.HTTPError.
+        from shared.ssl_helper import active_cert_bundle
+        ca = active_cert_bundle()
+        if ca and not os.path.isfile(ca):
+            raise RuntimeError(
+                f"SSL CA bundle file not found: {ca} "
+                f"(set via REQUESTS_CA_BUNDLE or SSL_CERT_FILE). "
+                f"Remove or fix this environment variable to resolve the issue."
+            ) from e
+        raise RuntimeError(f"Request failed (OS error): {e}") from e
 
 
 def _make_get_request(
@@ -229,6 +242,17 @@ def _make_get_request(
         if is_ssl_cert_failure(e):
             log_ssl_guidance("GitHub OAuth", e)
         raise RuntimeError(f"Request failed: {e}") from e
+    except OSError as e:
+        # Catch filesystem errors (e.g., SSL cert bundle file not found).
+        from shared.ssl_helper import active_cert_bundle
+        ca = active_cert_bundle()
+        if ca and not os.path.isfile(ca):
+            raise RuntimeError(
+                f"SSL CA bundle file not found: {ca} "
+                f"(set via REQUESTS_CA_BUNDLE or SSL_CERT_FILE). "
+                f"Remove or fix this environment variable to resolve the issue."
+            ) from e
+        raise RuntimeError(f"Request failed (OS error): {e}") from e
 
 
 def exchange_oauth_for_copilot_token(oauth_token: str) -> CopilotToken:
