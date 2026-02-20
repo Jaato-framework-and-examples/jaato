@@ -234,7 +234,7 @@ OLLAMA_MODEL=qwen3:32b</code></pre>
         <div class="panel-code">
           <div class="code-label">basic_example.py</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
@@ -288,7 +288,7 @@ print(response)  # "4"</code></pre>
         <div class="panel-code">
           <div class="code-label">with_tools.py</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env

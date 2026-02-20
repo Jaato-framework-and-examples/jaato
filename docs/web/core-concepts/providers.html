@@ -111,7 +111,7 @@
         <div class="panel-code">
           <div class="code-label">Provider-agnostic code</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, Message, Role
+            <pre><code class="language-python">from jaato import JaatoClient, Message, Role
 
 # Your code doesn't know which provider
 client = JaatoClient()
@@ -292,10 +292,11 @@ print(f"Loaded: {provider.name}")</code></pre>
           <div class="code-label">Provider protocol</div>
           <div class="code-block">
             <pre><code class="language-python">from typing import Protocol, List, Optional
-from shared import (
+from jaato import (
     Message, Part, ToolSchema, ToolResult,
-    ProviderResponse, ProviderConfig
+    ProviderResponse,
 )
+from shared import ProviderConfig
 
 class ModelProviderPlugin(Protocol):
     name: str
@@ -405,7 +406,7 @@ class ModelProviderPlugin(Protocol):
         <div class="panel-code">
           <div class="code-label">Streaming with cancellation</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import CancelToken, CancelledException
+            <pre><code class="language-python">from jaato import CancelToken, CancelledException
 
 # Create cancellation token
 token = CancelToken()
@@ -508,7 +509,7 @@ response = provider.send_message_streaming(
             <pre><code class="language-python"># Each provider implements type conversion.
 # Example: inside a provider implementation:
 
-from shared import Message, Part, ToolSchema, ProviderResponse
+from jaato import Message, Part, ToolSchema, ProviderResponse
 
 def to_sdk_messages(msg: Message):
     """Convert jaato Message to SDK-specific format."""
@@ -607,7 +608,7 @@ provider.connect("claude-sonnet-4-20250514")</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Via JaatoClient (recommended)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 # JaatoClient handles provider setup
 # Reads JAATO_PROVIDER and MODEL_NAME from env
@@ -652,12 +653,11 @@ client.connect()</code></pre>
           <div class="code-block">
             <pre><code class="language-python"># shared/plugins/model_provider/anthropic/provider.py
 
-from shared import (
-    ModelProviderPlugin,
-    ProviderConfig,
+from jaato import (
     ProviderResponse,
     Message, ToolSchema, ToolResult
 )
+from shared import ModelProviderPlugin, ProviderConfig
 import anthropic
 
 class AnthropicProvider:
@@ -759,7 +759,7 @@ class AnthropicProvider:
         <div class="panel-code">
           <div class="code-label">Using unified types</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import (
+            <pre><code class="language-python">from jaato import (
     Message, Part, Role,
     ToolSchema, FunctionCall, ToolResult,
     ProviderResponse, TokenUsage
@@ -785,11 +785,11 @@ tool = ToolSchema(
 
           <div class="code-label" style="margin-top: 24px;">Import patterns</div>
           <div class="code-block">
-            <pre><code class="language-python"># Recommended: import from shared
-from shared import Message, ToolSchema
+            <pre><code class="language-python"># Recommended: import from jaato (public API)
+from jaato import Message, ToolSchema
 
 # Direct import (also works)
-from shared.plugins.model_provider.types import (
+from jaato_sdk.plugins.model_provider.types import (
     Message,
     Part,
     Role,
