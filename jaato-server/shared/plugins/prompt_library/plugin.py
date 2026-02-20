@@ -265,6 +265,13 @@ class PromptLibraryPlugin:
                     entry_file=SKILL_ENTRY_FILE,
                     writable=True,
                 ),
+                # Legacy slash_command directory (read-only, superseded by prompts/skills)
+                PromptSource(
+                    path=workspace / ".jaato" / "commands",
+                    source_name="legacy-commands",
+                    entry_file=PROMPT_ENTRY_FILE,
+                    writable=False,
+                ),
                 # Claude Code interop (read-only)
                 PromptSource(
                     path=workspace / ".claude" / "skills",

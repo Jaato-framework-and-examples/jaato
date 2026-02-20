@@ -283,6 +283,8 @@ class IntrospectionPlugin:
                 "system": "Shell commands, environment, system operations",
                 "web": "Fetch URLs, web search, external API access",
                 "communication": "Ask user questions, request clarification, get input",
+                "prompt": "Reusable prompt templates and skills",
+                "MCP": "Tools from external MCP (Model Context Protocol) servers",
             }
 
             category_counts: Dict[str, int] = {}

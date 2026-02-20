@@ -143,13 +143,6 @@ A 3D rendered open book or documentation icon with small floating citation bubbl
 A 3D rendered stylized eye icon with a small image/picture frame reflected in the pupil. The iris glows with indigo (#635bff) and cyan (#00d4ff) gradients. Represents image viewing and multimodal understanding. Small @ symbol accent. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style, slight glossy finish.
 ```
 
-### 9. Slash Command Plugin (`slash_command/`)
-**Visual Concept:** Forward slash with template variables
-
-```
-A 3D rendered large forward slash (/) symbol in bold indigo (#635bff) with small template placeholder brackets {% raw %}{{ }}{% endraw %} floating nearby in cyan (#00d4ff). Represents slash command templating. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style, slight glossy finish.
-```
-
 ---
 
 ## Memory & State Management Plugins
@@ -292,8 +285,6 @@ docs/web/assets/images/plugins/
 ├── plugin-references.svg
 ├── plugin-multimodal.png
 ├── plugin-multimodal.svg
-├── plugin-slash-command.png
-├── plugin-slash-command.svg
 ├── plugin-calculator.png
 ├── plugin-calculator.svg
 ├── plugin-gc-truncate.png
@@ -349,7 +340,6 @@ If the detailed prompts produce inconsistent results, try these simplified versi
 | clarification | "3D question mark with choice bubbles, indigo cyan" |
 | references | "3D open book with citation markers, indigo style" |
 | multimodal | "3D eye with image in pupil, indigo cyan glow" |
-| slash_command | "3D forward slash with template brackets, indigo" |
 | calculator | "3D math symbols arrangement, indigo cyan" |
 | model_provider | "3D brain hub with cloud connections, indigo cyan" |
 | registry | "3D circular registry dial with plugin slots, indigo" |
