@@ -795,6 +795,7 @@ class JaatoServer:
             },
             "references": {
                 "channel_type": "queue",
+                "workspace_path": self._workspace_path,
             },
             "clarification": {
                 "channel_type": "queue",

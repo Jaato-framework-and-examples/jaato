@@ -116,8 +116,11 @@ class ReferencesPlugin:
 
         Called by PluginRegistry.set_workspace_path() when a session binds
         to a specific workspace.  Re-derives _project_root and reloads the
-        configuration so sources resolve against the workspace, not the
-        server CWD.
+        master catalog so sources resolve against the workspace.
+
+        If the plugin initialized before the workspace was known (sources=0),
+        this triggers a full catalog reload so that .jaato/references/ files
+        are discovered.
         """
         self._workspace_path = path
         # Re-derive project root from workspace
@@ -128,6 +131,34 @@ class ReferencesPlugin:
         else:
             self._project_root = str(base_path_obj)
         self._trace(f"set_workspace_path: workspace={path}, project_root={self._project_root}")
+
+        # Reload catalog if sources weren't loaded during initialize()
+        # (happens when workspace wasn't available at init time)
+        if not self._sources:
+            self._reload_catalog(path)
+
+    def _reload_catalog(self, workspace_path: str) -> None:
+        """Reload the master catalog from .jaato/references/ using the given workspace.
+
+        Called by set_workspace_path() when sources weren't loaded during
+        initialize() because the workspace wasn't available yet.
+
+        Args:
+            workspace_path: The workspace root path to scan for references.
+        """
+        try:
+            self._config = load_config(None, workspace_path=workspace_path)
+        except FileNotFoundError:
+            self._config = ReferencesConfig()
+
+        self._sources = self._config.sources
+        for source in self._sources:
+            self._resolve_source_for_context(source)
+
+        self._trace(
+            f"_reload_catalog: reloaded {len(self._sources)} sources "
+            f"from workspace={workspace_path}"
+        )
 
     def _authorize_source_path(self, source: ReferenceSource) -> None:
         """Authorize a source's path for readonly access via the sandbox plugin.
@@ -679,6 +710,8 @@ class ReferencesPlugin:
                                            automatically injected. Also applies to runtime
                                            selections via selectReferences tool and
                                            'references select' command.
+                   - workspace_path: Workspace root for resolving .jaato/references/.
+                                     Falls back to base_path, then self._workspace_path.
                    - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
@@ -691,7 +724,7 @@ class ReferencesPlugin:
 
         # Compute and store project root for path resolution
         # This is used when resolving paths for catalog sources and in _get_reference_content
-        inline_base_path = config.get("base_path") or self._workspace_path
+        inline_base_path = config.get("base_path") or config.get("workspace_path") or self._workspace_path
         if not inline_base_path:
             self._trace("initialize: no base_path in config and no workspace set — project_root will be None")
         base_path_obj = Path(inline_base_path).resolve() if inline_base_path else None
