@@ -1828,90 +1828,9 @@ class JaatoSession:
             current_tool_names.add(tool_name)
             activated.append(tool_name)
 
-            # Track activated tool schema in instruction budget with CONDITIONAL policy
-            if self._instruction_budget:
-                from .instruction_budget import GCPolicy
-                import json
-
-                try:
-                    # Estimate tokens for the tool schema
-                    schema_dict = {
-                        "name": schema.name,
-                        "description": schema.description,
-                        "parameters": schema.parameters,
-                    }
-                    schema_json = json.dumps(schema_dict, indent=2)
-                    schema_tokens = self._count_tokens(schema_json)
-
-                    # Add as child entry to PLUGIN source with CONDITIONAL policy
-                    child_key = f"discovered_tool:{tool_name}"
-                    self._instruction_budget.add_child(
-                        InstructionSource.PLUGIN,
-                        child_key,
-                        schema_tokens,
-                        GCPolicy.CONDITIONAL,  # Will be evaluated based on usage
-                        label=f"Discovered: {tool_name}",
-                        metadata={
-                            "tool_name": tool_name,
-                            "discoverability": getattr(schema, 'discoverability', 'discoverable'),
-                            "category": schema.category,
-                        }
-                    )
-                except Exception as e:
-                    # Don't fail activation if budget tracking fails
-                    logger.warning(f"Failed to track discovered tool {tool_name} in budget: {e}")
-
-        # Inject deferred system instructions for plugins whose tools
-        # are being activated for the first time.  These instructions were
-        # withheld from the initial context because the plugin had no core
-        # tools and deferred tool loading was enabled.
-        if activated and self._deferred_plugin_instructions and self._runtime.registry:
-            newly_injected_plugins: List[str] = []
-            for tool_name in activated:
-                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
-                if not plugin:
-                    continue
-                plugin_name = plugin.name
-                if plugin_name not in self._deferred_plugin_instructions:
-                    continue
-                # This plugin's instructions were deferred — inject them now
-                self._deferred_plugin_instructions.discard(plugin_name)
-                if not hasattr(plugin, 'get_system_instructions'):
-                    continue
-                instr = plugin.get_system_instructions()
-                if not instr:
-                    continue
-
-                newly_injected_plugins.append(plugin_name)
-
-                # Append to system instruction for the provider session
-                if self._system_instruction:
-                    self._system_instruction = self._system_instruction + "\n\n" + instr
-                else:
-                    self._system_instruction = instr
-
-                # Track in instruction budget
-                if self._instruction_budget:
-                    try:
-                        instr_tokens = self._count_tokens(instr)
-                        self._instruction_budget.add_child(
-                            InstructionSource.PLUGIN,
-                            plugin_name,
-                            instr_tokens,
-                            DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
-                            label=plugin_name,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to track deferred instructions for "
-                            f"{plugin_name} in budget: {e}"
-                        )
-
-            if newly_injected_plugins:
-                self._trace(
-                    f"Injected deferred system instructions for plugins: "
-                    f"{newly_injected_plugins}"
-                )
+        # --- Update budget and system instructions for activated tools ---
+        if activated and self._runtime.registry:
+            self._track_activated_tools_in_budget(activated, schema_map)
 
         # If we activated any tools, recreate the provider session
         if activated:
@@ -1922,6 +1841,109 @@ class JaatoSession:
             self._emit_instruction_budget_update()
 
         return activated
+
+    def _track_activated_tools_in_budget(
+        self,
+        activated: List[str],
+        schema_map: Dict[str, 'ToolSchema'],
+    ) -> None:
+        """Track newly-activated tools in the instruction budget.
+
+        Each tool's schema tokens are accumulated under its owning plugin's
+        budget entry.  If the plugin had its system instructions deferred
+        (because it had no core tools), those instructions are injected into
+        ``self._system_instruction`` and the budget on first discovery.
+
+        This keeps the budget panel clean: one entry per plugin, never
+        per-tool entries.
+
+        Args:
+            activated: Tool names that were just activated.
+            schema_map: Mapping of tool name to ToolSchema.
+        """
+        import json
+        from .instruction_budget import GCPolicy
+
+        registry = self._runtime.registry
+
+        # Group activated tools by their owning plugin.
+        plugin_tools: Dict[str, List[str]] = {}
+        for tool_name in activated:
+            plugin = registry.get_plugin_for_tool(tool_name)
+            if plugin:
+                plugin_tools.setdefault(plugin.name, []).append(tool_name)
+
+        for plugin_name, tool_names_in_plugin in plugin_tools.items():
+            plugin = registry.get_plugin(plugin_name)
+
+            # --- Inject deferred system instructions (once per plugin) ---
+            if plugin_name in self._deferred_plugin_instructions:
+                self._deferred_plugin_instructions.discard(plugin_name)
+                if plugin and hasattr(plugin, 'get_system_instructions'):
+                    instr = plugin.get_system_instructions()
+                    if instr:
+                        if self._system_instruction:
+                            self._system_instruction = self._system_instruction + "\n\n" + instr
+                        else:
+                            self._system_instruction = instr
+                        self._trace(
+                            f"Injected deferred system instructions for plugin: "
+                            f"{plugin_name}"
+                        )
+
+            # --- Accumulate tool schema tokens under the plugin entry ---
+            if not self._instruction_budget:
+                continue
+
+            # Sum schema tokens for all tools activated in this batch
+            batch_tokens = 0
+            for tool_name in tool_names_in_plugin:
+                schema = schema_map.get(tool_name)
+                if not schema:
+                    continue
+                try:
+                    schema_dict = {
+                        "name": schema.name,
+                        "description": schema.description,
+                        "parameters": schema.parameters,
+                    }
+                    schema_json = json.dumps(schema_dict, indent=2)
+                    batch_tokens += self._count_tokens(schema_json)
+                except Exception:
+                    pass
+
+            if batch_tokens == 0:
+                continue
+
+            # Check if the plugin already has a budget entry (e.g. from
+            # initial core tools, or a previous discovery batch).
+            plugin_entry = self._instruction_budget.get_entry(InstructionSource.PLUGIN)
+            existing = plugin_entry.children.get(plugin_name) if plugin_entry else None
+
+            if existing is not None:
+                # Accumulate into the existing entry
+                existing.tokens += batch_tokens
+            else:
+                # First time this plugin appears in the budget — create
+                # entry with instructions tokens (if any) + schema tokens.
+                instr_tokens = 0
+                if plugin and hasattr(plugin, 'get_system_instructions'):
+                    instr = plugin.get_system_instructions()
+                    if instr:
+                        instr_tokens = self._count_tokens(instr)
+
+                try:
+                    self._instruction_budget.add_child(
+                        InstructionSource.PLUGIN,
+                        plugin_name,
+                        instr_tokens + batch_tokens,
+                        DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
+                        label=plugin_name,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to track plugin {plugin_name} in budget: {e}"
+                    )
 
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
