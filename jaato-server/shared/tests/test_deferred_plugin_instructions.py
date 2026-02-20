@@ -309,6 +309,42 @@ class TestDeferredPluginInstructions:
         assert instr_after_first.count("Multi-tool plugin instructions.") == 1
 
     @patch("shared.jaato_runtime._is_deferred_tools_enabled", return_value=True)
+    def test_second_tool_accumulates_tokens_in_same_entry(self, _mock):
+        """Activating a second tool from the same plugin accumulates tokens."""
+        plugin = _make_plugin(
+            "multi_tool",
+            tools=[
+                ToolSchema(name="tool_a", description="Tool A", parameters={},
+                           discoverability="discoverable"),
+                ToolSchema(name="tool_b", description="Tool B", parameters={},
+                           discoverability="discoverable"),
+            ],
+            system_instructions="Multi-tool plugin instructions.",
+        )
+
+        session = _make_session(
+            exposed_plugins={"multi_tool": plugin},
+        )
+
+        session._populate_instruction_budget()
+        session._system_instruction = "Base."
+
+        # Activate first tool
+        session.activate_discovered_tools(["tool_a"])
+        budget = session._instruction_budget
+        plugin_entry = budget.get_entry(InstructionSource.PLUGIN)
+        tokens_after_first = plugin_entry.children["multi_tool"].tokens
+
+        # Activate second tool — tokens should increase, still one entry
+        session.activate_discovered_tools(["tool_b"])
+        tokens_after_second = plugin_entry.children["multi_tool"].tokens
+
+        assert tokens_after_second > tokens_after_first
+        # Still only one entry for the plugin, no per-tool entries
+        plugin_children_keys = list(plugin_entry.children.keys())
+        assert plugin_children_keys == ["multi_tool"]
+
+    @patch("shared.jaato_runtime._is_deferred_tools_enabled", return_value=True)
     def test_plugin_with_no_instructions_not_tracked(self, _mock):
         """Plugins with no system instructions are not added to the deferred set."""
         plugin = _make_plugin(
