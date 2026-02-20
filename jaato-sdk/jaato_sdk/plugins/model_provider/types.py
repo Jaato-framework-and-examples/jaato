@@ -60,6 +60,7 @@ TOOL_CATEGORIES = [
     "system",       # System commands, shell execution, environment
     "web",          # Web fetching, API calls, external resources
     "communication",  # User interaction, prompts, questions
+    "prompt",         # Reusable prompt templates and skills
     "MCP",          # Tools from external MCP (Model Context Protocol) servers
 ]
 

@@ -103,19 +103,6 @@ def build_file_reference_help_text() -> List[Tuple[str, str]]:
     ]
 
 
-def build_slash_command_help_text() -> List[Tuple[str, str]]:
-    """Build help text for slash commands.
-
-    Returns:
-        List of (text, style) tuples for display.
-    """
-    return [
-        ("Slash commands:", "bold"),
-        ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
-        ("  - Type / to see available commands with descriptions", "dim"),
-        ("", "dim"),
-    ]
-
 
 def build_keyboard_shortcuts_help_text() -> List[Tuple[str, str]]:
     """Build help text for keyboard shortcuts.
@@ -163,7 +150,6 @@ def build_full_help_text(server_commands: List[dict] = None) -> List[Tuple[str, 
 
     lines.extend(build_permission_help_text())
     lines.extend(build_file_reference_help_text())
-    lines.extend(build_slash_command_help_text())
     lines.extend(build_keyboard_shortcuts_help_text())
 
     return lines

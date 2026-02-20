@@ -301,7 +301,6 @@ flowchart TB
                 REFS[ReferencesPlugin<br/>plugins/references/]
                 SUB[SubagentPlugin<br/>plugins/subagent/]
                 FEDIT[FileEditPlugin<br/>plugins/file_edit/]
-                SLASH[SlashCommandPlugin<br/>plugins/slash_command/]
                 CLAR[ClarificationPlugin<br/>plugins/clarification/]
                 SESS[SessionPlugin<br/>plugins/session/]
                 TMPL[TemplatePlugin<br/>plugins/template/]
@@ -1190,12 +1189,6 @@ classDiagram
         +undoFileChange(path)
     }
 
-    class SlashCommandPlugin {
-        +name = "slash_command"
-        -commands_dir: str
-        +processCommand(command_name, args)
-    }
-
     class BackgroundPlugin {
         +name = "background"
         -registry: PluginRegistry
@@ -1267,8 +1260,7 @@ classDiagram
     ToolPlugin <|.. ReferencesPlugin
     ToolPlugin <|.. SubagentPlugin
     ToolPlugin <|.. FileEditPlugin
-    ToolPlugin <|.. SlashCommandPlugin
-    ToolPlugin <|.. MultimodalPlugin
+ToolPlugin <|.. MultimodalPlugin
     ToolPlugin <|.. TemplatePlugin
     ToolPlugin <|.. ClarificationPlugin
     SessionPlugin <|.. FileSessionPlugin
@@ -1413,8 +1405,7 @@ shared/
     ├── references/          # ReferencesPlugin (model tools + user commands)
     ├── subagent/            # SubagentPlugin (model tools + user commands)
     ├── file_edit/           # FileEditPlugin (file operations with diff approval)
-    ├── slash_command/       # SlashCommandPlugin (process /command references)
-    ├── clarification/       # ClarificationPlugin (request user input)
+├── clarification/       # ClarificationPlugin (request user input)
     │
     │   # Session Plugins (PLUGIN_KIND = "session") - NOT managed by PluginRegistry
     ├── session/             # Base types + FileSessionPlugin

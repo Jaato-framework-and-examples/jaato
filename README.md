@@ -58,7 +58,6 @@ jaato includes **20 built-in plugins** organized into categories for tool orches
 | <img src="docs/web/assets/images/plugins/plugin-file-edit.png" width="32"> | **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
 | <img src="docs/web/assets/images/plugins/plugin-references.png" width="32"> | **references** | Inject documentation sources into model context (auto or user-selected) |
 | <img src="docs/web/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
-| <img src="docs/web/assets/images/plugins/plugin-slash-command.png" width="32"> | **slash_command** | Process /commands with template variable substitution |
 
 #### Memory & State
 | | Plugin | Description |

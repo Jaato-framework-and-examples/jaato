@@ -2741,7 +2741,6 @@ class RichClient:
         from client_commands import (
             build_permission_help_text,
             build_file_reference_help_text,
-            build_slash_command_help_text,
             build_keyboard_shortcuts_help_text,
         )
 
@@ -2786,10 +2785,6 @@ class RichClient:
         help_lines.extend(build_file_reference_help_text())
         # Add extra file reference detail for direct mode
         help_lines.insert(-1, ("  Completions appear automatically as you type after @.", "dim"))
-
-        help_lines.extend(build_slash_command_help_text())
-        # Add extra slash command detail for direct mode
-        help_lines.insert(-1, ("  - Pass arguments after the command name: /review file.py", "dim"))
 
         # Direct mode extra sections
         help_lines.extend([
