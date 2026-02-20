@@ -55,6 +55,7 @@ TOOL_CATEGORIES = [
     "filesystem",   # File reading, writing, editing, navigation
     "code",         # Code editing, refactoring, analysis
     "search",       # Searching files, content, web
+    "knowledge",    # Reference sources, documentation, context retrieval
     "memory",       # Persistent memory, notes, context storage
     "coordination", # Task planning, delegation, subagents, parallel execution
     "system",       # System commands, shell execution, environment
