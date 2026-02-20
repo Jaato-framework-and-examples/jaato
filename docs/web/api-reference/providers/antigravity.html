@@ -124,7 +124,7 @@
         <div class="panel-code">
           <div class="code-label">Quick start</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 client = JaatoClient(provider_name="antigravity")
 client.connect(None, None, "antigravity-gemini-3-pro")
@@ -350,7 +350,7 @@ JAATO_ANTIGRAVITY_THINKING_BUDGET=16000</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Runtime configuration</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.types import ThinkingConfig
+            <pre><code class="language-python">from jaato_sdk.plugins.model_provider.types import ThinkingConfig
 
 if client.supports_thinking():
     client.set_thinking_config(ThinkingConfig(

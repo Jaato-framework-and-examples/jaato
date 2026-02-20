@@ -148,7 +148,8 @@
         <div class="panel-code">
           <div class="code-label">Quick start - AI Studio</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+            <pre><code class="language-python">from jaato import JaatoClient
+from shared import ProviderConfig
 
 client = JaatoClient()
 
@@ -161,7 +162,7 @@ client.connect_with_config(ProviderConfig(
 
           <div class="code-label" style="margin-top: 24px;">Quick start - Vertex AI</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 client = JaatoClient()
 
@@ -387,7 +388,8 @@ export GOOGLE_GENAI_API_KEY=AIza...your-api-key</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Use API key in code</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+            <pre><code class="language-python">from jaato import JaatoClient
+from shared import ProviderConfig
 
 client = JaatoClient()
 
@@ -490,7 +492,8 @@ gcloud auth application-default login \
 
           <div class="code-label" style="margin-top: 24px;">Use ADC in code</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+            <pre><code class="language-python">from jaato import JaatoClient
+from shared import ProviderConfig
 
 client = JaatoClient()
 
@@ -587,7 +590,8 @@ gcloud projects add-iam-policy-binding my-project \
 
           <div class="code-label" style="margin-top: 24px;">Use impersonation in code</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+            <pre><code class="language-python">from jaato import JaatoClient
+from shared import ProviderConfig
 
 client = JaatoClient()
 
@@ -691,7 +695,7 @@ client.connect(model="gemini-2.5-flash")</code></pre>
             <pre><code class="language-python"># Just set environment variables
 # Provider auto-detects credentials
 
-from shared import JaatoClient
+from jaato import JaatoClient
 
 client = JaatoClient()
 client.connect(

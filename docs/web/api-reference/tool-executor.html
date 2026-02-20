@@ -668,7 +668,8 @@ with ThreadPoolExecutor(max_workers=4) as pool:
         <div class="panel-code">
           <div class="code-label">Configuration</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolExecutor, PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
+from shared import ToolExecutor
 from shared.token_accounting import TokenLedger
 
 executor = ToolExecutor()

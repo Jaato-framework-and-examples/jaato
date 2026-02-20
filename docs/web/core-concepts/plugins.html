@@ -129,7 +129,7 @@
         <div class="panel-code">
           <div class="code-label">Plugin discovery</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
 
 registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 
@@ -299,7 +299,7 @@ my_plugin = "my_package.plugins:create_plugin"
 
           <div class="code-label" style="margin-top: 24px;">Discovery options</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
 
 registry = PluginRegistry()
 
@@ -364,7 +364,7 @@ print(registry.list_available())
         <div class="panel-code">
           <div class="code-label">Registry workflow</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
 
 registry = PluginRegistry(model_name="claude-sonnet-4-20250514")
 
@@ -540,7 +540,7 @@ for schema in schemas:
         <div class="panel-code">
           <div class="code-label">Minimal plugin</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 class WeatherPlugin:
     name = "weather"
@@ -1164,7 +1164,7 @@ if instructions:
         <div class="panel-code">
           <div class="code-label">Define user commands with parameters</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.base import (
+            <pre><code class="language-python">from jaato import (
     UserCommand,
     CommandParameter
 )

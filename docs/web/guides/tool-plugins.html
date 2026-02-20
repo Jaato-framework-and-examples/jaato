@@ -355,7 +355,7 @@ def enrich_prompt(self, prompt: str):
     Example: multimodal plugin detects @image.png
     references and adds viewImage tool context.
     """
-    from shared.plugins.base import PromptEnrichmentResult
+    from jaato_sdk.plugins.base import PromptEnrichmentResult
     # Detect patterns, add context...
     return PromptEnrichmentResult(
         prompt=prompt,  # Modified or original
@@ -892,7 +892,7 @@ def create_plugin():
 
           <div class="code-label" style="margin-top: 24px;">Using your plugin</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 # Create client and registry
 client = JaatoClient()
@@ -1024,7 +1024,7 @@ pip install -e .
 pip install jaato-plugin-weather
 
 # Plugin is now discoverable
-from shared import PluginRegistry
+from jaato import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()  # Finds your plugin!

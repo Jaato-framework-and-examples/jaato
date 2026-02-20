@@ -230,7 +230,7 @@
         <div class="panel-code">
           <div class="code-label">Basic usage</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.registry import PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()
@@ -283,7 +283,7 @@ shell_info = executors["get_environment"]({"aspect": "shell"})</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">With JaatoClient</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
