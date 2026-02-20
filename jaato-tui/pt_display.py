@@ -576,10 +576,8 @@ class PTDisplay:
         self._mouse_selection_start: Optional[int] = None  # Start Y coordinate
         self._mouse_selecting: bool = False
 
-        # Permission input filtering state
+        # Permission input state
         self._waiting_for_channel_input: bool = False
-        self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
-        self._last_valid_permission_input: str = ""  # Track last valid input for reverting
         self._saved_input_text: Optional[str] = None  # User's input text saved during permission prompts
 
         # Permission keyboard navigation state
@@ -695,17 +693,15 @@ class PTDisplay:
         terminals without bracketed paste support (MSYS2 on Windows Terminal)
         still get large pastes collapsed into placeholders.
         """
-        # In permission mode, validate input and revert if invalid
-        # Comment mode bypasses validation — user types free-text
-        if self._waiting_for_channel_input and self._valid_input_prefixes and not self._comment_mode_active:
-            current_text = self._input_buffer.text
-            if not self._is_valid_permission_input(current_text):
-                # Revert to last valid input
-                self._input_buffer.text = self._last_valid_permission_input
-                self._input_buffer.cursor_position = len(self._last_valid_permission_input)
-            else:
-                # Update last valid input
-                self._last_valid_permission_input = current_text
+        # In permission mode, block all typed input — only tab-cycling
+        # and enter/space selection are allowed.
+        # Comment mode bypasses blocking — user types free-text.
+        if (self._waiting_for_channel_input
+                and self._permission_response_options
+                and not self._comment_mode_active):
+            if self._input_buffer.text:
+                self._input_buffer.text = ""
+                self._input_buffer.cursor_position = 0
         elif self._search_mode:
             # Search mode: update search results as user types
             self._update_search()
@@ -1633,14 +1629,13 @@ class PTDisplay:
                 if self._input_callback:
                     self._input_callback(f"c:{text}")
                 return
-            # Check for permission mode - if input is empty, select focused option
-            raw_text = self._input_buffer.text
-            text = raw_text.strip()
-            if (not text and
-                getattr(self, '_waiting_for_channel_input', False) and
+            # Permission mode: always select the focused option via tab-cycling
+            if (getattr(self, '_waiting_for_channel_input', False) and
                 self._permission_response_options):
                 self._select_focused_permission_option()
                 return
+            raw_text = self._input_buffer.text
+            text = raw_text.strip()
             # Workspace panel: open selected file when input is empty
             if not text and self._workspace_captures_keys():
                 self._open_workspace_file()
@@ -3452,46 +3447,6 @@ class PTDisplay:
         if self._app and self._app.is_running:
             self._app.loop.call_later(0.1, self._advance_spinner)
 
-    def _compute_valid_prefixes(self, response_options: list) -> set:
-        """Compute all valid prefixes for the given response options.
-
-        This generates all possible prefixes of valid responses so we can
-        proactively filter input keystroke by keystroke.
-
-        Args:
-            response_options: List of PermissionResponseOption objects.
-
-        Returns:
-            Set of all valid prefixes (lowercase), including empty string.
-        """
-        prefixes = {''}  # Empty string is always valid (nothing typed yet)
-        for option in response_options:
-            # Handle both object attributes and dict keys
-            if isinstance(option, dict):
-                short = option.get('key', option.get('short', '')).lower()
-                full = option.get('label', option.get('full', '')).lower()
-            else:
-                short = getattr(option, 'short', getattr(option, 'key', '')).lower()
-                full = getattr(option, 'full', getattr(option, 'label', '')).lower()
-            # Add all prefixes of short form (e.g., "y", "a", "n")
-            for i in range(1, len(short) + 1):
-                prefixes.add(short[:i])
-            # Add all prefixes of full form (e.g., "yes", "ye", "y")
-            for i in range(1, len(full) + 1):
-                prefixes.add(full[:i])
-        return prefixes
-
-    def _is_valid_permission_input(self, text: str) -> bool:
-        """Check if text is a valid prefix for permission input.
-
-        Args:
-            text: The current input text to validate.
-
-        Returns:
-            True if text could lead to a valid response, False otherwise.
-        """
-        return text.lower() in self._valid_input_prefixes
-
     @staticmethod
     def _is_comment_option(option) -> bool:
         """Check if a permission option is the comment option.
@@ -3560,7 +3515,7 @@ class PTDisplay:
         """Toggle comment mode based on the currently focused permission option.
 
         When focus lands on the comment option, activates comment mode which:
-        - Bypasses prefix validation so the user can type free-text
+        - Allows the user to type free-text in the input buffer
         - Clears the input buffer for a fresh start
 
         When focus moves away from comment, deactivates comment mode and
@@ -3583,7 +3538,6 @@ class PTDisplay:
             self._comment_mode_active = False
             self._input_buffer.text = ""
             self._input_buffer.cursor_position = 0
-            self._last_valid_permission_input = ""
 
     def set_waiting_for_channel_input(
         self,
@@ -3616,22 +3570,19 @@ class PTDisplay:
         if waiting and response_options:
             # Permission mode: back up whatever the user was typing so it
             # can be restored after the permission prompt is resolved, then
-            # clear the buffer and set up keystroke validation.
+            # clear the buffer.  Only tab-cycling and enter/space selection
+            # are allowed — no shortcut typing.
             current_text = self._input_buffer.text
             if current_text:
                 self._saved_input_text = current_text
             self._input_buffer.text = ""
             self._input_buffer.cursor_position = 0
-            self._valid_input_prefixes = self._compute_valid_prefixes(response_options)
-            self._last_valid_permission_input = ""  # Reset for new permission prompt
             # Store options for keyboard navigation
             self._permission_response_options = response_options
             self._permission_focus_index = 0  # Default focus on first option (yes)
         elif waiting:
             # Non-permission waiting (clarification, auth, reference selection):
             # clear any stale permission state but leave the input buffer as-is
-            self._valid_input_prefixes = set()
-            self._last_valid_permission_input = ""
             self._permission_response_options = None
             self._permission_focus_index = 0
         else:
@@ -3639,8 +3590,6 @@ class PTDisplay:
             # text so they can continue composing their message
             saved = self._saved_input_text
             self._saved_input_text = None
-            self._valid_input_prefixes = set()
-            self._last_valid_permission_input = ""
             self._permission_response_options = None
             self._permission_focus_index = 0
             if saved:
