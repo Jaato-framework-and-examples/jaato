@@ -67,6 +67,7 @@
           <li><a href="claude-cli.html">Claude CLI</a></li>
           <li><a href="antigravity.html">Antigravity</a></li>
           <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
         </ul>
       </div>
 
@@ -147,6 +148,12 @@
                 <td>Available</td>
                 <td>Qwen, Llama, Mistral (local)</td>
               </tr>
+              <tr>
+                <td><strong><a href="zhipuai.html">Zhipu AI</a></strong></td>
+                <td><code>zhipuai</code></td>
+                <td>Available</td>
+                <td>GLM-5, GLM-4.7, GLM-4.6, GLM-4.5</td>
+              </tr>
             </tbody>
           </table>
 
@@ -187,6 +194,10 @@
                 <td>Access to Gemini 3</td>
                 <td>Antigravity - Google IDE backend</td>
               </tr>
+              <tr>
+                <td>GLM models / China AI</td>
+                <td>Zhipu AI - GLM-5, GLM-4.7 with chain-of-thought</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -221,7 +232,7 @@ client.connect(model="qwen3:32b")</code></pre>
 providers = discover_providers()
 print(f"Available: {list(providers.keys())}")
 # ['google_genai', 'anthropic', 'github_models',
-#  'claude_cli', 'antigravity', 'ollama']
+#  'claude_cli', 'antigravity', 'ollama', 'zhipuai']
 
 # Load a specific provider
 provider = load_provider("anthropic")
@@ -273,7 +284,7 @@ print(f"Loaded: {provider.name}")</code></pre>
             <tbody>
               <tr>
                 <td><code>JAATO_PROVIDER</code></td>
-                <td><code>anthropic</code>, <code>google_genai</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code></td>
+                <td><code>anthropic</code>, <code>google_genai</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code>, <code>zhipuai</code></td>
                 <td>Default provider for all sessions</td>
               </tr>
             </tbody>
@@ -363,6 +374,14 @@ client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env</code></pre>
             <li><strong>Features:</strong> Run models locally, no API costs, privacy</li>
             <li><strong>Best for:</strong> Privacy-sensitive use cases, offline work</li>
           </ul>
+
+          <h3>Zhipu AI</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Z.AI Anthropic-compatible API</li>
+            <li><strong>Auth:</strong> API key</li>
+            <li><strong>Features:</strong> GLM models, extended thinking, function calling</li>
+            <li><strong>Best for:</strong> GLM model access, chain-of-thought reasoning</li>
+          </ul>
         </div>
         <div class="panel-code">
           <div class="code-label">Provider capabilities</div>
@@ -397,6 +416,7 @@ print(f"Token count: {tokens}")</code></pre>
             <li><a href="google-genai.html">Google GenAI Provider</a> - GCP integration, Vertex AI</li>
             <li><a href="github-models.html">GitHub Models Provider</a> - Multi-model access, enterprise SSO</li>
             <li><a href="ollama.html">Ollama Provider</a> - Local models, no API costs</li>
+            <li><a href="zhipuai.html">Zhipu AI Provider</a> - GLM models, chain-of-thought reasoning</li>
             <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
             <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
           </ul>
@@ -413,7 +433,8 @@ print(f"Token count: {tokens}")</code></pre>
 ├── github_models/       # GitHub Models API
 ├── claude_cli/          # Claude CLI wrapper
 ├── antigravity/         # Google IDE backend
-└── ollama/              # Ollama local models</code></pre>
+├── ollama/              # Ollama local models
+└── zhipuai/             # Zhipu AI GLM models</code></pre>
           </div>
         </div>
       </section>

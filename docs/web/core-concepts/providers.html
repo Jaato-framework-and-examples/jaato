@@ -73,6 +73,7 @@
           <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
           <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
+          <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
         </ul>
       </div>
     </aside>
@@ -178,6 +179,11 @@ client = JaatoClient(provider_name="anthropic")
                 <td><code>ollama</code></td>
                 <td>Qwen, Llama, Mistral (local)</td>
               </tr>
+              <tr>
+                <td><strong><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></strong></td>
+                <td><code>zhipuai</code></td>
+                <td>GLM-5, GLM-4.7, GLM-4.6, GLM-4.5</td>
+              </tr>
             </tbody>
           </table>
 
@@ -216,7 +222,7 @@ client.connect(model="qwen3:32b")</code></pre>
 providers = discover_providers()
 print(f"Available: {list(providers.keys())}")
 # ['anthropic', 'google_genai', 'github_models',
-#  'claude_cli', 'antigravity', 'ollama']
+#  'claude_cli', 'antigravity', 'ollama', 'zhipuai']
 
 # Load a specific provider
 provider = load_provider("anthropic")
@@ -577,6 +583,7 @@ def from_sdk_response(resp) -> ProviderResponse:
               <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
               <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
               <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
+              <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
             </ul>
           </div>
         </div>
@@ -821,7 +828,8 @@ from shared.plugins.model_provider.types import (
 #   ├── github_models/   # GitHub Models API
 #   ├── claude_cli/      # Claude CLI wrapper
 #   ├── antigravity/     # Google IDE backend
-#   └── ollama/          # Ollama local models</code></pre>
+#   ├── ollama/          # Ollama local models
+#   └── zhipuai/         # Zhipu AI GLM models</code></pre>
           </div>
         </div>
       </section>
