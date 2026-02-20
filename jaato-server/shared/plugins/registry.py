@@ -1106,7 +1106,37 @@ class PluginRegistry:
                 _trace(f" Error getting streaming tools from '{plugin_name}': {exc}")
         return streaming_tools
 
-    def get_system_instructions(self, run_enrichment: bool = True) -> Optional[str]:
+    def plugin_has_core_tools(self, plugin_name: str) -> bool:
+        """Check whether a plugin has at least one tool with discoverability='core'.
+
+        Used by the runtime and session to decide whether a plugin's system
+        instructions should be included in the initial model context when
+        deferred tool loading is enabled.  Plugins whose tools are **all**
+        discoverable should have their instructions deferred until the model
+        actually discovers one of their tools.
+
+        Args:
+            plugin_name: Name of the plugin to check.
+
+        Returns:
+            True if the plugin provides at least one core tool, False otherwise.
+        """
+        plugin = self._plugins.get(plugin_name)
+        if not plugin or not hasattr(plugin, 'get_tool_schemas'):
+            return False
+        try:
+            for schema in plugin.get_tool_schemas():
+                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def get_system_instructions(
+        self,
+        run_enrichment: bool = True,
+        skip_discoverable_only: bool = False,
+    ) -> Optional[str]:
         """Combine system instructions from all exposed plugins.
 
         Collects raw system instructions from all exposed plugins, then
@@ -1116,6 +1146,10 @@ class PluginRegistry:
         Args:
             run_enrichment: If True (default), run system instruction
                 enrichment plugins after combining raw instructions.
+            skip_discoverable_only: If True, skip plugins whose tools are
+                all discoverable (no core tools).  Used when deferred tool
+                loading is enabled so that instructions for undiscovered
+                tools do not pollute the initial model context.
 
         Returns:
             Combined (and optionally enriched) system instructions string,
@@ -1124,6 +1158,8 @@ class PluginRegistry:
         instructions = []
         for name in self._exposed:
             try:
+                if skip_discoverable_only and not self.plugin_has_core_tools(name):
+                    continue
                 plugin_instructions = self._plugins[name].get_system_instructions()
                 if plugin_instructions:
                     instructions.append(plugin_instructions)
