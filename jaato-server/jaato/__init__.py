@@ -30,7 +30,14 @@ from jaato_sdk.plugins.model_provider.types import (
 
     # Attachments
     Attachment,
+
+    # Cancellation
+    CancelToken,
+    CancelledException,
 )
+
+# Presentation context for display-aware agents
+from jaato_sdk.events import PresentationContext, ClientType
 
 # Plugin base classes
 from jaato_sdk.plugins.base import UserCommand, CommandParameter
@@ -60,6 +67,14 @@ __all__ = [
 
     # Attachments
     "Attachment",
+
+    # Cancellation
+    "CancelToken",
+    "CancelledException",
+
+    # Presentation
+    "PresentationContext",
+    "ClientType",
 
     # Plugin support
     "UserCommand",

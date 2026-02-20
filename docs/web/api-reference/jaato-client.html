@@ -112,13 +112,14 @@
           </p>
 
           <div class="method-signature">
-            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoClient, JaatoRuntime, JaatoSession
+            <span class="token-keyword">from</span> jaato <span class="token-keyword">import</span> JaatoClient<br>
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoRuntime, JaatoSession
           </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Quick example</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
@@ -488,12 +489,8 @@ client.configure_tools(registry, permission_plugin, ledger)</code></pre>
         <div class="panel-code">
           <div class="code-label">Using PluginRegistry</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import (
-    JaatoClient,
-    PluginRegistry,
-    PermissionPlugin,
-    TokenLedger
-)
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
+from shared import PermissionPlugin, TokenLedger
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
@@ -521,7 +518,7 @@ client.configure_tools(
 
           <div class="code-label" style="margin-top: 24px;">Custom tools</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 # Define custom tool
 def get_weather(city: str) -> str:
@@ -659,7 +656,7 @@ print(f"\n\nFinal: {response}")</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Multimodal message</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import Part, Attachment
+            <pre><code class="language-python">from jaato import Part, Attachment
 
 # Create parts with image
 parts = [
@@ -976,7 +973,7 @@ client.delete_session(old_session_id)</code></pre>
         <div class="panel-code">
           <div class="code-label">Enable thinking mode</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.types import ThinkingConfig
+            <pre><code class="language-python">from jaato_sdk.plugins.model_provider.types import ThinkingConfig
 
 # Check support
 if client.supports_thinking():
@@ -1203,7 +1200,7 @@ if share:
           <div class="code-label">Cancellation example</div>
           <div class="code-block">
             <pre><code class="language-python">import threading
-from shared import JaatoClient, CancelledException
+from jaato import JaatoClient, CancelledException
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env

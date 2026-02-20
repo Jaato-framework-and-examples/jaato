@@ -382,7 +382,7 @@ After 10 requests: 90% savings</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Caching with tools</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 tools = [
     ToolSchema(name='search', description='...', parameters={...}),
@@ -447,7 +447,7 @@ provider.create_session(
         <div class="panel-code">
           <div class="code-label">Define and use tools</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolSchema, ToolResult
+            <pre><code class="language-python">from jaato import ToolSchema, ToolResult
 
 # Define tool with standard ToolSchema
 tools = [ToolSchema(

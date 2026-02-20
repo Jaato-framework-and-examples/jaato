@@ -138,7 +138,7 @@
         <div class="panel-code">
           <div class="code-label">Basic usage (via JaatoClient)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 # JaatoClient creates runtime internally
 client = JaatoClient()
@@ -157,7 +157,8 @@ sub_response = sub_session.send_message("Research...")</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Direct runtime usage</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoRuntime, PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
+from shared import JaatoRuntime
 
 # Create runtime directly
 runtime = JaatoRuntime(provider_name="anthropic")
@@ -360,9 +361,9 @@ if not runtime.verify_auth(allow_interactive=True):
         <div class="panel-code">
           <div class="code-label">Configure plugins</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import (
+            <pre><code class="language-python">from jaato import PluginRegistry
+from shared import (
     JaatoRuntime,
-    PluginRegistry,
     PermissionPlugin,
     TokenLedger
 )
