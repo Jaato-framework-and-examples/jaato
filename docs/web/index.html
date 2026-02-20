@@ -93,6 +93,11 @@
       --persona-color-light: #38bdf8;
     }
 
+    .persona-card.persona-enduser {
+      --persona-color: #ec4899;
+      --persona-color-light: #f472b6;
+    }
+
     .persona-icon {
       width: 56px;
       height: 56px;
@@ -442,6 +447,30 @@
 
           <a href="enterprise/index.html" class="persona-cta">
             Explore Architecture
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </a>
+        </div>
+
+        <!-- End User -->
+        <div class="persona-card persona-enduser">
+          <div class="persona-icon">🖥️</div>
+          <div class="persona-subtitle">For Users</div>
+          <h3>Using jaato TUI</h3>
+          <p>
+            Install and run jaato on your terminal. Set up a provider, authenticate,
+            configure context management, and start chatting with AI.
+          </p>
+
+          <div class="persona-what">You'll learn how to:</div>
+          <ul>
+            <li>Install from TestPyPI and launch the server + TUI</li>
+            <li>Choose an AI provider and authenticate</li>
+            <li>Configure garbage collection and sessions</li>
+            <li>Customize keybindings and themes</li>
+          </ul>
+
+          <a href="user-guide/index.html" class="persona-cta">
+            Read the User Guide
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
           </a>
         </div>
