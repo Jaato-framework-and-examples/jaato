@@ -959,10 +959,15 @@ class JaatoRuntime:
         Returns:
             Combined system instructions string, or None.
         """
+        deferred_enabled = _is_deferred_tools_enabled()
+
         if plugin_names is None:
             # Use registry's method which runs enrichment pipeline
             if self._registry:
-                plugin_instructions = self._registry.get_system_instructions(run_enrichment=True)
+                plugin_instructions = self._registry.get_system_instructions(
+                    run_enrichment=True,
+                    skip_discoverable_only=deferred_enabled,
+                )
             else:
                 plugin_instructions = self._system_instructions
         else:
@@ -973,6 +978,11 @@ class JaatoRuntime:
             parts = []
             if self._registry:
                 for name in effective_plugins:
+                    # When deferred tools are enabled, skip system instructions
+                    # from plugins that have no core tools — their instructions
+                    # will be injected when the model discovers their tools.
+                    if deferred_enabled and not self._registry.plugin_has_core_tools(name):
+                        continue
                     plugin = self._registry.get_plugin(name)
                     if plugin and hasattr(plugin, 'get_system_instructions'):
                         instr = plugin.get_system_instructions()

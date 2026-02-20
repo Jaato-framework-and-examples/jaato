@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 
@@ -237,6 +237,12 @@ class JaatoSession:
         # Injected into system instructions so the model adapts its output.
         # Set via set_presentation_context() when the client connects.
         self._presentation_context: Optional['PresentationContext'] = None
+
+        # Tracks plugin names whose system instructions were deferred because
+        # they had no core tools at session start.  When the model activates
+        # a tool from one of these plugins, the instructions are injected into
+        # the system prompt and the budget.
+        self._deferred_plugin_instructions: Set[str] = set()
 
         # Priority-aware message queue for agent communication
         # Uses double-linked list for efficient mid-queue removal of parent messages
@@ -1320,24 +1326,34 @@ class JaatoSession:
         ))
 
         # --- PLUGIN children ---
+        # When deferred tool loading is enabled, only include system
+        # instructions from plugins that have at least one core tool.
+        # Instructions for discoverable-only plugins are deferred until
+        # the model activates one of their tools via get_tool_schemas.
+
+        from .jaato_runtime import _is_deferred_tools_enabled
+        deferred_enabled = _is_deferred_tools_enabled()
 
         if self._runtime.registry:
             for plugin_name in self._runtime.registry._exposed:
+                if deferred_enabled and not self._runtime.registry.plugin_has_core_tools(plugin_name):
+                    # Remember this plugin's instructions are deferred so we
+                    # can inject them when the model discovers its tools.
+                    plugin = self._runtime.registry.get_plugin(plugin_name)
+                    if plugin and hasattr(plugin, 'get_system_instructions'):
+                        instr = plugin.get_system_instructions()
+                        if instr:
+                            self._deferred_plugin_instructions.add(plugin_name)
+                    continue
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'get_system_instructions'):
                     instr = plugin.get_system_instructions()
                     if instr:
-                        discoverability = getattr(plugin, 'discoverability', 'core')
-                        tool_type = (
-                            PluginToolType.CORE
-                            if discoverability == 'core'
-                            else PluginToolType.DISCOVERABLE
-                        )
                         requests.append(_TokenCountRequest(
                             text=instr,
                             source=InstructionSource.PLUGIN,
                             child_key=plugin_name,
-                            gc_policy=DEFAULT_TOOL_POLICIES[tool_type],
+                            gc_policy=DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
                             label=plugin_name,
                         ))
 
@@ -1777,6 +1793,11 @@ class JaatoSession:
         get_tool_schemas, this method activates them by adding their schemas
         to the provider's declared tools.
 
+        If the newly-activated tool belongs to a plugin whose system
+        instructions were deferred (because it had no core tools), those
+        instructions are injected into ``self._system_instruction`` and
+        tracked in the instruction budget at this point — not before.
+
         Args:
             tool_names: Names of tools to activate.
 
@@ -1839,6 +1860,58 @@ class JaatoSession:
                 except Exception as e:
                     # Don't fail activation if budget tracking fails
                     logger.warning(f"Failed to track discovered tool {tool_name} in budget: {e}")
+
+        # Inject deferred system instructions for plugins whose tools
+        # are being activated for the first time.  These instructions were
+        # withheld from the initial context because the plugin had no core
+        # tools and deferred tool loading was enabled.
+        if activated and self._deferred_plugin_instructions and self._runtime.registry:
+            newly_injected_plugins: List[str] = []
+            for tool_name in activated:
+                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
+                if not plugin:
+                    continue
+                plugin_name = plugin.name
+                if plugin_name not in self._deferred_plugin_instructions:
+                    continue
+                # This plugin's instructions were deferred — inject them now
+                self._deferred_plugin_instructions.discard(plugin_name)
+                if not hasattr(plugin, 'get_system_instructions'):
+                    continue
+                instr = plugin.get_system_instructions()
+                if not instr:
+                    continue
+
+                newly_injected_plugins.append(plugin_name)
+
+                # Append to system instruction for the provider session
+                if self._system_instruction:
+                    self._system_instruction = self._system_instruction + "\n\n" + instr
+                else:
+                    self._system_instruction = instr
+
+                # Track in instruction budget
+                if self._instruction_budget:
+                    try:
+                        instr_tokens = self._count_tokens(instr)
+                        self._instruction_budget.add_child(
+                            InstructionSource.PLUGIN,
+                            plugin_name,
+                            instr_tokens,
+                            DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
+                            label=plugin_name,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to track deferred instructions for "
+                            f"{plugin_name} in budget: {e}"
+                        )
+
+            if newly_injected_plugins:
+                self._trace(
+                    f"Injected deferred system instructions for plugins: "
+                    f"{newly_injected_plugins}"
+                )
 
         # If we activated any tools, recreate the provider session
         if activated:
