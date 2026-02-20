@@ -131,7 +131,7 @@
 
           <div class="code-label" style="margin-top: 24px;">Use in jaato</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
@@ -391,7 +391,7 @@ uvx mcp-server-fetch</code></pre>
         <div class="panel-code">
           <div class="code-label">List MCP tools</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import PluginRegistry
+            <pre><code class="language-python">from jaato import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()
@@ -462,7 +462,7 @@ for tool in filesystem_tools:
         <div class="panel-code">
           <div class="code-label">Model using MCP tools</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+            <pre><code class="language-python">from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env

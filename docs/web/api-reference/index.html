@@ -185,26 +185,21 @@
 
           <h2 id="imports">Import Patterns</h2>
           <p>
-            All public APIs are exported from the <code>shared</code> module.
-            Use the pattern shown on the right for clean imports.
+            Public APIs are exported from the <code>jaato</code> module.
+            Internal APIs (runtime, provider management) are in the <code>shared</code> module.
+            Use the patterns shown on the right for clean imports.
           </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Recommended imports</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import (
+            <pre><code class="language-python"># Public API (from jaato package)
+from jaato import (
     # Core client
     JaatoClient,
 
     # Plugin system
     PluginRegistry,
-    PermissionPlugin,
-
-    # Tool execution
-    ToolExecutor,
-
-    # Token accounting
-    TokenLedger,
 
     # Type system
     Message,
@@ -217,8 +212,19 @@
     TokenUsage,
     FinishReason,
     Attachment,
+    CancelToken,
+    CancelledException,
 
-    # Provider abstraction
+    # Presentation
+    PresentationContext,
+    ClientType,
+)
+
+# Internal API (from shared package)
+from shared import (
+    PermissionPlugin,
+    ToolExecutor,
+    TokenLedger,
     ModelProviderPlugin,
     ProviderConfig,
     load_provider,
@@ -229,7 +235,7 @@
           <div class="code-label" style="margin-top: 24px;">Quick reference</div>
           <div class="code-block">
             <pre><code class="language-python"># Minimal setup
-from shared import JaatoClient, PluginRegistry
+from jaato import JaatoClient, PluginRegistry
 
 client = JaatoClient()
 client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env

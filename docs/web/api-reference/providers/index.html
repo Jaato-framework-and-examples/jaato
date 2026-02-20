@@ -204,7 +204,7 @@
         <div class="panel-code">
           <div class="code-label">Using a provider</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 # Recommended: configure via .env file
 # JAATO_PROVIDER=anthropic
@@ -309,7 +309,7 @@ MODEL_NAME=openai/gpt-4o</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Explicit in code</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import JaatoClient
+            <pre><code class="language-python">from jaato import JaatoClient
 
 # Explicit provider (overrides JAATO_PROVIDER env var)
 client = JaatoClient(provider_name="anthropic")
