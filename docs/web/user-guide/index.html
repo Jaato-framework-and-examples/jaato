@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Guide - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">User Guide</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html" class="active">Getting Started</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">On This Page</div>
+        <ul class="sidebar-nav">
+          <li><a href="#installation">Installation</a></li>
+          <li><a href="#first-launch">First Launch</a></li>
+          <li><a href="#provider-selection">Provider Selection</a></li>
+          <li><a href="#authentication">Authentication</a></li>
+          <li><a href="#configuration">Configuration</a></li>
+          <li><a href="#gc-config">Context Management</a></li>
+          <li><a href="#session-management">Sessions</a></li>
+          <li><a href="#keybindings">Keybindings & Themes</a></li>
+          <li><a href="#updating">Updating</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
+          <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>User Guide</h1>
+          <p class="lead">
+            Get jaato running on your terminal. This guide walks you through
+            installing from TestPyPI, choosing an AI provider, authenticating,
+            and configuring the TUI for daily use.
+          </p>
+
+          <h2 id="overview">What You'll Learn</h2>
+          <ul>
+            <li>Installing jaato from TestPyPI (or from source)</li>
+            <li>Starting the server and connecting the TUI</li>
+            <li>Choosing and authenticating with an AI provider</li>
+            <li>Configuring context management (garbage collection)</li>
+            <li>Managing sessions, keybindings, and themes</li>
+            <li>Keeping jaato up to date</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Not a developer?</div>
+            <p>
+              This guide is for end users of the jaato TUI. If you want to
+              build applications using jaato as a library, see the
+              <a href="../getting-started/quickstart.html">Quickstart</a> instead.
+            </p>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Prerequisites</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># You'll need Python 3.10+
+python3 --version
+# Python 3.10.x or higher
+
+# And pip (usually bundled with Python)
+pip --version</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Installation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="installation">Installation</h2>
+          <p>
+            jaato is published as three packages on
+            <a href="https://test.pypi.org" target="_blank">TestPyPI</a>
+            during the alpha period:
+          </p>
+          <ul>
+            <li><strong>jaato-sdk</strong> &mdash; lightweight protocol and types</li>
+            <li><strong>jaato-server</strong> &mdash; the daemon that runs AI models and tools</li>
+            <li><strong>jaato-tui</strong> &mdash; the terminal interface you interact with</li>
+          </ul>
+          <p>
+            Install all three in a virtual environment. The
+            <code>--extra-index-url</code> flag tells pip to fetch jaato
+            packages from TestPyPI while resolving other dependencies from
+            the regular PyPI.
+          </p>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Alpha software</div>
+            <p>
+              jaato is in alpha. APIs and package structure may change between
+              releases. Pin versions in production environments.
+            </p>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Install from TestPyPI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Create a virtual environment
+python3 -m venv jaato-env
+source jaato-env/bin/activate  # Windows: jaato-env\Scripts\activate
+
+# Install all three packages from TestPyPI
+pip install \
+  --extra-index-url https://test.pypi.org/simple/ \
+  jaato-sdk jaato-server jaato-tui
+
+# Verify the install
+jaato --help
+jaato-server --help</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Alternative: install from source</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Clone the repository
+git clone https://github.com/apanoia/jaato.git
+cd jaato
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install all packages in editable mode
+pip install -e jaato-sdk/. \
+  -e "jaato-server/.[all]" \
+  -e "jaato-tui/.[all]"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- First Launch -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="first-launch">First Launch</h2>
+          <p>
+            jaato uses a server-client architecture. The <strong>server</strong>
+            runs as a background daemon and handles AI model calls, tool execution,
+            and session persistence. The <strong>TUI</strong> connects to the
+            server over a Unix socket.
+          </p>
+
+          <h3>Start the server</h3>
+          <p>
+            Launch the server with <code>--daemon</code> to run it in the
+            background. The default IPC socket path is <code>/tmp/jaato.sock</code>.
+          </p>
+
+          <h3>Connect the TUI</h3>
+          <p>
+            Once the server is running, start the TUI with
+            <code>jaato</code>. It auto-discovers the server via the
+            default socket path.
+          </p>
+
+          <h3>Server management</h3>
+          <ul>
+            <li><code>jaato-server --status</code> &mdash; check if the server is running</li>
+            <li><code>jaato-server --stop</code> &mdash; stop the daemon</li>
+            <li><code>jaato-server --restart</code> &mdash; restart with the same parameters</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Start the server</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Start as background daemon with default socket
+jaato-server --ipc-socket /tmp/jaato.sock --daemon
+
+# Or start with both local and remote access
+jaato-server \
+  --ipc-socket /tmp/jaato.sock \
+  --web-socket :8080 \
+  --daemon
+
+# Check status
+jaato-server --status</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Connect the TUI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Connect to running server (auto-discovers socket)
+jaato
+
+# Or specify socket path explicitly
+jaato --connect /tmp/jaato.sock</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Provider Selection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="provider-selection">Choosing a Provider</h2>
+          <p>
+            jaato supports multiple AI providers. Pick the one that fits your
+            needs and budget. You configure your choice in a <code>.env</code>
+            file in your project directory.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Best For</th>
+                <th>Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Google GenAI</strong></td>
+                <td>Long context, multimodal, free tier</td>
+                <td>Free tier / pay-as-you-go</td>
+              </tr>
+              <tr>
+                <td><strong>Anthropic</strong></td>
+                <td>Complex reasoning, code generation</td>
+                <td>Pay-as-you-go API</td>
+              </tr>
+              <tr>
+                <td><strong>GitHub Models</strong></td>
+                <td>Multi-model access (GPT, Claude, Gemini, Llama)</td>
+                <td>Free tier for all GitHub users</td>
+              </tr>
+              <tr>
+                <td><strong>Ollama</strong></td>
+                <td>Privacy, no API costs, runs locally</td>
+                <td>Free (your hardware)</td>
+              </tr>
+              <tr>
+                <td><strong>Claude CLI</strong></td>
+                <td>Claude Pro/Max subscribers</td>
+                <td>Included in subscription</td>
+              </tr>
+              <tr>
+                <td><strong>Antigravity</strong></td>
+                <td>Gemini 3 and Claude via Google OAuth</td>
+                <td>Free (Google IDE quota)</td>
+              </tr>
+              <tr>
+                <td><strong>Zhipu AI</strong></td>
+                <td>GLM models, chain-of-thought reasoning</td>
+                <td>Pay-as-you-go API</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            Set <code>JAATO_PROVIDER</code> and <code>MODEL_NAME</code> in your
+            <code>.env</code> file. The right-hand panel shows examples for each provider.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env &mdash; Google GenAI</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_PROVIDER=google_genai
+GOOGLE_GENAI_API_KEY=AIza...your-key
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 16px;">.env &mdash; Anthropic</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-...
+MODEL_NAME=claude-sonnet-4-20250514</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 16px;">.env &mdash; GitHub Models</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_PROVIDER=github_models
+GITHUB_TOKEN=github_pat_...
+MODEL_NAME=openai/gpt-4o</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 16px;">.env &mdash; Ollama (local)</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_PROVIDER=ollama
+MODEL_NAME=qwen3:32b
+# Requires: ollama serve && ollama pull qwen3:32b</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+          <p>
+            Some providers use simple API keys (set in <code>.env</code>),
+            while others offer interactive OAuth flows you run from the TUI.
+          </p>
+
+          <h3>API Key Providers</h3>
+          <p>
+            For <strong>Google GenAI</strong>, <strong>Anthropic</strong>,
+            <strong>GitHub Models</strong>, and <strong>Zhipu AI</strong>,
+            set the appropriate key in your <code>.env</code> file. No
+            additional auth step is required.
+          </p>
+
+          <h3>OAuth Providers</h3>
+          <p>
+            <strong>Antigravity</strong>, <strong>Anthropic (subscription)</strong>,
+            and <strong>GitHub (device code)</strong> support browser-based OAuth
+            login. Run the auth command in the TUI:
+          </p>
+          <ul>
+            <li><code>anthropic-auth login</code> &mdash; Anthropic OAuth (PKCE)</li>
+            <li><code>github-auth login</code> &mdash; GitHub device code flow</li>
+            <li><code>antigravity-auth login</code> &mdash; Google OAuth</li>
+            <li><code>zhipuai-auth login</code> &mdash; Zhipu AI API key entry</li>
+          </ul>
+          <p>
+            Tokens are stored in <code>~/.config/jaato/</code> and persist
+            across sessions. Use <code>*-auth status</code> to check your
+            current authentication state.
+          </p>
+
+          <h3>Claude CLI Provider</h3>
+          <p>
+            The Claude CLI provider delegates authentication to the Claude Code CLI.
+            Install and log in to the CLI separately:
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">OAuth login (in the TUI)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Antigravity (opens browser for Google sign-in)
+antigravity-auth login
+
+# Check status
+antigravity-auth status
+
+# Add multiple accounts for load balancing
+antigravity-auth login    # run again for each account
+antigravity-auth accounts # list all accounts</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">GitHub device code flow (in the TUI)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Start device code flow
+github-auth login
+# Opens browser with a code to enter
+
+# Poll for completion (if needed)
+github-auth poll
+
+# Check status
+github-auth status</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Claude CLI setup (in your terminal)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Install Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# Log in (uses your Claude Pro/Max subscription)
+claude login
+
+# Then in your .env:
+# JAATO_PROVIDER=claude_cli
+# MODEL_NAME=sonnet</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+          <p>
+            jaato reads configuration from a <code>.env</code> file in your
+            workspace directory and from several JSON config files under
+            <code>.jaato/</code>.
+          </p>
+
+          <h3>Configuration files</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>.env</code></td>
+                <td>Provider, model, credentials, rate limits</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/gc.json</code></td>
+                <td>Garbage collection strategy and thresholds</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/permissions.json</code></td>
+                <td>Tool permission whitelist/blacklist rules</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/keybindings.json</code></td>
+                <td>Custom keybindings (project-level)</td>
+              </tr>
+              <tr>
+                <td><code>.mcp.json</code></td>
+                <td>MCP server configuration</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>User-level config</h3>
+          <p>
+            Files in <code>~/.jaato/</code> apply across all projects:
+          </p>
+          <ul>
+            <li><code>~/.jaato/keybindings.json</code> &mdash; global keybindings</li>
+            <li><code>~/.jaato/theme.json</code> &mdash; custom theme</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Getting started quickly</div>
+            <p>
+              Copy the example file to get a documented starting point:
+              <code>cp .env.example .env</code>, then edit it with your
+              provider and credentials.
+            </p>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal .env</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># The two required variables
+JAATO_PROVIDER=google_genai
+MODEL_NAME=gemini-2.5-flash
+
+# Authentication (provider-specific)
+GOOGLE_GENAI_API_KEY=AIza...your-key</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Common optional settings</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Rate limiting (prevents 429 errors)
+AI_REQUEST_INTERVAL=0.5
+
+# Parallel tool execution (default: true)
+JAATO_PARALLEL_TOOLS=true
+
+# Deferred tool loading (default: true)
+JAATO_DEFERRED_TOOLS=true
+
+# Per-session logs
+JAATO_SESSION_LOG_DIR=.jaato/logs</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.mcp.json (MCP servers)</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "mcpServers": {
+    "Atlassian": {
+      "type": "stdio",
+      "command": "mcp-atlassian"
+    },
+    "GitHub": {
+      "type": "stdio",
+      "command": "mcp-github"
+    }
+  }
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Garbage Collection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="gc-config">Context Management (GC)</h2>
+          <p>
+            AI models have a limited context window. When a conversation grows
+            too long, jaato automatically triggers <strong>garbage collection</strong>
+            to free up space while preserving recent context.
+          </p>
+
+          <h3>GC strategies</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Strategy</th>
+                <th>Behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>truncate</code></td>
+                <td>Remove oldest conversation turns</td>
+              </tr>
+              <tr>
+                <td><code>summarize</code></td>
+                <td>Compress old turns into summaries</td>
+              </tr>
+              <tr>
+                <td><code>hybrid</code></td>
+                <td>Summarize middle turns, truncate ancient ones, keep recent</td>
+              </tr>
+              <tr>
+                <td><code>budget</code></td>
+                <td>Token budget-based cleanup</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Key thresholds</h3>
+          <ul>
+            <li><strong>Threshold</strong> (default 80%) &mdash; GC triggers when context reaches this % of the window</li>
+            <li><strong>Target</strong> (default 60%) &mdash; GC aims to reduce usage to this %</li>
+            <li><strong>Pressure</strong> (default 90%) &mdash; at this %, even "preservable" entries get evicted</li>
+          </ul>
+          <p>
+            GC can be configured via environment variables or a JSON file.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env (GC settings)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Trigger GC at 80% context usage (default)
+JAATO_GC_THRESHOLD=80.0
+
+# Target 60% usage after cleanup (default)
+JAATO_GC_TARGET=60.0
+
+# Start evicting preservable entries at 90% (default)
+JAATO_GC_PRESSURE=90.0</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.jaato/gc.json (fine-grained control)</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "type": "hybrid",
+  "threshold_percent": 80.0,
+  "target_percent": 60.0,
+  "pressure_percent": 90.0,
+  "preserve_recent_turns": 5,
+  "summarize_middle_turns": 10,
+  "notify_on_gc": true
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Continuous GC (advanced)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Set pressure to 0 for continuous GC
+# (runs every turn regardless of usage)
+JAATO_GC_PRESSURE=0</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session Management -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session-management">Session Management</h2>
+          <p>
+            jaato persists conversations to disk so you can resume them later.
+            Sessions are managed via TUI commands.
+          </p>
+
+          <h3>TUI commands</h3>
+          <ul>
+            <li><code>session list</code> &mdash; list all saved sessions</li>
+            <li><code>session new [name]</code> &mdash; start a new named session</li>
+            <li><code>session attach &lt;id&gt;</code> &mdash; resume a previous session</li>
+            <li><code>session delete &lt;id&gt;</code> &mdash; permanently remove a session</li>
+            <li><code>reset</code> &mdash; clear current conversation history</li>
+            <li><code>model &lt;name&gt;</code> &mdash; switch to a different model mid-session</li>
+          </ul>
+
+          <h3>Tool management</h3>
+          <ul>
+            <li><code>tools list</code> &mdash; show all tools and their status</li>
+            <li><code>tools enable &lt;name|all&gt;</code> &mdash; enable a tool or all tools</li>
+            <li><code>tools disable &lt;name|all&gt;</code> &mdash; disable a tool</li>
+          </ul>
+
+          <h3>Permissions</h3>
+          <p>
+            When the model wants to execute a tool, jaato asks for permission.
+            Responses:
+          </p>
+          <ul>
+            <li><code>y</code> &mdash; yes, this time</li>
+            <li><code>n</code> &mdash; no</li>
+            <li><code>a</code> &mdash; always allow this tool</li>
+            <li><code>t</code> &mdash; allow for this turn only</li>
+            <li><code>i</code> &mdash; allow until session goes idle</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Session workflow</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># List your sessions
+session list
+
+# Create a named session
+session new refactoring-auth
+
+# Later, resume it
+session attach refactoring-auth
+
+# Switch model on the fly
+model gemini-2.5-pro
+
+# Clear history and start fresh
+reset</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Permission management</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Show current permission rules
+permissions show
+
+# Whitelist a tool permanently
+permissions whitelist cli
+
+# Check permission status
+permissions status</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Keybindings & Themes -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="keybindings">Keybindings &amp; Themes</h2>
+
+          <h3>Default keybindings</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Enter</code></td><td>Submit prompt</td></tr>
+              <tr><td><code>Ctrl+C</code></td><td>Cancel current operation</td></tr>
+              <tr><td><code>Ctrl+D</code></td><td>Exit</td></tr>
+              <tr><td><code>Ctrl+P</code></td><td>Toggle plan display</td></tr>
+              <tr><td><code>Ctrl+T</code></td><td>Toggle tool display</td></tr>
+              <tr><td><code>Ctrl+G</code></td><td>Open prompt in external editor</td></tr>
+              <tr><td><code>Ctrl+F</code></td><td>Search session output</td></tr>
+              <tr><td><code>Ctrl+Y</code></td><td>Copy (yank) output to clipboard</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Custom keybindings</h3>
+          <p>
+            Override keybindings in <code>.jaato/keybindings.json</code>
+            (project) or <code>~/.jaato/keybindings.json</code> (global).
+            Key syntax follows prompt_toolkit conventions.
+          </p>
+
+          <h3>Themes</h3>
+          <p>
+            Three built-in themes: <code>dark</code> (default),
+            <code>light</code>, and <code>high-contrast</code>.
+            Switch at any time with <code>/theme</code>.
+          </p>
+          <p>
+            Create a custom theme by placing a <code>theme.json</code> in
+            <code>.jaato/</code> or <code>~/.jaato/</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.jaato/keybindings.json</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "submit": "enter",
+  "cancel": "c-c",
+  "exit": "c-d",
+  "toggle_plan": "c-p",
+  "toggle_tools": "c-t",
+  "open_editor": "c-g",
+  "search": "c-f"
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Theme switching</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Switch theme in the TUI
+/theme dark
+/theme light
+/theme high-contrast
+/theme reload   # reload custom theme.json</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom theme (~/.jaato/theme.json)</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "colors": {
+    "primary": "#635bff",
+    "secondary": "#8b84ff",
+    "success": "#10b981",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "muted": "#6b7280",
+    "background": "#0f172a",
+    "surface": "#1e293b",
+    "text": "#f8fafc",
+    "text_muted": "#94a3b8"
+  }
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Updating -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="updating">Updating jaato</h2>
+          <p>
+            Upgrade to the latest version by re-running pip with the
+            <code>--upgrade</code> flag.
+          </p>
+
+          <h3>From TestPyPI</h3>
+          <p>
+            Use the same <code>--extra-index-url</code> flag as the initial install.
+          </p>
+
+          <h3>From source</h3>
+          <p>
+            Pull the latest code and reinstall in editable mode.
+          </p>
+
+          <h3>After updating</h3>
+          <ul>
+            <li>Stop the running server: <code>jaato-server --stop</code></li>
+            <li>Start a fresh server: <code>jaato-server --ipc-socket /tmp/jaato.sock --daemon</code></li>
+            <li>Reconnect the TUI: <code>jaato</code></li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Upgrade from TestPyPI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Activate your environment
+source jaato-env/bin/activate
+
+# Upgrade all three packages
+pip install --upgrade \
+  --extra-index-url https://test.pypi.org/simple/ \
+  jaato-sdk jaato-server jaato-tui
+
+# Restart the server
+jaato-server --stop
+jaato-server --ipc-socket /tmp/jaato.sock --daemon</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Upgrade from source</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Pull latest changes
+cd jaato
+git pull
+
+# Reinstall
+source .venv/bin/activate
+pip install -e jaato-sdk/. \
+  -e "jaato-server/.[all]" \
+  -e "jaato-tui/.[all]"
+
+# Restart server
+jaato-server --stop
+jaato-server --ipc-socket /tmp/jaato.sock --daemon</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section style="padding: 40px 0;">
+        <h2>Next Steps</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-top: 24px;">
+          <a href="../api-reference/providers/index.html" style="display: block; padding: 24px; border: 1px solid var(--color-border); border-radius: 8px; text-decoration: none;">
+            <h3 style="margin-top: 0;">Provider Reference</h3>
+            <p style="color: var(--color-text-secondary); margin: 0;">
+              Detailed configuration options, model lists, and setup guides for every supported provider.
+            </p>
+          </a>
+
+          <a href="../guides/permissions.html" style="display: block; padding: 24px; border: 1px solid var(--color-border); border-radius: 8px; text-decoration: none;">
+            <h3 style="margin-top: 0;">Permissions Guide</h3>
+            <p style="color: var(--color-text-secondary); margin: 0;">
+              Fine-grained control over which tools the model can execute and when.
+            </p>
+          </a>
+
+          <a href="../guides/mcp-integration.html" style="display: block; padding: 24px; border: 1px solid var(--color-border); border-radius: 8px; text-decoration: none;">
+            <h3 style="margin-top: 0;">MCP Integration</h3>
+            <p style="color: var(--color-text-secondary); margin: 0;">
+              Connect external MCP servers to extend jaato with additional tools and capabilities.
+            </p>
+          </a>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
