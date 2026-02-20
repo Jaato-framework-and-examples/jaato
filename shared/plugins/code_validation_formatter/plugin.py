@@ -63,6 +63,12 @@ LANGUAGE_EXTENSIONS = {
 # Priority for pipeline ordering (35 = BEFORE code_block_formatter at 40)
 DEFAULT_PRIORITY = 35
 
+# Minimum number of code lines before validation is attempted.
+# Blocks shorter than this are treated as excerpts/snippets and skipped,
+# since they almost always produce false-positive LSP diagnostics
+# (undefined variables, missing imports, incomplete structures).
+DEFAULT_MIN_LINES_FOR_VALIDATION = 10
+
 # Severity icons for diagnostic output
 SEVERITY_ICONS = {
     'Error': '❌',
@@ -91,6 +97,7 @@ class CodeValidationFormatterPlugin:
         self._priority = DEFAULT_PRIORITY
         self._max_errors_per_block = 5
         self._max_warnings_per_block = 3
+        self._min_lines_for_validation = DEFAULT_MIN_LINES_FOR_VALIDATION
         self._accumulated_issues: List[Dict[str, Any]] = []
 
         # Streaming state
@@ -208,6 +215,9 @@ class CodeValidationFormatterPlugin:
         self._enabled = config.get("enabled", True)
         self._max_errors_per_block = config.get("max_errors_per_block", 5)
         self._max_warnings_per_block = config.get("max_warnings_per_block", 3)
+        self._min_lines_for_validation = config.get(
+            "min_lines_for_validation", DEFAULT_MIN_LINES_FOR_VALIDATION
+        )
         self._console_width = config.get("console_width", 80)
         self._priority = config.get("priority", DEFAULT_PRIORITY)
         _trace(f"initialize: enabled={self._enabled}")
@@ -275,6 +285,11 @@ class CodeValidationFormatterPlugin:
     def _validate_and_annotate(self, code_block_text: str) -> str:
         """Validate a code block and append diagnostics if any.
 
+        Short code blocks (below ``min_lines_for_validation``) are treated as
+        excerpts/snippets and skipped, since incomplete code almost always
+        produces false-positive diagnostics (undefined variables, missing
+        imports, etc.).
+
         Args:
             code_block_text: Complete code block including ``` markers.
 
@@ -290,6 +305,15 @@ class CodeValidationFormatterPlugin:
         code = match.group(2)
 
         if language not in LANGUAGE_EXTENSIONS:
+            return code_block_text
+
+        # Skip short code blocks — they are almost certainly excerpts/snippets
+        line_count = code.count('\n') + 1
+        if line_count < self._min_lines_for_validation:
+            _trace(
+                f"_validate_and_annotate: skipping {language} block "
+                f"({line_count} lines < {self._min_lines_for_validation} threshold)"
+            )
             return code_block_text
 
         # Validate the code
