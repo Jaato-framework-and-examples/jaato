@@ -1181,3 +1181,264 @@ class TestRemoveSubcommand:
             completion_names = [c.value for c in completions]
             assert "writable" in completion_names
             assert "readonly" not in completion_names
+
+
+class TestSavePromptOverwrite:
+    """Tests for savePrompt overwrite functionality."""
+
+    def test_overwrite_existing_prompt(self):
+        """Overwriting an existing prompt should succeed when overwrite=True."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            # Create initial prompt
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            prompt_file = prompts_dir / "existing.md"
+            prompt_file.write_text("---\ndescription: Old\n---\nOld content")
+
+            result = plugin._execute_save_prompt({
+                "name": "existing",
+                "content": "New content",
+                "description": "New description",
+                "overwrite": True,
+            })
+
+            assert result.get("success") is True
+            assert result.get("overwritten") is True
+            assert "updated" in result["message"]
+
+            # Verify file content was updated
+            updated_content = prompt_file.read_text()
+            assert "New description" in updated_content
+            assert "New content" in updated_content
+
+    def test_overwrite_false_rejects_existing(self):
+        """Without overwrite, saving to existing name should fail."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "existing.md").write_text("Existing content")
+
+            result = plugin._execute_save_prompt({
+                "name": "existing",
+                "content": "New content",
+                "description": "New desc",
+                "overwrite": False,
+            })
+
+            assert "error" in result
+            assert "already exists" in result["error"]
+            assert "overwrite=true" in result["hint"]
+
+    def test_overwrite_default_is_false(self):
+        """Default behavior (no overwrite param) should reject existing."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "existing.md").write_text("Existing content")
+
+            result = plugin._execute_save_prompt({
+                "name": "existing",
+                "content": "New content",
+                "description": "New desc",
+            })
+
+            assert "error" in result
+            assert "already exists" in result["error"]
+
+    def test_overwrite_new_prompt_creates_normally(self):
+        """Overwrite=True on a new prompt should create it normally."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            result = plugin._execute_save_prompt({
+                "name": "brand-new",
+                "content": "New content",
+                "description": "New prompt",
+                "overwrite": True,
+            })
+
+            assert result.get("success") is True
+            assert result.get("overwritten") is False
+            assert "saved" in result["message"]
+
+            prompt_file = Path(tmpdir) / ".jaato" / "prompts" / "brand-new.md"
+            assert prompt_file.exists()
+
+    def test_overwrite_notifies_tools_changed(self):
+        """Overwriting a prompt should notify tools changed."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "existing.md").write_text("Old content")
+
+            notified_tools = []
+            plugin.set_on_tools_changed(lambda tools: notified_tools.extend(tools))
+
+            plugin._execute_save_prompt({
+                "name": "existing",
+                "content": "Updated content",
+                "description": "Updated desc",
+                "overwrite": True,
+            })
+
+            assert "prompt.existing" in notified_tools
+
+    def test_overwrite_preserves_tags(self):
+        """Overwriting with tags should include them in the new content."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "tagged.md").write_text("Old")
+
+            result = plugin._execute_save_prompt({
+                "name": "tagged",
+                "content": "New content",
+                "description": "Updated",
+                "tags": ["code", "review"],
+                "overwrite": True,
+            })
+
+            assert result.get("success") is True
+            content = (prompts_dir / "tagged.md").read_text()
+            assert "['code', 'review']" in content
+
+
+class TestDeletePrompt:
+    """Tests for deletePrompt tool."""
+
+    def test_get_tool_schemas_includes_deletePrompt(self):
+        """deletePrompt should be in tool schemas."""
+        plugin = PromptLibraryPlugin()
+        schemas = plugin.get_tool_schemas()
+
+        names = {s.name for s in schemas}
+        assert "deletePrompt" in names
+
+    def test_deletePrompt_schema_structure(self):
+        """deletePrompt schema should have correct structure."""
+        plugin = PromptLibraryPlugin()
+        schemas = plugin.get_tool_schemas()
+        delete_schema = next(s for s in schemas if s.name == "deletePrompt")
+
+        assert "name" in delete_schema.parameters["properties"]
+        assert "name" in delete_schema.parameters["required"]
+        assert delete_schema.category == "prompt"
+
+    def test_get_executors_includes_deletePrompt(self):
+        """deletePrompt should have an executor."""
+        plugin = PromptLibraryPlugin()
+        executors = plugin.get_executors()
+
+        assert "deletePrompt" in executors
+        assert callable(executors["deletePrompt"])
+
+    def test_delete_prompt_success(self):
+        """Deleting an existing writable prompt should succeed."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            prompt_file = prompts_dir / "test-prompt.md"
+            prompt_file.write_text("# Test prompt")
+
+            result = plugin._execute_delete_prompt({"name": "test-prompt"})
+
+            assert result.get("success") is True
+            assert result["name"] == "test-prompt"
+            assert "deleted" in result["message"]
+            assert not prompt_file.exists()
+
+    def test_delete_prompt_not_found(self):
+        """Deleting a non-existent prompt should fail."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            result = plugin._execute_delete_prompt({"name": "nonexistent"})
+
+            assert "error" in result
+            assert "not found" in result["error"]
+
+    def test_delete_prompt_empty_name(self):
+        """Deleting with empty name should fail."""
+        plugin = PromptLibraryPlugin()
+
+        result = plugin._execute_delete_prompt({"name": ""})
+        assert "error" in result
+        assert "No prompt name" in result["error"]
+
+    def test_delete_prompt_readonly_fails(self):
+        """Cannot delete prompts from read-only locations."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            # Create a prompt in a read-only location (.claude/skills)
+            claude_skills = Path(tmpdir) / ".claude" / "skills" / "readonly-skill"
+            claude_skills.mkdir(parents=True)
+            (claude_skills / "SKILL.md").write_text("# Read-only skill")
+
+            result = plugin._execute_delete_prompt({"name": "readonly-skill"})
+
+            assert "error" in result
+            assert "read-only" in result["error"]
+            assert claude_skills.exists()
+
+    def test_delete_directory_prompt(self):
+        """Deleting a directory-based prompt should remove the entire directory."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            skill_dir = prompts_dir / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "PROMPT.md").write_text("# My Skill")
+            (skill_dir / "helper.py").write_text("# Helper file")
+
+            result = plugin._execute_delete_prompt({"name": "my-skill"})
+
+            assert result.get("success") is True
+            assert not skill_dir.exists()
+
+    def test_delete_notifies_tools_changed(self):
+        """Deleting a prompt should trigger tools changed notification."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "test-prompt.md").write_text("# Test prompt")
+
+            notified_tools = []
+            plugin.set_on_tools_changed(lambda tools: notified_tools.extend(tools))
+
+            plugin._execute_delete_prompt({"name": "test-prompt"})
+
+            assert "prompt.test-prompt" in notified_tools
+
+    def test_delete_prompt_not_auto_approved(self):
+        """deletePrompt should NOT be in auto-approved tools (it modifies files)."""
+        plugin = PromptLibraryPlugin()
+        auto_approved = plugin.get_auto_approved_tools()
+
+        assert "deletePrompt" not in auto_approved
