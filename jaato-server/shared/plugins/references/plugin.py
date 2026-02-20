@@ -941,7 +941,7 @@ class ReferencesPlugin:
                     },
                     "required": []
                 },
-                category="system",
+                category="knowledge",
                 discoverability="discoverable",
             ),
             ToolSchema(
@@ -967,7 +967,7 @@ class ReferencesPlugin:
                     },
                     "required": []
                 },
-                category="system",
+                category="knowledge",
                 discoverability="core",
             ),
             ToolSchema(
@@ -988,7 +988,7 @@ class ReferencesPlugin:
                     },
                     "required": ["path"]
                 },
-                category="system",
+                category="knowledge",
                 discoverability="discoverable",
             ),
         ]
