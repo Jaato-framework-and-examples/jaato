@@ -968,7 +968,7 @@ class ReferencesPlugin:
                     "required": []
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability="core",
             ),
             ToolSchema(
                 name="validateReference",
