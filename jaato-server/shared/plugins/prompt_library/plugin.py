@@ -2,7 +2,7 @@
 
 This plugin provides:
 - User command: `prompt` for listing and using prompts
-- Model tools: listPrompts, usePrompt, savePrompt
+- Model tools: savePrompt, deletePrompt, prompt.* (per-prompt tools)
 
 Storage locations (in priority order):
 1. .jaato/prompts/ (project)
@@ -1375,18 +1375,19 @@ class PromptLibraryPlugin:
         """Return tool schemas for model access.
 
         Returns:
-            - savePrompt tool for creating new prompts
+            - savePrompt tool for creating or updating prompts
+            - deletePrompt tool for removing prompts
             - Virtual tools for each discovered prompt (prompt.name)
         """
         schemas = [
-            # Only savePrompt remains - listPrompts/usePrompt are redundant
-            # since prompts are now first-class tools discoverable via list_tools
+            # savePrompt - create or update prompts
             ToolSchema(
                 name='savePrompt',
                 description=(
-                    'Save a new prompt to the library.\n\n'
+                    'Save a prompt to the library (create or update).\n\n'
                     'Use this when you notice the user performing repetitive tasks '
                     'that could be captured as a reusable prompt.\n\n'
+                    'Set overwrite=true to update an existing prompt.\n\n'
                     'Prompts are saved to .jaato/prompts/ in the project.'
                 ),
                 parameters={
@@ -1412,9 +1413,38 @@ class PromptLibraryPlugin:
                         "global": {
                             "type": "boolean",
                             "description": "Save to ~/.jaato/prompts/ instead of project"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Overwrite if prompt already exists (default: false)"
                         }
                     },
                     "required": ["name", "content", "description"]
+                },
+                category="prompt",
+                discoverability="discoverable",
+            ),
+            # deletePrompt - remove prompts
+            ToolSchema(
+                name='deletePrompt',
+                description=(
+                    'Delete a prompt from the library.\n\n'
+                    'Only prompts in writable locations can be deleted:\n'
+                    '- .jaato/prompts/ (project)\n'
+                    '- .jaato/skills/ (project)\n'
+                    '- ~/.jaato/prompts/ (global)\n'
+                    '- ~/.jaato/skills/ (global)\n\n'
+                    'Read-only prompts from .claude/ directories cannot be deleted.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the prompt to delete"
+                        }
+                    },
+                    "required": ["name"]
                 },
                 category="prompt",
                 discoverability="discoverable",
@@ -1431,12 +1461,14 @@ class PromptLibraryPlugin:
         """Return executor mapping for model tools and user commands.
 
         Returns mapping for:
-        - savePrompt: Create new prompts
+        - savePrompt: Create or update prompts
+        - deletePrompt: Remove prompts
         - prompt: User command
         - prompt.<name>: Dynamic executors for each discovered prompt
         """
         executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {
             'savePrompt': self._execute_save_prompt,
+            'deletePrompt': self._execute_delete_prompt,
             'prompt': self._execute_prompt_command,
         }
 
@@ -1524,14 +1556,30 @@ class PromptLibraryPlugin:
             }
 
     def _execute_save_prompt(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute savePrompt tool."""
+        """Execute savePrompt tool.
+
+        Creates a new prompt or overwrites an existing one when overwrite=True.
+
+        Args:
+            args: Dict with keys:
+                - name: Prompt name (lowercase, hyphens/underscores allowed)
+                - content: Prompt content with optional {{param}} placeholders
+                - description: Brief description of the prompt
+                - tags: Optional list of tags for categorization
+                - global: Save to ~/.jaato/prompts/ instead of project
+                - overwrite: If True, overwrite existing prompt (default: False)
+
+        Returns:
+            Dict with 'success' and metadata on success, 'error' on failure.
+        """
         name = args.get('name', '').strip()
         content = args.get('content', '').strip()
         description = args.get('description', '').strip()
         tags = args.get('tags', [])
         save_global = args.get('global', False)
+        overwrite = args.get('overwrite', False)
 
-        self._trace(f"savePrompt: name={name}, global={save_global}")
+        self._trace(f"savePrompt: name={name}, global={save_global}, overwrite={overwrite}")
 
         if not name:
             return {'error': 'No prompt name provided'}
@@ -1573,27 +1621,106 @@ description: {description}
         # Save file
         prompt_path = prompts_dir / f"{name}.md"
 
-        # Check if exists
-        if prompt_path.exists():
+        # Check if exists and overwrite is not requested
+        is_update = prompt_path.exists()
+        if is_update and not overwrite:
             return {
                 'error': f'Prompt already exists: {name}',
                 'path': str(prompt_path),
-                'hint': 'Delete the existing prompt first or choose a different name'
+                'hint': 'Use overwrite=true to update, or deletePrompt to remove it first'
             }
 
         try:
             prompt_path.write_text(file_content, encoding='utf-8')
-            self._trace(f"Saved prompt to: {prompt_path}")
+            action = "updated" if is_update else "saved"
+            self._trace(f"{action.capitalize()} prompt to: {prompt_path}")
+
+            # Notify tools changed if this was an update (content may have changed)
+            if is_update:
+                self._notify_tools_changed([f"prompt.{name}"])
 
             return {
                 'success': True,
                 'name': name,
                 'path': str(prompt_path),
-                'message': f'Prompt "{name}" saved. Use `prompt {name}` or usePrompt("{name}") to invoke it.'
+                'overwritten': is_update,
+                'message': f'Prompt "{name}" {action}. Use `prompt {name}` to invoke it.'
             }
         except Exception as e:
             return {
                 'error': f'Failed to save prompt: {e}',
+                'name': name
+            }
+
+    def _execute_delete_prompt(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute deletePrompt tool.
+
+        Deletes a prompt from the library. Only prompts in writable locations
+        (.jaato/prompts/, .jaato/skills/, ~/.jaato/prompts/, ~/.jaato/skills/)
+        can be deleted. Prompts from read-only locations (.claude/) are rejected.
+
+        For directory-based prompts, the entire directory and its contents are removed.
+
+        Args:
+            args: Dict with 'name' key identifying the prompt to delete.
+
+        Returns:
+            Dict with 'success' and metadata on success, 'error' on failure.
+        """
+        name = args.get('name', '').strip()
+
+        self._trace(f"deletePrompt: name={name}")
+
+        if not name:
+            return {'error': 'No prompt name provided'}
+
+        # Find the prompt
+        prompts = self._discover_prompts()
+        if name not in prompts:
+            available = sorted(prompts.keys())[:10]
+            return {
+                'error': f'Prompt not found: {name}',
+                'available': available,
+                'hint': 'Use list_tools(category="prompt") to see available prompts'
+            }
+
+        info = prompts[name]
+
+        # Check if the source is writable
+        writable_sources = {"project", "global", "project-skills", "global-skills"}
+        if info.source not in writable_sources:
+            return {
+                'error': f"Cannot delete '{name}': it's in a read-only location ({info.source})",
+                'path': str(info.path),
+                'hint': 'Only prompts in .jaato/ directories can be deleted'
+            }
+
+        # Perform the deletion
+        try:
+            if info.is_directory:
+                shutil.rmtree(info.path)
+            else:
+                info.path.unlink()
+
+            self._trace(f"Deleted prompt: {name} from {info.path}")
+
+            # Notify that tools changed (prompt removed)
+            self._notify_tools_changed([f"prompt.{name}"])
+
+            return {
+                'success': True,
+                'name': name,
+                'path': str(info.path),
+                'message': f'Prompt "{name}" deleted from {info.source}.'
+            }
+        except PermissionError:
+            return {
+                'error': f'Permission denied: cannot delete {info.path}',
+                'name': name
+            }
+        except Exception as e:
+            return {
+                'error': f'Failed to delete prompt: {e}',
                 'name': name
             }
 
@@ -2030,7 +2157,7 @@ Examples:
         """Return tools that should be auto-approved.
 
         Prompt tools (prompt.*) are read-only and safe to auto-approve.
-        savePrompt creates files, so it requires permission.
+        savePrompt and deletePrompt modify files, so they require permission.
         """
         auto_approved = ['prompt']  # User command
 
@@ -2064,9 +2191,14 @@ Call prompt tools directly with their parameters:
 
 **IMPORTANT**: When a prompt tool returns content, treat it as a user request and execute the instructions immediately. Use your available tools (CLI, file operations, etc.) to carry out what the prompt describes.
 
-### Creating Prompts
+### Creating and Updating Prompts
 Use savePrompt(name, content, description) to create new reusable prompts.
+Use savePrompt(name, content, description, overwrite=true) to update an existing prompt.
 The user can also invoke prompts with `prompt <name> [args...]`
+
+### Deleting Prompts
+Use deletePrompt(name) to remove a prompt from the library.
+Only prompts in writable locations (.jaato/) can be deleted.
 
 ### Proactively suggest creating prompts
 When you notice the user performing similar tasks repeatedly (2-3 times), suggest saving it as a reusable prompt:
