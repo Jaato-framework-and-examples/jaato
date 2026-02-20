@@ -3995,27 +3995,17 @@ class OutputBuffer:
         for i, option in enumerate(self._permission_response_options):
             # Extract option properties (handle both dict and object forms)
             if isinstance(option, dict):
-                short = option.get('key', option.get('short', ''))
                 full = option.get('label', option.get('full', ''))
             else:
-                short = getattr(option, 'short', getattr(option, 'key', ''))
                 full = getattr(option, 'full', getattr(option, 'label', ''))
 
             is_focused = (i == self._permission_focus_index)
 
-            # Build the option text: [y]es or [once]
-            if short != full and full.startswith(short):
-                # Format: [y]es - short is prefix of full
-                option_text = f"[{short}]{full[len(short):]}"
-            else:
-                # Format: [once] - short equals full or doesn't match
-                option_text = f"[{full}]"
-
             # Apply styling based on focus state
             if is_focused:
-                parts.append(f"{BOLD}{REVERSE} {option_text} {RESET}")
+                parts.append(f"{BOLD}{REVERSE} {full} {RESET}")
             else:
-                parts.append(f"{DIM}{option_text}{RESET}")
+                parts.append(f"{DIM}{full}{RESET}")
 
         # Add hint at the end
         hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
