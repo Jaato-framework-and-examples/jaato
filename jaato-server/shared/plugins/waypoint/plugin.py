@@ -279,8 +279,7 @@ class WaypointPlugin:
                 name="restore_waypoint",
                 description=(
                     "Restore all files to their state at a waypoint, undoing changes "
-                    "made after that point. You can restore your own waypoints freely. "
-                    "Restoring user-owned waypoints requires user permission."
+                    "made after that point."
                 ),
                 parameters={
                     "type": "object",
@@ -288,8 +287,7 @@ class WaypointPlugin:
                         "waypoint_id": {
                             "type": "string",
                             "description": (
-                                "The waypoint ID to restore to (e.g., 'w1', 'w2'). "
-                                "Model-owned waypoints can be restored without permission."
+                                "The waypoint ID to restore to (e.g., 'w1', 'w2')."
                             ),
                         },
                     },
@@ -373,12 +371,12 @@ always navigate back to where you were.
         """Return auto-approved tools.
 
         Auto-approved:
-        - waypoint: user command (always trusted)
+        - waypoint: user command
         - list_waypoints, waypoint_info: read-only operations
-        - create_waypoint: creates model-owned waypoint (safe)
+        - create_waypoint: creates model-owned waypoint
         - delete_waypoint: executor enforces model-owned only
 
-        Requires permission:
+        Not auto-approved:
         - restore_waypoint: can affect user-owned waypoints
         """
         return [

@@ -255,7 +255,7 @@ class TodoPlugin:
                            "achieve with available tools. IMPORTANT: Before including any tool "
                            "in a step, verify that tool is available and you are allowed to use it. "
                            "Each step must be specific and actionable. "
-                           "After calling this, you MUST call startPlan to get user approval.",
+                           "After calling this, you MUST call startPlan to confirm the plan before executing steps.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -281,9 +281,9 @@ class TodoPlugin:
             ),
             ToolSchema(
                 name="startPlan",
-                description="Step 2: Request user approval to begin executing the plan. "
+                description="Step 2: Confirm the plan before beginning execution. "
                            "This MUST be called after createPlan and BEFORE any updateStep calls. "
-                           "If the user denies: call completePlan with status='cancelled', "
+                           "If the plan is rejected: call completePlan with status='cancelled', "
                            "do NOT create another plan and retry.",
                 parameters={
                     "type": "object",
@@ -301,7 +301,7 @@ class TodoPlugin:
             ToolSchema(
                 name="updateStep",
                 description="Step 3: Update the status of a step. Can only be called AFTER "
-                           "startPlan has been approved. Use this to report progress as you work.",
+                           "startPlan has been called. Use this to report progress as you work.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -373,7 +373,7 @@ class TodoPlugin:
                            "Use this when you discover missing steps, need a corrective action after "
                            "a failure, or realize additional work is needed. "
                            "ALWAYS prefer this over recreating the plan with createPlan. "
-                           "Can only be called AFTER startPlan has been approved.",
+                           "Can only be called AFTER startPlan has been called.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -680,7 +680,7 @@ class TodoPlugin:
             "- For simple single-agent tasks, just do the work directly\n"
             "- When spawning subagents, ALWAYS use plans to coordinate their work\n\n"
             "# PLAN WORKFLOW (Single Agent)\n"
-            "1. createPlan → 2. startPlan (wait for approval) → 3. updateStep → 4. completePlan\n\n"
+            "1. createPlan → 2. startPlan → 3. updateStep → 4. completePlan\n\n"
             "# CROSS-AGENT COORDINATION (Multi-Agent)\n\n"
             "When delegating work to subagents, use this pattern:\n\n"
             "**Step 1: Subscribe to events BEFORE spawning subagents**\n"
@@ -758,9 +758,9 @@ class TodoPlugin:
             "- 'blocked': Waiting on cross-agent dependencies (automatic)\n"
             "- Be honest - failed steps are more valuable than false completions\n\n"
             "# RULES\n\n"
-            "- MUST call startPlan after createPlan and wait for approval\n"
-            "- CANNOT updateStep until startPlan is approved\n"
-            "- If startPlan denied: call completePlan(status='cancelled')\n"
+            "- MUST call startPlan after createPlan\n"
+            "- CANNOT updateStep until startPlan has been called\n"
+            "- If startPlan is rejected: call completePlan(status='cancelled')\n"
             "- When using completeStepWithOutput, the output is passed to dependent steps"
         )
 
@@ -768,13 +768,13 @@ class TodoPlugin:
         """Return TODO tools as auto-approved (no security implications).
 
         Note: createPlan and startPlan are intentionally excluded:
-        - createPlan: Requires permission so user can review/edit the proposed plan
-        - startPlan: Requires permission to confirm user wants to proceed
+        - createPlan: Excluded so user can review/edit the proposed plan
+        - startPlan: Excluded so user can confirm before execution begins
 
         The 'plan' user command is also included since it's just a status query.
         """
         return [
-            # Core plan management (createPlan excluded - requires permission for editing)
+            # Core plan management (createPlan excluded - user reviews the plan)
             "updateStep", "getPlanStatus", "completePlan", "addStep", "plan",
             # Cross-agent collaboration (read/write plan state, no side effects)
             "subscribeToTasks", "addDependentStep", "completeStepWithOutput",
@@ -874,8 +874,7 @@ class TodoPlugin:
     def _execute_start_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the startPlan tool.
 
-        This tool requires permission - when the user approves, it signals
-        that they agree with the proposed plan and the model can proceed.
+        Confirms the plan so the model can begin executing steps.
         """
         message = args.get("message", "")
         self._trace(f"startPlan: message={message!r}")
@@ -904,10 +903,10 @@ class TodoPlugin:
         self._publish_event(TaskEventType.PLAN_STARTED, plan)
 
         return {
-            "approved": True,
+            "confirmed": True,
             "plan_id": plan.plan_id,
             "title": plan.title,
-            "message": message or "Plan approved by user. You may proceed with execution.",
+            "message": message or "Plan confirmed. You may proceed with execution.",
             "steps": [
                 {
                     "sequence": s.sequence,
@@ -952,7 +951,7 @@ class TodoPlugin:
             plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
             if not plan.started:
-                return {"error": "Plan not started. Call startPlan first to get user approval."}
+                return {"error": "Plan not started. Call startPlan first to confirm the plan."}
 
             # Find step
             step = plan.get_step_by_id(step_id)
@@ -1184,7 +1183,7 @@ class TodoPlugin:
             plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
             if not plan.started:
-                return {"error": "Plan not started. Call startPlan first to get user approval."}
+                return {"error": "Plan not started. Call startPlan first to confirm the plan."}
 
             # Add the step
             new_step = plan.add_step(description, after_step_id)
@@ -1544,7 +1543,7 @@ class TodoPlugin:
             plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
             if not plan.started:
-                return {"error": "Plan not started. Call startPlan first to get user approval."}
+                return {"error": "Plan not started. Call startPlan first to confirm the plan."}
 
             # Find the existing step
             step = plan.get_step_by_id(step_id)
@@ -1629,7 +1628,7 @@ class TodoPlugin:
             plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
             if not plan.started:
-                return {"error": "Plan not started. Call startPlan first to get user approval."}
+                return {"error": "Plan not started. Call startPlan first to confirm the plan."}
 
             # Find step
             step = plan.get_step_by_id(step_id)
