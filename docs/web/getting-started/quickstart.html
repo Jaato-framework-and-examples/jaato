@@ -156,18 +156,18 @@
         <div class="panel-explanation">
           <h2 id="installation">Installation</h2>
           <p>
-            Clone the repository and set up a virtual environment.
+            Create a virtual environment and install from TestPyPI.
           </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Terminal</div>
           <div class="code-block">
-            <pre><code class="language-bash">git clone https://github.com/Jaato-framework-and-examples/jaato.git
-cd jaato
+            <pre><code class="language-bash">python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"</code></pre>
+pip install \
+  --extra-index-url https://test.pypi.org/simple/ \
+  jaato-sdk jaato-server jaato-tui</code></pre>
           </div>
         </div>
       </section>
