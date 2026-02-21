@@ -5,8 +5,7 @@ Interactive TUI client for jaato with multi-agent support, streaming output, and
 ## Installation
 
 ```bash
-# Install TUI package (includes jaato-sdk and jaato-server dependencies)
-pip install -e jaato-tui/
+pip install --extra-index-url https://test.pypi.org/simple/ jaato-tui
 ```
 
 ## Overview

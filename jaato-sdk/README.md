@@ -5,11 +5,7 @@ Lightweight Python SDK for building clients that connect to a jaato server.
 ## Installation
 
 ```bash
-# From PyPI (when published)
-pip install jaato-sdk
-
-# From source
-pip install jaato-sdk/
+pip install --extra-index-url https://test.pypi.org/simple/ jaato-sdk
 ```
 
 ## Quick Start
