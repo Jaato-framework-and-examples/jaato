@@ -111,7 +111,7 @@ jaato consists of three packages:
 - **jaato-tui** - Terminal user interface client
 
 ```bash
-git clone https://github.com/apanoia/jaato.git
+git clone https://github.com/Jaato-framework-and-examples/jaato.git
 cd jaato
 
 # For contributors: install all packages in development mode
