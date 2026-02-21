@@ -65,16 +65,16 @@ class FileEditPlugin:
     """Plugin for file reading and editing operations.
 
     Tools provided:
-    - readFile: Read file contents (auto-approved, low risk)
-    - updateFile: Modify existing file (shows diff for approval, creates backup)
-    - writeNewFile: Create new file (shows content for approval)
-    - removeFile: Delete file (shows confirmation, creates backup)
-    - moveFile: Move/rename file (shows confirmation, creates backup)
+    - readFile: Read file contents
+    - updateFile: Modify existing file (shows diff preview, creates backup)
+    - writeNewFile: Create new file
+    - removeFile: Delete file (creates backup)
+    - moveFile: Move/rename file (creates backup)
     - renameFile: Alias for moveFile (for discoverability)
-    - undoFileChange: Restore from most recent backup (auto-approved)
+    - undoFileChange: Restore from most recent backup
 
     Integrates with the permission system to show formatted diffs
-    when requesting approval for file modifications.
+    for file modifications.
 
     Path Sandboxing:
         When workspace_root is configured, file operations are restricted to
@@ -390,8 +390,8 @@ class FileEditPlugin:
             ),
             ToolSchema(
                 name="writeNewFile",
-                description="Create a new file with the specified content. Shows the content for "
-                           "approval before creating. Fails if the file already exists.",
+                description="Create a new file with the specified content. "
+                           "Fails if the file already exists.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -674,13 +674,13 @@ IMPORTANT: Always prefer these tools over CLI commands:
 These tools provide structured output, automatic backups, and proper encoding handling.
 
 Tools available:
-- `readFile(path, offset=None, limit=None)`: Read file contents. Safe operation, no approval needed.
+- `readFile(path, offset=None, limit=None)`: Read file contents.
   - For large files, use `offset` (1-indexed line number) and `limit` (max lines) for chunked reading.
   - Example: `readFile(path="large.txt", offset=1, limit=100)` reads lines 1-100.
   - Example: `readFile(path="large.txt", offset=101, limit=100)` reads lines 101-200.
   - Chunked responses include: `total_lines`, `start_line`, `end_line`, and `has_more` (boolean).
   - **Image support**: For image files (PNG, JPG, GIF, WebP, BMP, ICO, SVG), returns multimodal content you can view directly.
-- `updateFile`: Update an existing file. Shows diff for approval and creates backup. Two modes:
+- `updateFile`: Update an existing file. Creates backup. Two modes:
   - **Targeted edit** (preferred): `updateFile(path, old="text to find", new="replacement text")`
     Finds `old` in the file and replaces it with `new`. The `old` text must appear exactly once.
     If `old` matches multiple locations, use `prologue` and/or `epilogue` to disambiguate.
@@ -692,7 +692,7 @@ Tools available:
     - Example: `updateFile(path, old="x = 1", new="x = 2", prologue="def setup():\\n")`
   - **Full replacement**: `updateFile(path, new_content="entire file content")`
     Replaces the entire file. Use only when the targeted mode is impractical.
-- `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
+- `writeNewFile(path, content)`: Create a new file. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
 - `moveFile(source_path, destination_path, overwrite=False)`: Move or rename a file. Creates destination directories if needed. Creates backup before moving. Fails if destination exists unless overwrite=True.
 - `renameFile(source_path, destination_path, overwrite=False)`: Alias for moveFile. Use for renaming files.
@@ -717,13 +717,12 @@ Tools available:
 IMPORTANT: When using updateFile (full replacement mode) or writeNewFile, provide the raw file content directly.
 Do NOT wrap the content in quotes, triple-quotes (''' or \"\"\"), or treat it as a string literal.
 
-File modifications (updateFile, writeNewFile, removeFile, moveFile, multiFileEdit, findAndReplace)
-will show you a preview and require approval before execution. Backups are automatically created."""
+Backups are automatically created for file modifications."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
 
-        readFile, undoFileChange, restoreFile, and listBackups are low-risk operations.
+        readFile, undoFileChange, restoreFile, and listBackups are read-only operations.
         """
         return ["readFile", "undoFileChange", "restoreFile", "listBackups"]
 
