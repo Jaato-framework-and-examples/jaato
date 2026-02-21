@@ -12,16 +12,12 @@ pip install --extra-index-url https://test.pypi.org/simple/ jaato-sdk
 
 ```python
 import asyncio
-from jaato_sdk import IPCClient, IPCRecoveryClient
+from jaato_sdk import IPCRecoveryClient
 from jaato_sdk.events import AgentOutputEvent, ToolCallStartEvent
 
 async def main():
-    # Connect to a running jaato server
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        auto_start=True,  # Start server if not running
-    )
-
+    # Connect to a running jaato server (default: /tmp/jaato.sock)
+    client = IPCRecoveryClient()
     await client.connect()
 
     # Send a message
