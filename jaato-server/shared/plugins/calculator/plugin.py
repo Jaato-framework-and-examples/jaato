@@ -128,7 +128,7 @@ class CalculatorPlugin:
             ),
             ToolSchema(
                 name="calculate",
-                description="Evaluate a mathematical expression safely. Supports basic operations (+, -, *, /, **, %, parentheses) and common math functions",
+                description="Evaluate a mathematical expression. Supports basic operations (+, -, *, /, **, %, parentheses) and common math functions",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -386,7 +386,7 @@ class CalculatorPlugin:
         return None  # Tool descriptions are self-explanatory
 
     def get_auto_approved_tools(self) -> List[str]:
-        """All calculator tools are safe, read-only operations."""
+        """All calculator tools are read-only operations."""
         return ["add", "subtract", "multiply", "divide", "calculate"]
 
     def get_user_commands(self) -> List:
