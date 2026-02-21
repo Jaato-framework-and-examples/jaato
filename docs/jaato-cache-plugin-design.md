@@ -6,9 +6,15 @@ This document captures the design for a provider-specific prompt caching system 
 
 The central design principle is that **cache plugins are consumers of the InstructionBudget's GC policies**. The `InstructionBudget` already classifies every source entry using `GCPolicy` — `LOCKED`, `PRESERVABLE`, `PARTIAL`, `EPHEMERAL`, or `CONDITIONAL` — and the cache plugin reads this same taxonomy to decide where to place cache breakpoints, what's worth the write premium, and what to skip.
 
-### Current State: Anthropic Caching Already Implemented
+### Current State and Motivation
 
-Prompt caching for Anthropic is **already implemented** inside `AnthropicProvider` (`jaato-server/shared/plugins/model_provider/anthropic/provider.py`). This doc describes the existing implementation, the GC integration points, and the design for extending caching to additional providers via a plugin interface.
+Prompt caching for Anthropic is **already implemented** inside `AnthropicProvider` (`jaato-server/shared/plugins/model_provider/anthropic/provider.py`). However, the cache logic is tightly coupled to the provider class, creating problems:
+
+1. **Inheritance coupling**: `ZhipuAIProvider` inherits from `AnthropicProvider` and must hardcode `self._enable_caching = False` to suppress the parent's Anthropic-specific breakpoint logic. ZhipuAI has its own implicit caching mechanism that's incompatible with Anthropic's explicit breakpoints.
+2. **No budget awareness**: The current Anthropic implementation uses `cache_exclude_recent_turns` (a simple turn count) to decide what to cache, rather than consulting the `InstructionBudget`'s GC policy assignments which already know which content is LOCKED, PRESERVABLE, or EPHEMERAL.
+3. **Not extensible**: Adding caching for a new provider requires either modifying the provider class or creating another inheritance workaround.
+
+This doc describes the existing implementation, explains these limitations, and proposes extracting cache logic into separate plugins that consume the `InstructionBudget`.
 
 ---
 
@@ -118,17 +124,32 @@ Things that break the cached prefix:
 
 ---
 
-## Existing Implementation: Anthropic Provider
+## Current State: Provider-Internal Caching
 
-### Architecture: Provider-Internal Caching
+### Architecture
 
-Caching for Anthropic is implemented **inside `AnthropicProvider`** rather than as a separate plugin. The provider owns the cache breakpoint strategy because it has direct access to the system instruction, tools, and message history at request construction time.
+Caching for Anthropic is currently implemented **inside `AnthropicProvider`** rather than as a separate plugin. The provider owns the cache breakpoint strategy because it has direct access to the system instruction, tools, and message history at request construction time.
 
 Key files:
 - `jaato-server/shared/plugins/model_provider/anthropic/provider.py` — Cache configuration, breakpoint placement, threshold checking
 - `jaato-server/shared/plugins/model_provider/anthropic/converters.py` — `messages_to_anthropic(cache_breakpoint_index=...)` applies history cache breakpoint
 - `jaato-server/shared/plugins/model_provider/anthropic/env.py` — `resolve_enable_caching()` reads `JAATO_ANTHROPIC_ENABLE_CACHING`
 - `jaato-sdk/jaato_sdk/plugins/model_provider/types.py` — `TokenUsage` dataclass with `cache_read_tokens` and `cache_creation_tokens` fields
+
+### The Inheritance Problem
+
+`ZhipuAIProvider` inherits from `AnthropicProvider` because Z.AI exposes an Anthropic-compatible API — all message handling, streaming, and converters are reused. But the parent's cache code is Anthropic-specific (explicit breakpoints with `cache_control` annotations), while ZhipuAI uses fully automatic/implicit caching that requires no annotations at all.
+
+Currently, `ZhipuAIProvider` suppresses the parent's cache logic by hardcoding:
+
+```python
+# ZhipuAIProvider.__init__() and initialize()
+self._enable_caching = False  # Caching may not be supported by Zhipu AI's API
+```
+
+This means ZhipuAI sessions get **no cache monitoring at all** — even though Z.AI does support implicit caching and reports `cached_tokens` in responses. The provider can't enable the parent's cache logic (wrong mechanism) and can't implement its own (the parent's `_build_api_kwargs()` already handles breakpoint injection).
+
+Extracting cache logic into a plugin would let each provider get the right caching strategy without inheritance conflicts.
 
 ### Configuration
 
@@ -472,59 +493,97 @@ def set_gc_plugin(self, plugin: GCPlugin, config: Optional[GCConfig] = None) -> 
 
 ## Relationship Diagram (Actual Architecture)
 
+### Current Architecture (cache logic inside provider)
+
 ```
-┌─────────────────────────────────────────────────────┐
-│                  InstructionBudget                   │
-│                                                     │
-│  entries: Dict[InstructionSource, SourceEntry]       │
-│  ┌──────────────┬────────┬───────────────────────┐  │
-│  │ Source        │ Tokens │ GCPolicy              │  │
-│  ├──────────────┼────────┼───────────────────────┤  │
-│  │ SYSTEM        │ 2,100  │ LOCKED 🔒            │  │
-│  │ PLUGIN        │ 1,800  │ PARTIAL ◐            │  │
-│  │   └ cli       │   450  │   LOCKED 🔒          │  │
-│  │   └ file_edit │   380  │   LOCKED 🔒          │  │
-│  │   └ web_search│   220  │   EPHEMERAL ○        │  │
-│  │ ENRICHMENT    │   150  │ EPHEMERAL ○          │  │
-│  │ CONVERSATION  │ 3,200  │ PARTIAL ◐            │  │
-│  │   └ turn_0    │   340  │   LOCKED 🔒          │  │
-│  │   └ turn_1    │   890  │   PRESERVABLE ◑      │  │
-│  │   └ turn_2    │   450  │   EPHEMERAL ○        │  │
-│  │   └ turn_3    │   520  │   EPHEMERAL ○        │  │
-│  │ THINKING      │ 1,200  │ EPHEMERAL ○          │  │
-│  └──────────────┴────────┴───────────────────────┘  │
-│  context_limit: 128,000                             │
-│  utilization: 5.7%                                  │
-└──────────┬──────────────────┬────────────────────────┘
-           │ reads policies    │ reads policies
-           ▼                   ▼
-┌────────────────────┐  ┌──────────────────────────────┐
-│ AnthropicProvider   │  │ BudgetGCPlugin (gc_budget)   │
-│ (cache breakpoints) │  │   PRIMARY GC PLUGIN          │
-│                     │  │                              │
-│ _build_api_kwargs() │  │ Policy-aware phased removal: │
-│ BP1: system         │  │  1a. ENRICHMENT (bulk clear) │
-│ BP2: tools[-1]      │  │  1b. EPHEMERAL (oldest first)│
-│ BP3: history index  │  │  2. PARTIAL turns (oldest)   │
-│                     │  │  3. PRESERVABLE (pressure)   │
-│ _should_cache_      │  │  ✗ LOCKED (never)            │
-│   content()         │  │                              │
-│                     │  │ + tool_call pair expansion    │
-│                     │  │ + CONDITIONAL evaluation      │
-│                     │  │                              │
-│                     │  │ Fallback plugins:             │
-│                     │  │   gc_truncate, gc_summarize,  │
-│                     │  │   gc_hybrid (turn-based)      │
-└────────────────────┘  └──────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│                   InstructionBudget                    │
+│                                                       │
+│  ┌──────────────┬────────┬─────────────────────────┐  │
+│  │ Source        │ Tokens │ GCPolicy                │  │
+│  ├──────────────┼────────┼─────────────────────────┤  │
+│  │ SYSTEM        │ 2,100  │ LOCKED 🔒              │  │
+│  │ PLUGIN        │ 1,800  │ PARTIAL ◐              │  │
+│  │ ENRICHMENT    │   150  │ EPHEMERAL ○            │  │
+│  │ CONVERSATION  │ 3,200  │ PARTIAL ◐              │  │
+│  │ THINKING      │ 1,200  │ EPHEMERAL ○            │  │
+│  └──────────────┴────────┴─────────────────────────┘  │
+└──────────┬──────────────────┬─────────────────────────┘
+           │                   │ reads policies
+           │ NOT used          ▼
+           │            ┌──────────────────────────────┐
+           │            │ BudgetGCPlugin (gc_budget)   │
+           │            └──────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────┐
+│ AnthropicProvider                                │
+│   cache logic INSIDE provider:                   │
+│   _build_api_kwargs() ← breakpoint placement     │
+│   _compute_history_cache_breakpoint()            │
+│   _should_cache_content()                        │
+│                                                  │
+│   ❌ Does NOT read InstructionBudget policies    │
+│   ❌ Uses simple cache_exclude_recent_turns      │
+│                                                  │
+├──────────────────────────────────────────────────┤
+│ ZhipuAIProvider (inherits AnthropicProvider)     │
+│   ❌ _enable_caching = False  (hardcoded)        │
+│   ❌ No cache monitoring at all                  │
+│   ❌ Can't implement Z.AI's implicit caching     │
+└─────────────────────────────────────────────────┘
+```
+
+### Proposed Architecture (cache logic in plugins)
+
+```
+┌───────────────────────────────────────────────────────┐
+│                   InstructionBudget                    │
+│                                                       │
+│  ┌──────────────┬────────┬─────────────────────────┐  │
+│  │ Source        │ Tokens │ GCPolicy                │  │
+│  ├──────────────┼────────┼─────────────────────────┤  │
+│  │ SYSTEM        │ 2,100  │ LOCKED 🔒              │  │
+│  │ PLUGIN        │ 1,800  │ PARTIAL ◐              │  │
+│  │ ENRICHMENT    │   150  │ EPHEMERAL ○            │  │
+│  │ CONVERSATION  │ 3,200  │ PARTIAL ◐              │  │
+│  │ THINKING      │ 1,200  │ EPHEMERAL ○            │  │
+│  └──────────────┴────────┴─────────────────────────┘  │
+└────────┬──────────────┬──────────────┬────────────────┘
+         │ reads         │ reads         │ reads
+         ▼               ▼               ▼
+┌─────────────────┐ ┌──────────────┐ ┌───────────────────┐
+│ BudgetGCPlugin  │ │ Anthropic    │ │ ZhipuAI           │
+│ (gc_budget)     │ │ CachePlugin  │ │ CachePlugin       │
+│                 │ │              │ │                   │
+│ phased removal  │ │ explicit BPs │ │ implicit caching  │
+│ 1a→1b→2→3      │ │ budget-aware │ │ monitoring only   │
+│                 │ │ breakpoint   │ │ cache hit rate    │
+│ returns         │ │ placement    │ │ tracking          │
+│ GCResult ───────┼→│ on_gc_result │ │ on_gc_result      │
+│                 │ │              │ │                   │
+└─────────────────┘ └──────┬───────┘ └─────────┬─────────┘
+                           │                    │
+                    ┌──────┴─────┐       ┌──────┴──────────┐
+                    │ Anthropic  │       │ ZhipuAIProvider │
+                    │ Provider   │       │ (inherits       │
+                    │ (no cache  │       │  Anthropic, no  │
+                    │  logic)    │       │  cache conflict)│
+                    └────────────┘       └─────────────────┘
 ```
 
 ---
 
-## Future: Cache Plugin Protocol
+## Proposed Design: Cache Plugin Protocol
 
-To extend caching to providers beyond Anthropic, a cache plugin protocol can be introduced. Unlike the existing Anthropic implementation (which is provider-internal), this protocol would allow pluggable, provider-specific caching strategies.
+The core proposal is to **extract cache logic out of the provider classes** into separate plugins that:
 
-### Proposed Protocol
+1. Are **provider-specific** — each plugin knows how its provider's caching works (explicit breakpoints vs implicit)
+2. Are **budget-aware** — plugins consume `InstructionBudget` GC policies to make smarter decisions
+3. Are **GC-coordinated** — plugins receive `GCResult` notifications to track invalidations
+4. **Decouple caching from provider inheritance** — `ZhipuAIProvider` can inherit `AnthropicProvider` for API compatibility without inheriting the wrong cache strategy
+
+### Protocol Definition
 
 ```python
 from typing import Protocol, runtime_checkable
@@ -599,17 +658,16 @@ class CachePlugin(Protocol):
         ...
 ```
 
-### Key Differences from Previous Revision
+### Current vs Proposed
 
-| Previous (incorrect) | Actual |
-|---|---|
-| `async` methods | Synchronous (matches `GCPlugin` pattern) |
-| `ContentMap` parameter | `InstructionBudget` parameter (actual type) |
-| `CacheTurnMetrics` return type | `TokenUsage` (existing dataclass, already has cache fields) |
-| `CacheCallback` type | Standard event emission via `JaatoSession` |
-| `GCCategory` enum (`LOCKED`/`CONDITIONAL`/`EPHEMERAL`) | `GCPolicy` enum (`LOCKED`/`PRESERVABLE`/`PARTIAL`/`EPHEMERAL`/`CONDITIONAL`) |
-| `ContentBlock` / `ContentMap` types | `SourceEntry` / `InstructionBudget` types |
-| Separate `cache/` plugin directory | Provider-internal (Anthropic) or future plugin directory |
+| Aspect | Current (provider-internal) | Proposed (plugin) |
+|---|---|---|
+| **Location** | Inside `AnthropicProvider._build_api_kwargs()` | Separate `cache_anthropic/plugin.py` |
+| **Budget awareness** | No — uses `cache_exclude_recent_turns` (turn count) | Yes — reads `GCPolicy` from `InstructionBudget` |
+| **GC coordination** | None — doesn't know when GC runs | `on_gc_result()` receives `GCResult` after each collection |
+| **ZhipuAI support** | Disabled (`_enable_caching = False`) | Separate `cache_zhipuai/plugin.py` for monitoring |
+| **New provider** | Modify provider class or override methods | Add a new plugin, no provider changes |
+| **Metrics** | OTel attributes only | OTel + session-level aggregates + `on_gc_result` tracking |
 
 ### Proposed File Structure
 
@@ -636,7 +694,11 @@ plugins/
 ├── gc_summarize/plugin.py        # SummarizeGCPlugin (summarization-based)
 ├── gc_hybrid/plugin.py           # HybridGCPlugin (generational: truncate + summarize)
 │
-├── cache_zhipuai/                # Future: ZhipuAI cache monitoring plugin
+├── cache_anthropic/              # Extracted from AnthropicProvider
+│   ├── __init__.py
+│   └── plugin.py                 # AnthropicCachePlugin (breakpoints + budget)
+│
+├── cache_zhipuai/                # ZhipuAI cache monitoring plugin
 │   ├── __init__.py
 │   └── plugin.py                 # ZhipuAICachePlugin (monitoring only)
 │
@@ -644,9 +706,93 @@ plugins/
     └── ...
 ```
 
-### ZhipuAI Plugin (Future — Monitoring Only)
+### Anthropic Cache Plugin — Budget-Aware Breakpoints
 
-ZhipuAI's caching is fully automatic. A cache plugin for ZhipuAI would be monitoring-only:
+Extracted from the current `AnthropicProvider._build_api_kwargs()` logic, but enhanced with `InstructionBudget` awareness:
+
+```python
+class AnthropicCachePlugin:
+    """Explicit breakpoint caching for Anthropic, informed by GC policies.
+
+    Extracted from AnthropicProvider so that:
+    1. ZhipuAIProvider doesn't inherit Anthropic-specific cache logic
+    2. Breakpoint placement can use InstructionBudget policies instead
+       of the simpler cache_exclude_recent_turns heuristic
+    3. GC invalidations are tracked via on_gc_result()
+    """
+
+    @property
+    def name(self) -> str:
+        return "cache_anthropic"
+
+    @property
+    def provider_name(self) -> str:
+        return "anthropic"
+
+    @property
+    def compatible_models(self) -> list[str]:
+        return ["claude-sonnet-4*", "claude-opus-4*", "claude-haiku-4.5*"]
+
+    def prepare_request(self, messages, tools, system, budget=None) -> dict:
+        cache_type = {"type": "ephemeral"}
+
+        # BP1: System instruction (LOCKED in budget — always stable)
+        modified_system = self._inject_system_breakpoint(system, cache_type)
+
+        # BP2: Last tool definition (core tools are LOCKED in budget)
+        # Sort by name for consistent ordering across sessions
+        modified_tools = self._inject_tool_breakpoint(tools, cache_type)
+
+        # BP3: History — use budget policies instead of turn counting
+        if budget:
+            # Place breakpoint at the boundary between PRESERVABLE
+            # and EPHEMERAL conversation turns. This is more precise
+            # than cache_exclude_recent_turns because the budget knows
+            # which turns are stable (clarification Q&A, summaries)
+            # vs volatile (working output).
+            bp_index = self._find_policy_boundary(budget)
+        else:
+            # Fallback: use the existing turn-counting heuristic
+            bp_index = self._compute_history_breakpoint_by_recency()
+
+        modified_messages = self._inject_history_breakpoint(
+            messages, bp_index, cache_type
+        )
+
+        return {
+            "system": modified_system,
+            "tools": modified_tools,
+            "messages": modified_messages,
+        }
+
+    def _find_policy_boundary(self, budget: InstructionBudget) -> int:
+        """Find the last LOCKED or PRESERVABLE conversation turn.
+
+        This is the optimal cache breakpoint: everything before it
+        is stable (won't be GC'd except under extreme pressure),
+        everything after it is EPHEMERAL (may be GC'd any time).
+        """
+        conv = budget.get_entry(InstructionSource.CONVERSATION)
+        if not conv or not conv.children:
+            return -1
+
+        last_stable = -1
+        for key, child in conv.children.items():
+            policy = child.effective_gc_policy()
+            if policy in (GCPolicy.LOCKED, GCPolicy.PRESERVABLE):
+                # Track this as a candidate breakpoint
+                last_stable = child  # resolve to message index
+        return last_stable
+
+    def on_gc_result(self, result: GCResult) -> None:
+        # Only PRESERVABLE removal risks disrupting the cached prefix
+        if result.details.get("preservable_removed", 0) > 0:
+            self._prefix_invalidated = True
+```
+
+### ZhipuAI Cache Plugin — Implicit Caching Monitor
+
+ZhipuAI's caching is fully automatic. The plugin is monitoring-only — it doesn't inject annotations, but it tracks cache hit rates and GC invalidations:
 
 ```python
 class ZhipuAICachePlugin:
@@ -809,14 +955,16 @@ Configuration: `config.extra["cache_ttl"] = "1h"` — currently stored on the pr
 
 ### Breakpoint Allocation Strategy
 
-With 4 breakpoints available, the current allocation:
+With 4 breakpoints available, the current allocation and proposed improvement:
 
-| Breakpoint | Target | Implementation |
-|---|---|---|
-| BP1 | System instruction | `_build_api_kwargs()`: cache_control on system text block |
-| BP2 | Last tool definition | `_build_api_kwargs()`: cache_control on `tools[-1]` (sorted by name) |
-| BP3 | Historical messages | `_compute_history_cache_breakpoint()`: last MODEL message before the exclusion window |
-| BP4 | (Reserved) | Not yet used — available for large document injection or future features |
+| Breakpoint | Target | Current (provider-internal) | Proposed (cache plugin) |
+|---|---|---|---|
+| BP1 | System instruction | cache_control on system text block | Same |
+| BP2 | Last tool definition | cache_control on `tools[-1]` (sorted) | Same |
+| BP3 | Historical messages | Last MODEL before `cache_exclude_recent_turns` window | Last LOCKED/PRESERVABLE turn boundary from `InstructionBudget` |
+| BP4 | (Reserved) | Not used | Not used |
+
+The key improvement is BP3: the current implementation uses a simple turn count (`cache_exclude_recent_turns = 2`) which doesn't know whether those turns are important or not. The proposed plugin would use the budget's GC policies to place the breakpoint at the PRESERVABLE/EPHEMERAL boundary — caching exactly the content that `gc_budget` won't remove.
 
 ### Tool Sorting for Cache Stability
 
@@ -832,16 +980,27 @@ This prevents cache invalidation when tool registration order varies between ses
 
 ## ZhipuAI-Specific Considerations
 
-### Implicit Caching — Zero Configuration
+### Current Limitation
 
-ZhipuAI's implicit caching means any future cache plugin for ZhipuAI is primarily a **monitoring** role:
+`ZhipuAIProvider` inherits `AnthropicProvider` for API compatibility (Z.AI exposes an Anthropic-compatible endpoint at `https://api.z.ai/api/anthropic`). This inheritance brings all message handling, streaming, and converter code for free — but also brings the Anthropic-specific cache code which must be disabled.
+
+Currently `_enable_caching = False` is hardcoded, which means:
+- No cache monitoring even though Z.AI supports implicit caching
+- No `cached_tokens` extraction from responses
+- No GC-cache coordination
+
+### Implicit Caching — Plugin Approach
+
+With a separate `ZhipuAICachePlugin`, ZhipuAI sessions would get:
 
 - **Monitoring**: Extract `cached_tokens` from the response `TokenUsage` and correlate with GC policy assignments from the `InstructionBudget`.
 - **Advisory**: Detect when GC is about to disrupt a highly-cached prefix and surface this through metrics.
+- **No annotation injection**: `prepare_request()` is a no-op since caching is fully automatic.
+- **Independence from parent**: No need to fight `AnthropicProvider`'s cache logic.
 
 ### API Compatibility
 
-ZhipuAI uses OpenAI-compatible API format (`/v4/chat/completions`). Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` and should be mapped to `TokenUsage.cache_read_tokens` by the provider.
+ZhipuAI uses an Anthropic-compatible API format. Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` and should be mapped to `TokenUsage.cache_read_tokens` by the provider.
 
 ---
 
@@ -853,7 +1012,7 @@ The key architectural advantage of building cache decisions on the `InstructionB
 - Which content is important but expendable under pressure (PRESERVABLE) — clarification history, turn summaries.
 - Which content is freely collectible (EPHEMERAL) — working turns, enrichment, discoverable tool schemas.
 
-The `BudgetGCPlugin` and the Anthropic cache system both read these same policy assignments. The GC plugin uses them to decide removal priority; the cache system uses them to decide breakpoint placement. Neither system invents its own content lifecycle model.
+The `BudgetGCPlugin` and the proposed cache plugins would both read these same policy assignments. The GC plugin uses them to decide removal priority; the cache plugin uses them to decide breakpoint placement. Neither system invents its own content lifecycle model.
 
 When tools declare their GC policy (e.g., a core tool marked LOCKED via `DEFAULT_TOOL_POLICIES[PluginToolType.CORE]`), `gc_budget` will never remove it and the cache system automatically treats it as high-priority cached content — without any cross-system configuration.
 
