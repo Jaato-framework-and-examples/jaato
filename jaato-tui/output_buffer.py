@@ -4003,9 +4003,9 @@ class OutputBuffer:
 
             # Apply styling based on focus state
             if is_focused:
-                parts.append(f"{BOLD}{REVERSE} {full} {RESET}")
+                parts.append(f"{BOLD}{REVERSE} [{full}] {RESET}")
             else:
-                parts.append(f"{DIM}{full}{RESET}")
+                parts.append(f"{DIM}[{full}]{RESET}")
 
         # Add hint at the end
         hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
