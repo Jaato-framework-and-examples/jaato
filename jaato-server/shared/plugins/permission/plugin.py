@@ -341,7 +341,7 @@ class PermissionPlugin:
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""
         # No system instructions needed - the model should just call tools directly.
-        # The permission middleware will prompt for approval when needed.
+        # The permission middleware handles tool access control transparently.
         return None
 
     def get_auto_approved_tools(self) -> List[str]:

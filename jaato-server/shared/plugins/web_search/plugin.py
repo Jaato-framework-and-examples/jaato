@@ -134,7 +134,7 @@ Tips for effective searches:
 - Add year/date for time-sensitive information"""
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Web search is read-only and safe - auto-approve it."""
+        """Web search is a read-only operation."""
         return ['web_search']
 
     def get_user_commands(self) -> List[UserCommand]:

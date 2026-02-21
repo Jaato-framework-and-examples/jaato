@@ -595,7 +595,7 @@ The template engine is auto-detected based on syntax patterns. Mustache patterns
 Jinja2 patterns ({% %}, {{ | filter }}) trigger Jinja2 rendering.
 Simple {{variable}} works in both and defaults to Jinja2.
 
-Template rendering requires approval since it writes files."""
+Template rendering writes files to the workspace."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
