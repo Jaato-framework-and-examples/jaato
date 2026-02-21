@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from jaato_sdk.client.config import RecoveryConfig
-from jaato_sdk.client.ipc import IPCClient
+from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient
 from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
@@ -146,7 +146,7 @@ class IPCRecoveryClient:
 
     def __init__(
         self,
-        socket_path: str,
+        socket_path: str = DEFAULT_SOCKET_PATH,
         config: Optional[RecoveryConfig] = None,
         auto_start: bool = True,
         env_file: str = ".env",
