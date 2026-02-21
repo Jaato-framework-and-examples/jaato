@@ -15,7 +15,7 @@ from shared.trace import trace as _trace_write
 
 DEFAULT_TIMEOUT = 30  # seconds
 DEFAULT_MAX_LENGTH = 100000  # max characters to return
-DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; JaatoBot/1.0; +https://github.com/apanoia/jaato)"
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; JaatoBot/1.0; +https://github.com/Jaato-framework-and-examples/jaato)"
 
 # Auto-background threshold for web_fetch (covers PDF download + conversion).
 # Regular HTML fetches complete well within this; only PDFs are likely to exceed it.
