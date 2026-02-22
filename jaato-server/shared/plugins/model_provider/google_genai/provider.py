@@ -170,6 +170,9 @@ class GoogleGenAIProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
+        # Cache plugin (optional, for explicit CachedContent management)
+        self._cache_plugin: Optional[Any] = None
+
         # Agent context for trace identification
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
@@ -779,9 +782,9 @@ class GoogleGenAIProvider:
         if not self._chat:
             raise RuntimeError("No chat session. Call create_session() first.")
 
-        # Build config override for structured output
-        config = None
-        if response_schema:
+        # Build config — prefer cached content, fall back to structured output
+        config = self._get_cached_content_config(response_schema)
+        if config is None and response_schema:
             config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
@@ -831,9 +834,9 @@ class GoogleGenAIProvider:
         # Create user Content with the parts
         user_content = get_types().Content(role='user', parts=sdk_parts)
 
-        # Build config override for structured output
-        config = None
-        if response_schema:
+        # Build config — prefer cached content, fall back to structured output
+        config = self._get_cached_content_config(response_schema)
+        if config is None and response_schema:
             config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
@@ -873,9 +876,9 @@ class GoogleGenAIProvider:
         # Convert results to SDK parts
         sdk_parts = tool_results_to_sdk_parts(results)
 
-        # Build config override for structured output
-        config = None
-        if response_schema:
+        # Build config — prefer cached content, fall back to structured output
+        config = self._get_cached_content_config(response_schema)
+        if config is None and response_schema:
             config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
@@ -1031,9 +1034,9 @@ class GoogleGenAIProvider:
 
         self._trace(f"STREAM_INIT on_usage_update={'set' if on_usage_update else 'None'}")
 
-        # Build config override for structured output
-        config = None
-        if response_schema:
+        # Build config — prefer cached content, fall back to structured output
+        config = self._get_cached_content_config(response_schema)
+        if config is None and response_schema:
             config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
@@ -1217,9 +1220,9 @@ class GoogleGenAIProvider:
         # Convert results to SDK parts
         sdk_parts = tool_results_to_sdk_parts(results)
 
-        # Build config override for structured output
-        config = None
-        if response_schema:
+        # Build config — prefer cached content, fall back to structured output
+        config = self._get_cached_content_config(response_schema)
+        if config is None and response_schema:
             config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
@@ -1403,6 +1406,66 @@ class GoogleGenAIProvider:
             List of Message objects.
         """
         return deserialize_history(data)
+
+    # ==================== Cache Plugin Delegation ====================
+
+    def set_cache_plugin(self, plugin: Any) -> None:
+        """Attach a cache control plugin for explicit CachedContent management.
+
+        When set, the provider delegates cache creation/reuse decisions
+        to this plugin.  The plugin receives the ``genai.Client`` so it
+        can call ``client.caches.create()`` / ``client.caches.delete()``.
+
+        Args:
+            plugin: A ``GoogleGenAICachePlugin`` instance (duck-typed).
+        """
+        self._cache_plugin = plugin
+        if hasattr(plugin, "set_client") and self._client:
+            plugin.set_client(self._client)
+
+    def _get_cached_content_config(
+        self,
+        response_schema: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Any]:
+        """Build a GenerateContentConfig with cached_content if available.
+
+        Calls the cache plugin's ``prepare_request()`` and, when a
+        ``cached_content`` name is returned, builds a config that
+        references the cached prefix instead of re-sending system
+        instruction and tools.
+
+        Args:
+            response_schema: Optional JSON schema for structured output.
+
+        Returns:
+            A ``GenerateContentConfig`` with ``cached_content`` set,
+            or ``None`` if caching is not active.
+        """
+        if not self._cache_plugin:
+            return None
+
+        cache_result = self._cache_plugin.prepare_request(
+            system=self._system_instruction,
+            tools=self._tools or [],
+            messages=[],
+        )
+        cached_content_name = cache_result.get("cached_content")
+        if not cached_content_name:
+            return None
+
+        self._trace(f"CACHE using CachedContent: {cached_content_name}")
+
+        kwargs: Dict[str, Any] = {
+            "cached_content": cached_content_name,
+            "automatic_function_calling": get_types().AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+        }
+        if response_schema:
+            kwargs["response_mime_type"] = "application/json"
+            kwargs["response_schema"] = response_schema
+
+        return get_types().GenerateContentConfig(**kwargs)
 
     # ==================== Error Classification for Retry ====================
 
