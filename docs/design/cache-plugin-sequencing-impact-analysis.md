@@ -130,7 +130,7 @@ The implementation was larger than projected because: (1) the provider was refac
 
 ### Variant B: Not Started
 
-Variant B remains blocked on **session-owned history Phase 2** (stateless `complete()` method on providers). No session-owned history work has been started.
+Variant B remains blocked on **session-owned history Phase 2** (stateless `complete()` method on providers). The prerequisite design document ([Session-Owned History Impact Analysis](session-owned-history-impact-analysis.md)) is complete. Implementation has not started.
 
 **What's needed for A→B (unchanged from Section 2):**
 
