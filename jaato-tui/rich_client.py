@@ -4292,19 +4292,23 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
-                # Update session bar with current session info
-                current_session = next(
-                    (s for s in event.sessions if s.get('id') == event.session_id),
-                    None
-                )
-                if current_session:
-                    display.set_session_info(
-                        session_id=event.session_id,
-                        description=current_session.get('description', ''),
-                        workspace=current_session.get('workspace_path', ''),
+                # Update session bar only when the event carries session data.
+                # Partial updates (e.g. after model-change) only carry model
+                # info with empty session_id/sessions — touching the session
+                # bar would blank out the session ID, description, and workspace.
+                if event.sessions or event.session_id:
+                    current_session = next(
+                        (s for s in event.sessions if s.get('id') == event.session_id),
+                        None
                     )
-                else:
-                    display.set_session_info(session_id=event.session_id)
+                    if current_session:
+                        display.set_session_info(
+                            session_id=event.session_id,
+                            description=current_session.get('description', ''),
+                            workspace=current_session.get('workspace_path', ''),
+                        )
+                    else:
+                        display.set_session_info(session_id=event.session_id)
                 display.refresh()
 
             elif isinstance(event, SessionDescriptionUpdatedEvent):
