@@ -1296,6 +1296,25 @@ class TestSavePromptOverwrite:
 
             assert "prompt.existing" in notified_tools
 
+    def test_save_new_prompt_notifies_tools_changed(self):
+        """Saving a brand-new prompt should notify tools changed so it's immediately available."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            notified_tools = []
+            plugin.set_on_tools_changed(lambda tools: notified_tools.extend(tools))
+
+            result = plugin._execute_save_prompt({
+                "name": "brand-new-prompt",
+                "content": "New content",
+                "description": "A new prompt",
+            })
+
+            assert result.get("success") is True
+            assert result.get("overwritten") is False
+            assert "prompt.brand-new-prompt" in notified_tools
+
     def test_overwrite_preserves_tags(self):
         """Overwriting with tags should include them in the new content."""
         plugin = PromptLibraryPlugin()

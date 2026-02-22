@@ -1559,6 +1559,8 @@ class PromptLibraryPlugin:
         """Execute savePrompt tool.
 
         Creates a new prompt or overwrites an existing one when overwrite=True.
+        After saving, refreshes the prompt cache and notifies subscribers so the
+        new or updated prompt is immediately available as a ``prompt.<name>`` tool.
 
         Args:
             args: Dict with keys:
@@ -1635,16 +1637,17 @@ description: {description}
             action = "updated" if is_update else "saved"
             self._trace(f"{action.capitalize()} prompt to: {prompt_path}")
 
-            # Notify tools changed if this was an update (content may have changed)
-            if is_update:
-                self._notify_tools_changed([f"prompt.{name}"])
+            # Refresh prompt cache and notify subscribers so the new/updated
+            # prompt is immediately available as a prompt.<name> tool.
+            self._notify_tools_changed([f"prompt.{name}"])
 
             return {
                 'success': True,
                 'name': name,
                 'path': str(prompt_path),
                 'overwritten': is_update,
-                'message': f'Prompt "{name}" {action}. Use `prompt {name}` to invoke it.'
+                'tool': f'prompt.{name}',
+                'message': f'Prompt "{name}" {action}. It is now available as tool `prompt.{name}` — you can invoke it directly.'
             }
         except Exception as e:
             return {
