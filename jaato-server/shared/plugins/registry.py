@@ -35,6 +35,7 @@ from shared.trace import trace as _trace_write
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
     "gc": "jaato.gc_plugins",
+    "cache": "jaato.cache_plugins",
 }
 
 
