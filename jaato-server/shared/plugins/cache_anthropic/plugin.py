@@ -6,13 +6,15 @@ placing up to 3 of the 4 available breakpoints on:
   - BP2: Last tool definition (core tools are LOCKED in budget)
   - BP3: History breakpoint (budget-aware PRESERVABLE/EPHEMERAL boundary)
 
-Key improvements over the previous provider-internal implementation:
+Key features:
   1. Budget-aware BP3 — uses InstructionBudget GC policies instead of
-     the simpler ``cache_exclude_recent_turns`` turn-counting heuristic.
+     a simpler turn-counting heuristic.
   2. GC coordination — ``on_gc_result()`` tracks when GC removes
      PRESERVABLE content that may invalidate the cached prefix.
-  3. Decoupled from provider inheritance — ZhipuAIProvider and
-     OllamaProvider no longer need ``_enable_caching = False`` hacks.
+  3. Extended TTL — supports 1-hour cache TTL for long agentic sessions
+     (requires ``extended-cache-ttl-2025-04-11`` beta header).
+  4. Decoupled from provider — cache logic is fully in this plugin,
+     the provider delegates via ``prepare_request()``.
 
 Cache breakpoint placement:
     ┌─────────────────────────────────────┐
@@ -179,6 +181,36 @@ class AnthropicCachePlugin:
         """
         self._model_name = model_name
 
+    # ==================== Cache Control Construction ====================
+
+    def _make_cache_control(self) -> Dict[str, str]:
+        """Build the ``cache_control`` dict for annotations.
+
+        Returns ``{"type": "ephemeral"}`` for the default 5-minute TTL,
+        or ``{"type": "ephemeral", "ttl": "1h"}`` for the extended 1-hour
+        TTL.  The extended TTL costs 2x base write price (vs 1.25x for 5m)
+        but avoids cache misses during long agentic sessions.
+
+        The extended TTL requires the ``extended-cache-ttl-2025-04-11``
+        beta header on the Anthropic client.  Callers can check
+        ``requires_extended_cache_beta`` to determine whether to add it.
+
+        Returns:
+            Dict suitable for use as ``cache_control`` on content blocks.
+        """
+        if self._cache_ttl == "1h":
+            return {"type": "ephemeral", "ttl": "1h"}
+        return {"type": "ephemeral"}
+
+    @property
+    def requires_extended_cache_beta(self) -> bool:
+        """Whether the current TTL setting requires the extended-cache beta header.
+
+        When True, the Anthropic client must include
+        ``extended-cache-ttl-2025-04-11`` in its beta headers.
+        """
+        return self._cache_ttl == "1h"
+
     # ==================== Pre-Request Annotation ====================
 
     def prepare_request(
@@ -209,7 +241,7 @@ class AnthropicCachePlugin:
                 "cache_breakpoint_index": -1,
             }
 
-        cache_type = {"type": "ephemeral"}
+        cache_type = self._make_cache_control()
 
         # BP1: System instruction
         annotated_system = self._inject_system_breakpoint(system, cache_type)
