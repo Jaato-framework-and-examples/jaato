@@ -1646,7 +1646,8 @@ description: {description}
                 'name': name,
                 'path': str(prompt_path),
                 'overwritten': is_update,
-                'message': f'Prompt "{name}" {action}. Use `prompt {name}` to invoke it.'
+                'tool': f'prompt.{name}',
+                'message': f'Prompt "{name}" {action}. It is now available as tool `prompt.{name}` — you can invoke it directly.'
             }
         except Exception as e:
             return {
