@@ -319,8 +319,8 @@ class TestConsoleChannel:
         output_text = "\n".join(outputs)
         assert "test_tool" in output_text
         assert "ls -la" in output_text
-        assert "[y]es" in output_text
-        assert "[n]o" in output_text
+        assert "[yes]" in output_text
+        assert "[no]" in output_text
 
 
 class TestWebhookChannel:

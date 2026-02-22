@@ -635,19 +635,15 @@ class ConsoleChannel(Channel):
             ChannelDecision.COMMENT: self.ANSI_YELLOW,  # Deny-adjacent
         }
 
-        parts = ["Options: "]
-        for i, opt in enumerate(options):
+        parts = []
+        for opt in options:
             color = color_map.get(opt.decision, "")
-            if opt.short != opt.full:
-                # Format: [y]es
-                parts.append(f"[{self._c(opt.short, color)}]{opt.full[len(opt.short):]}")
+            if color:
+                parts.append(f"[{self._c(opt.full, color)}]")
             else:
-                # Format: [once]
-                parts.append(f"[{self._c(opt.full, color) if color else opt.full}]")
-            if i < len(options) - 1:
-                parts.append(", ")
+                parts.append(f"[{opt.full}]")
 
-        return "".join(parts)
+        return " ".join(parts)
 
     def _create_response_for_option(
         self, request: PermissionRequest, option: PermissionResponseOption
