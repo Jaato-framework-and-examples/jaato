@@ -1095,9 +1095,8 @@ def sandboxed_execute(command: str, workspace: str) -> dict:
 
 | File | Purpose |
 |------|---------|
-| `permissions.json` | Project-level config (in project root) |
-| `.permissions.json` | Hidden config alternative |
-| `~/.config/jaato/permissions.json` | User-level default config |
+| `.jaato/permissions.json` | Project-level config (in workspace) |
+| `~/.jaato/permissions.json` | User-level default config |
 | `PERMISSION_CONFIG_PATH` env var | Override config path |
 
 ## User Commands
