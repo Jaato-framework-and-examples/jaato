@@ -12,18 +12,17 @@
 
 ### Tier 1: Actionable Now (No Blockers)
 
-#### 1.1 — Create Session-Owned History Impact Analysis Document
+#### 1.1 — Create Session-Owned History Impact Analysis Document — **COMPLETED**
 
-The design doc references `docs/design/session-owned-history-impact-analysis.md` but this file **does not exist**. It's the prerequisite design document for the 5-phase session-owned history migration, which in turn unblocks Variant B.
+**Status:** Created on 2026-02-22. See [session-owned-history-impact-analysis.md](session-owned-history-impact-analysis.md).
 
-**Scope:** Design document covering:
-- Phase 1: Introduce `SessionHistory` wrapper (session holds canonical copy, still syncs to provider)
-- Phase 2: Add stateless `complete(messages, system, tools, ...) -> ProviderResponse` to providers
-- Phase 3: Migrate all 6 providers to `complete()`
-- Phase 4: Remove legacy `create_session()`, `get_history()`, `send_message()` from protocol
-- Phase 5: Simplify session internals (GC operates on `self._messages` directly)
-
-**Impact:** ~2350 LOC across all 6 providers (per design doc estimates). This is a design-only deliverable.
+The document covers:
+- 5-phase migration plan (SessionHistory wrapper → stateless `complete()` → legacy removal → simplification)
+- Per-provider impact analysis across all 7 providers (~1455 LOC affected)
+- Unified `complete()` method design (combines batch + streaming, replaces 7 protocol methods)
+- Impact on dependent systems (cache plugin A→B, GC, subagents, session persistence, telemetry)
+- Risk analysis (GoogleGenAI SDK bypass, Claude CLI delegated mode, dual code paths)
+- Dependency graph and sequencing
 
 #### 1.2 — Legacy Fallback Removal from AnthropicProvider
 
@@ -134,20 +133,21 @@ The full 5-phase migration that moves history ownership from providers to the se
 
 ```
 COMPLETED
+├── 1.1 Session-Owned History design doc ✓ (2026-02-22)
 ├── 1.2 Legacy fallback removal ✓
 ├── 1.3 Extended TTL support ✓
-└── 1.4 Google GenAI cache plugin (monitoring-only) ✓
+└── 1.4 Google GenAI cache plugin ✓
 
-REMAINING (no blockers)
-└── 1.1 Session-Owned History design doc (prerequisite for Phases 1-5)
-
-AFTER Session-Owned History Phase 2
-└── 2.1 A→B transition (~60 lines, mechanical)
+NEXT: Session-Owned History Phase 1 (SessionHistory wrapper, no blockers)
+└── Phase 2 (Anthropic complete(), unblocks A→B)
+    └── 2.1 A→B transition (~60 lines, mechanical)
 
 AFTER Session-Owned History Phase 4+
 └── Full legacy cleanup (any remaining provider-level cache code)
 ```
 
-## Remaining Decision
+## Status
 
-**1.1 (SOH design doc):** The only remaining Tier 1 item. Unblocks the entire Tier 2/3 pipeline but is design work, not implementation.
+**All Tier 1 items are complete.** The design document for session-owned history ([session-owned-history-impact-analysis.md](session-owned-history-impact-analysis.md)) was created on 2026-02-22, covering the full 5-phase migration plan, per-provider impact analysis, dependent system impacts, and risk analysis.
+
+**Next actionable work:** Session-Owned History Phase 1 (`SessionHistory` wrapper), which has no blockers and is a low-risk behavioral no-op that establishes the foundation for subsequent phases.
