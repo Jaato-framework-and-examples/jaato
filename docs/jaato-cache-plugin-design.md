@@ -138,18 +138,26 @@ Key files:
 
 ### The Inheritance Problem
 
-`ZhipuAIProvider` inherits from `AnthropicProvider` because Z.AI exposes an Anthropic-compatible API — all message handling, streaming, and converters are reused. But the parent's cache code is Anthropic-specific (explicit breakpoints with `cache_control` annotations), while ZhipuAI uses fully automatic/implicit caching that requires no annotations at all.
+Two providers inherit from `AnthropicProvider` and must both suppress its cache logic:
 
-Currently, `ZhipuAIProvider` suppresses the parent's cache logic by hardcoding:
+**`ZhipuAIProvider`** inherits from `AnthropicProvider` because Z.AI exposes an Anthropic-compatible API — all message handling, streaming, and converters are reused. But the parent's cache code is Anthropic-specific (explicit breakpoints with `cache_control` annotations), while ZhipuAI uses fully automatic/implicit caching that requires no annotations at all.
+
+**`OllamaProvider`** also inherits from `AnthropicProvider` because Ollama exposes an Anthropic-compatible API locally. Ollama doesn't support prompt caching at all.
+
+Both suppress the parent's cache logic by hardcoding:
 
 ```python
-# ZhipuAIProvider.__init__() and initialize()
+# ZhipuAIProvider.__init__()
 self._enable_caching = False  # Caching may not be supported by Zhipu AI's API
+
+# OllamaProvider.__init__()
+self._enable_caching = False  # Ollama doesn't support prompt caching
+self._enable_thinking = False
 ```
 
 This means ZhipuAI sessions get **no cache monitoring at all** — even though Z.AI does support implicit caching and reports `cached_tokens` in responses. The provider can't enable the parent's cache logic (wrong mechanism) and can't implement its own (the parent's `_build_api_kwargs()` already handles breakpoint injection).
 
-Extracting cache logic into a plugin would let each provider get the right caching strategy without inheritance conflicts.
+Extracting cache logic into a plugin would let each provider get the right caching strategy without inheritance conflicts — and would let `AnthropicProvider` drop its cache code entirely, simplifying the class that two other providers inherit from.
 
 ### Configuration
 
@@ -530,7 +538,11 @@ def set_gc_plugin(self, plugin: GCPlugin, config: Optional[GCConfig] = None) -> 
 │ ZhipuAIProvider (inherits AnthropicProvider)     │
 │   ❌ _enable_caching = False  (hardcoded)        │
 │   ❌ No cache monitoring at all                  │
-│   ❌ Can't implement Z.AI's implicit caching     │
+│   ❌ Can't use Z.AI's implicit caching           │
+├──────────────────────────────────────────────────┤
+│ OllamaProvider (inherits AnthropicProvider)      │
+│   ❌ _enable_caching = False  (hardcoded)        │
+│   (correct — Ollama has no caching)              │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -564,12 +576,21 @@ def set_gc_plugin(self, plugin: GCPlugin, config: Optional[GCConfig] = None) -> 
 │                 │ │              │ │                   │
 └─────────────────┘ └──────┬───────┘ └─────────┬─────────┘
                            │                    │
-                    ┌──────┴─────┐       ┌──────┴──────────┐
-                    │ Anthropic  │       │ ZhipuAIProvider │
-                    │ Provider   │       │ (inherits       │
-                    │ (no cache  │       │  Anthropic, no  │
-                    │  logic)    │       │  cache conflict)│
-                    └────────────┘       └─────────────────┘
+             ┌─────────────┴─────────────┐      │
+             │ AnthropicProvider          │      │
+             │ (no cache logic — cleaned) │      │
+             ├───────────────────────────┤      │
+             │ ZhipuAIProvider (inherits) │◄─────┘
+             │ (no _enable_caching hack)  │
+             ├───────────────────────────┤
+             │ OllamaProvider (inherits)  │  (no cache plugin
+             │ (no suppression needed)    │   needed — correct)
+             └───────────────────────────┘
+
+Standalone providers (no caching, no inheritance conflict):
+  GoogleGenAIProvider, AntigravityProvider,
+  ClaudeCLIProvider, GitHubModelsProvider
+  → Cache plugin can be added later without modifying the provider
 ```
 
 ---
@@ -582,6 +603,57 @@ The core proposal is to **extract cache logic out of the provider classes** into
 2. Are **budget-aware** — plugins consume `InstructionBudget` GC policies to make smarter decisions
 3. Are **GC-coordinated** — plugins receive `GCResult` notifications to track invalidations
 4. **Decouple caching from provider inheritance** — `ZhipuAIProvider` can inherit `AnthropicProvider` for API compatibility without inheriting the wrong cache strategy
+
+### Cache as a Fifth Plugin Kind
+
+Cache plugins introduce a new `PLUGIN_KIND = "cache"`, following the same discovery pattern as the existing four kinds:
+
+| Kind | Protocol | Entry Point Group | Example |
+|------|----------|-------------------|---------|
+| `"tool"` | `ToolPlugin` | `jaato.plugins` | `cli`, `file_edit`, `todo` |
+| `"gc"` | `GCPlugin` | `jaato.gc_plugins` | `gc_truncate`, `gc_budget` |
+| `"model_provider"` | `ModelProviderPlugin` | (import-based) | `anthropic`, `google_genai` |
+| `"session"` | (session protocol) | (import-based) | session persistence |
+| **`"cache"`** | **`CachePlugin`** | **`jaato.cache_plugins`** | **`cache_anthropic`, `cache_zhipuai`** |
+
+Each cache plugin follows the standard plugin scaffolding:
+
+```python
+# shared/plugins/cache_anthropic/__init__.py
+PLUGIN_KIND = "cache"
+from .plugin import AnthropicCachePlugin, create_plugin
+__all__ = ["PLUGIN_KIND", "AnthropicCachePlugin", "create_plugin"]
+
+# shared/plugins/cache_anthropic/plugin.py
+class AnthropicCachePlugin:
+    ...
+
+def create_plugin() -> AnthropicCachePlugin:
+    return AnthropicCachePlugin()
+```
+
+```toml
+# pyproject.toml
+[project.entry-points."jaato.cache_plugins"]
+cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
+cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
+```
+
+**Selection:** The session (or runtime) selects the cache plugin by matching the active provider's name against `CachePlugin.provider_name`. If no cache plugin matches the current provider, no caching is applied — this is the correct behavior for providers like Ollama, ClaudeCLI, and Antigravity that don't support prompt caching.
+
+### Provider Coverage
+
+| Provider | Inheritance | Cache Plugin | Behavior |
+|----------|-------------|--------------|----------|
+| **AnthropicProvider** | Base class | `cache_anthropic` | Explicit breakpoints, budget-aware BP3 |
+| **ZhipuAIProvider** | inherits Anthropic | `cache_zhipuai` | Monitoring only (implicit caching) |
+| **OllamaProvider** | inherits Anthropic | None | No caching (correct) |
+| **GoogleGenAIProvider** | Standalone | `cache_google_genai` (future) | Google context caching (when added) |
+| **AntigravityProvider** | Standalone | None (for now) | No caching API exposed |
+| **ClaudeCLIProvider** | Standalone | None | CLI handles caching internally |
+| **GitHubModelsProvider** | Standalone | None (for now) | Depends on underlying model provider |
+
+After extraction, `AnthropicProvider` drops its `_enable_caching`, `_cache_history`, `_cache_exclude_recent_turns`, and `_cache_min_tokens` fields, plus `_build_api_kwargs()`'s breakpoint injection, `_compute_history_cache_breakpoint()`, and `_should_cache_content()`. The child providers (`ZhipuAIProvider`, `OllamaProvider`) no longer need to hardcode `self._enable_caching = False`.
 
 ### Protocol Definition
 
@@ -978,29 +1050,49 @@ This prevents cache invalidation when tool registration order varies between ses
 
 ---
 
-## ZhipuAI-Specific Considerations
+## Provider-Specific Considerations
 
-### Current Limitation
+### Inheritance Cleanup: AnthropicProvider
 
-`ZhipuAIProvider` inherits `AnthropicProvider` for API compatibility (Z.AI exposes an Anthropic-compatible endpoint at `https://api.z.ai/api/anthropic`). This inheritance brings all message handling, streaming, and converter code for free — but also brings the Anthropic-specific cache code which must be disabled.
+After extraction, `AnthropicProvider` loses these cache-specific members:
 
-Currently `_enable_caching = False` is hardcoded, which means:
-- No cache monitoring even though Z.AI supports implicit caching
-- No `cached_tokens` extraction from responses
-- No GC-cache coordination
+| Removed from provider | Moved to `cache_anthropic` plugin |
+|---|---|
+| `_enable_caching`, `_cache_ttl` | `AnthropicCachePlugin._ttl` |
+| `_cache_history`, `_cache_exclude_recent_turns` | Replaced by budget-aware `_find_policy_boundary()` |
+| `_cache_min_tokens` | `AnthropicCachePlugin._should_cache_content()` |
+| `_build_api_kwargs()` breakpoint injection | `prepare_request()` |
+| `_compute_history_cache_breakpoint()` | `_find_policy_boundary()` |
+| `_should_cache_content()`, `_get_cache_min_tokens()`, `_estimate_tokens()` | Moved as-is |
 
-### Implicit Caching — Plugin Approach
+This simplifies `AnthropicProvider` and makes it a clean base class. Child providers (`ZhipuAIProvider`, `OllamaProvider`) no longer need `self._enable_caching = False` hacks because there's no cache logic to suppress.
 
-With a separate `ZhipuAICachePlugin`, ZhipuAI sessions would get:
+### ZhipuAI: Implicit Caching
+
+`ZhipuAIProvider` inherits `AnthropicProvider` for API compatibility (Z.AI exposes an Anthropic-compatible endpoint). Currently `_enable_caching = False` is hardcoded, which means no cache monitoring even though Z.AI supports implicit caching and reports `cached_tokens` in responses.
+
+With a separate `ZhipuAICachePlugin`:
 
 - **Monitoring**: Extract `cached_tokens` from the response `TokenUsage` and correlate with GC policy assignments from the `InstructionBudget`.
 - **Advisory**: Detect when GC is about to disrupt a highly-cached prefix and surface this through metrics.
 - **No annotation injection**: `prepare_request()` is a no-op since caching is fully automatic.
-- **Independence from parent**: No need to fight `AnthropicProvider`'s cache logic.
+- **Independence from parent**: No `_enable_caching` hack needed.
 
-### API Compatibility
+Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` (OpenAI-compatible format) and should be mapped to `TokenUsage.cache_read_tokens` by the provider's response parser.
 
-ZhipuAI uses an Anthropic-compatible API format. Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` and should be mapped to `TokenUsage.cache_read_tokens` by the provider.
+### Ollama: No Caching
+
+`OllamaProvider` also inherits `AnthropicProvider`. Ollama doesn't support prompt caching. After extraction, no special handling is needed — if no `CachePlugin` matches the provider name `"ollama"`, no caching is applied. The current `self._enable_caching = False` hack becomes unnecessary.
+
+### Google GenAI: Future Context Caching
+
+`GoogleGenAIProvider` is standalone (no inheritance). Google offers explicit context caching for Gemini models (different mechanism from Anthropic's — cached content is created via a separate API call and referenced by name). A future `cache_google_genai/` plugin could implement this without modifying `GoogleGenAIProvider`.
+
+### Other Providers
+
+- **AntigravityProvider**: Standalone. No caching API known. No plugin needed.
+- **ClaudeCLIProvider**: Standalone. The CLI handles its own caching internally. No plugin needed.
+- **GitHubModelsProvider**: Standalone. Caching depends on the underlying model provider (OpenAI, Anthropic, Google). A plugin could be added if GitHub Models exposes cache tokens in responses.
 
 ---
 
