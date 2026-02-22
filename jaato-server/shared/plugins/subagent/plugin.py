@@ -2219,7 +2219,9 @@ class SubagentPlugin:
                         output_tokens=turn.get('output', 0),
                         total_tokens=turn.get('total', 0),
                         duration_seconds=turn.get('duration_seconds', 0),
-                        function_calls=turn.get('function_calls', [])
+                        function_calls=turn.get('function_calls', []),
+                        cache_read_tokens=turn.get('cache_read'),
+                        cache_creation_tokens=turn.get('cache_creation'),
                     )
 
                 self._ui_hooks.on_agent_context_updated(

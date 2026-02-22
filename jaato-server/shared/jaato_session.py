@@ -2741,6 +2741,11 @@ NOTES
                 turn_data['prompt'] = usage.prompt_tokens
                 turn_data['output'] = usage.output_tokens
                 turn_data['total'] = usage.total_tokens
+            # Cache tokens: capture when present (streaming path)
+            if usage.cache_read_tokens is not None:
+                turn_data['cache_read'] = usage.cache_read_tokens
+            if usage.cache_creation_tokens is not None:
+                turn_data['cache_creation'] = usage.cache_creation_tokens
             if on_usage_update:
                 on_usage_update(usage)
 
@@ -4949,11 +4954,21 @@ NOTES
 
         However, we only replace if values are non-zero, to preserve good values
         when streaming is cancelled mid-turn (which may return zero tokens).
+
+        Cache token fields (cache_read, cache_creation) are replaced alongside
+        prompt/output/total so the final API call's values propagate to
+        turn_accounting and ultimately to TurnCompletedEvent.
         """
         if response.usage.total_tokens > 0:
             turn_tokens['prompt'] = response.usage.prompt_tokens
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
+
+        # Cache tokens: replace when present (same semantics as prompt/output)
+        if response.usage.cache_read_tokens is not None:
+            turn_tokens['cache_read'] = response.usage.cache_read_tokens
+        if response.usage.cache_creation_tokens is not None:
+            turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
 
         # Accumulate thinking tokens (these are summed, not replaced)
         if response.usage.thinking_tokens:
@@ -4964,7 +4979,8 @@ NOTES
         """Emit turn progress event with current token state.
 
         Called after each model response within a turn to provide real-time
-        token tracking before the turn completes.
+        token tracking before the turn completes.  Includes cache token
+        fields when the provider reports them.
         """
         if not self._ui_hooks:
             return
@@ -4977,6 +4993,8 @@ NOTES
             output_tokens=turn_data.get('output', 0),
             percent_used=context_usage.get('percent_used', 0.0),
             pending_tool_calls=pending_tool_calls,
+            cache_read_tokens=turn_data.get('cache_read'),
+            cache_creation_tokens=turn_data.get('cache_creation'),
         )
 
         # Update conversation budget and emit for budget panel

@@ -760,10 +760,13 @@ class RichClient:
 
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                        output_tokens, total_tokens, duration_seconds,
-                                       function_calls):
+                                       function_calls, cache_read_tokens=None,
+                                       cache_creation_tokens=None):
                 registry.update_turn_accounting(
                     agent_id, turn_number, prompt_tokens, output_tokens,
-                    total_tokens, duration_seconds, function_calls
+                    total_tokens, duration_seconds, function_calls,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 )
 
             def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,

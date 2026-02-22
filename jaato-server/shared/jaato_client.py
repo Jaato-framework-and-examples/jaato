@@ -575,7 +575,9 @@ class JaatoClient:
                 output_tokens=last_turn.get('output', 0),
                 total_tokens=last_turn.get('total', 0),
                 duration_seconds=last_turn.get('duration_seconds', 0),
-                function_calls=last_turn.get('function_calls', [])
+                function_calls=last_turn.get('function_calls', []),
+                cache_read_tokens=last_turn.get('cache_read'),
+                cache_creation_tokens=last_turn.get('cache_creation'),
             )
 
             # Update context usage

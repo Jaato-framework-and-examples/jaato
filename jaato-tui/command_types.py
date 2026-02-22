@@ -199,6 +199,8 @@ class AgentUIHooks(Protocol):
         total_tokens: int,
         duration_seconds: float,
         function_calls: List[Dict[str, Any]],
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
     ) -> None: ...
 
     def on_agent_context_updated(

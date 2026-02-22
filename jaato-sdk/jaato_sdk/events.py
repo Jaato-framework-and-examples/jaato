@@ -535,7 +535,15 @@ class InstructionBudgetEvent(Event):
 
 @dataclass
 class TurnCompletedEvent(Event):
-    """A conversation turn has completed."""
+    """A conversation turn has completed.
+
+    Includes optional prompt-cache token fields so clients (e.g. TUI) can
+    display cache hit rates.  ``cache_read_tokens`` is the number of prompt
+    tokens served from cache (90% cost saving on Anthropic);
+    ``cache_creation_tokens`` is the number written *into* the cache (1.25x
+    write premium on Anthropic).  Both are ``None`` when the provider does
+    not support prompt caching.
+    """
     type: EventType = field(default=EventType.TURN_COMPLETED)
     agent_id: str = ""
     turn_number: int = 0
@@ -547,6 +555,9 @@ class TurnCompletedEvent(Event):
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
+    # Prompt-cache token counts (None when provider does not support caching)
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
 
 
 @dataclass
@@ -554,7 +565,8 @@ class TurnProgressEvent(Event):
     """Incremental progress during turn execution.
 
     Emitted after each model response within a turn, enabling real-time
-    token tracking before the turn completes.
+    token tracking before the turn completes.  Includes optional cache
+    token fields mirroring ``TurnCompletedEvent``.
     """
     type: EventType = field(default=EventType.TURN_PROGRESS)
     agent_id: str = ""
@@ -565,6 +577,9 @@ class TurnProgressEvent(Event):
     percent_used: float = 0.0
     tokens_remaining: int = 0
     pending_tool_calls: int = 0  # How many tool calls remain
+    # Prompt-cache token counts (None when provider does not support caching)
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
 
 
 @dataclass
