@@ -84,6 +84,16 @@ def _make_session(
     session._gc_config = None
     session._preloaded_plugins = set()
 
+    # Phase 2: Session-owned history flag (default True)
+    import os
+    session._session_owned_history = os.environ.get(
+        'JAATO_SESSION_OWNED_HISTORY', 'true'
+    ).lower() in ('true', '1', 'yes')
+
+    # Phase 1: SessionHistory wrapper
+    from ..session_history import SessionHistory
+    session._history = SessionHistory()
+
     return session
 
 

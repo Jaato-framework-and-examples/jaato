@@ -145,6 +145,12 @@ def _make_session(
     from ..session_history import SessionHistory
     session._history = SessionHistory()
 
+    # Phase 2: Session-owned history flag (default True)
+    import os
+    session._session_owned_history = os.environ.get(
+        'JAATO_SESSION_OWNED_HISTORY', 'true'
+    ).lower() in ('true', '1', 'yes')
+
     return session
 
 

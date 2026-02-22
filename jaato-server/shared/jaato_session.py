@@ -186,9 +186,19 @@ class JaatoSession:
 
         # Canonical conversation history owned by the session.
         # Phase 1: synced from provider after each provider operation.
-        # Later phases: session becomes sole owner, provider receives
-        # messages as parameters to stateless complete().
+        # Phase 2+: session is sole owner; provider receives messages
+        # as parameters to stateless complete().
         self._history = SessionHistory()
+
+        # Feature flag: use stateless provider.complete() path.
+        # When True, session manages history directly and calls complete().
+        # When False, falls back to legacy send_message()/send_tool_results().
+        # Default True on this branch; set JAATO_SESSION_OWNED_HISTORY=false
+        # to test the legacy path. This env var will be removed once the
+        # legacy path is dropped entirely (Phase 4).
+        self._session_owned_history: bool = os.environ.get(
+            'JAATO_SESSION_OWNED_HISTORY', 'true'
+        ).lower() in ('true', '1', 'yes')
 
         # Tool configuration
         self._executor: Optional[ToolExecutor] = None
@@ -1214,6 +1224,13 @@ class JaatoSession:
     ) -> None:
         """Create or recreate the provider session.
 
+        In stateless mode, the session is the sole history owner. The
+        provider session is still created (for connection config) but
+        history is set directly on ``self._history`` rather than synced
+        from the provider.
+
+        In legacy mode, the provider owns the history and we sync from it.
+
         Args:
             history: Optional initial conversation history.
         """
@@ -1230,14 +1247,43 @@ class JaatoSession:
         else:
             logger.debug(f"[session:{self._agent_id}] _create_provider_session: no history to restore")
 
-        self._provider.create_session(
-            system_instruction=self._system_instruction,
-            tools=tools_to_pass,
-            history=history
+        if self._use_stateless_provider:
+            # Stateless path: session owns history directly.
+            # Still create provider session for config but pass empty history
+            # since the provider won't manage it.
+            self._provider.create_session(
+                system_instruction=self._system_instruction,
+                tools=tools_to_pass,
+                history=[],
+            )
+            # Set session history directly
+            if history:
+                self._history.replace(list(history))
+            else:
+                self._history.clear()
+        else:
+            # Legacy path: provider is authoritative.
+            self._provider.create_session(
+                system_instruction=self._system_instruction,
+                tools=tools_to_pass,
+                history=history
+            )
+            # Sync session's canonical history from the provider after session
+            # creation/recreation.
+            self._sync_history_from_provider()
+
+    @property
+    def _use_stateless_provider(self) -> bool:
+        """Whether to use the stateless ``provider.complete()`` path.
+
+        Returns True when the session-owned history flag is set AND the
+        current provider implements the ``complete()`` method.
+        """
+        return (
+            self._session_owned_history
+            and self._provider is not None
+            and hasattr(self._provider, 'complete')
         )
-        # Sync session's canonical history from the provider after session
-        # creation/recreation. During Phase 1 the provider is authoritative.
-        self._sync_history_from_provider()
 
     def _sync_history_from_provider(self) -> None:
         """Sync the session's canonical history from the provider.
@@ -1246,12 +1292,47 @@ class JaatoSession:
         send_tool_results, create_session, etc.) to keep the session's
         ``SessionHistory`` in sync.
 
-        During Phase 1 of the migration, the provider remains authoritative
-        and this method simply copies its state. In later phases this method
-        is removed as the session becomes the sole history owner.
+        Skipped when using the stateless provider path
+        (``_use_stateless_provider`` is True) because the session is the
+        sole history owner in that mode.
         """
+        if self._use_stateless_provider:
+            return
         if self._provider:
             self._history.sync_from_provider(self._provider)
+
+    def _add_model_response_to_history(self, response: 'ProviderResponse') -> None:
+        """Add the model's response to session history (stateless path).
+
+        Mirrors ``AnthropicProvider._add_response_to_history()`` but operates
+        on the session's ``SessionHistory`` instead of the provider's
+        internal list.
+
+        Called after ``provider.complete()`` returns successfully. Filters
+        response parts to only text and function_call (excludes
+        function_response parts which belong to user/tool messages).
+
+        Args:
+            response: The ProviderResponse from the provider.
+        """
+        history_parts = [
+            p for p in response.parts
+            if p.text is not None or p.function_call is not None
+        ]
+        if history_parts:
+            self._history.append(Message(role=Role.MODEL, parts=history_parts))
+
+    def _get_tools_for_provider(self) -> Optional[List['ToolSchema']]:
+        """Get the tool list to pass to the provider.
+
+        Checks whether the provider manages its own tools (e.g. Claude CLI
+        in delegated mode). If so, returns an empty list.
+
+        Returns:
+            Tools to pass, or empty list if provider manages its own.
+        """
+        uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
+        return self._tools if uses_external else []
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -2851,6 +2932,12 @@ NOTES
             # Set activity phase: we're about to wait for LLM response
             self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
 
+            # Stateless path: append user message to session history before provider call.
+            # The message stays in history across retries (correct: the user DID send it).
+            # Rolled back in the outer except block if all retries fail.
+            if self._use_stateless_provider:
+                self._history.append(Message.from_text(Role.USER, message))
+
             # Send message (streaming or batched) with telemetry
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
@@ -2902,31 +2989,69 @@ NOTES
                             self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
                             on_output("thinking", thinking, "write")
 
-                    response, _retry_stats = with_retry(
-                        lambda: self._provider.send_message_streaming(
-                            message,
-                            on_chunk=streaming_callback,
+                    if self._use_stateless_provider:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                                on_chunk=streaming_callback,
+                                cancel_token=self._cancel_token,
+                                on_usage_update=wrapped_usage_callback,
+                                on_thinking=thinking_callback,
+                                # Note: on_function_call is intentionally NOT used here.
+                                # The SDK may deliver function calls before preceding text,
+                                # which would cause tool trees to appear in wrong positions.
+                                # Tool trees are displayed during parts processing instead.
+                            ),
+                            context="complete_streaming",
+                            on_retry=self._on_retry,
                             cancel_token=self._cancel_token,
-                            on_usage_update=wrapped_usage_callback,
-                            on_thinking=thinking_callback
-                            # Note: on_function_call is intentionally NOT used here.
-                            # The SDK may deliver function calls before preceding text,
-                            # which would cause tool trees to appear in wrong positions.
-                            # Tool trees are displayed during parts processing instead.
-                        ),
-                        context="send_message_streaming",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token,
-                        provider=self._provider
-                    )
+                            provider=self._provider
+                        )
+                    else:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.send_message_streaming(
+                                message,
+                                on_chunk=streaming_callback,
+                                cancel_token=self._cancel_token,
+                                on_usage_update=wrapped_usage_callback,
+                                on_thinking=thinking_callback
+                                # Note: on_function_call is intentionally NOT used here.
+                                # The SDK may deliver function calls before preceding text,
+                                # which would cause tool trees to appear in wrong positions.
+                                # Tool trees are displayed during parts processing instead.
+                            ),
+                            context="send_message_streaming",
+                            on_retry=self._on_retry,
+                            cancel_token=self._cancel_token,
+                            provider=self._provider
+                        )
                 else:
-                    response, _retry_stats = with_retry(
-                        lambda: self._provider.send_message(message),
-                        context="send_message",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token,
-                        provider=self._provider
-                    )
+                    if self._use_stateless_provider:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                            ),
+                            context="complete",
+                            on_retry=self._on_retry,
+                            cancel_token=self._cancel_token,
+                            provider=self._provider
+                        )
+                    else:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.send_message(message),
+                            context="send_message",
+                            on_retry=self._on_retry,
+                            cancel_token=self._cancel_token,
+                            provider=self._provider
+                        )
+
+                # Stateless path: record model response in session history
+                if self._use_stateless_provider:
+                    self._add_model_response_to_history(response)
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 # Track model response count for turn complexity
@@ -4741,7 +4866,17 @@ NOTES
         wrapped_usage_callback: Optional[UsageUpdateCallback],
         turn_data: Dict[str, Any]
     ) -> ProviderResponse:
-        """Actually send tool results to the provider."""
+        """Actually send tool results to the provider.
+
+        In stateless mode, appends tool results to session history as a TOOL
+        message before calling ``provider.complete()``. In legacy mode,
+        delegates to ``provider.send_tool_results[_streaming]()``.
+        """
+        # Stateless path: append tool results to session history
+        if self._use_stateless_provider:
+            tool_result_parts = [Part(function_response=r) for r in tool_results]
+            self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
             provider=self._provider.name if self._provider else "unknown",
@@ -4773,29 +4908,63 @@ NOTES
                         self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results_streaming(
-                        tool_results,
-                        on_chunk=streaming_callback,
+                if self._use_stateless_provider:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback,
+                        ),
+                        context="complete_tool_results_streaming",
+                        on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback
-                        # Note: on_function_call is intentionally NOT used here.
-                        # See comment in send_message for explanation.
-                    ),
-                    context="send_tool_results_streaming",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                        provider=self._provider
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_tool_results_streaming(
+                            tool_results,
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback
+                            # Note: on_function_call is intentionally NOT used here.
+                            # See comment in send_message for explanation.
+                        ),
+                        context="send_tool_results_streaming",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
             else:
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                if self._use_stateless_provider:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_tool_results",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_tool_results(tool_results),
+                        context="send_tool_results",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
+
+            # Stateless path: record model response in session history
+            if self._use_stateless_provider:
+                self._add_model_response_to_history(response)
 
             # Emit thinking content if present (non-streaming only).
             # For streaming, the provider emits thinking via on_thinking callback
@@ -4890,6 +5059,10 @@ NOTES
 
         self._trace(f"MID_TURN_PROMPT: About to call provider, cancel_token.is_cancelled={self._cancel_token.is_cancelled if self._cancel_token else 'None'}")
 
+        # Stateless path: append user message to session history
+        if self._use_stateless_provider:
+            self._history.append(Message.from_text(Role.USER, prompt))
+
         # Send the prompt to the model with telemetry
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
@@ -4913,28 +5086,58 @@ NOTES
                         on_output("thinking", thinking, "write")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message_streaming(
-                        prompt,
-                        on_chunk=streaming_callback,
+                if self._use_stateless_provider:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback,
+                        ),
+                        context="complete_mid_turn_streaming",
+                        on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback
-                    ),
-                    context="mid_turn_prompt_streaming",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                        provider=self._provider
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_message_streaming(
+                            prompt,
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback
+                        ),
+                        context="mid_turn_prompt_streaming",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
                 self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message(prompt),
-                    context="mid_turn_prompt",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                if self._use_stateless_provider:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_mid_turn",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_message(prompt),
+                        context="mid_turn_prompt",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
 
                 # Emit thinking content if present
                 if on_output and response.thinking:
@@ -4943,6 +5146,10 @@ NOTES
                 # Emit response text if not streaming
                 if on_output and response.get_text():
                     on_output("model", response.get_text(), "write")
+
+            # Stateless path: record model response in session history
+            if self._use_stateless_provider:
+                self._add_model_response_to_history(response)
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -5653,17 +5860,38 @@ NOTES
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
+            # Stateless path: append user message to session history
+            if self._use_stateless_provider:
+                self._history.append(Message(role=Role.USER, parts=list(parts)))
+
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=False,
             ) as llm_telemetry:
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message_with_parts(parts),
-                    context="send_message_with_parts",
-                    on_retry=self._on_retry,
-                    provider=self._provider
-                )
+                if self._use_stateless_provider:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_with_parts",
+                        on_retry=self._on_retry,
+                        provider=self._provider
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_message_with_parts(parts),
+                        context="send_message_with_parts",
+                        on_retry=self._on_retry,
+                        provider=self._provider
+                    )
+
+                # Stateless path: record model response
+                if self._use_stateless_provider:
+                    self._add_model_response_to_history(response)
+
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 # Record token usage to telemetry span
@@ -5792,17 +6020,40 @@ NOTES
 
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
+
+                # Stateless path: append tool results to session history
+                if self._use_stateless_provider:
+                    tool_result_parts = [Part(function_response=r) for r in tool_results]
+                    self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
                 with self._telemetry.llm_span(
                     model=self._model_name or "unknown",
                     provider=self._provider.name if self._provider else "unknown",
                     streaming=False,
                 ) as llm_telemetry:
-                    response, _retry_stats = with_retry(
-                        lambda: self._provider.send_tool_results(tool_results),
-                        context="send_tool_results",
-                        on_retry=self._on_retry,
-                        provider=self._provider
-                    )
+                    if self._use_stateless_provider:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                            ),
+                            context="complete_tool_results_parts",
+                            on_retry=self._on_retry,
+                            provider=self._provider
+                        )
+                    else:
+                        response, _retry_stats = with_retry(
+                            lambda: self._provider.send_tool_results(tool_results),
+                            context="send_tool_results",
+                            on_retry=self._on_retry,
+                            provider=self._provider
+                        )
+
+                    # Stateless path: record model response
+                    if self._use_stateless_provider:
+                        self._add_model_response_to_history(response)
+
                     self._record_token_usage(response)
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span

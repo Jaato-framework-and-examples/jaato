@@ -250,7 +250,52 @@ class ModelProviderPlugin(Protocol):
         """
         ...
 
-    # ==================== Messaging ====================
+    # ==================== Stateless Completion ====================
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None,
+    ) -> ProviderResponse:
+        """Stateless completion: convert messages to provider format, call API, return response.
+
+        Unlike send_message(), this method does NOT modify any internal state.
+        The caller (session) is responsible for maintaining the message list.
+
+        When on_chunk is provided, the response is streamed token-by-token.
+        When on_chunk is None, the response is returned in batch mode.
+
+        Args:
+            messages: Full conversation history in provider-agnostic Message format.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+
+        Note:
+            This is an optional method introduced in Phase 2 of the session-owned
+            history migration. Providers that do not yet implement it will not
+            be used via the stateless path. Check ``hasattr(provider, 'complete')``
+            before calling.
+        """
+        ...
+
+    # ==================== Messaging (Legacy) ====================
 
     def generate(self, prompt: str) -> ProviderResponse:
         """Simple one-shot generation without session context.

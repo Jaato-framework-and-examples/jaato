@@ -112,6 +112,38 @@ class SessionHistory:
         self._messages = list(get_history())
         self._dirty = False
 
+    def pop_last(self) -> Optional['Message']:
+        """Remove and return the last message, or None if empty.
+
+        Used for rollback when a provider call fails after the session
+        has already appended a user/tool message.
+        """
+        if self._messages:
+            msg = self._messages.pop()
+            self._dirty = True
+            return msg
+        return None
+
+    @property
+    def last(self) -> Optional['Message']:
+        """Return the last message without removing it, or None if empty."""
+        return self._messages[-1] if self._messages else None
+
+    @property
+    def messages_ref(self) -> List['Message']:
+        """Return a direct reference to the internal message list.
+
+        Unlike ``messages`` (which returns a copy), this gives direct access
+        for performance-critical reads where the caller guarantees it will
+        not mutate the list. Used by the stateless provider path to avoid
+        copying the full history on every ``complete()`` call.
+
+        .. warning:: Do NOT mutate the returned list. Use ``append()``,
+           ``replace()``, or ``pop_last()`` for mutations so dirty-tracking
+           is maintained.
+        """
+        return self._messages
+
     def __len__(self) -> int:
         return len(self._messages)
 
