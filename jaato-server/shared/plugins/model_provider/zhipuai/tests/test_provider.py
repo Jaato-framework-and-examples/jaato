@@ -79,16 +79,13 @@ class TestInitialization:
         assert provider._base_url == "https://env-url.com"
 
     @patch('anthropic.Anthropic')
-    def test_caching_disabled(self, mock_anthropic):
-        """Should have caching disabled (may not be supported)."""
+    def test_no_cache_plugin_by_default(self, mock_anthropic):
+        """Cache plugin is not attached by default (wired by session)."""
         provider = ZhipuAIProvider()
-        provider.initialize(ProviderConfig(
-            api_key="test-key",
-            extra={"enable_caching": True}
-        ))
+        provider.initialize(ProviderConfig(api_key="test-key"))
 
-        # Should still be disabled
-        assert provider._enable_caching is False
+        # No cache plugin attached directly on provider
+        assert provider._cache_plugin is None
 
     @patch('anthropic.Anthropic')
     def test_thinking_default_disabled(self, mock_anthropic):
