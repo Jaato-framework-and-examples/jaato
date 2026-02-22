@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
+from .session_history import SessionHistory
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,12 @@ class JaatoSession:
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
+
+        # Canonical conversation history owned by the session.
+        # Phase 1: synced from provider after each provider operation.
+        # Later phases: session becomes sole owner, provider receives
+        # messages as parameters to stateless complete().
+        self._history = SessionHistory()
 
         # Tool configuration
         self._executor: Optional[ToolExecutor] = None
@@ -1228,6 +1235,23 @@ class JaatoSession:
             tools=tools_to_pass,
             history=history
         )
+        # Sync session's canonical history from the provider after session
+        # creation/recreation. During Phase 1 the provider is authoritative.
+        self._sync_history_from_provider()
+
+    def _sync_history_from_provider(self) -> None:
+        """Sync the session's canonical history from the provider.
+
+        Called after provider operations that mutate history (send_message,
+        send_tool_results, create_session, etc.) to keep the session's
+        ``SessionHistory`` in sync.
+
+        During Phase 1 of the migration, the provider remains authoritative
+        and this method simply copies its state. In later phases this method
+        is removed as the session becomes the sole history owner.
+        """
+        if self._provider:
+            self._history.sync_from_provider(self._provider)
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -3577,6 +3601,12 @@ NOTES
             raise
 
         finally:
+            # Sync session's canonical history from provider after all
+            # provider operations in this turn (send_message, send_tool_results,
+            # mid-turn prompts, etc.). This must happen before
+            # _update_conversation_budget() which reads from get_history().
+            self._sync_history_from_provider()
+
             # Record turn end time
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
@@ -4505,6 +4535,10 @@ NOTES
                 # Hit a non-tool message, stop
                 break
 
+        # Sync session history after direct provider mutation
+        if removed > 0:
+            self._sync_history_from_provider()
+
     _TRUNCATION_PRESERVE_LINES = 20  # Lines to keep from the start of truncated results
     _TRUNCATION_PRESERVE_CHARS = 2000  # Minimum characters to keep when using char-based truncation
     _TRUNCATION_NOTICE = (
@@ -5341,10 +5375,14 @@ NOTES
         })
 
     def get_history(self) -> List[Message]:
-        """Get current conversation history."""
-        if not self._provider:
-            return []
-        return self._provider.get_history()
+        """Get current conversation history.
+
+        Returns the session's canonical copy of the history. During Phase 1
+        of the session-owned history migration, this is kept in sync with
+        the provider's copy via ``_sync_history_from_provider()`` calls
+        after each provider operation.
+        """
+        return self._history.messages
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
@@ -5398,13 +5436,18 @@ NOTES
         message_id, so cached counts remain valid.  The cache is only
         cleared on a true fresh reset (no history).
 
+        Updates both the session's canonical ``SessionHistory`` and the
+        provider's internal state (via ``_create_provider_session``).
+
         Args:
             history: Optional initial history for the new session.
         """
         if history:
             logger.info(f"[session:{self._agent_id}] reset_session: restoring {len(history)} messages")
+            self._history.replace(history)
         else:
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
+            self._history.clear()
         self._turn_accounting = []
         if not history:
             self._msg_token_cache.clear()
@@ -5803,6 +5846,10 @@ NOTES
             raise
 
         finally:
+            # Sync session's canonical history from provider after all
+            # provider operations in this turn.
+            self._sync_history_from_provider()
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()

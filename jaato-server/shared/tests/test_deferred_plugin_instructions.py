@@ -141,6 +141,10 @@ def _make_session(
     session._deferred_plugin_instructions = set()
     session._preloaded_plugins = set()
 
+    # Phase 1: SessionHistory wrapper (canonical history owned by session)
+    from ..session_history import SessionHistory
+    session._history = SessionHistory()
+
     return session
 
 
