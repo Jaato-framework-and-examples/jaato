@@ -108,6 +108,7 @@ gc_budget = "shared.plugins.gc_budget:create_plugin"
 [project.entry-points."jaato.cache_plugins"]
 cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
 cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
+cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 
 [tool.setuptools.packages.find]
 where = ["."]
