@@ -1,7 +1,7 @@
 # Impact Analysis: Cache Plugin Extraction (Variant A) → Session-Owned History (Variant B)
 
 **Date:** 2026-02-22
-**Status:** Analysis
+**Status:** Variant A implemented; Variant B not started (blocked on session-owned history)
 **Depends on:**
 - [Cache Plugin Design](../jaato-cache-plugin-design.md) — Variants A and B
 - [Session-Owned History Impact Analysis](session-owned-history-impact-analysis.md) — 5-phase migration
@@ -11,6 +11,102 @@
 This document analyzes the impact of implementing cache plugin extraction using **Variant A** (provider delegates, current architecture) as a first step, then transitioning to **Variant B** (session orchestrates) when session-owned history lands.
 
 **Verdict:** The sequencing is sound. The throwaway cost of the A→B transition is **~20 lines of glue code**. The core CachePlugin protocol, all plugin implementations, budget wiring, and GC-cache coordination survive the transition unchanged. Variant A delivers immediate value (inheritance cleanup, budget-aware breakpoints, extensibility) without blocking or being blocked by the session-owned history migration.
+
+---
+
+## Implementation Progress
+
+### Variant A: Completed (2026-02-22)
+
+Variant A was fully implemented in commit `8500019` ("Implement Variant A cache plugin extraction from AnthropicProvider"), followed by four commits (`8eee506`, `69639e0`, `c526ca0`, `96d8ed4`) that threaded cache metrics through the full pipeline to clients.
+
+#### New Files Created
+
+| Path | LOC | Purpose | Status |
+|------|:---:|---------|:------:|
+| `shared/plugins/cache/__init__.py` | 129 | Package init, `discover_cache_plugins()`, `PLUGIN_KIND = "cache"` | Done |
+| `shared/plugins/cache/base.py` | 146 | `CachePlugin` protocol/ABC | Done |
+| `shared/plugins/cache/tests/test_protocol.py` | 37 | Protocol conformance tests (5 tests) | Done |
+| `shared/plugins/cache_anthropic/__init__.py` | 12 | Package init, `create_plugin()` | Done |
+| `shared/plugins/cache_anthropic/plugin.py` | 473 | `AnthropicCachePlugin` — explicit breakpoints, budget-aware BP3 | Done |
+| `shared/plugins/cache_anthropic/tests/test_plugin.py` | 350 | Unit tests (31 tests) | Done |
+| `shared/plugins/cache_zhipuai/__init__.py` | 12 | Package init, `create_plugin()` | Done |
+| `shared/plugins/cache_zhipuai/plugin.py` | 166 | `ZhipuAICachePlugin` — monitoring-only, implicit caching | Done |
+| `shared/plugins/cache_zhipuai/tests/test_plugin.py` | 189 | Unit tests (21 tests) | Done |
+
+**Test totals:** 57 new tests (5 protocol + 31 Anthropic + 21 ZhipuAI), 0 regressions.
+
+#### Modifications to Existing Files
+
+| File | Change | Status |
+|------|--------|:------:|
+| **`AnthropicProvider`** (`anthropic/provider.py`) | `_build_api_kwargs()` refactored into `_build_system_blocks`, `_build_tool_list`, `_apply_legacy_cache_annotations`. Added `set_cache_plugin()` method and `self._cache_plugin` attribute. Delegation to `CachePlugin.prepare_request()` when plugin attached. `_compute_history_cache_breakpoint()` delegates to plugin's budget-aware BP3 when available, falls back to recency-based heuristic. (+204 / -62 net) | Done |
+| **`JaatoSession`** (`jaato_session.py`) | `_wire_cache_plugin()` auto-discovers matching cache plugin by `provider_name`. Budget forwarding via `_emit_instruction_budget_update()`. GC notification via `_apply_gc_removal_list()` → `cache_plugin.on_gc_result()`. Cache metrics extracted via `_accumulate_turn_tokens()` — threads `cache_read_tokens` and `cache_creation_tokens` into `turn_data`. (+132 initial, +20 metrics pipeline) | Done |
+| **`ZhipuAIProvider`** (`zhipuai/provider.py`) | `_enable_caching = False` **retained** but re-documented: "Disable parent's legacy cache annotations. ZhipuAI uses implicit caching — breakpoint injection is handled by `cache_zhipuai` plugin when attached, not by the provider." | Done |
+| **`OllamaProvider`** (`ollama/provider.py`) | `_enable_caching = False` **retained** but re-documented: "Ollama doesn't support caching. No cache plugin will match `provider_name='ollama'`, so no cache annotations are applied (correct behavior)." | Done |
+| **`pyproject.toml`** | Added `jaato.cache_plugins` entry point group with `cache_anthropic` and `cache_zhipuai` entries. | Done |
+| **`registry.py`** | Updated for cache plugin discovery. | Done |
+
+**Note on ZhipuAI/Ollama:** The design doc projected removing `_enable_caching = False` entirely. In practice, the flag was **retained** because it suppresses the parent `AnthropicProvider`'s legacy (non-plugin) cache annotation path. It's now documented as "legacy annotation suppression" rather than a hack. The flag becomes unnecessary only when the legacy cache code path is removed from `AnthropicProvider` entirely (i.e., when all users have migrated to plugin-based caching and the fallback path is dropped).
+
+#### Cache Metrics Pipeline (Commits `8eee506` → `96d8ed4`)
+
+End-to-end pipeline threading `cache_read_tokens` and `cache_creation_tokens` from provider responses to client display:
+
+```
+AnthropicProvider response
+  → TokenUsage.cache_read_tokens / .cache_creation_tokens (already existed in converters.py)
+  → JaatoSession._accumulate_turn_tokens() populates turn_data['cache_read'] / ['cache_creation']
+  → on_agent_turn_completed callback includes cache fields
+  → TurnCompletedEvent / TurnProgressEvent (jaato_sdk/events.py) — new Optional[int] fields
+  → JaatoServer (server/core.py) forwards cache fields in events and turn accounting
+  → agent_registry.py (TUI) receives and stores per-turn cache data
+  → rich_client.py displays:
+      - Per-turn summary: "─── cache hit: 85%" after each turn (both local hooks + remote events)
+      - /history command: cache hit % per turn and session total
+      - Subagent turns: same pipeline via subagent UIHooks
+```
+
+| Component | File | Change |
+|-----------|------|--------|
+| SDK events | `jaato_sdk/events.py` | `TurnCompletedEvent` + `TurnProgressEvent` gained `cache_read_tokens`, `cache_creation_tokens` fields |
+| Session | `jaato_session.py` | `_accumulate_turn_tokens()` extracts cache tokens from `ProviderResponse.usage` |
+| Server | `server/core.py` | `on_agent_turn_completed` + `on_agent_turn_progress` forward cache fields |
+| Subagent hooks | `subagent/ui_hooks.py` | Cache fields threaded through subagent turn callbacks |
+| TUI registry | `agent_registry.py` | Stores cache fields in per-turn accounting |
+| TUI types | `command_types.py` | Added cache fields to turn data types |
+| TUI display | `rich_client.py` | Turn summary lines, `/history` per-turn + session totals, remote event handling |
+
+### Variant A vs. Design Doc Projections
+
+| Design Doc Projection (Section 1.4) | Actual |
+|--------------------------------------|--------|
+| New plugin code: ~420 LOC | **~820 LOC** (protocol + Anthropic + ZhipuAI implementations, larger than projected) |
+| Provider modification: ~185 lines | **+204 / -62 lines** (refactored rather than just extracted) |
+| Session modification: ~30 lines | **~152 lines** (includes metrics pipeline, larger scope than projected) |
+| Runtime/registry modification: ~20 lines | ~20 lines (accurate) |
+| Tests: ~200 LOC | **~576 LOC** (57 tests, more thorough than projected) |
+| Total new/modified: ~670 | **~1,870** (larger due to metrics pipeline, thorough tests, refactoring) |
+
+The implementation was larger than projected because: (1) the provider was refactored (not just extracted) — `_build_api_kwargs` was split into composable methods; (2) the cache metrics pipeline (4 commits) was additional scope not in the original projection; (3) test coverage was more thorough than estimated.
+
+### Variant B: Not Started
+
+Variant B remains blocked on **session-owned history Phase 2** (stateless `complete()` method on providers). No session-owned history work has been started.
+
+**What's needed for A→B (unchanged from Section 2):**
+
+| Item | Lines | Status |
+|------|:---:|:------:|
+| Remove `set_cache_plugin()` from protocol + `AnthropicProvider` | ~13 | Not started |
+| Relocate delegation from `_build_api_kwargs` to `complete()` | ~15 | Blocked on `complete()` existing |
+| Simplify session wiring (remove `hasattr` check) | ~3 | Not started |
+| Remove `_enable_caching = False` from ZhipuAI/Ollama | ~6 | Blocked on legacy path removal |
+| Update affected tests | ~30 | Not started |
+| Verify cache hits (integration test) | — | Not started |
+| **Blocking dependency: session-owned history Phase 2** | — | **Not started** |
+
+**Estimated A→B effort remains ~2 hours of mechanical work** once session-owned history Phase 2 lands.
 
 ---
 
