@@ -3517,14 +3517,6 @@ class OutputBuffer:
         if remaining_content:
             remaining_lines = remaining_content.split('\n')
 
-            # Handle options line focus highlighting if permission options are set
-            if self._permission_response_options:
-                for i in range(len(remaining_lines) - 1, -1, -1):
-                    if self._is_options_line(remaining_lines[i]):
-                        # Replace options line with focused version
-                        remaining_lines[i] = self._render_focused_options_line()
-                        break
-
             # Check for notebook rows in remaining content
             if "<nb-row " in remaining_content:
                 self._render_notebook_rows(output, remaining_content, prefix, continuation, is_last)
@@ -3850,15 +3842,6 @@ class OutputBuffer:
             indent_width = len(indent)  # 12 chars
             content_lines = content_text.split('\n')
 
-            # Search for options line from end (may not be exactly last due to trailing empty lines)
-            # Options line typically looks like: "[y]es [n]o [a]lways ..."
-            if self._permission_response_options:
-                for i in range(len(content_lines) - 1, -1, -1):
-                    if self._is_options_line(content_lines[i]):
-                        # Replace options line with focused version
-                        content_lines[i] = self._render_focused_options_line()
-                        break
-
             # Calculate available width for content
             max_width = max(20, self._console_width - indent_width)
 
@@ -3951,28 +3934,6 @@ class OutputBuffer:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
-
-    def _is_options_line(self, line: str) -> bool:
-        """Check if a line is the permission options line.
-
-        The options line contains bracketed choices like [yes] [no] [always].
-        We detect it by looking for the pattern of multiple bracketed items.
-
-        Args:
-            line: The line to check.
-
-        Returns:
-            True if this appears to be an options line.
-        """
-        import re
-        # Strip ANSI codes for pattern matching
-        clean_line = re.sub(r'\x1b\[[0-9;?]*[A-Za-z~]', '', line)
-        # Options line has multiple [x]word patterns
-        # Pattern: [letter(s)]rest_of_word repeated multiple times
-        pattern = r'\[[a-z]+\][a-z]*'
-        matches = re.findall(pattern, clean_line.lower())
-        # Need at least 3 options to be considered an options line
-        return len(matches) >= 3
 
     def _render_focused_options_line(self) -> str:
         """Render the permission options line with the focused option highlighted.

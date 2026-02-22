@@ -1341,7 +1341,7 @@ class PermissionPlugin:
         if not include_details and display_info and display_info.details:
             raw_details = display_info.details
 
-        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=True)
+        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=False)
         return lines, format_hint, language, raw_details, warnings, warning_level
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
