@@ -1,12 +1,14 @@
-"""Google GenAI Cache Plugin — monitoring for implicit context caching.
+"""Google GenAI Cache Plugin — explicit context caching via CachedContent.
 
-Google GenAI (Gemini) uses automatic context caching where the system
-detects repeated prefixes across requests.  This plugin tracks cache
-hit metrics and GC invalidations without modifying requests.
+When ``enable_caching`` is set in provider config, this plugin creates
+a server-side ``CachedContent`` object containing the session's system
+instruction and tool definitions.  Subsequent requests reference the
+cache by name, avoiding re-transmission of the (potentially large)
+prefix.
 
-Future enhancement: Active caching via the ``google.genai.caching``
-API (create/manage ``CachedContent`` objects) for explicit prefix
-pinning.
+When caching is disabled or the content falls below the minimum token
+threshold (~32K tokens), the plugin operates in monitoring-only mode
+and tracks cache metrics without modifying requests.
 """
 
 PLUGIN_KIND = "cache"
