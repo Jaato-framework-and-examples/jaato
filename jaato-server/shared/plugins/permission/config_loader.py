@@ -208,12 +208,11 @@ def load_config(
         path = os.environ.get(env_var)
 
     if path is None:
-        # Try default locations
+        # Try default locations (follows .jaato/ convention used by other plugins)
         cwd = Path(base_path) if base_path else Path(os.environ.get('JAATO_WORKSPACE_ROOT') or Path.cwd())
         default_paths = [
-            cwd / "permissions.json",
-            cwd / ".permissions.json",
-            Path.home() / ".config" / "jaato" / "permissions.json",
+            cwd / ".jaato" / "permissions.json",
+            Path.home() / ".jaato" / "permissions.json",
         ]
         for default_path in default_paths:
             if default_path.exists():
