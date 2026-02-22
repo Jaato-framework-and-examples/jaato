@@ -139,6 +139,7 @@
           <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
           <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
           <li><a href="../guides/permissions.html">Permissions</a></li>
+          <li><a href="../guides/connection-recovery.html">Connection Recovery</a></li>
         </ul>
       </div>
 
@@ -203,6 +204,12 @@
         <p class="lead">
           When a client connects to the JAATO server via IPC, the connection may be interrupted by server restarts, crashes, or network issues. The IPC recovery mechanism provides automatic reconnection with exponential backoff, preserving the user's session and conversation state.
         </p>
+
+        <div class="callout callout-info" style="margin-top: 24px; padding: 16px 20px; border-left: 4px solid #0ea5e9; background: rgba(14, 165, 233, 0.08); border-radius: 4px;">
+          <strong>Practical integration guide:</strong> For a step-by-step guide on using
+          <code>IPCRecoveryClient</code> in your client code, see the
+          <a href="../guides/connection-recovery.html">Connection Recovery Guide</a>.
+        </div>
       </section>
 
       <div class="infography-full">
