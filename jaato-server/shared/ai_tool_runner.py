@@ -250,6 +250,35 @@ class ToolExecutor:
             return plugin
         return None
 
+    def _can_resolve_executor(self, name: str) -> bool:
+        """Check whether an executor can be resolved for the given tool name.
+
+        Performs a lightweight lookup without executing anything. Used to
+        skip permission prompts for tools that have no registered executor,
+        avoiding unnecessary user interaction for calls that will
+        unconditionally fail.
+
+        Args:
+            name: Tool name to check.
+
+        Returns:
+            True if an executor can be found via direct map, registry, or
+            generic execution fallback.
+        """
+        # Direct map lookup
+        if name in self._map:
+            return True
+        # Registry/plugin fallback
+        if self._registry:
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin and hasattr(plugin, 'get_executors'):
+                if name in plugin.get_executors():
+                    return True
+        # Generic executor fallback
+        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
+            return True
+        return False
+
     def _execute_sync(self, name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
         """Execute a tool synchronously (internal helper).
 
@@ -449,7 +478,20 @@ class ToolExecutor:
         debug: bool,
         call_id: Optional[str] = None
     ) -> Tuple[bool, Any]:
-        """Internal implementation of execute(), separated for try/finally wrapping."""
+        """Internal implementation of execute(), separated for try/finally wrapping.
+
+        Checks executor existence before permission to avoid prompting the user
+        for tools that have no registered executor and will unconditionally fail.
+        """
+        # Early exit: skip permission prompt if no executor can be resolved.
+        # This avoids asking the user to approve a tool call that will
+        # unconditionally fail with "No executor registered".
+        if not self._can_resolve_executor(name):
+            if debug:
+                print(f"[ai_tool_runner] no executor resolvable for {name}, "
+                      f"skipping permission check")
+            return False, {'error': f'No executor registered for {name}'}
+
         # Track permission metadata for injection into result
         permission_meta = None
 
