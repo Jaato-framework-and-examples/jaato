@@ -57,21 +57,33 @@ The `AnthropicCachePlugin` accepts `cache_ttl` config (`"5m"` or `"1h"`) but cur
 
 #### 1.4 — Google GenAI Context Caching Plugin (New) — **COMPLETED**
 
-**Status:** Implemented as monitoring-only plugin (Pattern 2, like ZhipuAI) with 31 passing tests.
+**Status:** Implemented with active `CachedContent` support — 61 passing tests.
 
-The `GoogleGenAICachePlugin` tracks cache hit metrics from `cached_content_token_count` (already extracted by `GoogleGenAIProvider` into `TokenUsage.cache_read_tokens`) and monitors GC invalidations. It does not modify requests since Google GenAI uses implicit prefix caching.
+The `GoogleGenAICachePlugin` supports two modes:
 
-**Files created:**
+1. **Active caching** (`enable_caching: true`): Creates a server-side `CachedContent` object containing system instruction + tool definitions via `client.caches.create()`. Returns `cached_content` name in `prepare_request()` result so the provider references the cached prefix in `GenerateContentConfig`. Content changes are detected via SHA-256 hash; stale caches are automatically deleted and recreated. Minimum ~32K token threshold prevents wasteful caching of small prompts.
+
+2. **Monitoring-only** (default): Tracks `cache_read_tokens` metrics from `cached_content_token_count` and GC invalidation counts without modifying requests.
+
+**Provider integration:** `GoogleGenAIProvider.set_cache_plugin()` passes the `genai.Client` to the plugin. `_get_cached_content_config()` builds a `GenerateContentConfig` with `cached_content` reference, injected into all 5 send methods.
+
+**Files created/modified:**
 
 | Path | Purpose |
 |------|---------|
 | `shared/plugins/cache_google_genai/__init__.py` | Package init, `PLUGIN_KIND = "cache"`, `create_plugin()` |
-| `shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` — monitoring-only implementation |
-| `shared/plugins/cache_google_genai/tests/test_plugin.py` | 31 unit tests (protocol compliance, passthrough, metrics, GC) |
+| `shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` — active + monitoring modes |
+| `shared/plugins/cache_google_genai/tests/test_plugin.py` | 61 unit tests |
+| `model_provider/google_genai/provider.py` | `set_cache_plugin()`, `_get_cached_content_config()`, 5 send method integrations |
 
 **Entry point:** Added to `pyproject.toml` under `[project.entry-points."jaato.cache_plugins"]`.
 
-**Future enhancement:** Active caching via the `google.genai.caching` API (create/manage `CachedContent` objects for explicit prefix pinning). This would require extending the `prepare_request()` return dict with a `cached_content` key and managing `CachedContent` lifecycle (create, TTL, invalidation).
+**Configuration** (via `ProviderConfig.extra`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enable_caching` | bool | `False` | Enable explicit CachedContent creation |
+| `cache_ttl` | str | `"3600s"` | TTL for cached content (e.g. `"1800s"`) |
 
 ---
 
