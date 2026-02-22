@@ -242,8 +242,6 @@ class ActiveToolCall:
     # Permission tracking
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
-    permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt (may contain ANSI codes)
-    permission_format_hint: Optional[str] = None  # "diff" for pre-formatted content (skip box wrapping)
     permission_truncated: bool = False  # True if prompt is truncated
     permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
     permission_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
@@ -1793,62 +1791,6 @@ class OutputBuffer:
         else:
             _trace(f"_maybe_restore_expanded_state: no saved state to restore")
 
-    def set_tool_permission_pending(
-        self,
-        tool_name: str,
-        prompt_lines: List[str],
-        format_hint: Optional[str] = None,
-    ) -> None:
-        """Mark a tool as awaiting permission with the prompt to display.
-
-        Args:
-            tool_name: Name of the tool awaiting permission (may be the tool being
-                checked, not necessarily the currently executing tool).
-            prompt_lines: Lines of the permission prompt to display (may contain ANSI codes).
-            format_hint: Optional hint about content format ("diff" = pre-formatted, skip box).
-        """
-        _trace(f"set_tool_permission_pending: looking for tool={tool_name}")
-        _trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
-
-        # First try exact match by tool name
-        for tool in self._active_tools:
-            if tool.name == tool_name and not tool.completed:
-                tool.permission_state = "pending"
-                tool.permission_prompt_lines = prompt_lines
-                tool.permission_format_hint = format_hint
-                # Save current state and force expanded view so user can see the permission prompt
-                if self._tools_expanded_before_prompt is None:
-                    self._tools_expanded_before_prompt = self._tools_expanded
-                self._tools_expanded = True
-                # Scroll to show the tool tree with the permission prompt
-                self.scroll_to_show_tool_tree()
-                _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}, _tools_expanded now True")
-                return
-
-        # Fallback: attach to the last uncompleted tool (handles askPermission checking other tools)
-        # When askPermission checks permission for "cli_based_tool", the active tool is "askPermission"
-        for tool in reversed(self._active_tools):
-            if not tool.completed:
-                tool.permission_state = "pending"
-                tool.permission_prompt_lines = prompt_lines
-                tool.permission_format_hint = format_hint
-                # If the requested tool is different from the active tool (e.g., askPermission
-                # checking permission for writeNewFile), show the actual tool name being checked
-                if tool.name != tool_name:
-                    tool.display_name = tool_name
-                    # Clear the args summary since it contains askPermission's args, not the target tool's
-                    tool.display_args_summary = ""
-                # Save current state and force expanded view so user can see the permission prompt
-                if self._tools_expanded_before_prompt is None:
-                    self._tools_expanded_before_prompt = self._tools_expanded
-                self._tools_expanded = True
-                # Scroll to show the tool tree with the permission prompt
-                self.scroll_to_show_tool_tree()
-                _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
-                return
-
-        _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
-
     def set_tool_awaiting_approval(self, tool_name: str, call_id: Optional[str] = None) -> None:
         """Mark tool as awaiting permission and associate buffered content.
 
@@ -1951,8 +1893,6 @@ class OutputBuffer:
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
-                # Clear permission content - it was just for the prompt display, not permanent storage
-                tool.permission_content = None
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 resolved = True
                 break
@@ -1963,8 +1903,6 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     tool.permission_state = "granted" if granted else "denied"
                     tool.permission_method = method
-                    # Clear permission content - it was just for the prompt display, not permanent storage
-                    tool.permission_content = None
                     _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
                     resolved = True
                     break
@@ -2083,8 +2021,6 @@ class OutputBuffer:
             or None if no prompt is pending.
         """
         for tool in self._active_tools:
-            if tool.permission_state == "pending" and tool.permission_prompt_lines:
-                return ("permission", tool.permission_prompt_lines)
             if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
                 return ("clarification", tool.clarification_prompt_lines)
         return None
@@ -2609,60 +2545,6 @@ class OutputBuffer:
                         else:
                             # No truncation - all lines shown
                             height += logical_lines
-                        continue
-
-                    # Legacy flow: no permission_content, use prompt_lines
-                    if not tool.permission_prompt_lines:
-                        continue
-
-                    prompt_lines = tool.permission_prompt_lines
-
-                    # Pre-formatted content (e.g., diff) - no box, just lines
-                    # Count actual visual lines (diff lines may contain embedded newlines)
-                    if tool.permission_format_hint == "diff":
-                        for line in prompt_lines:
-                            # Count newlines within each line + 1 for the line itself
-                            height += line.count('\n') + 1
-                    else:
-                        # Box calculation
-                        max_prompt_lines = 18
-                        max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
-                        content_width = box_width - 4
-
-                        # First count ALL wrapped lines to decide truncation (matches render logic)
-                        total_wrapped_lines = 0
-                        for prompt_line in prompt_lines:
-                            if len(prompt_line) > content_width:
-                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                                total_wrapped_lines += len(wrapped) if wrapped else 1
-                            else:
-                                total_wrapped_lines += 1
-
-                        if total_wrapped_lines > max_prompt_lines:
-                            # Truncation triggered - render shows:
-                            # - max_lines_before_truncation content lines
-                            # - 1 truncation message
-                            # - Last line (may wrap to multiple lines)
-                            max_lines_before_truncation = max_prompt_lines - 3
-
-                            # Calculate wrapped lines for last line
-                            last_line = prompt_lines[-1]
-                            if len(last_line) > content_width:
-                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
-                                last_line_count = len(last_wrapped) if last_wrapped else 1
-                            else:
-                                last_line_count = 1
-
-                            rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
-                        else:
-                            # No truncation - show all wrapped lines
-                            rendered_lines = total_wrapped_lines
-
-                        height += 1  # top border
-                        height += rendered_lines
-                        height += 1  # bottom border
-
                 # Clarification prompt (if pending)
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
@@ -3823,14 +3705,13 @@ class OutputBuffer:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
         prefix = "    "
-        prompt_lines = tool.permission_prompt_lines or []
 
         # Header - always show
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append("  🔒 Permission required", style=self._style("permission_prompt", "bold yellow"))
 
-        # Unified flow: permission_content contains formatted content to render inline
+        # Render permission_content inline under the tool
         if tool.permission_content:
             content_text = tool.permission_content
 
@@ -3884,70 +3765,6 @@ class OutputBuffer:
                 output.append(self._render_focused_options_line())
 
             return
-
-        # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
-        if not prompt_lines:
-            return
-
-        if tool.permission_format_hint == "diff":
-            # Pre-formatted content (diff) - render lines directly without box
-            # Handle embedded newlines by splitting and prefixing each visual line
-            for line in prompt_lines:
-                # Split on newlines to properly prefix each visual line
-                visual_lines = line.split('\n')
-                for visual_line in visual_lines:
-                    output.append("\n")
-                    output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-                    output.append(visual_line)
-        else:
-            # Standard box format
-            max_prompt_lines = 18
-            max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-            box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4) if prompt_lines else 40
-            content_width = box_width - 4
-
-            # Wrap and potentially truncate lines
-            wrapped_lines: list[str] = []
-            for line in prompt_lines:
-                if len(line) > content_width:
-                    wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
-                    wrapped_lines.extend(wrapped if wrapped else [line])
-                else:
-                    wrapped_lines.append(line)
-
-            # Check if truncation needed
-            if len(wrapped_lines) > max_prompt_lines:
-                max_before = max_prompt_lines - 3
-                truncated_count = len(wrapped_lines) - max_before - 1
-                display_lines = wrapped_lines[:max_before]
-                display_lines.append(f"... ({truncated_count} more lines)")
-                display_lines.append(wrapped_lines[-1])
-            else:
-                display_lines = wrapped_lines
-
-            # Top border
-            output.append("\n")
-            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_text", "yellow"))
-
-            # Content lines
-            for line in display_lines:
-                output.append("\n")
-                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-                padded = line.ljust(content_width)
-                output.append("│ " + padded + " │", style=self._style("permission_text", "yellow"))
-
-            # Bottom border
-            output.append("\n")
-            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
-
-        # Append focused options line rendered from structured data
-        if self._permission_response_options:
-            indent = f"{prefix}{continuation}     "
-            output.append("\n")
-            output.append(indent, style=self._style("tree_connector", "dim"))
-            output.append(self._render_focused_options_line())
 
     def _render_focused_options_line(self) -> str:
         """Render the permission options line with the focused option highlighted.

@@ -718,8 +718,9 @@ class TestToolBlockExpansionPersistence:
         # Add a tool
         self.buffer.add_active_tool("dangerousTool", {"cmd": "rm -rf /"}, call_id="call_1")
 
-        # Permission pending - saves collapsed state and forces expansion
-        self.buffer.set_tool_permission_pending("dangerousTool", ["Allow dangerous operation?"])
+        # Permission pending via unified flow - saves collapsed state and forces expansion
+        self.buffer._pending_permission_content = "Allow dangerous operation?"
+        self.buffer.set_tool_awaiting_approval("dangerousTool", call_id="call_1")
 
         # Verify state was saved and forced to expanded
         assert self.buffer._tools_expanded is True, "Should be forced to expanded"
@@ -765,8 +766,9 @@ class TestToolBlockExpansionPersistence:
         # Add a tool
         self.buffer.add_active_tool("dangerousTool", {"cmd": "rm"}, call_id="call_1")
 
-        # Permission pending - forces expansion, saves original preference
-        self.buffer.set_tool_permission_pending("dangerousTool", ["Allow?"])
+        # Permission pending via unified flow - forces expansion, saves original preference
+        self.buffer._pending_permission_content = "Allow?"
+        self.buffer.set_tool_awaiting_approval("dangerousTool", call_id="call_1")
         assert self.buffer._tools_expanded is True, "Should be forced to expanded"
         assert self.buffer._tools_expanded_before_prompt is False, "Should save user's original preference"
 

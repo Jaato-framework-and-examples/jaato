@@ -876,95 +876,6 @@ class RichClient:
             suspension_scope=status.get("suspension_scope"),
         )
 
-    def _setup_permission_hooks(self) -> None:
-        """Set up permission lifecycle hooks for UI integration.
-
-        These hooks update the tool call tree to show permission status
-        inline under each tool that requires permission.
-
-        Also stores the response_options from the permission plugin so they
-        can be passed to the input completer for context-aware autocompletion.
-        """
-        if not self.permission_plugin or not self._agent_registry:
-            return
-
-        registry = self._agent_registry
-        display = self._display
-        update_status = self._update_permission_status_display
-
-        def on_permission_requested(tool_name: str, request_id: str, tool_args: dict, response_options: list):
-            """Called when permission prompt is shown.
-
-            Args:
-                tool_name: Name of the tool requesting permission.
-                request_id: Unique identifier for this request.
-                tool_args: Arguments passed to the tool (client formats display).
-                response_options: List of PermissionResponseOption objects
-                    that define valid responses for autocompletion.
-            """
-            self._trace(f"on_permission_requested: tool={tool_name}, request_id={request_id}")
-            # Store the response options for the prompt_callback to use
-            # This makes the permission plugin the single source of truth
-            self._pending_response_options = response_options
-
-            # Get formatted prompt lines from permission plugin (with diff for file edits)
-            prompt_lines = None
-            format_hint = None
-            if hasattr(self.permission_plugin, 'get_formatted_prompt'):
-                try:
-                    prompt_lines, format_hint = self.permission_plugin.get_formatted_prompt(
-                        tool_name, tool_args, "queue"
-                    )
-                except Exception:
-                    pass  # Fall back to basic formatting
-
-            # Fallback to basic formatting if plugin formatting failed
-            if not prompt_lines:
-                from ui_utils import build_permission_prompt_lines
-                prompt_lines = build_permission_prompt_lines(
-                    tool_args=tool_args,
-                    response_options=response_options,
-                    include_tool_name=True,  # Direct mode includes tool name
-                    tool_name=tool_name,
-                )
-            self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines, format_hint={format_hint}")
-
-            # Format prompt lines through the pipeline (for diff coloring, etc.)
-            formatted_lines = [
-                registry.format_text(line, format_hint=format_hint) for line in prompt_lines
-            ]
-
-            # Update the tool in the main agent's buffer
-            buffer = registry.get_buffer("main")
-            self._trace(f"on_permission_requested: buffer={buffer}, active_tools={len(buffer._active_tools) if buffer else 0}")
-            if buffer:
-                buffer.set_tool_permission_pending(tool_name, formatted_lines, format_hint)
-                self._trace(f"on_permission_requested: set_tool_permission_pending called")
-                if display:
-                    display.refresh()
-                    self._trace(f"on_permission_requested: display.refresh() called")
-
-        def on_permission_resolved(tool_name: str, request_id: str, granted: bool, method: str):
-            """Called when permission is resolved."""
-            self._trace(f"on_permission_resolved: tool={tool_name}, granted={granted}, method={method}")
-            # Clear pending options
-            self._pending_response_options = None
-
-            # Update the tool in the main agent's buffer
-            buffer = registry.get_buffer("main")
-            if buffer:
-                buffer.set_tool_permission_resolved(tool_name, granted, method)
-                if display:
-                    display.refresh()
-
-            # Update permission status in session bar (may have changed due to t/i/a responses)
-            update_status()
-
-        self.permission_plugin.set_permission_hooks(
-            on_requested=on_permission_requested,
-            on_resolved=on_permission_resolved
-        )
-
     def _setup_clarification_hooks(self) -> None:
         """Set up clarification lifecycle hooks for UI integration.
 
@@ -1671,9 +1582,6 @@ class RichClient:
                 self._gc_target_percent,
                 self._gc_continuous_mode,
             )
-
-        # Set up permission hooks for inline permission display in tool tree
-        self._setup_permission_hooks()
 
         # Set initial permission status in session bar
         self._update_permission_status_display()

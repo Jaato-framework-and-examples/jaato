@@ -315,27 +315,6 @@ def format_percent(value: float, decimals: int = 1) -> str:
     return f"{value:.{decimals}f}%"
 
 
-def build_permission_prompt_lines(
-    tool_args: Optional[Dict[str, Any]],
-    response_options: List[Union[Dict[str, Any], Any]],
-    include_tool_name: bool = False,
-    tool_name: Optional[str] = None,
-) -> List[str]:
-    """Build permission prompt lines for display in tool tree."""
-    lines = []
-
-    if include_tool_name and tool_name:
-        lines.append(f"Tool: {tool_name}")
-
-    if tool_args:
-        lines.append(f"Args: {format_tool_args_summary(tool_args, max_length=100)}")
-
-    lines.append("")
-    lines.append(format_permission_options(response_options))
-
-    return lines
-
-
 def build_clarification_prompt_lines(
     question_text: str,
     question_index: Optional[int] = None,
