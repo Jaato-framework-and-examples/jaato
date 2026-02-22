@@ -130,6 +130,8 @@ Things that break the cached prefix:
 
 Caching for Anthropic is currently implemented **inside `AnthropicProvider`** rather than as a separate plugin. The provider owns the cache breakpoint strategy because it has direct access to the system instruction, tools, and message history at request construction time.
 
+> **Cross-reference:** The [Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md) proposes moving history ownership from providers to the session. Under that proposal, the provider would receive messages as a parameter to a stateless `complete()` method rather than maintaining `self._history`. This strengthens the case for extracting cache logic into plugins, since the provider would no longer "own" the data that drives breakpoint decisions. See [Impact on Cache Plugin Integration](#impact-of-session-owned-history) below.
+
 Key files:
 - `jaato-server/shared/plugins/model_provider/anthropic/provider.py` — Cache configuration, breakpoint placement, threshold checking
 - `jaato-server/shared/plugins/model_provider/anthropic/converters.py` — `messages_to_anthropic(cache_breakpoint_index=...)` applies history cache breakpoint
@@ -910,6 +912,8 @@ The current architecture creates a challenge for cache plugin integration:
 2. **The provider maintains its own history.** `self._history`, `self._system_instruction`, and `self._tools` live inside the provider. The session only interacts with history via `provider.get_history()` (read) and `_create_provider_session(history)` (replace).
 3. **GC talks to the session, not the provider.** After GC, the session calls `self.reset_session(new_history)` which calls `provider.create_session(system_instruction, tools, history=new_history)` — a full replacement.
 
+> **Cross-reference:** These three constraints are specific to the current provider-owned history architecture. The [Session-Owned History proposal](design/session-owned-history-impact-analysis.md) would change all three: (1) the session would call `provider.complete(messages, system, tools, ...)` instead of `provider.send_message(text)`, giving the session control over all inputs; (2) history would live in `session._messages`, not `provider._history`; (3) GC would slice `session._messages` directly without going through `provider.create_session()`. This opens a second integration path — see [Impact on Cache Plugin Integration](#impact-of-session-owned-history) and the [Session-Orchestration variant](#variant-b-session-orchestrates-future) below.
+
 ```
 Current data flow (per turn):
 
@@ -943,10 +947,14 @@ Current data flow (per turn):
 
 ### Proposed Integration: Provider Delegates to Cache Plugin
 
-The cleanest integration is to **add an optional `CachePlugin` slot to the provider protocol**. The provider still owns the API call, but delegates cache annotation decisions to the plugin when one is attached:
+There are two viable integration architectures for cache plugins. The right choice depends on whether history ownership stays with the provider (current architecture) or moves to the session (proposed in the [Session-Owned History analysis](design/session-owned-history-impact-analysis.md)).
+
+#### Variant A: Provider Delegates Internally (Current Architecture)
+
+Under the current provider-owned history model, the cleanest integration is to **add an optional `CachePlugin` slot to the provider**. The provider still owns the API call, but delegates cache annotation decisions to the plugin when one is attached. This is the **recommended starting point** because it works with the current codebase without requiring the session-owned history migration.
 
 ```
-Proposed data flow:
+Variant A data flow (provider-owned history):
 
     JaatoSession                 AnthropicProvider              CachePlugin
     ────────────                 ──────────────────             ────────────
@@ -991,7 +999,71 @@ Proposed data flow:
       └─ return response
 ```
 
+#### Variant B: Session Orchestrates (Future) {#variant-b-session-orchestrates-future}
+
+If the [Session-Owned History proposal](design/session-owned-history-impact-analysis.md) is implemented (specifically Phase 2+, where providers expose a stateless `complete()` method), a second integration path becomes viable: the **session orchestrates cache annotations** before calling the provider.
+
+```
+Variant B data flow (session-owned history, Phase 2+):
+
+    JaatoSession                 AnthropicProvider              CachePlugin
+    ────────────                 ──────────────────             ────────────
+    configure()
+      │
+      ├─ create provider
+      ├─ discover cache plugin (by provider_name match)
+      ├─ cache_plugin.initialize(config)
+      ├─ self._cache_plugin = cache_plugin  ← session holds plugin directly
+      │
+    send_message(prompt)
+      │
+      ├─ _maybe_collect_before_send()   ← GC slices self._messages directly
+      │
+      ├─ self._messages.append(user_msg)
+      │
+      ├─ _run_chat_loop()
+      │    │
+      │    └─────────────────→ complete(self._messages, system, tools, ...)
+      │                          │
+      │                          ├─ convert messages to Anthropic format
+      │                          ├─ cache_plugin.prepare_request(  ◄──── provider calls
+      │                          │    api_messages, api_tools,           plugin with
+      │                          │    api_system, budget)                API-format data
+      │                          ├─ client.messages.create(...)
+      │                          │
+      │    ◄─────────────────── return ProviderResponse
+      │
+      ├─ self._messages.append(response_msg)
+      │
+      ├─ cache_plugin.extract_cache_usage(response.usage)
+      │
+      ├─ _maybe_collect_after_turn()
+      │    │
+      │    ├─ gc_plugin.collect(self._messages, ..., budget)
+      │    │    → slices self._messages in place (no reset_session)
+      │    │
+      │    └─ cache_plugin.on_gc_result(result)
+      │
+      └─ return response
+```
+
+**Key differences from Variant A:**
+
+| Aspect | Variant A (provider delegates) | Variant B (session orchestrates) |
+|--------|-------------------------------|----------------------------------|
+| **History ownership** | Provider (`self._history`) | Session (`self._messages`) |
+| **Who calls `prepare_request`** | Provider, inside `_build_api_kwargs()` | Provider, inside `complete()` — data comes from parameters, not internal state |
+| **Provider protocol change** | Add `set_cache_plugin()` method | No protocol change needed — plugin is wired to session |
+| **GC flow** | `reset_session()` → `provider.create_session(history)` | `self._messages.replace(new)` — no provider call |
+| **Provider statefulness** | Stateful (owns history + cache plugin) | Stateless w.r.t. history; may still hold cache plugin reference |
+
+**Why the provider should still call `prepare_request()` in both variants:** Cache annotations are format-specific — Anthropic's `cache_control` dicts are injected into Anthropic-format message/tool/system structures, not generic `Message` objects. The provider converts to API format first, then calls the cache plugin. Having the session inject annotations before conversion would couple it to a specific provider's wire format, violating the provider abstraction.
+
+**Recommendation:** Implement Variant A now (works with current codebase). If session-owned history is adopted later, the cache plugin protocol (`CachePlugin.prepare_request()`) requires **no changes** — only the caller context shifts from provider-internal state to provider-received parameters. The migration is mechanical.
+
 ### Provider Protocol Extension
+
+> **Note:** This extension is needed for [Variant A](#variant-a-provider-delegates-internally-current-architecture) (current architecture). Under [Variant B](#variant-b-session-orchestrates-future) (session-owned history), the provider protocol may not need this method — the session holds the cache plugin directly and the provider receives pre-annotated data or calls the plugin using parameters it received. However, even under Variant B, having the provider call `prepare_request()` internally is cleaner because annotations are format-specific (see [Variant B rationale](#variant-b-session-orchestrates-future)).
 
 Add an optional method to `ModelProviderPlugin`:
 
@@ -1043,12 +1115,40 @@ def _build_api_kwargs(self, response_schema=None) -> dict:
     return kwargs
 ```
 
+Under session-owned history (Variant B), the same delegation pattern works but with parameters instead of internal state:
+
+```python
+# AnthropicProvider.complete() — Variant B (session-owned history)
+def complete(self, messages, system_instruction, tools, ...) -> ProviderResponse:
+    # Convert to Anthropic format
+    api_messages = messages_to_anthropic(messages)
+    api_tools = tools_to_anthropic(tools)
+    api_system = [{"type": "text", "text": system_instruction}]
+
+    if self._cache_plugin:
+        # Same delegation, but data comes from parameters, not self._history
+        cache_result = self._cache_plugin.prepare_request(
+            system=api_system,
+            tools=api_tools,
+            messages=api_messages,
+            budget=...,  # from plugin's own state (set_budget)
+        )
+        api_system = cache_result["system"]
+        api_tools = cache_result["tools"]
+        api_messages = cache_result["messages"]
+
+    response = self._client.messages.create(
+        messages=api_messages, system=api_system, tools=api_tools, ...
+    )
+    return self._convert_response(response)
+```
+
 ### Session Wiring
 
 `JaatoSession.configure()` discovers and attaches the cache plugin:
 
 ```python
-# JaatoSession.configure()
+# JaatoSession.configure() — Variant A (provider-owned history)
 def _wire_cache_plugin(self) -> None:
     """Discover and attach the cache plugin matching the active provider."""
     if not self._provider:
@@ -1067,29 +1167,52 @@ def _wire_cache_plugin(self) -> None:
         self._cache_plugin = cache_plugin
 ```
 
-After GC runs, the session notifies the cache plugin:
+Under session-owned history (Variant B), the wiring simplifies — no provider involvement:
+
+```python
+# JaatoSession.configure() — Variant B (session-owned history)
+def _wire_cache_plugin(self) -> None:
+    """Discover and attach the cache plugin matching the active provider."""
+    if not self._provider:
+        return
+
+    cache_plugin = self._runtime.get_cache_plugin(self._provider.name)
+    if cache_plugin:
+        cache_plugin.initialize(self._provider_config.extra)
+        self._cache_plugin = cache_plugin
+        # No provider.set_cache_plugin() needed — session orchestrates
+```
+
+After GC runs, the session notifies the cache plugin. This pattern is **identical in both variants** — cache invalidation tracking is always session-level:
 
 ```python
 # JaatoSession._maybe_collect_after_turn()
 new_history, result = self._gc_plugin.collect(...)
 if result.success:
-    self.reset_session(new_history)
+    # Variant A: self.reset_session(new_history)
+    #   → provider.create_session(system, tools, history=new_history)
+    # Variant B: self._history.replace(new_history)
+    #   → no provider call needed
     self._apply_gc_removal_list(result)
 
-    # Notify cache plugin about what GC removed
+    # Notify cache plugin about what GC removed (both variants)
     if self._cache_plugin:
         self._cache_plugin.on_gc_result(result)
 ```
 
-### Why Not Session-Level Interception?
+### Session-Level vs. Provider-Level Cache Orchestration
 
-An alternative would be to have the session intercept the provider call and inject cache annotations. This doesn't work because:
+An alternative to provider delegation is to have the session orchestrate cache annotations directly. Under the **current** provider-owned history architecture, this is impractical:
 
 1. **The session calls `provider.send_message(text)`** — it doesn't see or control the API kwargs. The provider builds and sends the request internally.
 2. **The provider owns the Anthropic SDK client** — only the provider can add `cache_control` annotations to the request.
 3. **History is inside the provider** — the cache plugin needs access to the current history to compute breakpoints, and only the provider has it at call time.
 
-The delegation pattern (provider calls plugin) keeps the control flow clean: the provider still owns the API call, but the cache strategy is pluggable.
+Under the current architecture, the delegation pattern (provider calls plugin) is the right approach.
+
+> **Cross-reference:** Under the [Session-Owned History proposal](design/session-owned-history-impact-analysis.md), arguments 1 and 3 are **invalidated**: the session would call `provider.complete(messages, ...)` (controlling all inputs) and history would live in `session._messages` (accessible to the cache plugin at any time). Argument 2 partially survives — the Anthropic SDK client remains on the provider — but the real constraint is **format-specificity**, not SDK ownership: `cache_control` annotations target Anthropic-format dicts, so the provider should still call `prepare_request()` after converting messages to API format, regardless of who owns the history.
+>
+> The practical recommendation is the same in both architectures: the **provider calls the cache plugin** during request construction, because that's when format-specific annotation is natural. The difference is whether the provider reads from internal state (Variant A) or from parameters (Variant B).
 
 ### InstructionBudget Access
 
@@ -1101,6 +1224,8 @@ The cache plugin needs the `InstructionBudget` to make policy-aware decisions. T
 
 Option B is simpler — it avoids adding budget awareness to the `ModelProviderPlugin` protocol, which would affect all 7 providers.
 
+> **Cross-reference:** Option B becomes even more natural under the [Session-Owned History proposal](design/session-owned-history-impact-analysis.md). In that architecture, the provider is meant to be stateless with respect to messages — adding a budget reference to it would re-introduce state and work against the design goal. Option B keeps the budget flow entirely at the session level, consistent with session-owned history's principle that the session orchestrates all context management.
+
 ```python
 # JaatoSession - after budget update
 if self._cache_plugin:
@@ -1108,6 +1233,8 @@ if self._cache_plugin:
 ```
 
 ### Complete Lifecycle
+
+#### Variant A — Provider-Owned History (Current Architecture)
 
 ```
 Session starts:
@@ -1143,6 +1270,51 @@ Budget changes:
   4. JaatoSession._emit_instruction_budget_update()
        → cache_plugin.set_budget(updated_budget)
 ```
+
+#### Variant B — Session-Owned History (After Phase 2+ Migration)
+
+> **Cross-reference:** See [Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md), Phases 2-5.
+
+```
+Session starts:
+  1. JaatoSession.configure()
+       → creates provider
+       → discovers cache plugin (by provider_name match)
+       → cache_plugin.initialize(config)
+       → cache_plugin.set_budget(instruction_budget)
+       → self._cache_plugin = cache_plugin  (no provider.set_cache_plugin needed)
+
+Each turn:
+  2. JaatoSession.send_message(prompt)
+       → self._messages.append(user_msg)
+       → provider.complete(self._messages, system, tools, ...)
+           → converts to API format
+           → cache_plugin.prepare_request(api_system, api_tools, api_messages)
+               → reads budget GC policies for BP3 placement
+               → returns annotated api_system/api_tools/api_messages
+           → API call with cache annotations
+           → returns ProviderResponse (with TokenUsage)
+       → self._messages.append(response_msg)
+       → cache_plugin.extract_cache_usage(response.usage)
+
+GC triggers:
+  3. JaatoSession._maybe_collect_after_turn()
+       → gc_plugin.collect(self._messages, ..., budget)
+           → returns (new_messages, GCResult)
+       → self._history.replace(new_messages)  (no provider.create_session call)
+       → cache_plugin.on_gc_result(result)
+           → tracks prefix invalidation
+       → cache_plugin.set_budget(updated_budget)
+
+Budget changes:
+  4. JaatoSession._emit_instruction_budget_update()
+       → cache_plugin.set_budget(updated_budget)
+```
+
+**Key simplifications in Variant B:**
+- No `provider.set_cache_plugin()` — session holds the plugin directly
+- No `provider.create_session(history=...)` after GC — session mutates its own list
+- The `CachePlugin` protocol is **identical** in both variants — only the orchestration changes
 
 ---
 
@@ -1339,6 +1511,66 @@ Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` (OpenAI-compa
 - **AntigravityProvider**: Standalone. No caching API known. No plugin needed.
 - **ClaudeCLIProvider**: Standalone. The CLI handles its own caching internally. No plugin needed.
 - **GitHubModelsProvider**: Standalone. Caching depends on the underlying model provider (OpenAI, Anthropic, Google). A plugin could be added if GitHub Models exposes cache tokens in responses.
+
+---
+
+## Impact of Session-Owned History {#impact-of-session-owned-history}
+
+The [Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md) proposes inverting message history ownership from providers to the session. This section summarizes how that proposal affects the cache plugin design.
+
+### Summary of the Session-Owned History Proposal
+
+The proposal proceeds in 5 phases:
+
+1. **Phase 1:** Introduce `SessionHistory` wrapper — session holds canonical copy, still syncs to provider
+2. **Phase 2:** Add stateless `complete(messages, system, tools, ...) -> ProviderResponse` to providers
+3. **Phase 3:** Migrate all providers to `complete()`
+4. **Phase 4:** Remove legacy `create_session()`, `get_history()`, `send_message()` from protocol
+5. **Phase 5:** Simplify session internals — GC operates on `self._messages` directly
+
+### Impact Assessment by Cache Doc Component
+
+| Component | Impact | Notes |
+|-----------|:------:|-------|
+| `CachePlugin` protocol (`prepare_request`, `on_gc_result`, etc.) | **None** | Signature takes explicit parameters, not provider state. Works in both architectures. |
+| `_find_policy_boundary(budget)` logic | **None** | Operates on `InstructionBudget`, which is orthogonal to history ownership. |
+| GC-Cache coordination (`on_gc_result`) | **None** | Cache invalidation tracking is session-level in both variants. |
+| `InstructionBudget` access (Option B) | **None** | Already recommended; becomes even more natural under session-owned history. |
+| Provider-level delegation (Variant A) | **Low** | Still works — provider calls `prepare_request()` using received parameters instead of `self._history`. |
+| `set_cache_plugin()` on provider protocol | **Medium** | May become unnecessary if session orchestrates. Provider can still hold plugin reference via constructor. |
+| Integration data flow diagrams | **Medium** | New Variant B diagrams needed (added above in [Proposed Integration](#proposed-integration-provider-delegates-to-cache-plugin)). |
+| "Why Not Session-Level Interception?" section | **High** | 2 of 3 arguments invalidated. Rewritten as [balanced comparison](#session-level-vs-provider-level-cache-orchestration) above. |
+| GC flow (`reset_session` → `create_session`) | **High** | Eliminated under Phase 4+. GC mutates `session._messages` directly. |
+
+### What Stays the Same
+
+The core cache plugin design is **robust to the session-owned history change**:
+
+- The `CachePlugin` protocol requires no signature changes
+- Budget-aware breakpoint placement (`_find_policy_boundary`) is unaffected
+- GC-cache coordination via `on_gc_result()` works identically
+- The "One Taxonomy, Two Consumers" principle applies regardless of history ownership
+- All provider-specific cache plugins (Anthropic, ZhipuAI) are unaffected
+- Prompt structure for optimal caching is unchanged
+
+### What Changes
+
+The **integration wiring** simplifies under session-owned history:
+
+1. **No `provider.set_cache_plugin()` needed** — session holds the plugin
+2. **No `provider.create_session(history)` after GC** — session mutates its own list
+3. **Provider is stateless** w.r.t. history — receives messages as parameter to `complete()`
+4. **Cache plugin wiring is purely session-level** — no duck-typing checks on provider
+
+### Recommended Sequencing
+
+The cache plugin extraction and session-owned history migration are **independent** changes that can proceed in any order:
+
+- **Cache plugin first:** Extract using Variant A (provider delegates). When session-owned history lands later, the migration to Variant B is mechanical — change the caller context from `self._history` to the `messages` parameter.
+- **Session-owned history first:** Cache logic stays inside the provider during Phases 1-3. Extract cache plugin using Variant B once `complete()` is available.
+- **Parallel:** Both can proceed simultaneously since the `CachePlugin` protocol is designed to work in both architectures.
+
+The recommended path is **cache plugin first** (Variant A), because it delivers immediate value (inheritance cleanup, budget-aware breakpoints) without waiting for the larger session-owned history migration.
 
 ---
 
