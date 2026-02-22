@@ -1304,7 +1304,8 @@ class JaatoServer:
 
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
-                                        function_calls):
+                                        function_calls, cache_read_tokens=None,
+                                        cache_creation_tokens=None):
                 # Flush any remaining buffered content from the agent's formatter pipeline
                 agent_pipeline = server._get_agent_pipeline(agent_id)
                 if agent_pipeline:
@@ -1327,14 +1328,19 @@ class JaatoServer:
                     agent_pipeline.reset()
 
                 if agent_id in server._agents:
-                    server._agents[agent_id].turn_accounting.append({
+                    turn_entry = {
                         'turn': turn_number,
                         'prompt': prompt_tokens,
                         'output': output_tokens,
                         'total': total_tokens,
                         'duration_seconds': duration_seconds,
                         'function_calls': function_calls,
-                    })
+                    }
+                    if cache_read_tokens is not None:
+                        turn_entry['cache_read'] = cache_read_tokens
+                    if cache_creation_tokens is not None:
+                        turn_entry['cache_creation'] = cache_creation_tokens
+                    server._agents[agent_id].turn_accounting.append(turn_entry)
                 server.emit(TurnCompletedEvent(
                     agent_id=agent_id,
                     turn_number=turn_number,
@@ -1343,6 +1349,8 @@ class JaatoServer:
                     total_tokens=total_tokens,
                     duration_seconds=duration_seconds,
                     function_calls=function_calls,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ))
 
             def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,
@@ -1510,7 +1518,8 @@ class JaatoServer:
                 ))
 
             def on_turn_progress(self, agent_id, total_tokens, prompt_tokens,
-                                 output_tokens, percent_used, pending_tool_calls):
+                                 output_tokens, percent_used, pending_tool_calls,
+                                 cache_read_tokens=None, cache_creation_tokens=None):
                 context_limit = server._jaato.get_context_limit() if server._jaato else 0
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
@@ -1521,6 +1530,8 @@ class JaatoServer:
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - total_tokens),
                     pending_tool_calls=pending_tool_calls,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ))
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")

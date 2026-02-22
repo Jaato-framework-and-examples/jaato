@@ -378,7 +378,9 @@ class AgentRegistry:
         output_tokens: int,
         total_tokens: int,
         duration_seconds: float,
-        function_calls: List[Dict[str, Any]]
+        function_calls: List[Dict[str, Any]],
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
     ) -> None:
         """Update agent's turn accounting.
 
@@ -390,6 +392,10 @@ class AgentRegistry:
             total_tokens: Sum of prompt + output.
             duration_seconds: Turn duration.
             function_calls: List of function call stats.
+            cache_read_tokens: Tokens read from prompt cache (reduced cost).
+                None when the provider does not support caching.
+            cache_creation_tokens: Tokens written to prompt cache.
+                None when the provider does not support caching.
         """
         with self._lock:
             agent = self._agents.get(agent_id)
@@ -404,6 +410,10 @@ class AgentRegistry:
                 'duration_seconds': duration_seconds,
                 'function_calls': function_calls
             }
+            if cache_read_tokens is not None:
+                turn_data['cache_read'] = cache_read_tokens
+            if cache_creation_tokens is not None:
+                turn_data['cache_creation'] = cache_creation_tokens
 
             # Ensure list is long enough
             while len(agent.turn_accounting) <= turn_number:

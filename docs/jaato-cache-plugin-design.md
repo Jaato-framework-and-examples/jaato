@@ -6,15 +6,23 @@ This document captures the design for a provider-specific prompt caching system 
 
 The central design principle is that **cache plugins are consumers of the InstructionBudget's GC policies**. The `InstructionBudget` already classifies every source entry using `GCPolicy` — `LOCKED`, `PRESERVABLE`, `PARTIAL`, `EPHEMERAL`, or `CONDITIONAL` — and the cache plugin reads this same taxonomy to decide where to place cache breakpoints, what's worth the write premium, and what to skip.
 
-### Current State and Motivation
+### Implementation Status
 
-Prompt caching for Anthropic is **already implemented** inside `AnthropicProvider` (`jaato-server/shared/plugins/model_provider/anthropic/provider.py`). However, the cache logic is tightly coupled to the provider class, creating problems:
+**Variant A (provider delegates to cache plugin) is implemented** as of 2026-02-22. The `CachePlugin` protocol, `AnthropicCachePlugin`, and `ZhipuAICachePlugin` are live. Cache metrics are threaded through the full pipeline to TUI clients. See the [Impact Analysis](design/cache-plugin-sequencing-impact-analysis.md) for detailed progress.
 
-1. **Inheritance coupling**: `ZhipuAIProvider` inherits from `AnthropicProvider` and must hardcode `self._enable_caching = False` to suppress the parent's Anthropic-specific breakpoint logic. ZhipuAI has its own implicit caching mechanism that's incompatible with Anthropic's explicit breakpoints.
-2. **No budget awareness**: The current Anthropic implementation uses `cache_exclude_recent_turns` (a simple turn count) to decide what to cache, rather than consulting the `InstructionBudget`'s GC policy assignments which already know which content is LOCKED, PRESERVABLE, or EPHEMERAL.
-3. **Not extensible**: Adding caching for a new provider requires either modifying the provider class or creating another inheritance workaround.
+**Variant B (session orchestrates)** is not started — blocked on session-owned history Phase 2.
 
-This doc describes the existing implementation, explains these limitations, and proposes extracting cache logic into separate plugins that consume the `InstructionBudget`.
+The sections below retain the original design rationale and motivation. Where behavior has been implemented, it reflects the actual implementation rather than the proposal.
+
+### Original Motivation
+
+Prompt caching for Anthropic was originally implemented **inside `AnthropicProvider`** (`jaato-server/shared/plugins/model_provider/anthropic/provider.py`). The cache logic was tightly coupled to the provider class, creating problems:
+
+1. **Inheritance coupling**: `ZhipuAIProvider` inherits from `AnthropicProvider` and had to hardcode `self._enable_caching = False` to suppress the parent's Anthropic-specific breakpoint logic. ZhipuAI has its own implicit caching mechanism that's incompatible with Anthropic's explicit breakpoints.
+2. **No budget awareness**: The original Anthropic implementation used `cache_exclude_recent_turns` (a simple turn count) to decide what to cache, rather than consulting the `InstructionBudget`'s GC policy assignments which already know which content is LOCKED, PRESERVABLE, or EPHEMERAL.
+3. **Not extensible**: Adding caching for a new provider required either modifying the provider class or creating another inheritance workaround.
+
+Cache logic has since been extracted into separate plugins that consume the `InstructionBudget`. The legacy code path remains in `AnthropicProvider` as a fallback when no cache plugin is attached.
 
 ---
 
@@ -124,7 +132,9 @@ Things that break the cached prefix:
 
 ---
 
-## Current State: Provider-Internal Caching
+## Legacy Architecture: Provider-Internal Caching
+
+> **Note:** This section describes the **legacy** cache architecture that existed before Variant A was implemented. The provider-internal cache logic is retained as a fallback path in `AnthropicProvider` when no `CachePlugin` is attached, but new deployments use the plugin-based architecture described in [Proposed Design](#proposed-design-cache-plugin-protocol) below.
 
 ### Architecture
 
@@ -277,13 +287,26 @@ if cache_read is not None and cache_read > 0:
     usage.cache_read_tokens = cache_read
 ```
 
-Cache tokens are also tracked via OpenTelemetry in `JaatoSession`:
+Cache tokens are tracked via OpenTelemetry in `JaatoSession`:
 
 ```python
 if response.usage.cache_read_tokens is not None:
     llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", ...)
 if response.usage.cache_creation_tokens is not None:
     llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", ...)
+```
+
+Cache metrics are also threaded through the full event pipeline to clients (implemented 2026-02-22):
+
+```
+ProviderResponse.usage.cache_read_tokens / .cache_creation_tokens
+  → JaatoSession._accumulate_turn_tokens() → turn_data['cache_read'] / ['cache_creation']
+  → on_agent_turn_completed callback
+  → TurnCompletedEvent / TurnProgressEvent (jaato_sdk/events.py)
+  → JaatoServer (server/core.py) → event forwarding
+  → TUI rich_client.py:
+      - Per-turn summary: "─── cache hit: 85%" after each turn
+      - /history command: cache hit % per turn + session total
 ```
 
 ---
@@ -501,9 +524,9 @@ def set_gc_plugin(self, plugin: GCPlugin, config: Optional[GCConfig] = None) -> 
 
 ---
 
-## Relationship Diagram (Actual Architecture)
+## Relationship Diagrams
 
-### Current Architecture (cache logic inside provider)
+### Legacy Architecture (cache logic inside provider, pre-Variant A)
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -548,7 +571,7 @@ def set_gc_plugin(self, plugin: GCPlugin, config: Optional[GCConfig] = None) -> 
 └─────────────────────────────────────────────────┘
 ```
 
-### Proposed Architecture (cache logic in plugins)
+### Current Architecture — Variant A (cache logic in plugins, implemented)
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -597,9 +620,11 @@ Standalone providers (no caching, no inheritance conflict):
 
 ---
 
-## Proposed Design: Cache Plugin Protocol
+## Cache Plugin Protocol (Implemented)
 
-The core proposal is to **extract cache logic out of the provider classes** into separate plugins that:
+> **Status:** Implemented as Variant A (2026-02-22). The protocol, both plugin implementations, session wiring, and metrics pipeline are live.
+
+Cache logic has been **extracted from provider classes** into separate plugins that:
 
 1. Are **provider-specific** — each plugin knows how its provider's caching works (explicit breakpoints vs implicit)
 2. Are **budget-aware** — plugins consume `InstructionBudget` GC policies to make smarter decisions
@@ -732,24 +757,24 @@ class CachePlugin(Protocol):
         ...
 ```
 
-### Current vs Proposed
+### Legacy vs Plugin Architecture
 
-| Aspect | Current (provider-internal) | Proposed (plugin) |
+| Aspect | Legacy (provider-internal) | Plugin (implemented) |
 |---|---|---|
 | **Location** | Inside `AnthropicProvider._build_api_kwargs()` | Separate `cache_anthropic/plugin.py` |
 | **Budget awareness** | No — uses `cache_exclude_recent_turns` (turn count) | Yes — reads `GCPolicy` from `InstructionBudget` |
 | **GC coordination** | None — doesn't know when GC runs | `on_gc_result()` receives `GCResult` after each collection |
 | **ZhipuAI support** | Disabled (`_enable_caching = False`) | Separate `cache_zhipuai/plugin.py` for monitoring |
 | **New provider** | Modify provider class or override methods | Add a new plugin, no provider changes |
-| **Metrics** | OTel attributes only | OTel + session-level aggregates + `on_gc_result` tracking |
+| **Metrics** | OTel attributes only | OTel + session-level aggregates + `on_gc_result` tracking + TUI per-turn display |
 
-### Proposed File Structure
+### File Structure (Implemented)
 
 ```
 plugins/
 ├── model_provider/
 │   ├── anthropic/
-│   │   ├── provider.py          # AnthropicProvider (caching already built-in)
+│   │   ├── provider.py          # AnthropicProvider (delegates to CachePlugin when attached, legacy fallback otherwise)
 │   │   ├── converters.py        # messages_to_anthropic(cache_breakpoint_index=...)
 │   │   └── env.py               # resolve_enable_caching()
 │   └── ...
@@ -768,13 +793,15 @@ plugins/
 ├── gc_summarize/plugin.py        # SummarizeGCPlugin (summarization-based)
 ├── gc_hybrid/plugin.py           # HybridGCPlugin (generational: truncate + summarize)
 │
-├── cache_anthropic/              # Extracted from AnthropicProvider
-│   ├── __init__.py
-│   └── plugin.py                 # AnthropicCachePlugin (breakpoints + budget)
+├── cache_anthropic/              # Extracted from AnthropicProvider (IMPLEMENTED)
+│   ├── __init__.py               # PLUGIN_KIND = "cache", create_plugin()
+│   ├── plugin.py                 # AnthropicCachePlugin (breakpoints + budget) — 473 LOC
+│   └── tests/test_plugin.py      # 31 tests
 │
-├── cache_zhipuai/                # ZhipuAI cache monitoring plugin
-│   ├── __init__.py
-│   └── plugin.py                 # ZhipuAICachePlugin (monitoring only)
+├── cache_zhipuai/                # ZhipuAI cache monitoring plugin (IMPLEMENTED)
+│   ├── __init__.py               # PLUGIN_KIND = "cache", create_plugin()
+│   ├── plugin.py                 # ZhipuAICachePlugin (monitoring only) — 166 LOC
+│   └── tests/test_plugin.py      # 21 tests
 │
 └── cache_vertex/                 # Future: Vertex AI cache plugin
     └── ...
@@ -945,13 +972,13 @@ Current data flow (per turn):
       └─ return response
 ```
 
-### Proposed Integration: Provider Delegates to Cache Plugin
+### Integration: Provider Delegates to Cache Plugin
 
-There are two viable integration architectures for cache plugins. The right choice depends on whether history ownership stays with the provider (current architecture) or moves to the session (proposed in the [Session-Owned History analysis](design/session-owned-history-impact-analysis.md)).
+There are two integration architectures for cache plugins. **Variant A is implemented.** Variant B becomes viable when session-owned history Phase 2 lands.
 
-#### Variant A: Provider Delegates Internally (Current Architecture)
+#### Variant A: Provider Delegates Internally (Implemented)
 
-Under the current provider-owned history model, the cleanest integration is to **add an optional `CachePlugin` slot to the provider**. The provider still owns the API call, but delegates cache annotation decisions to the plugin when one is attached. This is the **recommended starting point** because it works with the current codebase without requiring the session-owned history migration.
+Under the current provider-owned history model, the provider has an **optional `CachePlugin` slot**. The provider still owns the API call, but delegates cache annotation decisions to the plugin when one is attached. When no plugin is attached, the legacy provider-internal cache logic is used as a fallback.
 
 ```
 Variant A data flow (provider-owned history):
@@ -999,9 +1026,9 @@ Variant A data flow (provider-owned history):
       └─ return response
 ```
 
-#### Variant B: Session Orchestrates (Future) {#variant-b-session-orchestrates-future}
+#### Variant B: Session Orchestrates (Not Started — Blocked on Session-Owned History) {#variant-b-session-orchestrates-future}
 
-If the [Session-Owned History proposal](design/session-owned-history-impact-analysis.md) is implemented (specifically Phase 2+, where providers expose a stateless `complete()` method), a second integration path becomes viable: the **session orchestrates cache annotations** before calling the provider.
+When the [Session-Owned History proposal](design/session-owned-history-impact-analysis.md) is implemented (specifically Phase 2+, where providers expose a stateless `complete()` method), a second integration path becomes viable: the **session orchestrates cache annotations** before calling the provider. The A→B transition cost is ~21 lines of throwaway code (~3% of Variant A). See the [Impact Analysis](design/cache-plugin-sequencing-impact-analysis.md) for the detailed breakdown.
 
 ```
 Variant B data flow (session-owned history, Phase 2+):
@@ -1059,7 +1086,7 @@ Variant B data flow (session-owned history, Phase 2+):
 
 **Why the provider should still call `prepare_request()` in both variants:** Cache annotations are format-specific — Anthropic's `cache_control` dicts are injected into Anthropic-format message/tool/system structures, not generic `Message` objects. The provider converts to API format first, then calls the cache plugin. Having the session inject annotations before conversion would couple it to a specific provider's wire format, violating the provider abstraction.
 
-**Recommendation:** Implement Variant A now (works with current codebase). If session-owned history is adopted later, the cache plugin protocol (`CachePlugin.prepare_request()`) requires **no changes** — only the caller context shifts from provider-internal state to provider-received parameters. The migration is mechanical.
+**Status:** Variant A is implemented. When session-owned history is adopted later, the cache plugin protocol (`CachePlugin.prepare_request()`) requires **no changes** — only the caller context shifts from provider-internal state to provider-received parameters. The A→B migration is mechanical (~2 hours).
 
 ### Provider Protocol Extension
 
@@ -1143,12 +1170,12 @@ def complete(self, messages, system_instruction, tools, ...) -> ProviderResponse
     return self._convert_response(response)
 ```
 
-### Session Wiring
+### Session Wiring (Implemented)
 
 `JaatoSession.configure()` discovers and attaches the cache plugin:
 
 ```python
-# JaatoSession.configure() — Variant A (provider-owned history)
+# JaatoSession.configure() — Variant A (implemented)
 def _wire_cache_plugin(self) -> None:
     """Discover and attach the cache plugin matching the active provider."""
     if not self._provider:
@@ -1234,7 +1261,7 @@ if self._cache_plugin:
 
 ### Complete Lifecycle
 
-#### Variant A — Provider-Owned History (Current Architecture)
+#### Variant A — Provider-Owned History (Implemented)
 
 ```
 Session starts:
@@ -1271,7 +1298,7 @@ Budget changes:
        → cache_plugin.set_budget(updated_budget)
 ```
 
-#### Variant B — Session-Owned History (After Phase 2+ Migration)
+#### Variant B — Session-Owned History (Not Started — After Phase 2+ Migration)
 
 > **Cross-reference:** See [Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md), Phases 2-5.
 
@@ -1470,37 +1497,37 @@ This prevents cache invalidation when tool registration order varies between ses
 
 ## Provider-Specific Considerations
 
-### Inheritance Cleanup: AnthropicProvider
+### Inheritance Cleanup: AnthropicProvider (Implemented)
 
-After extraction, `AnthropicProvider` loses these cache-specific members:
+After extraction, `AnthropicProvider` was **refactored** rather than just stripped. The cache logic was extracted into `AnthropicCachePlugin`, and `_build_api_kwargs()` was split into composable methods (`_build_system_blocks`, `_build_tool_list`, `_apply_legacy_cache_annotations`). The provider gained `set_cache_plugin()` for plugin attachment and delegates to `CachePlugin.prepare_request()` when a plugin is attached.
 
-| Removed from provider | Moved to `cache_anthropic` plugin |
+| Extracted from provider | Destination in `cache_anthropic` plugin |
 |---|---|
 | `_enable_caching`, `_cache_ttl` | `AnthropicCachePlugin._ttl` |
 | `_cache_history`, `_cache_exclude_recent_turns` | Replaced by budget-aware `_find_policy_boundary()` |
 | `_cache_min_tokens` | `AnthropicCachePlugin._should_cache_content()` |
 | `_build_api_kwargs()` breakpoint injection | `prepare_request()` |
-| `_compute_history_cache_breakpoint()` | `_find_policy_boundary()` |
+| `_compute_history_cache_breakpoint()` | `_find_policy_boundary()` (budget-aware) + `_compute_history_breakpoint_by_recency()` (fallback) |
 | `_should_cache_content()`, `_get_cache_min_tokens()`, `_estimate_tokens()` | Moved as-is |
 
-This simplifies `AnthropicProvider` and makes it a clean base class. Child providers (`ZhipuAIProvider`, `OllamaProvider`) no longer need `self._enable_caching = False` hacks because there's no cache logic to suppress.
+**Legacy fallback retained:** The original cache code path remains in `AnthropicProvider` for backward compatibility when no `CachePlugin` is attached. This means `_enable_caching`, `_cache_history`, etc. still exist on the provider — they're used only in the fallback path.
 
-### ZhipuAI: Implicit Caching
+**Child provider `_enable_caching = False` retained:** `ZhipuAIProvider` and `OllamaProvider` still set `_enable_caching = False`, but it's now documented as "legacy annotation suppression" — it disables the parent's fallback cache path so the attached plugin (or no plugin, for Ollama) handles caching instead. This flag becomes unnecessary once the legacy fallback is removed from `AnthropicProvider`.
 
-`ZhipuAIProvider` inherits `AnthropicProvider` for API compatibility (Z.AI exposes an Anthropic-compatible endpoint). Currently `_enable_caching = False` is hardcoded, which means no cache monitoring even though Z.AI supports implicit caching and reports `cached_tokens` in responses.
+### ZhipuAI: Implicit Caching (Implemented)
 
-With a separate `ZhipuAICachePlugin`:
+`ZhipuAIProvider` inherits `AnthropicProvider` for API compatibility (Z.AI exposes an Anthropic-compatible endpoint). The separate `ZhipuAICachePlugin` is now implemented and provides:
 
-- **Monitoring**: Extract `cached_tokens` from the response `TokenUsage` and correlate with GC policy assignments from the `InstructionBudget`.
-- **Advisory**: Detect when GC is about to disrupt a highly-cached prefix and surface this through metrics.
-- **No annotation injection**: `prepare_request()` is a no-op since caching is fully automatic.
-- **Independence from parent**: No `_enable_caching` hack needed.
+- **Monitoring**: Extracts `cached_tokens` from the response `TokenUsage` and correlates with GC policy assignments from the `InstructionBudget`.
+- **Advisory**: Detects when GC disrupts a cached prefix and tracks invalidation count via `on_gc_result()`.
+- **No annotation injection**: `prepare_request()` is a pass-through since Z.AI caching is fully automatic.
+- **Independence from parent**: Cache logic is in the plugin, not the provider inheritance chain.
 
-Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` (OpenAI-compatible format) and should be mapped to `TokenUsage.cache_read_tokens` by the provider's response parser.
+Cache tokens appear in `usage.prompt_tokens_details.cached_tokens` (OpenAI-compatible format) and are mapped to `TokenUsage.cache_read_tokens` by the provider's response parser.
 
-### Ollama: No Caching
+### Ollama: No Caching (No Change Needed)
 
-`OllamaProvider` also inherits `AnthropicProvider`. Ollama doesn't support prompt caching. After extraction, no special handling is needed — if no `CachePlugin` matches the provider name `"ollama"`, no caching is applied. The current `self._enable_caching = False` hack becomes unnecessary.
+`OllamaProvider` also inherits `AnthropicProvider`. Ollama doesn't support prompt caching. No `CachePlugin` matches the provider name `"ollama"`, so no caching is applied — correct behavior. The `_enable_caching = False` flag is retained to suppress the parent's legacy fallback path.
 
 ### Google GenAI: Future Context Caching
 
@@ -1562,15 +1589,11 @@ The **integration wiring** simplifies under session-owned history:
 3. **Provider is stateless** w.r.t. history — receives messages as parameter to `complete()`
 4. **Cache plugin wiring is purely session-level** — no duck-typing checks on provider
 
-### Recommended Sequencing
+### Sequencing Status
 
-The cache plugin extraction and session-owned history migration are **independent** changes that can proceed in any order:
+**Variant A (cache plugin first) was implemented** on 2026-02-22. The next step is the A→B transition, which becomes possible when session-owned history Phase 2 lands and Anthropic gets a stateless `complete()` method. The transition is ~2 hours of mechanical work with no design decisions required.
 
-- **Cache plugin first:** Extract using Variant A (provider delegates). When session-owned history lands later, the migration to Variant B is mechanical — change the caller context from `self._history` to the `messages` parameter.
-- **Session-owned history first:** Cache logic stays inside the provider during Phases 1-3. Extract cache plugin using Variant B once `complete()` is available.
-- **Parallel:** Both can proceed simultaneously since the `CachePlugin` protocol is designed to work in both architectures.
-
-The recommended path is **cache plugin first** (Variant A), because it delivers immediate value (inheritance cleanup, budget-aware breakpoints) without waiting for the larger session-owned history migration.
+See the [Impact Analysis](design/cache-plugin-sequencing-impact-analysis.md) for the full implementation progress and A→B transition breakdown.
 
 ---
 

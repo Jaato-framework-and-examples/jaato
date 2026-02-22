@@ -103,6 +103,12 @@ gc_summarize = "shared.plugins.gc_summarize:create_plugin"
 gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
 gc_budget = "shared.plugins.gc_budget:create_plugin"
 
+# Entry points for Cache Control plugins
+# Cache plugins manage provider-specific prompt caching strategies
+[project.entry-points."jaato.cache_plugins"]
+cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
+cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*", "server*", "jaato*"]
