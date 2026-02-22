@@ -10,7 +10,7 @@ The central design principle is that **cache plugins are consumers of the Instru
 
 **Variant A (provider delegates to cache plugin) is implemented** as of 2026-02-22. The `CachePlugin` protocol, `AnthropicCachePlugin`, and `ZhipuAICachePlugin` are live. Cache metrics are threaded through the full pipeline to TUI clients. See the [Impact Analysis](design/cache-plugin-sequencing-impact-analysis.md) for detailed progress.
 
-**Variant B (session orchestrates)** is not started — blocked on session-owned history Phase 2.
+**Variant B (session orchestrates)** is not started — blocked on session-owned history Phase 2. The prerequisite design document ([Session-Owned History Impact Analysis](design/session-owned-history-impact-analysis.md)) is complete.
 
 The sections below retain the original design rationale and motivation. Where behavior has been implemented, it reflects the actual implementation rather than the proposal.
 
