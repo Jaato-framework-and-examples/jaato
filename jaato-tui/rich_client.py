@@ -2549,7 +2549,12 @@ class RichClient:
 
             if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
                 turn = turn_accounting[turn_index]
-                lines.append((f"  ─── tokens: {turn['prompt']} in / {turn['output']} out / {turn['total']} total", "dim"))
+                token_line = f"  ─── tokens: {turn['prompt']} in / {turn['output']} out / {turn['total']} total"
+                cache_read = turn.get('cache_read')
+                if cache_read and turn['prompt'] > 0:
+                    hit_pct = cache_read / turn['prompt'] * 100
+                    token_line += f"  (cache hit: {hit_pct:.0f}%)"
+                lines.append((token_line, "dim"))
                 if 'duration_seconds' in turn and turn['duration_seconds'] is not None:
                     duration = turn['duration_seconds']
                     lines.append((f"  ─── duration: {duration:.2f}s", "dim"))
@@ -2567,6 +2572,7 @@ class RichClient:
             total_prompt = sum(t['prompt'] for t in turn_accounting)
             total_output = sum(t['output'] for t in turn_accounting)
             total_all = sum(t['total'] for t in turn_accounting)
+            total_cache_read = sum(t.get('cache_read', 0) or 0 for t in turn_accounting)
             total_duration = sum(t.get('duration_seconds', 0) or 0 for t in turn_accounting)
             total_fc_time = sum(
                 sum(fc['duration_seconds'] for fc in t.get('function_calls', []))
@@ -2574,7 +2580,11 @@ class RichClient:
             )
             lines.append(("", ""))
             lines.append(("=" * 60, ""))
-            lines.append((f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)", "bold"))
+            total_line = f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)"
+            if total_cache_read and total_prompt > 0:
+                total_hit_pct = total_cache_read / total_prompt * 100
+                total_line += f"  (cache hit: {total_hit_pct:.0f}%)"
+            lines.append((total_line, "bold"))
             if total_duration > 0:
                 total_model_time = total_duration - total_fc_time
                 lines.append((f"  Time:  {total_duration:.2f}s total (model: {total_model_time:.2f}s, tools: {total_fc_time:.2f}s)", ""))
@@ -4483,7 +4493,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                 prompt = acc.get('prompt', 0)
                                 output = acc.get('output', 0)
                                 total = acc.get('total', prompt + output)
-                                lines.append((f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,}) ---", "dim"))
+                                turn_line = f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,})"
+                                cache_read = acc.get('cache_read')
+                                if cache_read and prompt > 0:
+                                    hit_pct = cache_read / prompt * 100
+                                    turn_line += f", cache hit: {hit_pct:.0f}%"
+                                turn_line += " ---"
+                                lines.append((turn_line, "dim"))
                                 turn_index += 1
 
                         lines.append(("", ""))
