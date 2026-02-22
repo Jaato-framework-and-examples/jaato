@@ -180,6 +180,9 @@ class JaatoSession:
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
 
+        # Cache control plugin (provider-specific caching strategy)
+        self._cache_plugin: Optional[Any] = None  # CachePlugin protocol
+
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
@@ -1103,6 +1106,60 @@ class JaatoSession:
         # Populate instruction budget after all configuration is complete
         self._populate_instruction_budget(session_instructions=system_instructions)
 
+        # Wire cache plugin (after budget is populated so we can set it)
+        self._wire_cache_plugin()
+
+    def _wire_cache_plugin(self) -> None:
+        """Discover and attach the cache plugin matching the active provider.
+
+        The cache plugin is selected by matching the provider's ``name``
+        property against available cache plugins' ``provider_name``.
+        When found:
+        - The plugin is initialized with provider config extras
+        - The current InstructionBudget is set on the plugin
+        - The plugin is attached to the provider via ``set_cache_plugin()``
+
+        This is a Variant A integration (provider delegates to plugin).
+        """
+        if not self._provider:
+            return
+
+        try:
+            from shared.plugins.cache import load_cache_plugin_for_provider
+        except ImportError:
+            # Cache plugin infrastructure not installed
+            return
+
+        provider_name = getattr(self._provider, 'name', None)
+        if not provider_name:
+            return
+
+        # Build config from provider config extras
+        config = {}
+        if self._runtime and self._runtime._provider_config:
+            config = dict(self._runtime._provider_config.extra)
+        # Include model name for threshold selection
+        model_name = getattr(self._provider, 'model_name', None)
+        if model_name:
+            config['model_name'] = model_name
+
+        cache_plugin = load_cache_plugin_for_provider(provider_name, config)
+
+        if cache_plugin:
+            # Set the budget so the plugin can make policy-aware decisions
+            if self._instruction_budget:
+                cache_plugin.set_budget(self._instruction_budget)
+
+            # Attach to provider (Variant A: provider delegates to plugin)
+            if hasattr(self._provider, 'set_cache_plugin'):
+                self._provider.set_cache_plugin(cache_plugin)
+
+            self._cache_plugin = cache_plugin
+            self._trace(
+                f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
+                f"{provider_name}"
+            )
+
     def _create_provider_session(
         self,
         history: Optional[List[Message]] = None
@@ -1526,9 +1583,21 @@ class JaatoSession:
         thread.start()
 
     def _emit_instruction_budget_update(self) -> None:
-        """Emit instruction budget update via callback and/or UI hooks."""
+        """Emit instruction budget update via callback and/or UI hooks.
+
+        Also forwards the updated budget to the cache plugin (if attached)
+        so it can adjust breakpoint placement based on current GC policies.
+        """
         if not self._instruction_budget:
             return
+
+        # Forward budget to cache plugin for policy-aware decisions
+        cache_plugin = getattr(self, '_cache_plugin', None)
+        if cache_plugin and hasattr(cache_plugin, 'set_budget'):
+            try:
+                cache_plugin.set_budget(self._instruction_budget)
+            except Exception as e:
+                logger.debug(f"Cache plugin set_budget failed: {e}")
 
         try:
             snapshot = self._instruction_budget.snapshot()
@@ -2454,11 +2523,32 @@ NOTES
         self,
         on_usage_update: Optional[UsageUpdateCallback]
     ) -> Optional[UsageUpdateCallback]:
-        """Wrap usage callback to check GC threshold during streaming."""
+        """Wrap usage callback for GC threshold check and cache usage tracking.
+
+        When a cache plugin is attached, also forwards cache metrics
+        from each usage update via ``extract_cache_usage()``.
+        """
+        _cache = getattr(self, '_cache_plugin', None)
         if not self._gc_plugin or not self._gc_config:
+            # Even without GC, we may still need cache tracking
+            if _cache:
+                def cache_only_callback(usage: TokenUsage) -> None:
+                    try:
+                        _cache.extract_cache_usage(usage)
+                    except Exception:
+                        pass
+                    if on_usage_update:
+                        on_usage_update(usage)
+                return cache_only_callback
             return on_usage_update
 
         def wrapped_callback(usage: TokenUsage) -> None:
+            # Forward cache metrics to cache plugin
+            if _cache:
+                try:
+                    _cache.extract_cache_usage(usage)
+                except Exception:
+                    pass
             # Check if threshold crossed
             if not self._gc_threshold_crossed and usage.total_tokens > 0:
                 context_limit = self.get_context_limit()
@@ -2574,6 +2664,14 @@ NOTES
         self._trace(
             f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
         )
+
+        # Notify cache plugin about GC so it can track prefix invalidation
+        _cache = getattr(self, '_cache_plugin', None)
+        if _cache and hasattr(_cache, 'on_gc_result'):
+            try:
+                _cache.on_gc_result(result)
+            except Exception as e:
+                self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
     def _enrich_and_clean_prompt(self, prompt: str) -> str:
         """Run prompt through enrichment pipeline and strip @references."""
@@ -5469,6 +5567,36 @@ NOTES
             return result
 
         return None
+
+    # ==================== Cache Control ====================
+
+    def set_cache_plugin(self, plugin: Any) -> None:
+        """Set the cache control plugin for this session.
+
+        Attaches the plugin and wires it to the provider and budget.
+
+        Args:
+            plugin: A CachePlugin instance (duck-typed).
+        """
+        self._cache_plugin = plugin
+
+        # Forward current budget
+        if self._instruction_budget and hasattr(plugin, 'set_budget'):
+            plugin.set_budget(self._instruction_budget)
+
+        # Attach to provider
+        if self._provider and hasattr(self._provider, 'set_cache_plugin'):
+            self._provider.set_cache_plugin(plugin)
+
+    def remove_cache_plugin(self) -> None:
+        """Remove the cache control plugin."""
+        if self._cache_plugin and hasattr(self._cache_plugin, 'shutdown'):
+            self._cache_plugin.shutdown()
+        self._cache_plugin = None
+
+        # Detach from provider
+        if self._provider and hasattr(self._provider, 'set_cache_plugin'):
+            self._provider.set_cache_plugin(None)
 
     # ==================== Thinking Mode ====================
 
