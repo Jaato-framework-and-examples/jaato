@@ -3876,6 +3876,13 @@ class OutputBuffer:
                 max_width=max_width,
                 preserve_ansi=True
             )
+
+            # Append focused options line rendered from structured data
+            if self._permission_response_options:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append(self._render_focused_options_line())
+
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -3934,6 +3941,13 @@ class OutputBuffer:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
+
+        # Append focused options line rendered from structured data
+        if self._permission_response_options:
+            indent = f"{prefix}{continuation}     "
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(self._render_focused_options_line())
 
     def _render_focused_options_line(self) -> str:
         """Render the permission options line with the focused option highlighted.
