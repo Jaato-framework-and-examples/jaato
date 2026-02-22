@@ -55,23 +55,35 @@ The `AnthropicCachePlugin` accepts `cache_ttl` config (`"5m"` or `"1h"`) but cur
 
 **Estimated scope:** ~5 lines.
 
-#### 1.4 — Google GenAI Context Caching Plugin (New)
+#### 1.4 — Google GenAI Context Caching Plugin (New) — **COMPLETED**
 
-`GoogleGenAIProvider` is standalone (no inheritance issues). Google offers explicit context caching for Gemini models via a separate API call. A new `cache_google_genai/` plugin would implement this.
+**Status:** Implemented with active `CachedContent` support — 61 passing tests.
 
-**Files to create:**
+The `GoogleGenAICachePlugin` supports two modes:
+
+1. **Active caching** (`enable_caching: true`): Creates a server-side `CachedContent` object containing system instruction + tool definitions via `client.caches.create()`. Returns `cached_content` name in `prepare_request()` result so the provider references the cached prefix in `GenerateContentConfig`. Content changes are detected via SHA-256 hash; stale caches are automatically deleted and recreated. Minimum ~32K token threshold prevents wasteful caching of small prompts.
+
+2. **Monitoring-only** (default): Tracks `cache_read_tokens` metrics from `cached_content_token_count` and GC invalidation counts without modifying requests.
+
+**Provider integration:** `GoogleGenAIProvider.set_cache_plugin()` passes the `genai.Client` to the plugin. `_get_cached_content_config()` builds a `GenerateContentConfig` with `cached_content` reference, injected into all 5 send methods.
+
+**Files created/modified:**
 
 | Path | Purpose |
 |------|---------|
-| `shared/plugins/cache_google_genai/__init__.py` | Package init, `create_plugin()` |
-| `shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` implementation |
-| `shared/plugins/cache_google_genai/tests/test_plugin.py` | Unit tests |
+| `shared/plugins/cache_google_genai/__init__.py` | Package init, `PLUGIN_KIND = "cache"`, `create_plugin()` |
+| `shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` — active + monitoring modes |
+| `shared/plugins/cache_google_genai/tests/test_plugin.py` | 61 unit tests |
+| `model_provider/google_genai/provider.py` | `set_cache_plugin()`, `_get_cached_content_config()`, 5 send method integrations |
 
-**Entry point:** Add to `pyproject.toml` under `[project.entry-points."jaato.cache_plugins"]`.
+**Entry point:** Added to `pyproject.toml` under `[project.entry-points."jaato.cache_plugins"]`.
 
-**Note:** Google's context caching is fundamentally different from Anthropic's (separate API call to create a cached content object, then reference by name). The `prepare_request()` interface may need to return additional metadata (cache name/ID). Requires design investigation.
+**Configuration** (via `ProviderConfig.extra`):
 
-**Estimated scope:** ~200-300 LOC + tests.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enable_caching` | bool | `False` | Enable explicit CachedContent creation |
+| `cache_ttl` | str | `"3600s"` | TTL for cached content (e.g. `"1800s"`) |
 
 ---
 
@@ -121,11 +133,13 @@ The full 5-phase migration that moves history ownership from providers to the se
 ## Recommended Sequencing
 
 ```
-NOW (no blockers)
-├── 1.1 Session-Owned History design doc (prerequisite for Phases 1-5)
-├── 1.2 Legacy fallback removal (if ready to drop backwards compat)
-├── 1.3 Extended TTL support (small enhancement)
-└── 1.4 Google GenAI cache plugin (new feature, needs design investigation)
+COMPLETED
+├── 1.2 Legacy fallback removal ✓
+├── 1.3 Extended TTL support ✓
+└── 1.4 Google GenAI cache plugin (monitoring-only) ✓
+
+REMAINING (no blockers)
+└── 1.1 Session-Owned History design doc (prerequisite for Phases 1-5)
 
 AFTER Session-Owned History Phase 2
 └── 2.1 A→B transition (~60 lines, mechanical)
@@ -134,13 +148,6 @@ AFTER Session-Owned History Phase 4+
 └── Full legacy cleanup (any remaining provider-level cache code)
 ```
 
-## Decision Required
+## Remaining Decision
 
-Before proceeding with implementation, the key decision is:
-
-**Which Tier 1 items to implement now?**
-
-- **1.2 (Legacy removal):** Are all deployments using plugin-based caching? If yes, this simplifies the provider substantially. If not, the fallback should be retained.
-- **1.3 (Extended TTL):** Small, safe enhancement. Low risk.
-- **1.4 (Google GenAI plugin):** Larger scope, needs design investigation for Google's different caching model.
-- **1.1 (SOH design doc):** Unblocks the entire Tier 2/3 pipeline but is design work, not implementation.
+**1.1 (SOH design doc):** The only remaining Tier 1 item. Unblocks the entire Tier 2/3 pipeline but is design work, not implementation.
