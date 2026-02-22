@@ -3955,7 +3955,7 @@ class OutputBuffer:
     def _is_options_line(self, line: str) -> bool:
         """Check if a line is the permission options line.
 
-        The options line contains bracketed shortcuts like [y]es [n]o [a]lways.
+        The options line contains bracketed choices like [yes] [no] [always].
         We detect it by looking for the pattern of multiple bracketed items.
 
         Args:
