@@ -1,7 +1,7 @@
 # Impact Analysis: Cache Plugin Extraction (Variant A) → Session-Owned History (Variant B)
 
-**Date:** 2026-02-22
-**Status:** Variant A implemented; Variant B not started (blocked on session-owned history)
+**Date:** 2026-02-22 (updated)
+**Status:** Variant A implemented; legacy fallback removed; extended TTL added; Variant B not started (blocked on session-owned history)
 **Depends on:**
 - [Cache Plugin Design](../jaato-cache-plugin-design.md) — Variants A and B
 - [Session-Owned History Impact Analysis](session-owned-history-impact-analysis.md) — 5-phase migration
@@ -40,14 +40,14 @@ Variant A was fully implemented in commit `8500019` ("Implement Variant A cache 
 
 | File | Change | Status |
 |------|--------|:------:|
-| **`AnthropicProvider`** (`anthropic/provider.py`) | `_build_api_kwargs()` refactored into `_build_system_blocks`, `_build_tool_list`, `_apply_legacy_cache_annotations`. Added `set_cache_plugin()` method and `self._cache_plugin` attribute. Delegation to `CachePlugin.prepare_request()` when plugin attached. `_compute_history_cache_breakpoint()` delegates to plugin's budget-aware BP3 when available, falls back to recency-based heuristic. (+204 / -62 net) | Done |
+| **`AnthropicProvider`** (`anthropic/provider.py`) | `_build_api_kwargs()` refactored into `_build_system_blocks`, `_build_tool_list`. Added `set_cache_plugin()` method and `self._cache_plugin` attribute. Delegation to `CachePlugin.prepare_request()` when plugin attached. Legacy fallback (`_apply_legacy_cache_annotations`, `_compute_recency_based_breakpoint`, `_should_cache_content`, `_get_cache_min_tokens`, `_estimate_tokens`) **removed** — plugin is now the only cache path. | Done |
 | **`JaatoSession`** (`jaato_session.py`) | `_wire_cache_plugin()` auto-discovers matching cache plugin by `provider_name`. Budget forwarding via `_emit_instruction_budget_update()`. GC notification via `_apply_gc_removal_list()` → `cache_plugin.on_gc_result()`. Cache metrics extracted via `_accumulate_turn_tokens()` — threads `cache_read_tokens` and `cache_creation_tokens` into `turn_data`. (+132 initial, +20 metrics pipeline) | Done |
-| **`ZhipuAIProvider`** (`zhipuai/provider.py`) | `_enable_caching = False` **retained** but re-documented: "Disable parent's legacy cache annotations. ZhipuAI uses implicit caching — breakpoint injection is handled by `cache_zhipuai` plugin when attached, not by the provider." | Done |
-| **`OllamaProvider`** (`ollama/provider.py`) | `_enable_caching = False` **retained** but re-documented: "Ollama doesn't support caching. No cache plugin will match `provider_name='ollama'`, so no cache annotations are applied (correct behavior)." | Done |
+| **`ZhipuAIProvider`** (`zhipuai/provider.py`) | `_enable_caching = False` **removed** — no legacy path to suppress. | Done |
+| **`OllamaProvider`** (`ollama/provider.py`) | `_enable_caching = False` **removed** — no legacy path to suppress. | Done |
 | **`pyproject.toml`** | Added `jaato.cache_plugins` entry point group with `cache_anthropic` and `cache_zhipuai` entries. | Done |
 | **`registry.py`** | Updated for cache plugin discovery. | Done |
 
-**Note on ZhipuAI/Ollama:** The design doc projected removing `_enable_caching = False` entirely. In practice, the flag was **retained** because it suppresses the parent `AnthropicProvider`'s legacy (non-plugin) cache annotation path. It's now documented as "legacy annotation suppression" rather than a hack. The flag becomes unnecessary only when the legacy cache code path is removed from `AnthropicProvider` entirely (i.e., when all users have migrated to plugin-based caching and the fallback path is dropped).
+**Note on ZhipuAI/Ollama:** The `_enable_caching = False` flags have been removed from both providers. The legacy cache code path in `AnthropicProvider` has been deleted, so there is nothing to suppress. Cache behavior is now entirely driven by the cache plugin: if no plugin matches a provider's `provider_name`, no cache annotations are applied.
 
 #### Cache Metrics Pipeline (Commits `8eee506` → `96d8ed4`)
 
@@ -77,6 +77,44 @@ AnthropicProvider response
 | TUI types | `command_types.py` | Added cache fields to turn data types |
 | TUI display | `rich_client.py` | Turn summary lines, `/history` per-turn + session totals, remote event handling |
 
+#### Legacy Fallback Removal + Extended TTL
+
+The legacy cache code path in `AnthropicProvider` was removed, completing the clean separation of concerns:
+
+**Removed from `AnthropicProvider`:**
+
+| Code | Lines Removed |
+|------|:---:|
+| `_enable_caching`, `_cache_ttl`, `_cache_history`, `_cache_exclude_recent_turns`, `_cache_min_tokens` fields | ~10 |
+| Cache config parsing in `initialize()` (resolve_enable_caching, cache_ttl, etc.) | ~15 |
+| `_apply_legacy_cache_annotations()` method | ~20 |
+| `_should_cache_content()`, `_get_cache_min_tokens()`, `_estimate_tokens()` methods | ~25 |
+| `_compute_recency_based_breakpoint()` method | ~20 |
+| Legacy branch in `_build_api_kwargs()` (`else: self._apply_legacy_cache_annotations(kwargs)`) | ~2 |
+| Legacy branch in `_compute_history_cache_breakpoint()` | ~10 |
+| `CACHE_MIN_TOKENS_SONNET`, `CACHE_MIN_TOKENS_OTHER`, `MAX_CACHE_BREAKPOINTS`, `DEFAULT_CACHE_EXCLUDE_RECENT_TURNS` constants | ~8 |
+| **Total removed** | **~110** |
+
+**Removed from child providers:**
+
+| Provider | Change |
+|----------|--------|
+| `ZhipuAIProvider` | Removed `self._enable_caching = False` from `__init__()` and `initialize()` (2 lines) |
+| `OllamaProvider` | Removed `self._enable_caching = False` from `__init__()` and `initialize()` (2 lines) |
+
+**Extended TTL added to `AnthropicCachePlugin`:**
+
+| Feature | Details |
+|---------|---------|
+| `_make_cache_control()` method | Returns `{"type": "ephemeral"}` for 5m or `{"type": "ephemeral", "ttl": "1h"}` for extended TTL |
+| `requires_extended_cache_beta` property | Indicates when `extended-cache-ttl-2025-04-11` beta header is needed |
+| 7 new tests in `TestExtendedTTL` | Covers both TTL variants, beta header detection |
+
+**Test updates:**
+- Removed `test_initialize_with_caching_enabled` from Anthropic provider tests (no `_enable_caching` field)
+- Replaced `TestPromptCaching` tests with plugin delegation tests (`test_no_cache_control_without_plugin`, `test_cache_plugin_delegation`)
+- Updated ZhipuAI/Ollama `test_caching_disabled` → `test_no_cache_plugin_by_default`
+
 ### Variant A vs. Design Doc Projections
 
 | Design Doc Projection (Section 1.4) | Actual |
@@ -101,7 +139,7 @@ Variant B remains blocked on **session-owned history Phase 2** (stateless `compl
 | Remove `set_cache_plugin()` from protocol + `AnthropicProvider` | ~13 | Not started |
 | Relocate delegation from `_build_api_kwargs` to `complete()` | ~15 | Blocked on `complete()` existing |
 | Simplify session wiring (remove `hasattr` check) | ~3 | Not started |
-| Remove `_enable_caching = False` from ZhipuAI/Ollama | ~6 | Blocked on legacy path removal |
+| ~~Remove `_enable_caching = False` from ZhipuAI/Ollama~~ | ~~6~~ | **Done** (removed with legacy fallback) |
 | Update affected tests | ~30 | Not started |
 | Verify cache hits (integration test) | — | Not started |
 | **Blocking dependency: session-owned history Phase 2** | — | **Not started** |

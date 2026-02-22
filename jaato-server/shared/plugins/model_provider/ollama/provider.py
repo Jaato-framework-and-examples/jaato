@@ -83,7 +83,8 @@ class OllamaProvider(AnthropicProvider):
     - No API key required
     - Custom base_url pointing to Ollama
     - Model listing via Ollama's native API
-    - Caching and thinking disabled (not supported)
+    - Thinking disabled (not supported by local models)
+    - No cache plugin matches 'ollama', so no cache annotations are applied
 
     All message handling, streaming, and converters are inherited from
     AnthropicProvider since Ollama uses the same API format.
@@ -95,10 +96,7 @@ class OllamaProvider(AnthropicProvider):
         self._host: str = DEFAULT_OLLAMA_HOST
         self._context_length_override: Optional[int] = None
 
-        # Ollama doesn't support caching or thinking.
-        # No cache plugin will match provider_name='ollama', so no
-        # cache annotations are applied (correct behavior).
-        self._enable_caching = False
+        # Ollama doesn't support thinking.
         self._enable_thinking = False
 
     @property
@@ -137,9 +135,7 @@ class OllamaProvider(AnthropicProvider):
             config.extra.get("context_length") or resolve_context_length()
         )
 
-        # Ollama doesn't support caching or thinking — force disable.
-        # No cache plugin matches 'ollama', so no annotations are applied.
-        self._enable_caching = False
+        # Ollama doesn't support thinking.
         self._enable_thinking = False
 
         # Ollama doesn't use OAuth/PKCE - set to disabled

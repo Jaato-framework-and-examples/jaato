@@ -1,8 +1,7 @@
 """Anthropic Cache Plugin — explicit breakpoint caching for Claude models.
 
-Extracted from AnthropicProvider to decouple cache strategy from provider
-inheritance, enabling budget-aware breakpoint placement and clean
-ZhipuAI/Ollama inheritance without ``_enable_caching = False`` hacks.
+Decouples cache strategy from provider internals, enabling budget-aware
+breakpoint placement and extended TTL support (5m default or 1h).
 """
 
 PLUGIN_KIND = "cache"

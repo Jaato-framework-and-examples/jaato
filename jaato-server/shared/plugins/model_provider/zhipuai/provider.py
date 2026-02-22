@@ -166,11 +166,6 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url: str = DEFAULT_ZHIPUAI_BASE_URL
         self._context_length_override: Optional[int] = None
 
-        # Disable parent's legacy cache annotations.
-        # ZhipuAI uses implicit caching -- breakpoint injection is handled
-        # by cache_zhipuai plugin when attached, not by the provider.
-        self._enable_caching = False
-
     @property
     def name(self) -> str:
         """Provider identifier."""
@@ -251,10 +246,6 @@ class ZhipuAIProvider(AnthropicProvider):
         )
         if self._context_length_override:
             self._trace(f"[INIT] context_length_override={self._context_length_override}")
-
-        # Disable parent's legacy cache annotations.
-        # ZhipuAI caching is handled by cache_zhipuai plugin when attached.
-        self._enable_caching = False
 
         # Extended thinking: configurable for GLM-4.7 which has native CoT reasoning
         self._enable_thinking = config.extra.get(

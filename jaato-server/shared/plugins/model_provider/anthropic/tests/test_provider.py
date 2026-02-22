@@ -108,19 +108,6 @@ class TestAuthentication:
         assert provider._api_key == "sk-ant-env-key"
 
     @patch('anthropic.Anthropic')
-    def test_initialize_with_caching_enabled(self, mock_client_class):
-        """Should enable caching when configured."""
-        mock_client_class.return_value = MagicMock()
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(
-            api_key="sk-ant-test",
-            extra={'enable_caching': True}
-        ))
-
-        assert provider._enable_caching is True
-
-    @patch('anthropic.Anthropic')
     def test_initialize_with_thinking_enabled(self, mock_client_class):
         """Should enable extended thinking when configured."""
         mock_client_class.return_value = MagicMock()
@@ -568,20 +555,23 @@ class TestProviderProperties:
 
 
 class TestPromptCaching:
-    """Tests for prompt caching feature."""
+    """Tests for cache plugin delegation.
+
+    Cache annotation logic now lives in the ``cache_anthropic`` plugin.
+    These tests verify the provider's delegation behavior — the plugin's
+    own test suite (``cache_anthropic/tests/test_plugin.py``) covers the
+    annotation logic in detail.
+    """
 
     @patch('anthropic.Anthropic')
-    def test_caching_adds_cache_control_to_system(self, mock_client_class):
-        """When caching enabled, system instruction should have cache_control."""
+    def test_no_cache_control_without_plugin(self, mock_client_class):
+        """Without a cache plugin, no cache_control annotations should appear."""
         mock_client = MagicMock()
         mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(
-            api_key="sk-ant-test",
-            extra={'enable_caching': True}
-        ))
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
         provider.create_session(system_instruction="You are helpful.")
 
@@ -590,38 +580,49 @@ class TestPromptCaching:
         call_kwargs = mock_client.messages.create.call_args.kwargs
         system = call_kwargs['system']
 
-        # Should be a list with cache_control
+        # Without plugin, no cache_control should be added
         assert isinstance(system, list)
-        assert system[0]['cache_control'] == {"type": "ephemeral"}
+        assert 'cache_control' not in system[0]
 
     @patch('anthropic.Anthropic')
-    def test_caching_adds_cache_control_to_tools(self, mock_client_class):
-        """When caching enabled, last tool should have cache_control."""
+    def test_cache_plugin_delegation(self, mock_client_class):
+        """With a cache plugin attached, prepare_request should be called."""
         mock_client = MagicMock()
         mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(
-            api_key="sk-ant-test",
-            extra={'enable_caching': True}
-        ))
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
 
         tools = [
             ToolSchema(name='tool1', description='First tool', parameters={}),
             ToolSchema(name='tool2', description='Second tool', parameters={}),
         ]
-        provider.create_session(tools=tools)
+        provider.create_session(
+            system_instruction="You are helpful.",
+            tools=tools,
+        )
+
+        # Attach a mock cache plugin
+        mock_plugin = MagicMock()
+        mock_plugin.prepare_request.return_value = {
+            "system": [{"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "tool1"}, {"name": "tool2", "cache_control": {"type": "ephemeral"}}],
+            "messages": [],
+            "cache_breakpoint_index": -1,
+        }
+        provider.set_cache_plugin(mock_plugin)
 
         provider.send_message("Hi")
 
-        call_kwargs = mock_client.messages.create.call_args.kwargs
-        tools_sent = call_kwargs['tools']
+        # Plugin's prepare_request should have been called
+        mock_plugin.prepare_request.assert_called_once()
 
-        # Last tool should have cache_control
-        assert 'cache_control' in tools_sent[-1]
-        assert tools_sent[-1]['cache_control'] == {"type": "ephemeral"}
+        # The annotated system/tools from the plugin should be in the API call
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        system = call_kwargs['system']
+        assert system[0]['cache_control'] == {"type": "ephemeral"}
 
 
 class TestStreamingCapabilities:

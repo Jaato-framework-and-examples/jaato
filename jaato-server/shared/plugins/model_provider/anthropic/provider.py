@@ -60,7 +60,6 @@ from .converters import (
 from .env import (
     get_checked_credential_locations,
     resolve_api_key,
-    resolve_enable_caching,
     resolve_enable_thinking,
     resolve_oauth_token,
     resolve_thinking_budget,
@@ -115,20 +114,6 @@ EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 # Claude Code identity - required for OAuth tokens (server-side validation)
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
-# Cache configuration
-# Anthropic requires minimum token thresholds for caching to be effective
-# Claude 3.5 Sonnet: 1024 tokens minimum
-# Other models (Haiku, Opus): 2048 tokens minimum
-CACHE_MIN_TOKENS_SONNET = 1024
-CACHE_MIN_TOKENS_OTHER = 2048
-
-# Maximum cache breakpoints allowed per request
-MAX_CACHE_BREAKPOINTS = 4
-
-# Default number of recent turns to exclude from history caching
-# (newer messages are less stable and may not benefit from caching)
-DEFAULT_CACHE_EXCLUDE_RECENT_TURNS = 2
-
 
 class AnthropicProvider:
     """Anthropic Claude provider.
@@ -137,7 +122,7 @@ class AnthropicProvider:
     - Multiple Claude model families
     - Function calling with manual control
     - Extended thinking (reasoning traces)
-    - Prompt caching for cost/latency optimization
+    - Prompt caching via ``cache_anthropic`` plugin (up to 90% cost reduction)
     - Real token counting via API
 
     Usage:
@@ -145,7 +130,6 @@ class AnthropicProvider:
         provider.initialize(ProviderConfig(
             api_key='sk-ant-...',  # Or set ANTHROPIC_API_KEY env var
             extra={
-                'enable_caching': True,    # Optional: prompt caching
                 'enable_thinking': True,   # Optional: extended thinking
                 'thinking_budget': 10000,  # Optional: max thinking tokens
             }
@@ -164,15 +148,8 @@ class AnthropicProvider:
 
         # Configuration
         self._api_key: Optional[str] = None
-        self._enable_caching: bool = False
         self._enable_thinking: bool = False
         self._thinking_budget: int = 10000
-        self._cache_ttl: str = "5m"  # "5m" or "1h"
-
-        # Cache optimization settings
-        self._cache_history: bool = True  # Cache historical messages
-        self._cache_exclude_recent_turns: int = DEFAULT_CACHE_EXCLUDE_RECENT_TURNS
-        self._cache_min_tokens: bool = True  # Enforce minimum token threshold
 
         # Session state
         self._system_instruction: Optional[str] = None
@@ -201,10 +178,11 @@ class AnthropicProvider:
         Args:
             config: Configuration with authentication details.
                 - api_key: Anthropic API key (or set ANTHROPIC_API_KEY)
-                - extra['enable_caching']: Enable prompt caching (default: False)
                 - extra['enable_thinking']: Enable extended thinking (default: False)
                 - extra['thinking_budget']: Max thinking tokens (default: 10000)
-                - extra['cache_ttl']: Cache TTL, "5m" or "1h" (default: "5m")
+
+            Note: Cache configuration (enable_caching, cache_ttl, etc.) is now
+            handled by the ``cache_anthropic`` plugin via ``CachePlugin.initialize()``.
 
         Raises:
             APIKeyNotFoundError: No API key found.
@@ -252,28 +230,12 @@ class AnthropicProvider:
             )
 
         # Parse extra config (config.extra takes precedence over env vars)
-        self._enable_caching = config.extra.get(
-            "enable_caching", resolve_enable_caching()
-        )
         self._enable_thinking = config.extra.get(
             "enable_thinking", resolve_enable_thinking()
         )
         self._thinking_budget = config.extra.get(
             "thinking_budget", resolve_thinking_budget()
         )
-        self._cache_ttl = config.extra.get("cache_ttl", "5m")
-
-        # Cache optimization settings
-        # cache_history: Whether to add a cache breakpoint in message history
-        self._cache_history = config.extra.get("cache_history", True)
-        # cache_exclude_recent_turns: Number of recent turns to exclude from caching
-        # (these are less stable and may reduce cache hit rate)
-        self._cache_exclude_recent_turns = config.extra.get(
-            "cache_exclude_recent_turns", DEFAULT_CACHE_EXCLUDE_RECENT_TURNS
-        )
-        # cache_min_tokens: Whether to enforce minimum token threshold for caching
-        # (Anthropic ignores cache markers on content smaller than threshold)
-        self._cache_min_tokens = config.extra.get("cache_min_tokens", True)
 
         # Create the client based on auth method
         # Priority: PKCE OAuth > env var OAuth > API key
@@ -787,15 +749,13 @@ class AnthropicProvider:
     def _build_api_kwargs(self, response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Build kwargs for the messages.create() call.
 
-        Cache optimization strategy (up to 4 breakpoints):
-        1. System instruction (most stable)
-        2. Tool definitions (stable within session, sorted for consistency)
-        3. Historical messages (computed breakpoint in older turns)
-        4. Reserved for future use (large document injection, etc.)
+        When a ``CachePlugin`` is attached (via ``set_cache_plugin()``),
+        cache annotations are delegated to it.  Without a plugin, no cache
+        annotations are applied.
 
-        Note: Breakpoint 3 (history) is applied in send_message() via
-        messages_to_anthropic(cache_breakpoint_index=...) since it needs
-        access to the converted message list.
+        Note: History cache breakpoint (BP3) is applied in send_message()
+        via messages_to_anthropic(cache_breakpoint_index=...) since it
+        needs access to the converted message list.
         """
         kwargs: Dict[str, Any] = {}
 
@@ -826,9 +786,6 @@ class AnthropicProvider:
                 kwargs["system"] = cache_result["system"]
             if cache_result.get("tools"):
                 kwargs["tools"] = cache_result["tools"]
-        else:
-            # Legacy path: provider-internal cache annotations (no plugin)
-            self._apply_legacy_cache_annotations(kwargs)
 
         # Extended thinking
         if self._enable_thinking and self._is_thinking_capable():
@@ -874,29 +831,6 @@ class AnthropicProvider:
         # Sort by name for consistent ordering (improves cache hits)
         return sorted(anthropic_tools, key=lambda t: t["name"])
 
-    def _apply_legacy_cache_annotations(self, kwargs: Dict[str, Any]) -> None:
-        """Apply cache_control annotations using provider-internal logic.
-
-        This is the legacy path used when no CachePlugin is attached.
-        It preserves the existing behavior for backwards compatibility.
-
-        Args:
-            kwargs: The API kwargs dict to annotate in-place.
-        """
-        # BP1: System instruction
-        system_blocks = kwargs.get("system")
-        if system_blocks and isinstance(system_blocks, list) and len(system_blocks) > 0:
-            text = system_blocks[-1].get("text", "")
-            if self._enable_caching and text and self._should_cache_content(text):
-                system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
-
-        # BP2: Tool definitions
-        tools = kwargs.get("tools")
-        if tools and self._enable_caching and len(tools) > 0:
-            tools_json = json.dumps(tools)
-            if self._should_cache_content(tools_json):
-                tools[-1]["cache_control"] = {"type": "ephemeral"}
-
     def _is_thinking_capable(self) -> bool:
         """Check if the current model supports extended thinking."""
         if not self._model_name:
@@ -906,96 +840,26 @@ class AnthropicProvider:
                 return True
         return False
 
-    def _get_cache_min_tokens(self) -> int:
-        """Get minimum token threshold for caching based on model.
-
-        Anthropic requires minimum token thresholds:
-        - Claude 3.5 Sonnet: 1024 tokens
-        - Other models: 2048 tokens
-        """
-        if not self._model_name:
-            return CACHE_MIN_TOKENS_OTHER
-        if "sonnet" in self._model_name.lower() and "3-5" in self._model_name:
-            return CACHE_MIN_TOKENS_SONNET
-        return CACHE_MIN_TOKENS_OTHER
-
-    def _estimate_tokens(self, content: str) -> int:
-        """Estimate token count for content.
-
-        Uses a rough heuristic of ~4 characters per token.
-        For accurate counts, use count_tokens() but that requires an API call.
-        """
-        return len(content) // 4
-
-    def _should_cache_content(self, content: str) -> bool:
-        """Check if content meets minimum token threshold for caching.
-
-        Args:
-            content: Text content to check.
-
-        Returns:
-            True if content is large enough to benefit from caching.
-        """
-        if not self._cache_min_tokens:
-            return True  # Skip threshold check if disabled
-        min_tokens = self._get_cache_min_tokens()
-        estimated = self._estimate_tokens(content)
-        return estimated >= min_tokens
-
     def _compute_history_cache_breakpoint(self) -> int:
-        """Compute the optimal history index for a cache breakpoint.
+        """Compute the optimal history index for cache breakpoint BP3.
 
-        When a cache plugin is attached, delegates to it for budget-aware
-        BP3 placement.  Otherwise uses the legacy recency-based heuristic.
-
-        Returns the index of the message that should receive cache_control,
-        or -1 if history caching should be disabled.
-        """
-        # When a cache plugin is attached, it handles the enabled check
-        # and budget-aware breakpoint placement
-        if self._cache_plugin:
-            # The plugin's prepare_request already computed the breakpoint.
-            # Use its internal result if available (-2 = budget-based).
-            bp = getattr(self._cache_plugin, '_budget_bp3_message_id', None)
-            if bp is not None:
-                # Resolve message_id to index in self._history
-                idx = self._resolve_message_id_to_index(bp)
-                if idx >= 0:
-                    return idx
-            # Fall through to recency-based if budget path didn't resolve
-
-        # Legacy path: provider-internal recency-based heuristic
-        if not self._enable_caching or not self._cache_history:
-            return -1
-
-        if not self._history:
-            return -1
-
-        return self._compute_recency_based_breakpoint()
-
-    def _compute_recency_based_breakpoint(self) -> int:
-        """Compute history breakpoint using turn-counting heuristic.
-
-        Walks backward through history to find the last assistant message
-        before the "exclude recent turns" window.
+        Delegates to the attached ``CachePlugin`` for budget-aware placement.
+        Without a plugin, returns -1 (no history caching).
 
         Returns:
-            Message index, or -1 if no suitable breakpoint found.
+            Message index for cache_control, or -1 to skip history caching.
         """
-        exclude_count = self._cache_exclude_recent_turns
-        if exclude_count <= 0:
-            exclude_count = 1
+        if not self._cache_plugin:
+            return -1
 
-        user_count = 0
-        for i in range(len(self._history) - 1, -1, -1):
-            if self._history[i].role == Role.USER:
-                user_count += 1
-                if user_count >= exclude_count:
-                    # Found the boundary - find last assistant message before it
-                    for j in range(i - 1, -1, -1):
-                        if self._history[j].role == Role.MODEL:
-                            return j
-                    return -1
+        # The plugin's prepare_request already computed the breakpoint.
+        # Use its internal result if available (-2 = budget-based).
+        bp = getattr(self._cache_plugin, '_budget_bp3_message_id', None)
+        if bp is not None:
+            idx = self._resolve_message_id_to_index(bp)
+            if idx >= 0:
+                return idx
+
         return -1
 
     def _resolve_message_id_to_index(self, message_id: str) -> int:
