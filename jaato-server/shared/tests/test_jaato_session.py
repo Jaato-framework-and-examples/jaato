@@ -374,6 +374,8 @@ class TestJaatoSessionTurnProgress:
             output_tokens=200,
             percent_used=25.5,
             pending_tool_calls=3,
+            cache_read_tokens=None,
+            cache_creation_tokens=None,
         )
 
         # Verify conversation budget is updated (which also emits instruction budget)
@@ -417,6 +419,8 @@ class TestJaatoSessionTurnProgress:
             output_tokens=0,
             percent_used=10.0,
             pending_tool_calls=1,
+            cache_read_tokens=None,
+            cache_creation_tokens=None,
         )
 
 

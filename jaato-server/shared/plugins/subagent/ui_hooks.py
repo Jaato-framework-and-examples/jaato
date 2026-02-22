@@ -118,7 +118,9 @@ class AgentUIHooks(Protocol):
         output_tokens: int,
         total_tokens: int,
         duration_seconds: float,
-        function_calls: List[Dict[str, Any]]
+        function_calls: List[Dict[str, Any]],
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
     ) -> None:
         """Called after each conversation turn completes.
 
@@ -133,6 +135,10 @@ class AgentUIHooks(Protocol):
             duration_seconds: Time taken for the turn.
             function_calls: List of function calls made during the turn,
                           each with 'name' and 'duration_seconds' keys.
+            cache_read_tokens: Tokens read from prompt cache (reduced cost).
+                None when the provider does not support caching.
+            cache_creation_tokens: Tokens written to prompt cache.
+                None when the provider does not support caching.
         """
         ...
 
@@ -166,7 +172,9 @@ class AgentUIHooks(Protocol):
         prompt_tokens: int,
         output_tokens: int,
         percent_used: float,
-        pending_tool_calls: int
+        pending_tool_calls: int,
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
     ) -> None:
         """Called with incremental progress during turn execution.
 
@@ -180,6 +188,10 @@ class AgentUIHooks(Protocol):
             output_tokens: Current output tokens.
             percent_used: Percentage of context window used.
             pending_tool_calls: Number of tool calls pending execution.
+            cache_read_tokens: Tokens read from prompt cache (reduced cost).
+                None when the provider does not support caching.
+            cache_creation_tokens: Tokens written to prompt cache.
+                None when the provider does not support caching.
         """
         ...
 
