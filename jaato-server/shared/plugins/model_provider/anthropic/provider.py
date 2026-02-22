@@ -180,6 +180,9 @@ class AnthropicProvider:
         self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
 
+        # Cache plugin (optional, for delegated cache control)
+        self._cache_plugin: Optional[Any] = None  # CachePlugin protocol
+
         # Agent context for tracing
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
@@ -802,49 +805,30 @@ class AnthropicProvider:
         else:
             kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
 
-        # System instruction (Cache breakpoint #1)
-        # When using OAuth tokens, prepend Claude Code identity (server-side validation)
-        if self._is_using_oauth():
-            # OAuth requires Claude Code identity
-            # Combine identity + instruction into single block for better caching
-            combined_system = CLAUDE_CODE_IDENTITY
-            if self._system_instruction:
-                combined_system = f"{CLAUDE_CODE_IDENTITY}\n\n{self._system_instruction}"
+        # Build system instruction in API format
+        system_blocks = self._build_system_blocks()
+        if system_blocks:
+            kwargs["system"] = system_blocks
 
-            # Only add cache_control if content meets threshold
-            system_block: Dict[str, Any] = {
-                "type": "text",
-                "text": combined_system,
-            }
-            if self._enable_caching and self._should_cache_content(combined_system):
-                system_block["cache_control"] = {"type": "ephemeral"}
-            kwargs["system"] = [system_block]
+        # Build tools in API format
+        anthropic_tools = self._build_tool_list()
+        if anthropic_tools is not None:
+            kwargs["tools"] = anthropic_tools
 
-        elif self._system_instruction:
-            system_block = {
-                "type": "text",
-                "text": self._system_instruction,
-            }
-            # Only add cache_control if caching enabled and meets threshold
-            if self._enable_caching and self._should_cache_content(self._system_instruction):
-                system_block["cache_control"] = {"type": "ephemeral"}
-            kwargs["system"] = [system_block]
-
-        # Tools (Cache breakpoint #2)
-        if self._tools:
-            anthropic_tools = tool_schemas_to_anthropic(self._tools)
-            if anthropic_tools:
-                # Sort tools by name for consistent ordering (improves cache hits)
-                # Tool order changes would otherwise invalidate the cache
-                anthropic_tools = sorted(anthropic_tools, key=lambda t: t["name"])
-
-                # Add cache control to last tool if caching enabled
-                if self._enable_caching and len(anthropic_tools) > 0:
-                    # Estimate combined size of all tools for threshold check
-                    tools_json = json.dumps(anthropic_tools)
-                    if self._should_cache_content(tools_json):
-                        anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
-                kwargs["tools"] = anthropic_tools
+        # Delegate cache annotations to plugin if attached
+        if self._cache_plugin:
+            cache_result = self._cache_plugin.prepare_request(
+                system=kwargs.get("system"),
+                tools=kwargs.get("tools", []),
+                messages=[],  # Messages are handled separately via cache_breakpoint_index
+            )
+            if cache_result.get("system") is not None:
+                kwargs["system"] = cache_result["system"]
+            if cache_result.get("tools"):
+                kwargs["tools"] = cache_result["tools"]
+        else:
+            # Legacy path: provider-internal cache annotations (no plugin)
+            self._apply_legacy_cache_annotations(kwargs)
 
         # Extended thinking
         if self._enable_thinking and self._is_thinking_capable():
@@ -854,6 +838,64 @@ class AnthropicProvider:
             }
 
         return kwargs
+
+    def _build_system_blocks(self) -> Optional[List[Dict[str, Any]]]:
+        """Build system instruction content blocks in Anthropic API format.
+
+        Handles OAuth identity prepending.  Does NOT apply cache_control --
+        that is handled by the cache plugin or legacy annotation path.
+
+        Returns:
+            List of system content blocks, or None if no system instruction.
+        """
+        if self._is_using_oauth():
+            combined_system = CLAUDE_CODE_IDENTITY
+            if self._system_instruction:
+                combined_system = f"{CLAUDE_CODE_IDENTITY}\n\n{self._system_instruction}"
+            return [{"type": "text", "text": combined_system}]
+        elif self._system_instruction:
+            return [{"type": "text", "text": self._system_instruction}]
+        return None
+
+    def _build_tool_list(self) -> Optional[List[Dict[str, Any]]]:
+        """Build tool definitions in Anthropic API format.
+
+        Sorts by name for cache stability.  Does NOT apply cache_control --
+        that is handled by the cache plugin or legacy annotation path.
+
+        Returns:
+            Sorted list of tool dicts, or None if no tools.
+        """
+        if not self._tools:
+            return None
+        anthropic_tools = tool_schemas_to_anthropic(self._tools)
+        if not anthropic_tools:
+            return None
+        # Sort by name for consistent ordering (improves cache hits)
+        return sorted(anthropic_tools, key=lambda t: t["name"])
+
+    def _apply_legacy_cache_annotations(self, kwargs: Dict[str, Any]) -> None:
+        """Apply cache_control annotations using provider-internal logic.
+
+        This is the legacy path used when no CachePlugin is attached.
+        It preserves the existing behavior for backwards compatibility.
+
+        Args:
+            kwargs: The API kwargs dict to annotate in-place.
+        """
+        # BP1: System instruction
+        system_blocks = kwargs.get("system")
+        if system_blocks and isinstance(system_blocks, list) and len(system_blocks) > 0:
+            text = system_blocks[-1].get("text", "")
+            if self._enable_caching and text and self._should_cache_content(text):
+                system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
+        # BP2: Tool definitions
+        tools = kwargs.get("tools")
+        if tools and self._enable_caching and len(tools) > 0:
+            tools_json = json.dumps(tools)
+            if self._should_cache_content(tools_json):
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
 
     def _is_thinking_capable(self) -> bool:
         """Check if the current model supports extended thinking."""
@@ -903,41 +945,74 @@ class AnthropicProvider:
     def _compute_history_cache_breakpoint(self) -> int:
         """Compute the optimal history index for a cache breakpoint.
 
+        When a cache plugin is attached, delegates to it for budget-aware
+        BP3 placement.  Otherwise uses the legacy recency-based heuristic.
+
         Returns the index of the message that should receive cache_control,
         or -1 if history caching should be disabled.
-
-        Strategy:
-        - Skip if caching disabled or history too short
-        - Find the last assistant message before the "exclude recent" window
-        - This creates a stable cache key for older conversation context
         """
+        # When a cache plugin is attached, it handles the enabled check
+        # and budget-aware breakpoint placement
+        if self._cache_plugin:
+            # The plugin's prepare_request already computed the breakpoint.
+            # Use its internal result if available (-2 = budget-based).
+            bp = getattr(self._cache_plugin, '_budget_bp3_message_id', None)
+            if bp is not None:
+                # Resolve message_id to index in self._history
+                idx = self._resolve_message_id_to_index(bp)
+                if idx >= 0:
+                    return idx
+            # Fall through to recency-based if budget path didn't resolve
+
+        # Legacy path: provider-internal recency-based heuristic
         if not self._enable_caching or not self._cache_history:
             return -1
 
         if not self._history:
             return -1
 
-        # Count turns (user-assistant pairs)
-        # We want to cache up to but not including the last N turns
+        return self._compute_recency_based_breakpoint()
+
+    def _compute_recency_based_breakpoint(self) -> int:
+        """Compute history breakpoint using turn-counting heuristic.
+
+        Walks backward through history to find the last assistant message
+        before the "exclude recent turns" window.
+
+        Returns:
+            Message index, or -1 if no suitable breakpoint found.
+        """
         exclude_count = self._cache_exclude_recent_turns
         if exclude_count <= 0:
-            # Cache everything except the very last message (current turn)
             exclude_count = 1
 
-        # Find candidate: last assistant message before the exclusion window
-        # Walk backward to find the Nth user message from the end
         user_count = 0
         for i in range(len(self._history) - 1, -1, -1):
             if self._history[i].role == Role.USER:
                 user_count += 1
                 if user_count >= exclude_count:
-                    # Found the boundary - cache everything before this user message
-                    # Find the last assistant message before this point
+                    # Found the boundary - find last assistant message before it
                     for j in range(i - 1, -1, -1):
                         if self._history[j].role == Role.MODEL:
                             return j
-                    # No assistant message found before this point
                     return -1
+        return -1
+
+    def _resolve_message_id_to_index(self, message_id: str) -> int:
+        """Find the index of a message by its ID in the history.
+
+        Searches backward since the target is typically near the end
+        of the stable prefix (before recent ephemeral turns).
+
+        Args:
+            message_id: The message ID to find.
+
+        Returns:
+            Index in self._history, or -1 if not found.
+        """
+        for i in range(len(self._history) - 1, -1, -1):
+            if getattr(self._history[i], 'id', None) == message_id:
+                return i
         return -1
 
     def _add_response_to_history(self, response: ProviderResponse) -> None:
@@ -1157,6 +1232,23 @@ class AnthropicProvider:
         this to write to the provider trace log.
         """
         pass
+
+    # ==================== Cache Plugin Delegation ====================
+
+    def set_cache_plugin(self, plugin: Any) -> None:
+        """Attach a cache control plugin for delegated breakpoint placement.
+
+        When set, the provider delegates cache annotation decisions
+        (breakpoint placement, threshold checks) to this plugin instead
+        of using provider-internal logic.  This decouples cache strategy
+        from provider implementation, allowing ZhipuAIProvider and
+        OllamaProvider to inherit from AnthropicProvider without
+        inheriting the wrong cache logic.
+
+        Args:
+            plugin: A CachePlugin instance (duck-typed).
+        """
+        self._cache_plugin = plugin
 
     # ==================== Streaming ====================
 

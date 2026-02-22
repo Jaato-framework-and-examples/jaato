@@ -95,7 +95,9 @@ class OllamaProvider(AnthropicProvider):
         self._host: str = DEFAULT_OLLAMA_HOST
         self._context_length_override: Optional[int] = None
 
-        # Ollama doesn't support these features
+        # Ollama doesn't support caching or thinking.
+        # No cache plugin will match provider_name='ollama', so no
+        # cache annotations are applied (correct behavior).
         self._enable_caching = False
         self._enable_thinking = False
 
@@ -135,7 +137,8 @@ class OllamaProvider(AnthropicProvider):
             config.extra.get("context_length") or resolve_context_length()
         )
 
-        # Ollama doesn't support caching or thinking - force disable
+        # Ollama doesn't support caching or thinking — force disable.
+        # No cache plugin matches 'ollama', so no annotations are applied.
         self._enable_caching = False
         self._enable_thinking = False
 
