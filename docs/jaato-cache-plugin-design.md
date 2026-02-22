@@ -900,6 +900,252 @@ class ZhipuAICachePlugin:
 
 ---
 
+## Integration: How Provider, Cache Plugin, and GC Plugin Interact
+
+### The Wiring Problem
+
+The current architecture creates a challenge for cache plugin integration:
+
+1. **The provider owns the API call.** `_build_api_kwargs()` is called inside `AnthropicProvider.send_message()` on every request. The session calls `provider.send_message(text)` and never sees the kwargs.
+2. **The provider maintains its own history.** `self._history`, `self._system_instruction`, and `self._tools` live inside the provider. The session only interacts with history via `provider.get_history()` (read) and `_create_provider_session(history)` (replace).
+3. **GC talks to the session, not the provider.** After GC, the session calls `self.reset_session(new_history)` which calls `provider.create_session(system_instruction, tools, history=new_history)` — a full replacement.
+
+```
+Current data flow (per turn):
+
+    JaatoSession                        AnthropicProvider
+    ────────────                        ──────────────────
+    send_message(prompt, callback)
+      │
+      ├─ _maybe_collect_before_send()   ← GC check (may reset_session)
+      │
+      ├─ _run_chat_loop(prompt)
+      │    │
+      │    └──────────────────────────→ send_message(text)
+      │                                   │
+      │                                   ├─ _history.append(user_msg)
+      │                                   ├─ _compute_history_cache_breakpoint()
+      │                                   ├─ messages_to_anthropic(cache_breakpoint_index=bp)
+      │                                   ├─ _build_api_kwargs()  ← cache logic HERE
+      │                                   ├─ client.messages.create(...)
+      │                                   ├─ _add_response_to_history()
+      │                                   │
+      │    ◄──────────────────────────── return ProviderResponse
+      │                                   │
+      │    (ProviderResponse.usage has     │
+      │     cache_read_tokens,             │
+      │     cache_creation_tokens)         │
+      │
+      ├─ _maybe_collect_after_turn()    ← GC check (may reset_session)
+      │
+      └─ return response
+```
+
+### Proposed Integration: Provider Delegates to Cache Plugin
+
+The cleanest integration is to **add an optional `CachePlugin` slot to the provider protocol**. The provider still owns the API call, but delegates cache annotation decisions to the plugin when one is attached:
+
+```
+Proposed data flow:
+
+    JaatoSession                 AnthropicProvider              CachePlugin
+    ────────────                 ──────────────────             ────────────
+    configure()
+      │
+      ├─ create provider
+      ├─ discover cache plugin (by provider_name match)
+      ├─ provider.set_cache_plugin(plugin)  ──────────→ self._cache_plugin = plugin
+      │
+    send_message(prompt)
+      │
+      ├─ _run_chat_loop()
+      │    │
+      │    └─────────────────→ send_message(text)
+      │                          │
+      │                          ├─ _build_api_kwargs()
+      │                          │    │
+      │                          │    ├─ if self._cache_plugin:
+      │                          │    │    plugin.prepare_request(  ◄──── budget-aware
+      │                          │    │      system, tools, messages,     breakpoint
+      │                          │    │      budget=...)                  placement
+      │                          │    │    → modified system/tools/messages
+      │                          │    │
+      │                          │    └─ else: current cache logic (fallback)
+      │                          │
+      │                          ├─ client.messages.create(...)
+      │                          │
+      │    ◄─────────────────── return response (with TokenUsage)
+      │
+      ├─ extract cache metrics from response.usage
+      │    │
+      │    └─ cache_plugin.extract_cache_usage(usage) ──────→ track hit rate
+      │
+      ├─ _maybe_collect_after_turn()
+      │    │
+      │    └─ gc_plugin.collect(history, ..., budget)
+      │         │
+      │         └─ returns GCResult
+      │              │
+      │              └─ cache_plugin.on_gc_result(result) ──→ track invalidation
+      │
+      └─ return response
+```
+
+### Provider Protocol Extension
+
+Add an optional method to `ModelProviderPlugin`:
+
+```python
+# shared/plugins/model_provider/base.py
+
+class ModelProviderPlugin(Protocol):
+    # ... existing methods ...
+
+    def set_cache_plugin(self, plugin: "CachePlugin") -> None:
+        """Attach a cache control plugin.
+
+        When set, the provider delegates cache annotation decisions
+        (breakpoint placement, threshold checks) to this plugin
+        instead of using provider-internal logic.
+
+        This decouples cache strategy from provider implementation,
+        allowing ZhipuAIProvider and OllamaProvider to inherit from
+        AnthropicProvider without inheriting the wrong cache logic.
+        """
+        ...
+```
+
+Providers that don't support caching ignore this (duck typing — the method is optional on the protocol). `AnthropicProvider` implements it:
+
+```python
+# AnthropicProvider
+def set_cache_plugin(self, plugin: CachePlugin) -> None:
+    self._cache_plugin = plugin
+
+def _build_api_kwargs(self, response_schema=None) -> dict:
+    kwargs = {}
+
+    if self._cache_plugin:
+        # Delegate to plugin — it gets the budget and decides breakpoints
+        cache_result = self._cache_plugin.prepare_request(
+            system=self._system_instruction,
+            tools=self._tools,
+            messages=self._history,
+            budget=self._instruction_budget,  # if available
+        )
+        kwargs["system"] = cache_result["system"]
+        kwargs["tools"] = cache_result["tools"]
+        # messages handled via cache_breakpoint_index from plugin
+    else:
+        # Existing logic (backwards compatible, no plugin attached)
+        # ... current _build_api_kwargs code ...
+
+    return kwargs
+```
+
+### Session Wiring
+
+`JaatoSession.configure()` discovers and attaches the cache plugin:
+
+```python
+# JaatoSession.configure()
+def _wire_cache_plugin(self) -> None:
+    """Discover and attach the cache plugin matching the active provider."""
+    if not self._provider:
+        return
+
+    provider_name = self._provider.name
+    cache_plugin = self._runtime.get_cache_plugin(provider_name)
+
+    if cache_plugin:
+        cache_plugin.initialize(self._provider_config.extra)
+
+        # Provider delegates cache decisions to plugin
+        if hasattr(self._provider, 'set_cache_plugin'):
+            self._provider.set_cache_plugin(cache_plugin)
+
+        self._cache_plugin = cache_plugin
+```
+
+After GC runs, the session notifies the cache plugin:
+
+```python
+# JaatoSession._maybe_collect_after_turn()
+new_history, result = self._gc_plugin.collect(...)
+if result.success:
+    self.reset_session(new_history)
+    self._apply_gc_removal_list(result)
+
+    # Notify cache plugin about what GC removed
+    if self._cache_plugin:
+        self._cache_plugin.on_gc_result(result)
+```
+
+### Why Not Session-Level Interception?
+
+An alternative would be to have the session intercept the provider call and inject cache annotations. This doesn't work because:
+
+1. **The session calls `provider.send_message(text)`** — it doesn't see or control the API kwargs. The provider builds and sends the request internally.
+2. **The provider owns the Anthropic SDK client** — only the provider can add `cache_control` annotations to the request.
+3. **History is inside the provider** — the cache plugin needs access to the current history to compute breakpoints, and only the provider has it at call time.
+
+The delegation pattern (provider calls plugin) keeps the control flow clean: the provider still owns the API call, but the cache strategy is pluggable.
+
+### InstructionBudget Access
+
+The cache plugin needs the `InstructionBudget` to make policy-aware decisions. Two options:
+
+**Option A: Provider passes it.** The session sets the budget on the provider (`provider.set_instruction_budget(budget)`), and the provider passes it to the cache plugin in `prepare_request()`.
+
+**Option B: Plugin receives it directly.** The session sets the budget on the cache plugin (`cache_plugin.set_budget(budget)`), and the plugin reads it in `prepare_request()` without the provider being involved.
+
+Option B is simpler — it avoids adding budget awareness to the `ModelProviderPlugin` protocol, which would affect all 7 providers.
+
+```python
+# JaatoSession - after budget update
+if self._cache_plugin:
+    self._cache_plugin.set_budget(self._instruction_budget)
+```
+
+### Complete Lifecycle
+
+```
+Session starts:
+  1. JaatoSession.configure()
+       → creates provider
+       → discovers cache plugin (by provider_name match)
+       → cache_plugin.initialize(config)
+       → cache_plugin.set_budget(instruction_budget)
+       → provider.set_cache_plugin(cache_plugin)
+
+Each turn:
+  2. JaatoSession.send_message(prompt)
+       → provider.send_message(text)
+           → provider._build_api_kwargs()
+               → cache_plugin.prepare_request(system, tools, messages)
+                   → reads budget GC policies for BP3 placement
+                   → returns annotated system/tools/messages
+           → API call with cache annotations
+           → returns ProviderResponse (with TokenUsage)
+       → cache_plugin.extract_cache_usage(response.usage)
+
+GC triggers:
+  3. JaatoSession._maybe_collect_after_turn()
+       → gc_plugin.collect(history, ..., budget)
+           → returns (new_history, GCResult)
+       → session.reset_session(new_history)
+           → provider.create_session(system, tools, history=new_history)
+       → cache_plugin.on_gc_result(result)
+           → tracks prefix invalidation
+       → cache_plugin.set_budget(updated_budget)
+
+Budget changes:
+  4. JaatoSession._emit_instruction_budget_update()
+       → cache_plugin.set_budget(updated_budget)
+```
+
+---
+
 ## GC-Cache Coordination
 
 ### How `gc_budget` Preserves Cached Prefixes
