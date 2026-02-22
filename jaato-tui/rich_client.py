@@ -768,13 +768,22 @@ class RichClient:
                     cache_read_tokens=cache_read_tokens,
                     cache_creation_tokens=cache_creation_tokens,
                 )
-                # Show cache hit rate in output after each turn
-                if cache_read_tokens and prompt_tokens > 0:
-                    hit_pct = cache_read_tokens / prompt_tokens * 100
-                    buf = registry.get_buffer(agent_id)
-                    if buf:
+                # Show turn summary in output buffer
+                buf = registry.get_buffer(agent_id)
+                if buf and total_tokens > 0:
+                    buf.add_system_message(
+                        f"─── tokens: {prompt_tokens:,} in / {output_tokens:,} out / {total_tokens:,} total",
+                        "dim",
+                    )
+                    if duration_seconds:
                         buf.add_system_message(
-                            f"cache hit: {hit_pct:.0f}% ({cache_read_tokens:,} / {prompt_tokens:,} prompt tokens)",
+                            f"─── duration: {duration_seconds:.2f}s",
+                            "dim",
+                        )
+                    if cache_read_tokens and prompt_tokens > 0:
+                        hit_pct = cache_read_tokens / prompt_tokens * 100
+                        buf.add_system_message(
+                            f"─── cache hit: {hit_pct:.0f}%",
                             "dim",
                         )
 
@@ -4148,13 +4157,23 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer:
                     buffer.flush()
-                    # Show cache hit rate in output after each turn
-                    if event.cache_read_tokens and event.prompt_tokens > 0:
-                        hit_pct = event.cache_read_tokens / event.prompt_tokens * 100
+                    # Show turn summary in output buffer
+                    if event.total_tokens > 0:
                         buffer.add_system_message(
-                            f"cache hit: {hit_pct:.0f}% ({event.cache_read_tokens:,} / {event.prompt_tokens:,} prompt tokens)",
+                            f"─── tokens: {event.prompt_tokens:,} in / {event.output_tokens:,} out / {event.total_tokens:,} total",
                             "dim",
                         )
+                        if event.duration_seconds:
+                            buffer.add_system_message(
+                                f"─── duration: {event.duration_seconds:.2f}s",
+                                "dim",
+                            )
+                        if event.cache_read_tokens and event.prompt_tokens > 0:
+                            hit_pct = event.cache_read_tokens / event.prompt_tokens * 100
+                            buffer.add_system_message(
+                                f"─── cache hit: {hit_pct:.0f}%",
+                                "dim",
+                            )
                 model_running = False
                 display.refresh()
 
