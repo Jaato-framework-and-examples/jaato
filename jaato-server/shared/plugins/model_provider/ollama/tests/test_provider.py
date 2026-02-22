@@ -76,16 +76,16 @@ class TestInitialization:
 
     @patch('httpx.get')
     @patch('anthropic.Anthropic')
-    def test_caching_disabled(self, mock_anthropic, mock_get):
-        """Should have caching disabled (not supported by Ollama)."""
+    def test_no_cache_plugin_by_default(self, mock_anthropic, mock_get):
+        """Cache plugin is not attached by default (no cache plugin matches 'ollama')."""
         mock_get.return_value = MagicMock(status_code=200)
         mock_get.return_value.json.return_value = {"models": []}
 
         provider = OllamaProvider()
-        provider.initialize(ProviderConfig(extra={"enable_caching": True}))
+        provider.initialize()
 
-        # Should still be disabled
-        assert provider._enable_caching is False
+        # No cache plugin attached directly on provider
+        assert provider._cache_plugin is None
 
     @patch('httpx.get')
     @patch('anthropic.Anthropic')

@@ -342,6 +342,84 @@ class TestSetBudget:
         assert plugin._budget is budget2
 
 
+class TestExtendedTTL:
+    """Tests for extended 1-hour cache TTL support."""
+
+    def test_default_ttl_is_ephemeral(self):
+        """Default 5m TTL produces plain ephemeral cache_control."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True, "cache_min_tokens": False})
+
+        result = plugin.prepare_request(
+            [{"type": "text", "text": "Hello"}], [], []
+        )
+
+        assert result["system"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_extended_ttl_includes_ttl_field(self):
+        """1h TTL produces cache_control with ttl field."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({
+            "enable_caching": True,
+            "cache_ttl": "1h",
+            "cache_min_tokens": False,
+        })
+
+        result = plugin.prepare_request(
+            [{"type": "text", "text": "Hello"}], [], []
+        )
+
+        assert result["system"][-1]["cache_control"] == {
+            "type": "ephemeral",
+            "ttl": "1h",
+        }
+
+    def test_extended_ttl_on_tools(self):
+        """1h TTL should also apply to tool breakpoints."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({
+            "enable_caching": True,
+            "cache_ttl": "1h",
+            "cache_min_tokens": False,
+        })
+
+        tools = [{"name": "my_tool", "input_schema": {}}]
+        result = plugin.prepare_request([], tools, [])
+
+        assert result["tools"][-1]["cache_control"] == {
+            "type": "ephemeral",
+            "ttl": "1h",
+        }
+
+    def test_requires_extended_cache_beta_false_by_default(self):
+        """Default 5m TTL should not require the beta header."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True})
+
+        assert plugin.requires_extended_cache_beta is False
+
+    def test_requires_extended_cache_beta_true_for_1h(self):
+        """1h TTL requires the extended-cache-ttl beta header."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True, "cache_ttl": "1h"})
+
+        assert plugin.requires_extended_cache_beta is True
+
+    def test_make_cache_control_5m(self):
+        """_make_cache_control for default TTL."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True})
+
+        assert plugin._make_cache_control() == {"type": "ephemeral"}
+
+    def test_make_cache_control_1h(self):
+        """_make_cache_control for extended TTL."""
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True, "cache_ttl": "1h"})
+
+        assert plugin._make_cache_control() == {"type": "ephemeral", "ttl": "1h"}
+
+
 class TestShutdown:
     def test_shutdown_is_noop(self):
         """Shutdown should not raise any errors."""
