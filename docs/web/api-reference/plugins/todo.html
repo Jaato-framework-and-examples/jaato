@@ -116,7 +116,7 @@
               <tr>
                 <td><strong>Tools Provided</strong></td>
                 <td>
-                  <strong>Core:</strong> <code>createPlan</code>, <code>startPlan</code>, <code>updateStep</code>, <code>getPlanStatus</code>, <code>completePlan</code>, <code>addStep</code><br>
+                  <strong>Core:</strong> <code>createPlan</code>, <code>startPlan</code>, <code>setStepStatus</code>, <code>getPlanStatus</code>, <code>completePlan</code>, <code>addStep</code><br>
                   <strong>Cross-Agent:</strong> <code>subscribeToTasks</code>, <code>addDependentStep</code>, <code>completeStepWithOutput</code>, <code>getBlockedSteps</code>, <code>getTaskEvents</code>, <code>listSubscriptions</code>, <code>unsubscribe</code>
                 </td>
               </tr>
@@ -135,7 +135,7 @@
           <ol>
             <li><strong>createPlan</strong>: Register an execution plan with ordered steps</li>
             <li><strong>startPlan</strong>: Request user approval (requires permission)</li>
-            <li><strong>updateStep</strong>: Report progress on each step</li>
+            <li><strong>setStepStatus</strong>: Report progress on each step</li>
             <li><strong>addStep</strong>: Add new steps if needed during execution</li>
             <li><strong>completePlan</strong>: Mark plan as finished</li>
           </ol>
@@ -183,8 +183,8 @@ createPlan(
 startPlan(message="Ready to proceed?")
 
 # 3. Report progress on each step
-updateStep(step_id="step_1", status="completed")
-updateStep(step_id="step_2", status="in_progress")
+setStepStatus(step_id="step_1", status="completed")
+setStepStatus(step_id="step_2", status="in_progress")
 
 # 4. Complete the plan
 completePlan(status="completed", summary="Refactoring done")</code></pre>
@@ -305,7 +305,7 @@ registry.expose_tool('todo', config={
             </tbody>
           </table>
 
-          <h3>updateStep</h3>
+          <h3>setStepStatus</h3>
           <p>Report progress on a specific step.</p>
           <table>
             <thead><tr><th>Parameter</th><th>Type</th><th>Required</th></tr></thead>
@@ -467,28 +467,28 @@ Progress: 2/4 (50%)</code></pre>
           <div class="code-label">Status examples</div>
           <div class="code-block">
             <pre><code class="language-python"># Correct: Step fully achieved
-updateStep(
+setStepStatus(
     step_id="step_1",
     status="completed",
     result="Found 3 auth-related files: auth.py, tokens.py, session.py"
 )
 
 # Correct: Step failed
-updateStep(
+setStepStatus(
     step_id="step_2",
     status="failed",
     error="Could not find token validation logic in expected location"
 )
 
 # Correct: Step became unnecessary
-updateStep(
+setStepStatus(
     step_id="step_3",
     status="skipped",
     result="Tests already exist, no need to add more"
 )
 
 # WRONG: Marking partial success as completed
-updateStep(
+setStepStatus(
     step_id="step_4",
     status="completed",  # Should be "failed"!
     result="Unable to update 2 of 5 imports due to circular dependencies"

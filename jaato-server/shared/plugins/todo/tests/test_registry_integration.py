@@ -84,7 +84,7 @@ class TestRegistryTodoToolSchemas:
 
         assert "createPlan" not in tool_names
         assert "startPlan" not in tool_names
-        assert "updateStep" not in tool_names
+        assert "setStepStatus" not in tool_names
         assert "getPlanStatus" not in tool_names
         assert "completePlan" not in tool_names
         assert "addStep" not in tool_names
@@ -101,7 +101,7 @@ class TestRegistryTodoToolSchemas:
 
         assert "createPlan" in tool_names
         assert "startPlan" in tool_names
-        assert "updateStep" in tool_names
+        assert "setStepStatus" in tool_names
         assert "getPlanStatus" in tool_names
         assert "completePlan" in tool_names
         assert "addStep" in tool_names
@@ -135,7 +135,7 @@ class TestRegistryTodoExecutors:
 
         assert "createPlan" not in executors
         assert "startPlan" not in executors
-        assert "updateStep" not in executors
+        assert "setStepStatus" not in executors
 
     def test_executor_available_after_expose(self):
         """Test that executor is available after expose."""
@@ -148,12 +148,12 @@ class TestRegistryTodoExecutors:
 
         assert "createPlan" in executors
         assert "startPlan" in executors
-        assert "updateStep" in executors
+        assert "setStepStatus" in executors
         assert "getPlanStatus" in executors
         assert "completePlan" in executors
         assert "addStep" in executors
         assert callable(executors["createPlan"])
-        assert callable(executors["updateStep"])
+        assert callable(executors["setStepStatus"])
 
         registry.unexpose_tool("todo")
 
@@ -168,7 +168,7 @@ class TestRegistryTodoExecutors:
         executors = registry.get_exposed_executors()
 
         assert "createPlan" not in executors
-        assert "updateStep" not in executors
+        assert "setStepStatus" not in executors
 
 
 class TestRegistryTodoAutoApproval:
@@ -185,7 +185,7 @@ class TestRegistryTodoAutoApproval:
 
         # These are auto-approved (no security implications)
         assert "createPlan" in auto_approved
-        assert "updateStep" in auto_approved
+        assert "setStepStatus" in auto_approved
         assert "getPlanStatus" in auto_approved
         assert "completePlan" in auto_approved
         assert "addStep" in auto_approved
@@ -285,14 +285,14 @@ class TestRegistryPluginForTool:
 
         registry.unexpose_tool("todo")
 
-    def test_get_plugin_for_update_step(self):
-        """Test that get_plugin_for_tool returns TODO plugin for updateStep."""
+    def test_get_plugin_for_set_step_status(self):
+        """Test that get_plugin_for_tool returns TODO plugin for setStepStatus."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("todo")
 
-        plugin = registry.get_plugin_for_tool("updateStep")
+        plugin = registry.get_plugin_for_tool("setStepStatus")
         assert plugin is not None
         assert plugin.name == "todo"
 

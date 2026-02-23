@@ -1148,7 +1148,7 @@ classDiagram
     class TodoPlugin {
         +name = "todo"
         +createPlan()
-        +updateStep()
+        +setStepStatus()
         +getPlanStatus()
         +plan user command
     }

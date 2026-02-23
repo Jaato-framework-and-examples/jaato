@@ -29,7 +29,7 @@ Schema
         {
           "policy_id": "plan_before_update",
           "prerequisite_tool": "createPlan",
-          "gated_tools": ["updateStep"],
+          "gated_tools": ["setStepStatus"],
           "lookback_turns": 5,
           "severity_thresholds": {
             "minor": 0,
@@ -37,9 +37,9 @@ Schema
             "severe": 2
           },
           "nudge_templates": {
-            "minor": ["direct", "Call createPlan before updateStep."],
-            "moderate": ["direct", "You MUST createPlan before updateStep (violation #{count})."],
-            "severe": ["interrupt", "BLOCKED: updateStep requires a plan. Call createPlan first."]
+            "minor": ["direct", "Call createPlan before setStepStatus."],
+            "moderate": ["direct", "You MUST createPlan before setStepStatus (violation #{count})."],
+            "severe": ["interrupt", "BLOCKED: setStepStatus requires a plan. Call createPlan first."]
           },
           "expected_action_template": "Call {prerequisite_tool} before using {tool_name}"
         }
@@ -184,7 +184,7 @@ def generate_default_config() -> str:
             {
                 "policy_id": "example_plan_before_update",
                 "prerequisite_tool": "createPlan",
-                "gated_tools": ["updateStep"],
+                "gated_tools": ["setStepStatus"],
                 "lookback_turns": 5,
                 "severity_thresholds": {
                     "minor": 0,
@@ -227,7 +227,7 @@ def generate_default_config_safe() -> str:
             {
                 "policy_id": "example_plan_before_update",
                 "prerequisite_tool": "createPlan",
-                "gated_tools": ["updateStep"],
+                "gated_tools": ["setStepStatus"],
                 "lookback_turns": 5,
                 "severity_thresholds": {
                     "minor": 0,

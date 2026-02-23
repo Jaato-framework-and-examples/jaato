@@ -1,6 +1,6 @@
 # TODO Plugin
 
-The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) provides plan registration and progress tracking for LLMs in the jaato orchestration framework. It enables models to register execution plans with ordered steps and progressively report progress through configurable transport protocols.
+The TODO plugin (`createPlan`, `setStepStatus`, `getPlanStatus`, `completePlan`) provides plan registration and progress tracking for LLMs in the jaato orchestration framework. It enables models to register execution plans with ordered steps and progressively report progress through configurable transport protocols.
 
 ## Demo
 
@@ -18,7 +18,7 @@ The demo below shows creating an execution plan for refactoring the authenticati
 │  │PluginRegistry│───▶│  ToolExecutor   │◀───│   TodoPlugin     │   │
 │  │             │    │                 │    │                  │   │
 │  │ - cli       │    │                 │    │ - createPlan     │   │
-│  │ - mcp       │    │                 │    │ - updateStep     │   │
+│  │ - mcp       │    │                 │    │ - setStepStatus     │   │
 │  │ - todo      │    │                 │    │ - getPlanStatus  │   │
 │  │ - ...       │    │                 │    │ - completePlan   │   │
 │  └─────────────┘    └────────┬────────┘    └────────┬─────────┘   │
@@ -63,7 +63,7 @@ The demo below shows creating an execution plan for refactoring the authenticati
 |------|-------------|---------------|
 | `createPlan` | Register a new execution plan with ordered steps | ✓ |
 | `startPlan` | Request user approval before beginning execution | ✗ (requires permission) |
-| `updateStep` | Update status of a specific step (in_progress, completed, failed, skipped) | ✓ |
+| `setStepStatus` | Update status of a specific step (in_progress, completed, failed, skipped) | ✓ |
 | `addStep` | Add a new step to an existing plan (insert at position or append) | ✓ |
 | `getPlanStatus` | Query current plan state and progress | ✓ |
 | `completePlan` | Mark plan as completed, failed, or cancelled | ✓ |
@@ -90,7 +90,7 @@ The TODO plugin enforces a strict workflow to ensure proper plan management:
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  createPlan │────▶│  startPlan  │────▶│  updateStep │────▶│ completePlan│
+│  createPlan │────▶│  startPlan  │────▶│  setStepStatus │────▶│ completePlan│
 │  (Step 1)   │     │  (Step 2)   │     │  (Step 3)   │     │  (Step 4)   │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
                           │                    ▲
@@ -130,7 +130,7 @@ When a plan is created, the model is instructed to:
 
 1. **createPlan** - Register the execution plan with ordered steps
 2. **startPlan** - Request user approval (REQUIRED before any execution)
-3. **updateStep** - Report progress on each step (only after startPlan is approved)
+3. **setStepStatus** - Report progress on each step (only after startPlan is approved)
 4. **addStep** - Add new steps if needed during execution
 5. **completePlan** - Mark plan as finished
 
@@ -138,7 +138,7 @@ When a plan is created, the model is instructed to:
 
 The plugin enforces these rules with guards:
 
-- `updateStep` and `addStep` will **reject** calls if `startPlan` was not approved
+- `setStepStatus` and `addStep` will **reject** calls if `startPlan` was not approved
 - `completePlan` with status `completed` or `failed` will **reject** if plan was not started
 - Use status `cancelled` to end plans that the user rejected at `startPlan`
 
@@ -146,10 +146,10 @@ The plugin enforces these rules with guards:
 
 | Condition | Error |
 |-----------|-------|
-| updateStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
+| setStepStatus before startPlan | "Plan not started. Call startPlan first to get user approval." |
 | addStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
 | completePlan(completed) before startPlan | "Cannot mark plan as 'completed' - plan was never started. Use 'cancelled' if the plan was rejected." |
-| startPlan on already started plan | "Plan already started. Proceed with updateStep." |
+| startPlan on already started plan | "Plan already started. Proceed with setStepStatus." |
 
 ## Cross-Agent Collaboration
 
@@ -215,7 +215,7 @@ This happens automatically - no polling required.
          │                    step_id: 'step_1'}])    │
          │     → Step created as BLOCKED              │
          │                                            │
-         │     [waiting...]                           │  5. updateStep(...)
+         │     [waiting...]                           │  5. setStepStatus(...)
          │                                            │     [working...]
          │                                            │
          │                                            │  6. completeStepWithOutput(
@@ -297,13 +297,13 @@ Model: Ready to begin the refactoring.
        [User approves or denies - permission prompt shown]
 
 Model: Starting with step 1: analyzing current code.
-       [calls updateStep with status: in_progress]
+       [calls setStepStatus with status: in_progress]
 
 Model: Found 3 deprecated patterns.
-       [calls updateStep with status: completed, result: "Found 3 deprecated patterns"]
+       [calls setStepStatus with status: completed, result: "Found 3 deprecated patterns"]
 
 Model: Moving to step 2: designing new interface.
-       [calls updateStep with status: in_progress]
+       [calls setStepStatus with status: in_progress]
        ...
        [continues through all steps]
 
@@ -540,9 +540,9 @@ plan = plugin.create_plan(
 
 # Update steps
 for step in plan.steps:
-    plugin.update_step(step.step_id, StepStatus.IN_PROGRESS)
+    plugin.set_step_status(step.step_id, StepStatus.IN_PROGRESS)
     # ... do work ...
-    plugin.update_step(step.step_id, StepStatus.COMPLETED, result="Done")
+    plugin.set_step_status(step.step_id, StepStatus.COMPLETED, result="Done")
 
 # Get current plan
 current = plugin.get_current_plan()
@@ -637,7 +637,7 @@ permission_plugin = PermissionPlugin()
 permission_plugin.initialize({
     "policy": {
         "defaultPolicy": "allow",
-        "whitelist": {"tools": ["createPlan", "updateStep", "getPlanStatus", "completePlan"]}
+        "whitelist": {"tools": ["createPlan", "setStepStatus", "getPlanStatus", "completePlan"]}
     }
 })
 executor.set_permission_plugin(permission_plugin)
