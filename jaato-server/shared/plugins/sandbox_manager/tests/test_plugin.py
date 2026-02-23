@@ -1363,6 +1363,68 @@ class TestMSYS2PathConversion:
         # (/t is not a valid single-letter drive prefix pattern)
         assert "/tmp/" in stored_path or "\\tmp\\" in stored_path
 
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_add_strips_single_quotes_from_path(self, mock_isabs, initialized_plugin):
+        """Test that surrounding single quotes are stripped from paths.
+
+        Models often wrap Windows paths in shell-style quotes like
+        'C:\\Users\\...' which arrive as literal characters via capture_rest.
+        Without stripping, the quote prefix prevents os.path.isabs from
+        recognizing the path as absolute, causing it to be joined with workspace.
+        """
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readonly 'C:/Users/testuser/AppData/logs'"
+        })
+
+        assert result["status"] == "added"
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        # Path should be absolute C:/... not joined with workspace
+        assert stored_path.startswith("C:/")
+        assert "testuser/AppData/logs" in stored_path
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_add_strips_double_quotes_from_path(self, mock_isabs, initialized_plugin):
+        """Test that surrounding double quotes are stripped from paths."""
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": 'readwrite "C:/Users/testuser/data"'
+        })
+
+        assert result["status"] == "added"
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        stored_path = config["allowed_paths"][0]["path"]
+        assert stored_path.startswith("C:/")
+        assert "testuser/data" in stored_path
+
+    @mock.patch("shared.plugins.sandbox_manager.plugin.os.path.isabs")
+    def test_cmd_remove_strips_quotes_from_path(self, mock_isabs, initialized_plugin):
+        """Test that surrounding quotes are stripped from remove paths too."""
+        plugin, workspace = initialized_plugin
+        mock_isabs.side_effect = self._win_isabs
+
+        # Add a path first
+        plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "readwrite C:/Users/testuser/project"
+        })
+
+        # Remove with quoted path — should match the unquoted stored path
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "'C:/Users/testuser/project'"
+        })
+        assert result["status"] == "removed"
+
     def test_cmd_add_multichar_prefix_not_converted(self, initialized_plugin):
         """Test that /config/... is not misidentified as MSYS2 drive path."""
         plugin, workspace = initialized_plugin
