@@ -1,9 +1,9 @@
 """Tests for SessionHistory - canonical conversation history owned by the session.
 
 Tests cover:
-1. SessionHistory class behavior (append, replace, clear, dirty tracking, sync)
+1. SessionHistory class behavior (append, replace, clear, dirty tracking)
 2. Integration with JaatoSession (get_history returns from SessionHistory,
-   reset_session syncs, _create_provider_session syncs)
+   reset_session updates history, _create_provider_session sets history)
 """
 
 import pytest
@@ -140,78 +140,39 @@ class TestSessionHistoryMessages:
         assert len(sh) == 1
 
 
-class TestSessionHistorySyncFromProvider:
-    """Tests for SessionHistory.sync_from_provider()."""
+class TestSessionHistoryPopLast:
+    """Tests for SessionHistory.pop_last()."""
 
-    def test_sync_copies_provider_history(self):
-        """sync_from_provider() copies provider's history."""
+    def test_pop_last_returns_and_removes(self):
+        """pop_last() returns the last message and removes it."""
         sh = SessionHistory()
-        provider = MagicMock()
-        provider.get_history.return_value = [
-            Message(role=Role.USER, parts=[Part.from_text("hello")]),
-            Message(role=Role.MODEL, parts=[Part.from_text("world")]),
-        ]
+        msg1 = Message(role=Role.USER, parts=[Part.from_text("first")])
+        msg2 = Message(role=Role.MODEL, parts=[Part.from_text("second")])
+        sh.append(msg1)
+        sh.append(msg2)
 
-        sh.sync_from_provider(provider)
-
-        assert len(sh) == 2
-        assert sh.messages[0].parts[0].text == "hello"
-        assert sh.messages[1].parts[0].text == "world"
-
-    def test_sync_clears_dirty(self):
-        """sync_from_provider() clears the dirty flag."""
-        sh = SessionHistory()
-        sh.append(Message(role=Role.USER, parts=[Part.from_text("dirty")]))
-        assert sh.dirty
-
-        provider = MagicMock()
-        provider.get_history.return_value = [
-            Message(role=Role.USER, parts=[Part.from_text("clean")]),
-        ]
-        sh.sync_from_provider(provider)
-
-        assert not sh.dirty
-
-    def test_sync_with_no_get_history(self):
-        """sync_from_provider() is a no-op if provider lacks get_history."""
-        sh = SessionHistory()
-        sh.append(Message(role=Role.USER, parts=[Part.from_text("hello")]))
-
-        provider = object()  # No get_history attribute
-        sh.sync_from_provider(provider)
-
-        # Should not have changed
+        popped = sh.pop_last()
+        assert popped.parts[0].text == "second"
         assert len(sh) == 1
-        assert sh.dirty
 
-    def test_sync_replaces_existing_content(self):
-        """sync_from_provider() replaces existing messages."""
+    def test_pop_last_empty(self):
+        """pop_last() returns None for empty history."""
         sh = SessionHistory()
-        sh.append(Message(role=Role.USER, parts=[Part.from_text("old")]))
+        assert sh.pop_last() is None
 
-        provider = MagicMock()
-        provider.get_history.return_value = [
-            Message(role=Role.USER, parts=[Part.from_text("new")]),
-        ]
-        sh.sync_from_provider(provider)
 
-        assert len(sh) == 1
-        assert sh.messages[0].parts[0].text == "new"
+class TestSessionHistoryMessagesRef:
+    """Tests for SessionHistory.messages_ref property."""
 
-    def test_sync_makes_copy_of_provider_list(self):
-        """sync_from_provider() copies the list from provider."""
+    def test_messages_ref_returns_same_list(self):
+        """messages_ref returns the internal list (not a copy)."""
         sh = SessionHistory()
-        provider_list = [
-            Message(role=Role.USER, parts=[Part.from_text("hello")]),
-        ]
-        provider = MagicMock()
-        provider.get_history.return_value = provider_list
+        msg = Message(role=Role.USER, parts=[Part.from_text("hello")])
+        sh.append(msg)
 
-        sh.sync_from_provider(provider)
-
-        # Mutating the original list should not affect SessionHistory
-        provider_list.append(Message(role=Role.MODEL, parts=[Part.from_text("x")]))
-        assert len(sh) == 1
+        ref1 = sh.messages_ref
+        ref2 = sh.messages_ref
+        assert ref1 is ref2
 
 
 # ==================== JaatoSession Integration Tests ====================
@@ -221,7 +182,6 @@ def _make_configured_session():
     """Create a configured JaatoSession with mock provider."""
     mock_runtime = MagicMock()
     mock_provider = MagicMock()
-    mock_provider.get_history.return_value = []
     mock_runtime.create_provider.return_value = mock_provider
     mock_runtime.get_tool_schemas.return_value = []
     mock_runtime.get_executors.return_value = {}
@@ -246,13 +206,10 @@ class TestSessionHistoryInSession:
         assert len(session._history) == 0
 
     def test_get_history_returns_from_session_history(self):
-        """get_history() returns from SessionHistory, not from provider."""
+        """get_history() returns from SessionHistory."""
         session, mock_provider = _make_configured_session()
 
-        # Put different data in provider vs SessionHistory
-        mock_provider.get_history.return_value = [
-            Message(role=Role.USER, parts=[Part.from_text("from_provider")]),
-        ]
+        # Put data directly in SessionHistory
         session._history.replace([
             Message(role=Role.USER, parts=[Part.from_text("from_session")]),
         ])
@@ -270,21 +227,13 @@ class TestSessionHistoryInSession:
         assert session.get_history() == []
 
     def test_reset_session_updates_session_history(self):
-        """reset_session(history) updates SessionHistory.
-
-        During Phase 1, _create_provider_session → sync_from_provider
-        overwrites the SessionHistory from the provider. So we must
-        set the mock provider to return the expected history.
-        """
+        """reset_session(history) updates SessionHistory directly."""
         session, mock_provider = _make_configured_session()
 
         new_history = [
             Message(role=Role.USER, parts=[Part.from_text("restored")]),
             Message(role=Role.MODEL, parts=[Part.from_text("response")]),
         ]
-        # Provider returns same history after create_session (simulating
-        # the provider accepting and storing the passed-in history)
-        mock_provider.get_history.return_value = new_history
 
         session.reset_session(new_history)
 
@@ -306,30 +255,32 @@ class TestSessionHistoryInSession:
         assert len(session._history) == 0
         assert not session._history.dirty
 
-    def test_create_provider_session_syncs_history(self):
-        """_create_provider_session() syncs history from provider."""
+    def test_create_provider_session_sets_history(self):
+        """_create_provider_session() sets history directly on SessionHistory."""
         session, mock_provider = _make_configured_session()
 
-        # Set up provider to return history after create_session
         new_msgs = [
             Message(role=Role.USER, parts=[Part.from_text("hello")]),
             Message(role=Role.MODEL, parts=[Part.from_text("world")]),
         ]
-        mock_provider.get_history.return_value = new_msgs
 
         session._create_provider_session(new_msgs)
 
-        # SessionHistory should be synced
+        # SessionHistory should have the messages
         assert len(session._history) == 2
         assert session._history.messages[0].parts[0].text == "hello"
 
-    def test_sync_history_from_provider_no_provider(self):
-        """_sync_history_from_provider() is no-op without provider."""
-        mock_runtime = MagicMock()
-        session = JaatoSession(mock_runtime, "test-model")
+    def test_create_provider_session_clears_without_history(self):
+        """_create_provider_session() without history clears SessionHistory."""
+        session, mock_provider = _make_configured_session()
 
-        # Should not raise
-        session._sync_history_from_provider()
+        # Add some existing history
+        session._history.append(
+            Message(role=Role.USER, parts=[Part.from_text("old")])
+        )
+
+        session._create_provider_session()
+
         assert len(session._history) == 0
 
     def test_history_sync_preserves_across_gc_cycle(self):
@@ -350,7 +301,6 @@ class TestSessionHistoryInSession:
             Message(role=Role.USER, parts=[Part.from_text("turn2")]),
             Message(role=Role.MODEL, parts=[Part.from_text("response2")]),
         ]
-        mock_provider.get_history.return_value = gc_msgs
 
         session.reset_session(gc_msgs)
 

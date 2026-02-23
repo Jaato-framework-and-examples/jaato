@@ -10,8 +10,6 @@ import os
 import signal
 import subprocess
 import threading
-import uuid
-from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ..base import (
@@ -43,7 +41,6 @@ from .types import (
     AssistantMessage,
     CLIMessage,
     CLIMode,
-    ContentBlock,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -52,7 +49,6 @@ from .types import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
-    Usage,
     parse_ndjson_line,
 )
 
@@ -83,9 +79,14 @@ class CLIProcessError(Exception):
 class ClaudeCLIProvider:
     """Model provider that uses Claude Code CLI as backend.
 
-    This provider spawns the `claude` CLI in print mode with stream-json
+    This provider spawns the ``claude`` CLI in print mode with stream-json
     output format, enabling programmatic access to Claude's agentic
     capabilities without direct API calls.
+
+    All model interaction goes through the stateless ``complete()`` method.
+    The caller (session) owns the message list; this provider does not
+    maintain internal conversation history.  The CLI's own multi-turn
+    state is managed via ``--resume`` using ``_cli_session_id``.
 
     Attributes:
         name: Provider identifier ("claude_cli").
@@ -111,8 +112,6 @@ class ClaudeCLIProvider:
         # Session state
         self._system_instruction: Optional[str] = None
         self._tools: List[ToolSchema] = []
-        self._history: List[Message] = []
-        self._session_id: Optional[str] = None
 
         # Process state
         self._process: Optional[subprocess.Popen] = None
@@ -263,8 +262,6 @@ class ClaudeCLIProvider:
     def shutdown(self) -> None:
         """Clean up resources."""
         self._terminate_process()
-        self._history.clear()
-        self._session_id = None
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used."""
@@ -302,162 +299,7 @@ class ClaudeCLIProvider:
             models = [m for m in models if m.startswith(prefix)]
         return models
 
-    # ==================== Session Management ====================
-
-    def create_session(
-        self,
-        system_instruction: Optional[str] = None,
-        tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None,
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for Claude.
-            tools: List of available tools (used in passthrough mode only).
-            history: Previous conversation history to restore.
-        """
-        # Terminate any existing process
-        self._terminate_process()
-
-        self._system_instruction = system_instruction
-        self._history = list(history) if history else []
-        self._session_id = str(uuid.uuid4())[:8]
-
-        # Log what we received
-        self._trace(f"create_session: mode={self._mode.value}, tools_received={len(tools) if tools else 0}, "
-                    f"sys_instr_len={len(system_instruction) if system_instruction else 0}")
-
-        # Only reset CLI session ID when starting a truly new conversation (no history)
-        # Preserve it when updating with existing history (e.g., tool refresh, history update)
-        if not history:
-            self._trace(f"create_session: new conversation, resetting cli_session_id")
-            self._cli_session_id = None
-        else:
-            self._trace(f"create_session: preserving cli_session_id={self._cli_session_id}, history_len={len(history)}")
-        self._last_usage = None
-        self._last_result = None
-
-        # In delegated mode, CLI uses its own built-in tools - ignore external tools
-        if self._mode == CLIMode.DELEGATED:
-            if tools:
-                logger.debug(
-                    f"Ignoring {len(tools)} external tools in delegated mode - "
-                    "CLI handles tool execution with its own tools"
-                )
-            self._tools = []
-        else:
-            self._tools = tools or []
-
-        logger.debug(
-            f"Created session {self._session_id} with "
-            f"{len(self._tools)} tools, mode={self._mode.value}"
-        )
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history."""
-        return list(self._history)
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context."""
-        # Create temporary session, generate, restore
-        old_history = self._history
-        old_session = self._session_id
-
-        self._history = []
-        self._session_id = str(uuid.uuid4())[:8]
-
-        try:
-            return self.send_message(prompt)
-        finally:
-            self._history = old_history
-            self._session_id = old_session
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> ProviderResponse:
-        """Send a user message and get a response.
-
-        In delegated mode, the CLI handles tool execution automatically.
-        In passthrough mode, tool_use blocks are returned for jaato to execute.
-
-        Args:
-            message: The user's message text.
-            response_schema: Not supported by CLI provider.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if response_schema:
-            logger.warning("response_schema not supported by Claude CLI provider")
-
-        return self._execute_query(message)
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> ProviderResponse:
-        """Send a message with multiple parts.
-
-        Currently only text parts are supported. Images would need to be
-        handled through file references.
-        """
-        # Extract text from parts
-        text_parts = []
-        for part in parts:
-            if part.text:
-                text_parts.append(part.text)
-            elif part.inline_data:
-                logger.warning(
-                    "Inline data (images) not directly supported by CLI provider. "
-                    "Consider saving to a file and referencing it."
-                )
-
-        message = "\n".join(text_parts) if text_parts else ""
-        return self.send_message(message, response_schema)
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        This is used in passthrough mode where jaato executes tools and
-        sends results back. In delegated mode, this is a no-op since
-        the CLI handles tool execution internally.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Not supported by CLI provider.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        if self._mode == CLIMode.DELEGATED:
-            logger.warning(
-                "send_tool_results called in delegated mode - CLI handles tools"
-            )
-            return ProviderResponse(
-                parts=[],
-                finish_reason=FinishReason.STOP,
-            )
-
-        # In passthrough mode, we need to continue the conversation
-        # by feeding tool results back through stdin
-        # This requires maintaining a persistent process, which we'll implement
-        # in the streaming version
-        raise NotImplementedError(
-            "send_tool_results in passthrough mode requires streaming. "
-            "Use send_tool_results_streaming instead."
-        )
-
-    # ==================== Stateless Completion ====================
+    # ==================== Completion ====================
 
     def complete(
         self,
@@ -474,8 +316,8 @@ class ClaudeCLIProvider:
     ) -> ProviderResponse:
         """Stateless completion: extract last message, call CLI, return response.
 
-        Unlike send_message(), this method does NOT modify ``self._history``.
         The caller (session) is responsible for maintaining the message list.
+        This provider does not maintain any internal conversation history.
 
         The CLI manages its own conversation state via ``--resume``, so only
         the latest user message or tool results need to be sent as a prompt.
@@ -523,10 +365,9 @@ class ClaudeCLIProvider:
                 on_usage_update=on_usage_update,
                 on_function_call=on_function_call,
                 on_thinking=on_thinking,
-                _update_history=False,
             )
         else:
-            return self._execute_query(prompt, _update_history=False)
+            return self._execute_query(prompt)
 
     # ==================== Streaming ====================
 
@@ -537,72 +378,6 @@ class ClaudeCLIProvider:
     def supports_stop(self) -> bool:
         """Check if mid-turn cancellation is supported."""
         return True
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
-        """Send a message with streaming response.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback for each text chunk.
-            cancel_token: Optional token for cancellation.
-            response_schema: Not supported.
-            on_usage_update: Optional callback for token usage updates.
-            on_function_call: Optional callback when function call detected.
-            on_thinking: Optional callback for extended thinking content.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        return self._execute_query_streaming(
-            message,
-            on_chunk=on_chunk,
-            cancel_token=cancel_token,
-            on_usage_update=on_usage_update,
-            on_function_call=on_function_call,
-            on_thinking=on_thinking,
-        )
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
-        """Send tool results with streaming response.
-
-        This is used in passthrough mode. The tool results are formatted
-        and sent to continue the conversation.
-        """
-        if self._mode == CLIMode.DELEGATED:
-            logger.warning(
-                "send_tool_results_streaming called in delegated mode - "
-                "CLI handles tools"
-            )
-            return ProviderResponse(parts=[], finish_reason=FinishReason.STOP)
-
-        # Format tool results for the model
-        result_text = self._format_tool_results_as_message(results)
-        return self._execute_query_streaming(
-            result_text,
-            on_chunk=on_chunk,
-            cancel_token=cancel_token,
-            on_usage_update=on_usage_update,
-            on_function_call=on_function_call,
-            on_thinking=on_thinking,
-        )
 
     # ==================== Token Management ====================
 
@@ -969,13 +744,11 @@ class ClaudeCLIProvider:
 
         return args
 
-    def _execute_query(self, prompt: str, _update_history: bool = True) -> ProviderResponse:
+    def _execute_query(self, prompt: str) -> ProviderResponse:
         """Execute a query synchronously.
 
         Args:
             prompt: The prompt text to send to the CLI.
-            _update_history: If True (default), append messages to
-                ``self._history``. Set to False for stateless ``complete()``.
         """
         accumulated_text = ""
         accumulated_thinking = ""
@@ -1021,10 +794,6 @@ class ClaudeCLIProvider:
         if function_calls:
             finish_reason = FinishReason.TOOL_USE
 
-        # Add to history (unless stateless mode)
-        if _update_history:
-            self._add_to_history(prompt, accumulated_text, function_calls)
-
         # Build parts list
         parts: List[Part] = []
         if accumulated_text:
@@ -1046,7 +815,6 @@ class ClaudeCLIProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-        _update_history: bool = True,
     ) -> ProviderResponse:
         """Execute a query with streaming.
 
@@ -1057,8 +825,6 @@ class ClaudeCLIProvider:
             on_usage_update: Optional callback for token usage updates.
             on_function_call: Optional callback when function call detected.
             on_thinking: Optional callback for extended thinking content.
-            _update_history: If True (default), append messages to
-                ``self._history``. Set to False for stateless ``complete()``.
         """
         accumulated_text = ""
         accumulated_thinking = ""
@@ -1188,10 +954,6 @@ class ClaudeCLIProvider:
             finish_reason = FinishReason.CANCELLED
         elif function_calls:
             finish_reason = FinishReason.TOOL_USE
-
-        # Add to history (unless cancelled or stateless mode)
-        if not cancelled and _update_history:
-            self._add_to_history(prompt, accumulated_text, function_calls)
 
         # Build parts list
         parts: List[Part] = []
@@ -1355,32 +1117,6 @@ class ClaudeCLIProvider:
                     except Exception:
                         pass
                 self._process = None
-
-    def _add_to_history(
-        self,
-        user_message: str,
-        assistant_text: str,
-        function_calls: List[FunctionCall],
-    ) -> None:
-        """Add messages to conversation history."""
-        # Add user message
-        self._history.append(Message(
-            role=Role.USER,
-            parts=[Part.from_text(user_message)],
-        ))
-
-        # Add assistant response
-        parts: List[Part] = []
-        if assistant_text:
-            parts.append(Part.from_text(assistant_text))
-        for fc in function_calls:
-            parts.append(Part.from_function_call(fc))
-
-        if parts:
-            self._history.append(Message(
-                role=Role.MODEL,
-                parts=parts,
-            ))
 
     def _format_tool_results_as_message(self, results: List[ToolResult]) -> str:
         """Format tool results as a user message for passthrough mode.

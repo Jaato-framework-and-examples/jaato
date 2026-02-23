@@ -21,7 +21,7 @@ Usage:
     provider = ZhipuAIProvider()
     provider.initialize(ProviderConfig(api_key="your-key"))
     provider.connect('glm-5')
-    response = provider.send_message("Hello!")
+    response = provider.complete(messages=[...])
 
 Environment variables:
     ZHIPUAI_API_KEY: Zhipu AI API key
@@ -30,7 +30,6 @@ Environment variables:
     ZHIPUAI_CONTEXT_LENGTH: Override context length for models
 """
 
-import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -147,6 +146,9 @@ class ZhipuAIConnectionError(Exception):
 class ZhipuAIProvider(AnthropicProvider):
     """Zhipu AI provider using Anthropic-compatible API.
 
+    Stateless provider: the session calls ``complete()`` for every API
+    interaction. No conversation state is held inside the provider.
+
     This provider inherits from AnthropicProvider and overrides only
     what's necessary for Zhipu AI's API:
     - Custom base_url pointing to Z.AI's Anthropic-compatible endpoint
@@ -156,7 +158,7 @@ class ZhipuAIProvider(AnthropicProvider):
     - Caching disabled (may not be supported)
     - Extended thinking for GLM-5 and GLM-4.7 (native chain-of-thought)
 
-    All message handling, streaming, and converters are inherited from
+    All completion handling, streaming, and converters are inherited from
     AnthropicProvider since Zhipu AI uses the same API format.
     """
 

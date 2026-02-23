@@ -28,7 +28,7 @@ Example:
     provider = OllamaProvider()
     provider.initialize()  # No API key needed
     provider.connect('qwen3:32b')
-    response = provider.send_message("Hello!")
+    response = provider.complete(messages=[...])
 
     # Or with custom host:
     provider.initialize(ProviderConfig(extra={'host': 'http://remote:11434'}))

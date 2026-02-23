@@ -57,23 +57,18 @@ from jaato_sdk.plugins.model_provider.types import (
     Part,
     ProviderResponse,
     Role,
-    ToolResult,
     ToolSchema,
     TokenUsage,
 )
 from .converters import (
-    clear_tool_name_mapping,
-    extract_reasoning_from_response,
     extract_reasoning_from_stream_delta,
     get_original_tool_name,
-    history_from_sdk,
     history_to_sdk,
     register_tool_name_mapping,
     response_from_sdk,
     sanitize_tool_name,
     serialize_history,
     deserialize_history,
-    tool_results_to_sdk,
     tool_schemas_to_sdk,
 )
 from .env import (
@@ -191,13 +186,19 @@ class GitHubModelsConfig:
 
 
 class GitHubModelsProvider:
-    """GitHub Models provider.
+    """GitHub Models provider -- stateless ``complete()`` API.
+
+    All conversation state (history, tools, system instruction) is managed
+    by the caller (``JaatoSession``) and passed into ``complete()`` on each
+    call.  The provider holds only connection/auth state and per-call
+    accounting (``_last_usage``).
 
     This provider supports:
     - Multiple AI models (GPT, Claude, Gemini, Llama, Mistral, etc.)
     - Organization-attributed billing
     - Enterprise policy compliance
-    - Function calling with manual control
+    - Function calling via ``complete()``
+    - Streaming and cancellation via ``complete(on_chunk=...)``
     - Token counting (estimated)
 
     Usage:
@@ -209,7 +210,10 @@ class GitHubModelsProvider:
             }
         ))
         provider.connect('openai/gpt-4o')
-        response = provider.send_message("Hello!")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Hello!")],
+            system_instruction="You are helpful.",
+        )
 
     Environment variables:
         GITHUB_TOKEN: Personal access token or app token
@@ -238,8 +242,6 @@ class GitHubModelsProvider:
 
         # Session state
         self._system_instruction: Optional[str] = None
-        self._tools: Optional[List[ToolSchema]] = None
-        self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
 
         # Thinking/reasoning configuration
@@ -394,7 +396,7 @@ class GitHubModelsProvider:
 
         Note: The azure-ai-inference SDK doesn't have a list_models endpoint,
         so we skip connectivity verification at init time. Errors will be
-        caught on first send_message call.
+        caught on the first complete() call.
         """
         # The SDK doesn't provide a lightweight connectivity check
         # Verification happens on first actual API call
@@ -475,7 +477,6 @@ class GitHubModelsProvider:
         self._copilot_client = None
         self._use_copilot_api = False
         self._model_name = None
-        self._history = []
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used."""
@@ -711,368 +712,6 @@ class GitHubModelsProvider:
             # API or network error, return empty to trigger fallback
             return {}
 
-    # ==================== Session Management ====================
-
-    def create_session(
-        self,
-        system_instruction: Optional[str] = None,
-        tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools.
-            history: Previous conversation history to restore.
-        """
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
-        else:
-            if not self._client or not self._model_name:
-                raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
-
-        self._system_instruction = system_instruction
-        self._tools = tools
-        self._history = list(history) if history else []
-
-        # Clear tool name mapping when tools change
-        clear_tool_name_mapping()
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
-
-        Returns:
-            List of messages in internal format.
-        """
-        return list(self._history)
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("Provider not connected. Call connect() first.")
-
-            messages = [{"role": "user", "content": prompt}]
-
-            try:
-                response = self._copilot_client.complete(
-                    model=self._copilot_model_name(),
-                    messages=messages,
-                )
-                provider_response = self._copilot_response_to_provider(response)
-                self._last_usage = provider_response.usage
-                return provider_response
-            except Exception as e:
-                self._handle_api_error(e)
-                raise
-        else:
-            if not self._client or not self._model_name:
-                raise RuntimeError("Provider not connected. Call connect() first.")
-
-            messages = [get_models().UserMessage(content=prompt)]
-
-            try:
-                response = self._client.complete(
-                    model=self._model_name,
-                    messages=messages,
-                )
-                provider_response = response_from_sdk(response)
-                self._last_usage = provider_response.usage
-                return provider_response
-            except Exception as e:
-                self._handle_api_error(e)
-                raise
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a user message and get a response.
-
-        Args:
-            message: The user's message text.
-            response_schema: Optional JSON Schema to constrain the response.
-                Note: GitHub Models has limited structured output support.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        # Add user message to history first
-        self._trace(f"[SEND_MESSAGE] history_before_append={len(self._history)}")
-        self._history.append(Message.from_text(Role.USER, message))
-
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            # Build messages for Copilot API
-            self._trace(f"[SEND_MESSAGE] Building messages, history_len={len(self._history)}")
-            messages = self._build_copilot_messages()
-            tools = self._build_copilot_tools()
-
-            try:
-                # Route to Responses API for codex models
-                if self._is_responses_api_model():
-                    self._trace(f"[SEND_MESSAGE] Using Responses API for {self._copilot_model_name()}")
-                    response = self._copilot_client.complete_responses(
-                        model=self._copilot_model_name(),
-                        messages=messages,
-                        system_instruction=self._system_instruction,
-                        tools=tools,
-                    )
-                    provider_response = self._responses_api_response_to_provider(response)
-                else:
-                    response = self._copilot_client.complete(
-                        model=self._copilot_model_name(),
-                        messages=messages,
-                        tools=tools,
-                    )
-                    provider_response = self._copilot_response_to_provider(response)
-
-                self._last_usage = provider_response.usage
-
-                # Add assistant response to history
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                text = provider_response.get_text()
-                if response_schema and text:
-                    try:
-                        provider_response.structured_output = json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the user message we added
-                if self._history and self._history[-1].role == Role.USER:
-                    self._history.pop()
-                self._handle_api_error(e)
-                raise
-        else:
-            if not self._client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            # Build messages list (includes user message from history)
-            messages = self._build_messages()
-
-            # Build completion kwargs
-            kwargs = self._build_completion_kwargs(response_schema)
-
-            try:
-                response = self._client.complete(
-                    model=self._model_name,
-                    messages=messages,
-                    **kwargs,
-                )
-                provider_response = response_from_sdk(response)
-                self._last_usage = provider_response.usage
-
-                # Add assistant response to history
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                text = provider_response.get_text()
-                if response_schema and text:
-                    try:
-                        provider_response.structured_output = json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the user message we added
-                if self._history and self._history[-1].role == Role.USER:
-                    self._history.pop()
-                self._handle_api_error(e)
-                raise
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a message with multiple parts.
-
-        Note: Multimodal support depends on the underlying model.
-
-        Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        # For now, extract text content only
-        # Full multimodal support would require model-specific handling
-        text_parts = [p.text for p in parts if p.text]
-        combined_text = "".join(text_parts)
-
-        return self.send_message(combined_text, response_schema)
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        # Add tool results to history
-        for result in results:
-            self._history.append(Message(
-                role=Role.TOOL,
-                parts=[Part(function_response=result)],
-            ))
-
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            # Build messages for Copilot API
-            messages = self._build_copilot_messages()
-            tools = self._build_copilot_tools()
-
-            try:
-                # Route to Responses API for codex models
-                if self._is_responses_api_model():
-                    self._trace(f"[SEND_TOOL_RESULTS] Using Responses API for {self._copilot_model_name()}")
-                    response = self._copilot_client.complete_responses(
-                        model=self._copilot_model_name(),
-                        messages=messages,
-                        system_instruction=self._system_instruction,
-                        tools=tools,
-                    )
-                    provider_response = self._responses_api_response_to_provider(response)
-                else:
-                    response = self._copilot_client.complete(
-                        model=self._copilot_model_name(),
-                        messages=messages,
-                        tools=tools,
-                    )
-                    provider_response = self._copilot_response_to_provider(response)
-
-                self._last_usage = provider_response.usage
-
-                # Add assistant response to history
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                text = provider_response.get_text()
-                if response_schema and text:
-                    try:
-                        provider_response.structured_output = json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the tool result messages we added
-                self._rollback_tool_results(len(results))
-                self._handle_api_error(e)
-                raise
-        else:
-            if not self._client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            # Build messages including tool results
-            messages = self._build_messages()
-
-            # Build completion kwargs
-            kwargs = self._build_completion_kwargs(response_schema)
-
-            try:
-                response = self._client.complete(
-                    model=self._model_name,
-                    messages=messages,
-                    **kwargs,
-                )
-                provider_response = response_from_sdk(response)
-                self._last_usage = provider_response.usage
-
-                # Add assistant response to history
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                text = provider_response.get_text()
-                if response_schema and text:
-                    try:
-                        provider_response.structured_output = json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the tool result messages we added
-                self._rollback_tool_results(len(results))
-                self._handle_api_error(e)
-                raise
-
-    def _build_messages(self) -> List:
-        """Build the messages list for the API call."""
-        messages = []
-
-        # Add system instruction if present
-        if self._system_instruction:
-            messages.append(get_models().SystemMessage(content=self._system_instruction))
-
-        # Convert history to SDK format
-        messages.extend(history_to_sdk(self._history))
-
-        return messages
-
-    def _build_completion_kwargs(self, response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Build kwargs for the complete() call."""
-        kwargs = {}
-
-        # Add tools if configured
-        if self._tools:
-            sdk_tools = tool_schemas_to_sdk(self._tools)
-            if sdk_tools:
-                kwargs['tools'] = sdk_tools
-
-        # Add response format for structured output
-        response_format_json = get_response_format_json()
-        if response_schema and response_format_json is not None:
-            kwargs['response_format'] = response_format_json()
-
-        return kwargs
-
-    def _add_response_to_history(self, response: ProviderResponse) -> None:
-        """Add the model's response to history."""
-        if response.parts:
-            self._history.append(Message(role=Role.MODEL, parts=response.parts))
-
-    def _rollback_tool_results(self, count: int) -> None:
-        """Remove the last `count` tool result messages from history.
-
-        Called on API failure to prevent duplicate tool messages on retry.
-        GitHub Models appends one history message per tool result (unlike
-        Anthropic which batches them into a single message), so we need
-        to pop multiple entries.
-        """
-        for _ in range(count):
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-
     # ==================== Copilot API Helpers ====================
 
     def _copilot_model_name(self) -> str:
@@ -1162,103 +801,6 @@ class GitHubModelsProvider:
             raw=None,
             thinking=thinking,
         )
-
-    def _build_copilot_messages(self) -> List[Dict[str, Any]]:
-        """Build messages list for Copilot API (OpenAI format).
-
-        Tool names in history are sanitized to match OpenAI's pattern.
-        """
-        messages = []
-
-        # Add system instruction if present
-        if self._system_instruction:
-            messages.append({"role": "system", "content": self._system_instruction})
-
-        # Convert history to OpenAI format
-        for msg in self._history:
-            if msg.role == Role.USER:
-                text = msg.text or ""
-                messages.append({"role": "user", "content": text})
-            elif msg.role == Role.MODEL:
-                text = msg.text or ""
-                # Check for tool calls
-                tool_calls = []
-                for part in msg.parts:
-                    if part.function_call:
-                        # Sanitize tool name for API compatibility
-                        sanitized_name = sanitize_tool_name(part.function_call.name)
-                        tool_calls.append({
-                            "id": part.function_call.id or f"call_{sanitized_name}",
-                            "type": "function",
-                            "function": {
-                                "name": sanitized_name,
-                                "arguments": json.dumps(part.function_call.args or {}),
-                            }
-                        })
-                msg_dict: Dict[str, Any] = {"role": "assistant", "content": text or None}
-                if tool_calls:
-                    msg_dict["tool_calls"] = tool_calls
-                messages.append(msg_dict)
-            elif msg.role == Role.TOOL:
-                for part in msg.parts:
-                    if part.function_response:
-                        result = part.function_response.result
-                        if isinstance(result, dict):
-                            content = json.dumps(result)
-                        else:
-                            content = str(result) if result is not None else ""
-                        # Sanitize tool name for tool_call_id generation
-                        sanitized_name = sanitize_tool_name(part.function_response.name)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": part.function_response.call_id or f"call_{sanitized_name}",
-                            "content": content,
-                        })
-
-        # Validate tool_call_id references match assistant tool_calls
-        # Collect all tool_call IDs from assistant messages
-        assistant_tool_ids: set = set()
-        for msg in messages:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    if tc.get("id"):
-                        assistant_tool_ids.add(tc["id"])
-
-        # Check tool messages reference valid IDs
-        for msg in messages:
-            if msg.get("role") == "tool":
-                tool_call_id = msg.get("tool_call_id")
-                if tool_call_id and assistant_tool_ids and tool_call_id not in assistant_tool_ids:
-                    self._trace(f"WARNING: tool_call_id '{tool_call_id}' not found in assistant tool_calls: {assistant_tool_ids}")
-
-        return messages
-
-    def _build_copilot_tools(self) -> Optional[List[Dict[str, Any]]]:
-        """Build tools list for Copilot API (OpenAI format).
-
-        Tool names are sanitized to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
-        """
-        if not self._tools:
-            return None
-
-        tools = []
-        for tool in self._tools:
-            # Sanitize tool name for OpenAI-compatible API
-            sanitized_name = sanitize_tool_name(tool.name)
-            register_tool_name_mapping(sanitized_name, tool.name)
-
-            tool_dict = {
-                "type": "function",
-                "function": {
-                    "name": sanitized_name,
-                    "description": tool.description or "",
-                }
-            }
-            if tool.parameters:
-                tool_dict["function"]["parameters"] = tool.parameters
-            tools.append(tool_dict)
-
-        return tools if tools else None
 
     def _copilot_response_to_provider(self, response: "CopilotResponse") -> ProviderResponse:
         """Convert Copilot API response to ProviderResponse."""
@@ -1572,9 +1114,9 @@ class GitHubModelsProvider:
     ) -> ProviderResponse:
         """Stateless completion: convert messages to API format, call API, return response.
 
-        Unlike send_message(), this method does NOT read or modify
-        ``self._history``. The caller (session) is responsible for
-        maintaining the message list and passing it in full each call.
+        The caller (session) is responsible for maintaining the message
+        list and passing it in full each call.  This method does not hold
+        any conversation state.
 
         Handles both the Copilot API and Azure SDK backends transparently.
 
@@ -1602,30 +1144,34 @@ class GitHubModelsProvider:
         """
         msg_list = list(messages)
 
-        if self._use_copilot_api:
-            return self._complete_copilot(
-                msg_list,
-                system_instruction=system_instruction,
-                tools=tools,
-                response_schema=response_schema,
-                cancel_token=cancel_token,
-                on_chunk=on_chunk,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-                on_thinking=on_thinking,
-            )
-        else:
-            return self._complete_azure(
-                msg_list,
-                system_instruction=system_instruction,
-                tools=tools,
-                response_schema=response_schema,
-                cancel_token=cancel_token,
-                on_chunk=on_chunk,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-                on_thinking=on_thinking,
-            )
+        try:
+            if self._use_copilot_api:
+                return self._complete_copilot(
+                    msg_list,
+                    system_instruction=system_instruction,
+                    tools=tools,
+                    response_schema=response_schema,
+                    cancel_token=cancel_token,
+                    on_chunk=on_chunk,
+                    on_usage_update=on_usage_update,
+                    on_function_call=on_function_call,
+                    on_thinking=on_thinking,
+                )
+            else:
+                return self._complete_azure(
+                    msg_list,
+                    system_instruction=system_instruction,
+                    tools=tools,
+                    response_schema=response_schema,
+                    cancel_token=cancel_token,
+                    on_chunk=on_chunk,
+                    on_usage_update=on_usage_update,
+                    on_function_call=on_function_call,
+                    on_thinking=on_thinking,
+                )
+        except Exception as e:
+            self._handle_api_error(e)
+            raise
 
     def _complete_copilot(
         self,
@@ -1817,10 +1363,10 @@ class GitHubModelsProvider:
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
-        """Process streaming response for the Azure SDK backend in complete() mode.
+        """Process streaming response for the Azure SDK backend.
 
-        Mirrors the streaming logic from ``send_message_streaming()`` but
-        operates on pre-built API messages and does not touch ``self._history``.
+        Iterates over the Azure SDK streaming response, accumulates text
+        and function call parts, and returns the assembled ProviderResponse.
 
         Args:
             api_messages: Messages already converted to Azure SDK format.
@@ -1946,8 +1492,9 @@ class GitHubModelsProvider:
     ) -> List[Dict[str, Any]]:
         """Build OpenAI-format messages from an explicit message list.
 
-        Parameterized version of ``_build_copilot_messages()`` that uses
-        the provided messages and system instruction instead of instance state.
+        Converts provider-agnostic ``Message`` objects into the OpenAI
+        ``{"role": ..., "content": ...}`` dicts expected by the Copilot
+        API, prepending the system instruction when present.
 
         Args:
             messages: Conversation history in provider-agnostic format.
@@ -2002,8 +1549,9 @@ class GitHubModelsProvider:
     ) -> Optional[List[Dict[str, Any]]]:
         """Build OpenAI-format tools from an explicit tool list.
 
-        Parameterized version of ``_build_copilot_tools()`` that uses
-        the provided tools instead of ``self._tools``.
+        Converts provider-agnostic ``ToolSchema`` objects into the
+        OpenAI ``{"type": "function", "function": {...}}`` dicts
+        expected by the Copilot API.
 
         Args:
             tools: Tool schemas to convert.
@@ -2328,456 +1876,6 @@ class GitHubModelsProvider:
             raw=None,
             thinking=thinking,
         )
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send a message with streaming response and optional cancellation.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        # Add user message to history first
-        self._history.append(Message.from_text(Role.USER, message))
-
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            messages = self._build_copilot_messages()
-            tools = self._build_copilot_tools()
-
-            try:
-                # Route to Responses API for codex models
-                if self._is_responses_api_model():
-                    self._trace(f"[SEND_MESSAGE_STREAMING] Using Responses API for {self._copilot_model_name()}")
-                    provider_response = self._copilot_responses_streaming(
-                        messages=messages,
-                        tools=tools,
-                        on_chunk=on_chunk,
-                        cancel_token=cancel_token,
-                        on_usage_update=on_usage_update,
-                        on_thinking=on_thinking,
-                        trace_prefix="RESPONSES_STREAM",
-                    )
-                else:
-                    provider_response = self._copilot_streaming_response(
-                        messages=messages,
-                        tools=tools,
-                        on_chunk=on_chunk,
-                        cancel_token=cancel_token,
-                        on_usage_update=on_usage_update,
-                        on_thinking=on_thinking,
-                        trace_prefix="STREAM",
-                    )
-
-                self._last_usage = provider_response.usage
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                final_text = provider_response.get_text()
-                if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
-                    try:
-                        provider_response.structured_output = json.loads(final_text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the user message we added
-                if self._history and self._history[-1].role == Role.USER:
-                    self._history.pop()
-                self._handle_api_error(e)
-                raise
-
-        # Azure SDK path
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Build messages list (includes user message from history)
-        messages = self._build_messages()
-
-        # Build completion kwargs
-        kwargs = self._build_completion_kwargs(response_schema)
-        kwargs['stream'] = True
-
-        # Accumulate response with parts preserving order
-        accumulated_text = []  # Text chunks for current text block
-        accumulated_thinking: List[str] = []  # Reasoning/thinking chunks
-        parts = []  # Ordered parts preserving text/function_call interleaving
-        finish_reason = FinishReason.UNKNOWN
-        function_calls = []  # Also keep flat list for backwards compatibility
-        usage = TokenUsage()
-        was_cancelled = False
-
-        def flush_text_block():
-            """Flush accumulated text as a single Part."""
-            nonlocal accumulated_text
-            if accumulated_text:
-                text = ''.join(accumulated_text)
-                parts.append(Part.from_text(text))
-                accumulated_text = []
-
-        try:
-            self._trace(f"STREAM_START message_len={len(message)}")
-            self._trace(f"STREAM_INPUT>>>\n{message}\n<<<STREAM_INPUT")
-            chunk_count = 0
-            response_stream = self._client.complete(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-
-            for chunk in response_stream:
-                # Check for cancellation
-                if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
-                    was_cancelled = True
-                    finish_reason = FinishReason.CANCELLED
-                    break
-
-                # Extract content from choices
-                if hasattr(chunk, 'choices') and chunk.choices:
-                    for choice in chunk.choices:
-                        # Extract text delta
-                        if hasattr(choice, 'delta') and choice.delta:
-                            delta = choice.delta
-
-                            # Extract reasoning/thinking (e.g. DeepSeek-R1)
-                            if self._enable_thinking:
-                                reasoning_chunk = extract_reasoning_from_stream_delta(delta)
-                                if reasoning_chunk:
-                                    self._trace(f"STREAM_THINKING len={len(reasoning_chunk)}")
-                                    accumulated_thinking.append(reasoning_chunk)
-                                    if on_thinking:
-                                        on_thinking(reasoning_chunk)
-
-                            if hasattr(delta, 'content') and delta.content:
-                                chunk_count += 1
-                                self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
-                                accumulated_text.append(delta.content)
-                                on_chunk(delta.content)
-
-                            # Extract tool calls
-                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                                from .converters import extract_function_calls_from_stream_delta
-                                new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
-                                for fc in new_calls:
-                                    self._trace(f"STREAM_FUNC_CALL name={fc.name}")
-                                    # Flush any pending text before adding function call
-                                    flush_text_block()
-                                    # Add function call as a part
-                                    parts.append(Part.from_function_call(fc))
-                                function_calls.extend(new_calls)
-
-                        # Extract finish reason
-                        if hasattr(choice, 'finish_reason') and choice.finish_reason:
-                            finish_reason = self._map_finish_reason(choice.finish_reason)
-
-                # Extract usage from final chunk
-                if hasattr(chunk, 'usage') and chunk.usage:
-                    usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                        output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                        total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
-                    )
-                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
-                    # Notify about usage update for real-time accounting
-                    if on_usage_update and usage.total_tokens > 0:
-                        on_usage_update(usage)
-
-            # Get accumulated output before flushing
-            all_text = ''.join(accumulated_text)
-            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
-            self._trace(f"STREAM_OUTPUT>>>\n{all_text}\n<<<STREAM_OUTPUT")
-
-        except Exception as e:
-            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
-            # If cancelled during iteration, treat as cancellation
-            if cancel_token and cancel_token.is_cancelled:
-                was_cancelled = True
-                finish_reason = FinishReason.CANCELLED
-            else:
-                # Rollback the user message we added
-                if self._history and self._history[-1].role == Role.USER:
-                    self._history.pop()
-                self._handle_api_error(e)
-                raise
-
-        # Flush any remaining text as final part
-        flush_text_block()
-
-        # If we have function calls, update finish reason
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
-
-        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
-
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
-        )
-
-        self._last_usage = usage
-
-        # Add assistant response to history
-        self._add_response_to_history(provider_response)
-
-        # Parse structured output if schema was requested
-        final_text = provider_response.get_text()
-        if response_schema and final_text and not was_cancelled:
-            try:
-                provider_response.structured_output = json.loads(final_text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send tool results with streaming response and optional cancellation.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        # Add tool results to history
-        for result in results:
-            self._history.append(Message(
-                role=Role.TOOL,
-                parts=[Part(function_response=result)],
-            ))
-
-        if self._use_copilot_api:
-            if not self._copilot_client or not self._model_name:
-                raise RuntimeError("No chat session. Call create_session() first.")
-
-            messages = self._build_copilot_messages()
-            tools = self._build_copilot_tools()
-
-            try:
-                # Route to Responses API for codex models
-                if self._is_responses_api_model():
-                    self._trace(f"[SEND_TOOL_RESULTS_STREAMING] Using Responses API for {self._copilot_model_name()}")
-                    provider_response = self._copilot_responses_streaming(
-                        messages=messages,
-                        tools=tools,
-                        on_chunk=on_chunk,
-                        cancel_token=cancel_token,
-                        on_usage_update=on_usage_update,
-                        on_thinking=on_thinking,
-                        trace_prefix="RESPONSES_STREAM_TOOL_RESULTS",
-                    )
-                else:
-                    provider_response = self._copilot_streaming_response(
-                        messages=messages,
-                        tools=tools,
-                        on_chunk=on_chunk,
-                        cancel_token=cancel_token,
-                        on_usage_update=on_usage_update,
-                        on_thinking=on_thinking,
-                        trace_prefix="STREAM_TOOL_RESULTS",
-                    )
-
-                self._last_usage = provider_response.usage
-                self._add_response_to_history(provider_response)
-
-                # Parse structured output if schema was requested
-                final_text = provider_response.get_text()
-                if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
-                    try:
-                        provider_response.structured_output = json.loads(final_text)
-                    except json.JSONDecodeError:
-                        pass
-
-                return provider_response
-            except Exception as e:
-                # Rollback the tool result messages we added
-                self._rollback_tool_results(len(results))
-                self._handle_api_error(e)
-                raise
-
-        # Azure SDK path
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Build messages including tool results
-        messages = self._build_messages()
-
-        # Build completion kwargs
-        kwargs = self._build_completion_kwargs(response_schema)
-        kwargs['stream'] = True
-
-        # Accumulate response with parts preserving order
-        accumulated_text = []  # Text chunks for current text block
-        accumulated_thinking: List[str] = []  # Reasoning/thinking chunks
-        parts = []  # Ordered parts preserving text/function_call interleaving
-        finish_reason = FinishReason.UNKNOWN
-        function_calls = []  # Also keep flat list for backwards compatibility
-        usage = TokenUsage()
-        was_cancelled = False
-
-        def flush_text_block():
-            """Flush accumulated text as a single Part."""
-            nonlocal accumulated_text
-            if accumulated_text:
-                text = ''.join(accumulated_text)
-                parts.append(Part.from_text(text))
-                accumulated_text = []
-
-        try:
-            tool_names = [r.name for r in results]
-            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
-            # Log tool results as input
-            tool_results_summary = []
-            for r in results:
-                result_str = str(r.result) if r.result is not None else "None"
-                tool_results_summary.append(f"{r.name}: {result_str}")
-            self._trace(f"STREAM_TOOL_INPUT>>>\n" + "\n".join(tool_results_summary) + "\n<<<STREAM_TOOL_INPUT")
-            chunk_count = 0
-            response_stream = self._client.complete(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-
-            for chunk in response_stream:
-                # Check for cancellation
-                if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
-                    was_cancelled = True
-                    finish_reason = FinishReason.CANCELLED
-                    break
-
-                # Extract content from choices
-                if hasattr(chunk, 'choices') and chunk.choices:
-                    for choice in chunk.choices:
-                        # Extract text delta
-                        if hasattr(choice, 'delta') and choice.delta:
-                            delta = choice.delta
-
-                            # Extract reasoning/thinking (e.g. DeepSeek-R1)
-                            if self._enable_thinking:
-                                reasoning_chunk = extract_reasoning_from_stream_delta(delta)
-                                if reasoning_chunk:
-                                    self._trace(f"STREAM_TOOL_THINKING len={len(reasoning_chunk)}")
-                                    accumulated_thinking.append(reasoning_chunk)
-                                    if on_thinking:
-                                        on_thinking(reasoning_chunk)
-
-                            if hasattr(delta, 'content') and delta.content:
-                                chunk_count += 1
-                                self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
-                                accumulated_text.append(delta.content)
-                                on_chunk(delta.content)
-
-                            # Extract tool calls
-                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                                from .converters import extract_function_calls_from_stream_delta
-                                new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
-                                for fc in new_calls:
-                                    self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
-                                    # Flush any pending text before adding function call
-                                    flush_text_block()
-                                    # Add function call as a part
-                                    parts.append(Part.from_function_call(fc))
-                                function_calls.extend(new_calls)
-
-                        # Extract finish reason
-                        if hasattr(choice, 'finish_reason') and choice.finish_reason:
-                            finish_reason = self._map_finish_reason(choice.finish_reason)
-
-                # Extract usage from final chunk
-                if hasattr(chunk, 'usage') and chunk.usage:
-                    usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                        output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                        total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
-                    )
-                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
-                    # Notify about usage update for real-time accounting
-                    if on_usage_update and usage.total_tokens > 0:
-                        on_usage_update(usage)
-
-            # Get accumulated output before flushing
-            all_text = ''.join(accumulated_text)
-            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
-            self._trace(f"STREAM_TOOL_OUTPUT>>>\n{all_text}\n<<<STREAM_TOOL_OUTPUT")
-
-        except Exception as e:
-            self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
-            # If cancelled during iteration, treat as cancellation
-            if cancel_token and cancel_token.is_cancelled:
-                was_cancelled = True
-                finish_reason = FinishReason.CANCELLED
-            else:
-                # Rollback the tool result messages we added
-                self._rollback_tool_results(len(results))
-                self._handle_api_error(e)
-                raise
-
-        # Flush any remaining text as final part
-        flush_text_block()
-
-        # If we have function calls, update finish reason
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
-
-        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
-
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
-        )
-
-        self._last_usage = usage
-
-        # Add assistant response to history
-        self._add_response_to_history(provider_response)
-
-        # Parse structured output if schema was requested
-        final_text = provider_response.get_text()
-        if response_schema and final_text and not was_cancelled:
-            try:
-                provider_response.structured_output = json.loads(final_text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
 
     def _map_finish_reason(self, reason: str) -> FinishReason:
         """Map SDK finish reason string to internal FinishReason."""

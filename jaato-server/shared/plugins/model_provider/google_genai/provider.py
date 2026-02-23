@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import time
-import traceback
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -40,25 +39,20 @@ from ..base import (
     UsageUpdateCallback,
 )
 from jaato_sdk.plugins.model_provider.types import (
-    CancelledException,
     CancelToken,
     FinishReason,
     Message,
     ProviderResponse,
     Role,
     ThinkingConfig,
-    ToolResult,
     ToolSchema,
     TokenUsage,
     Part,
 )
 from .converters import (
     extract_text_from_chunk,
-    history_from_sdk,
     history_to_sdk,
-    message_from_sdk,
     response_from_sdk,
-    tool_results_to_sdk_parts,
     tool_schemas_to_sdk_tool,
     serialize_history,
     deserialize_history,
@@ -107,36 +101,36 @@ DEFAULT_CONTEXT_LIMIT = 1_048_576
 
 
 class GoogleGenAIProvider:
-    """Google GenAI / Vertex AI model provider.
+    """Google GenAI / Vertex AI model provider (stateless design).
 
-    This provider supports:
+    This provider is **stateless** with respect to conversation history.
+    It does not maintain an internal chat session or message list.  The
+    session layer (``JaatoSession``) owns the conversation history and
+    passes the full message list to ``complete()`` on every call.
+
+    Supports:
     - Dual endpoints: Google AI Studio (API key) and Vertex AI (GCP auth)
     - Multiple auth methods: API key, ADC, service account file
     - Gemini model family (1.5, 2.0, 2.5)
-    - Multi-turn chat with SDK-managed history
+    - Stateless completion via ``complete()`` (batch and streaming)
     - Function calling with manual control
     - Token counting and context management
+    - Optional CachedContent integration via cache plugin
 
-    Usage (Vertex AI - organization):
+    Usage::
+
         provider = GoogleGenAIProvider()
         provider.initialize(ProviderConfig(
             project='my-project',
             location='us-central1',
             use_vertex_ai=True,
-            auth_method='auto'  # Uses ADC or GOOGLE_APPLICATION_CREDENTIALS
+            auth_method='auto',
         ))
         provider.connect('gemini-2.5-flash')
-        response = provider.send_message("Hello!")
-
-    Usage (AI Studio - personal):
-        provider = GoogleGenAIProvider()
-        provider.initialize(ProviderConfig(
-            api_key='your-api-key',
-            use_vertex_ai=False,
-            auth_method='api_key'
-        ))
-        provider.connect('gemini-2.5-flash')
-        response = provider.send_message("Hello!")
+        response = provider.complete(
+            messages=[Message(role=Role.USER, parts=[Part.from_text("Hello!")])],
+            system_instruction="You are a helpful assistant.",
+        )
 
     Environment variables (auto-detected if config not provided):
         GOOGLE_GENAI_API_KEY: API key for AI Studio
@@ -151,20 +145,21 @@ class GoogleGenAIProvider:
     _MODELS_CACHE_TTL = 300
 
     def __init__(self):
-        """Initialize the provider (not yet connected)."""
+        """Initialize the provider (not yet connected).
+
+        The provider is stateless with respect to conversation history.
+        It holds only connection/auth state and per-call accounting.
+        """
         self._client: Optional[genai.Client] = None
         self._model_name: Optional[str] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
-        self._chat = None  # genai Chat object
 
         # Authentication state
         self._use_vertex_ai: bool = True
         self._auth_method: GoogleAuthMethod = "auto"
 
-        # Current session configuration
-        self._system_instruction: Optional[str] = None
-        self._tools: Optional[List[ToolSchema]] = None
+        # Per-call token accounting (updated after each complete() call)
         self._last_usage: TokenUsage = TokenUsage()
 
         # Models cache: (timestamp, models_list)
@@ -569,7 +564,6 @@ class GoogleGenAIProvider:
 
     def shutdown(self) -> None:
         """Clean up resources."""
-        self._chat = None
         self._client = None
         self._model_name = None
 
@@ -699,218 +693,7 @@ class GoogleGenAIProvider:
             models = [m for m in models if m.startswith(prefix)]
         return sorted(models)
 
-    # ==================== Session Management ====================
-
-    def create_session(
-        self,
-        system_instruction: Optional[str] = None,
-        tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools.
-            history: Previous conversation history to restore.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
-
-        self._system_instruction = system_instruction
-        self._tools = tools
-
-        # Convert tools to SDK format
-        sdk_tool = tool_schemas_to_sdk_tool(tools) if tools else None
-
-        # Build config
-        config = get_types().GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=[sdk_tool] if sdk_tool else None,
-            automatic_function_calling=get_types().AutomaticFunctionCallingConfig(disable=True)
-        )
-
-        # Convert history to SDK format
-        sdk_history = history_to_sdk(history) if history else None
-
-        # Create the chat session
-        self._chat = self._client.chats.create(
-            model=self._model_name,
-            config=config,
-            history=sdk_history
-        )
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
-
-        Returns:
-            List of messages in internal format.
-        """
-        if not self._chat:
-            return []
-
-        sdk_history = list(self._chat.get_history())
-        return history_from_sdk(sdk_history)
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Use this for basic prompts that don't need conversation history
-        or function calling.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not connected. Call connect() first.")
-
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=prompt
-        )
-        provider_response = response_from_sdk(response)
-        self._last_usage = provider_response.usage
-        return provider_response
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a user message and get a response.
-
-        Args:
-            message: The user's message text.
-            response_schema: Optional JSON Schema to constrain the response.
-                When provided, the model returns JSON matching this schema.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self._chat:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Build config — prefer cached content, fall back to structured output
-        config = self._get_cached_content_config(response_schema)
-        if config is None and response_schema:
-            config = get_types().GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
-            )
-
-        response = self._chat.send_message(message, config=config)
-        provider_response = response_from_sdk(response)
-        self._last_usage = provider_response.usage
-
-        # Parse structured output if schema was requested
-        text = provider_response.get_text()
-        if response_schema and text:
-            try:
-                provider_response.structured_output = json.loads(text)
-            except json.JSONDecodeError:
-                # Model returned invalid JSON despite schema constraint
-                pass
-
-        return provider_response
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a message with multiple parts (text, images, etc.).
-
-        Use this for multimodal input where the user message contains
-        more than just text.
-
-        Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self._chat:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Import converter here to avoid circular imports
-        from .converters import part_to_sdk
-
-        # Convert internal Parts to SDK Parts
-        sdk_parts = [part_to_sdk(p) for p in parts]
-
-        # Create user Content with the parts
-        user_content = get_types().Content(role='user', parts=sdk_parts)
-
-        # Build config — prefer cached content, fall back to structured output
-        config = self._get_cached_content_config(response_schema)
-        if config is None and response_schema:
-            config = get_types().GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
-            )
-
-        response = self._chat.send_message(user_content, config=config)
-        provider_response = response_from_sdk(response)
-        self._last_usage = provider_response.usage
-
-        # Parse structured output if schema was requested
-        text = provider_response.get_text()
-        if response_schema and text:
-            try:
-                provider_response.structured_output = json.loads(text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        if not self._chat:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Convert results to SDK parts
-        sdk_parts = tool_results_to_sdk_parts(results)
-
-        # Build config — prefer cached content, fall back to structured output
-        config = self._get_cached_content_config(response_schema)
-        if config is None and response_schema:
-            config = get_types().GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
-            )
-
-        # Send to model
-        response = self._chat.send_message(sdk_parts, config=config)
-        provider_response = response_from_sdk(response)
-        self._last_usage = provider_response.usage
-
-        # Parse structured output if schema was requested
-        text = provider_response.get_text()
-        if response_schema and text:
-            try:
-                provider_response.structured_output = json.loads(text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
+    # ==================== (Legacy session/messaging methods removed — Phase 4) ====
 
     # ==================== Token Management ====================
 
@@ -1034,14 +817,13 @@ class GoogleGenAIProvider:
     ) -> ProviderResponse:
         """Stateless completion: convert messages to SDK format, call API, return response.
 
-        Unlike send_message(), this method does NOT use the SDK-managed chat
-        session (``self._chat``) and does NOT modify any internal state.  The
-        caller (session) is responsible for maintaining the message list and
-        passing it in full each call.
+        This is the sole entry point for model inference.  The caller
+        (``JaatoSession``) is responsible for maintaining the message list
+        and passing it in full each call.  The provider does not maintain
+        any internal conversation state.
 
         Uses ``client.models.generate_content()`` (batch) or
-        ``client.models.generate_content_stream()`` (streaming) directly,
-        bypassing the chat session.
+        ``client.models.generate_content_stream()`` (streaming) directly.
 
         When ``on_chunk`` is provided, the response is streamed token-by-token.
         When ``on_chunk`` is None, the response is returned in batch mode.
@@ -1155,9 +937,8 @@ class GoogleGenAIProvider:
     ) -> ProviderResponse:
         """Process a streaming generate_content call for complete().
 
-        Uses ``client.models.generate_content_stream()`` directly (bypasses
-        ``self._chat``).  Chunk processing mirrors ``send_message_streaming()``
-        but operates on an explicit contents list instead of the chat session.
+        Uses ``client.models.generate_content_stream()`` directly, operating
+        on an explicit contents list passed in from ``complete()``.
 
         Args:
             sdk_contents: Contents in SDK format (from ``history_to_sdk``).
@@ -1287,384 +1068,7 @@ class GoogleGenAIProvider:
 
         return provider_response
 
-    # ==================== Streaming ====================
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send a message with streaming response and optional cancellation.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback for function call detection during streaming.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        if not self._chat:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        self._trace(f"STREAM_INIT on_usage_update={'set' if on_usage_update else 'None'}")
-
-        # Build config — prefer cached content, fall back to structured output
-        config = self._get_cached_content_config(response_schema)
-        if config is None and response_schema:
-            config = get_types().GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
-            )
-
-        # Accumulate response with parts preserving order
-        accumulated_text = []  # Text chunks for current text block
-        parts = []  # Ordered parts preserving text/function_call interleaving
-        finish_reason = FinishReason.UNKNOWN
-        function_calls = []  # Also keep flat list for backwards compatibility
-        usage = TokenUsage()
-        was_cancelled = False
-
-        def flush_text_block():
-            """Flush accumulated text as a single Part."""
-            nonlocal accumulated_text
-            if accumulated_text:
-                text = ''.join(accumulated_text)
-                parts.append(Part.from_text(text))
-                accumulated_text = []
-
-        try:
-            # Use send_message_stream for streaming
-            self._trace(f"STREAM_START message_len={len(message)}")
-            self._trace(f"STREAM_INPUT>>>\n{message}\n<<<STREAM_INPUT")
-            chunk_count = 0
-            for chunk in self._chat.send_message_stream(message, config=config):
-                # Check for cancellation
-                if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
-                    was_cancelled = True
-                    finish_reason = FinishReason.CANCELLED
-                    break
-
-                # Extract text from chunk safely (avoids SDK warning about non-text parts)
-                chunk_text = extract_text_from_chunk(chunk)
-                if chunk_text:
-                    chunk_count += 1
-                    self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text)}")
-                    accumulated_text.append(chunk_text)
-                    on_chunk(chunk_text)
-
-                # Extract function calls and other special parts if present
-                if hasattr(chunk, 'candidates') and chunk.candidates:
-                    candidate = chunk.candidates[0]
-                    if hasattr(candidate, 'content') and candidate.content:
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'function_call') and part.function_call:
-                                from .converters import function_call_from_sdk
-                                fc = function_call_from_sdk(part.function_call)
-                                if fc and fc not in function_calls:
-                                    self._trace(f"STREAM_FUNC_CALL name={fc.name}")
-                                    # Flush any pending text before adding function call
-                                    flush_text_block()
-                                    # Notify caller about function call detection (for UI positioning)
-                                    if on_function_call:
-                                        on_function_call(fc)
-                                    # Add function call as a part
-                                    parts.append(Part.from_function_call(fc))
-                                    function_calls.append(fc)
-
-                            # Capture thought parts (Gemini thinking mode)
-                            elif hasattr(part, 'thought') and part.thought:
-                                self._trace(f"STREAM_THOUGHT len={len(part.thought)}")
-                                flush_text_block()
-                                parts.append(Part(thought=part.thought))
-
-                            # Capture executable code parts
-                            elif hasattr(part, 'executable_code') and part.executable_code:
-                                code = part.executable_code
-                                code_str = getattr(code, 'code', str(code)) if code else ""
-                                self._trace(f"STREAM_CODE len={len(code_str)}")
-                                flush_text_block()
-                                parts.append(Part(executable_code=code_str))
-
-                            # Capture code execution result parts
-                            elif hasattr(part, 'code_execution_result') and part.code_execution_result:
-                                result = part.code_execution_result
-                                output = getattr(result, 'output', str(result)) if result else ""
-                                self._trace(f"STREAM_EXEC_RESULT len={len(output)}")
-                                flush_text_block()
-                                parts.append(Part(code_execution_result=output))
-
-                    # Extract finish reason from last chunk
-                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                        from .converters import finish_reason_from_sdk
-                        finish_reason = finish_reason_from_sdk(candidate.finish_reason)
-
-                # Extract usage if available
-                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-                    metadata = chunk.usage_metadata
-                    usage = TokenUsage(
-                        prompt_tokens=getattr(metadata, 'prompt_token_count', 0) or 0,
-                        output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
-                        total_tokens=getattr(metadata, 'total_token_count', 0) or 0
-                    )
-                    # Extract cached content token count (context caching)
-                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-                    if cached_tokens is not None and cached_tokens > 0:
-                        usage.cache_read_tokens = cached_tokens
-                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens} cached={usage.cache_read_tokens}")
-                    # Notify about usage update for real-time accounting
-                    will_call = on_usage_update is not None and usage.total_tokens > 0
-                    self._trace(f"STREAM_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
-                    if on_usage_update and usage.total_tokens > 0:
-                        try:
-                            cb_name = getattr(on_usage_update, '__name__', 'unknown')
-                            cb_module = getattr(on_usage_update, '__module__', 'unknown')
-                            self._trace(f"STREAM_USAGE_CALLING callback {cb_module}.{cb_name}...")
-                            on_usage_update(usage)
-                            self._trace("STREAM_USAGE_CALLED callback completed")
-                        except Exception as cb_err:
-                            self._trace(f"STREAM_USAGE_CALLBACK_ERROR {type(cb_err).__name__}: {cb_err}")
-
-            # Get accumulated output before flushing
-            all_text = ''.join(accumulated_text)
-            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
-            self._trace(f"STREAM_OUTPUT>>>\n{all_text}\n<<<STREAM_OUTPUT")
-
-        except Exception as e:
-            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
-            # If cancelled during iteration, treat as cancellation
-            if cancel_token and cancel_token.is_cancelled:
-                was_cancelled = True
-                finish_reason = FinishReason.CANCELLED
-            else:
-                raise
-
-        # Flush any remaining text as final part
-        flush_text_block()
-
-        # If we have function calls, update finish reason
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
-
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None  # Streaming doesn't provide single raw response
-        )
-
-        self._last_usage = usage
-
-        # Parse structured output if schema was requested
-        final_text = provider_response.get_text()
-        if response_schema and final_text and not was_cancelled:
-            try:
-                provider_response.structured_output = json.loads(final_text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send tool results with streaming response and optional cancellation.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback for function call detection during streaming.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        if not self._chat:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Convert results to SDK parts
-        sdk_parts = tool_results_to_sdk_parts(results)
-
-        # Build config — prefer cached content, fall back to structured output
-        config = self._get_cached_content_config(response_schema)
-        if config is None and response_schema:
-            config = get_types().GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
-            )
-
-        # Accumulate response with parts preserving order
-        accumulated_text = []  # Text chunks for current text block
-        parts = []  # Ordered parts preserving text/function_call interleaving
-        finish_reason = FinishReason.UNKNOWN
-        function_calls = []  # Also keep flat list for backwards compatibility
-        usage = TokenUsage()
-        was_cancelled = False
-
-        def flush_text_block():
-            """Flush accumulated text as a single Part."""
-            nonlocal accumulated_text
-            if accumulated_text:
-                text = ''.join(accumulated_text)
-                parts.append(Part.from_text(text))
-                accumulated_text = []
-
-        try:
-            # Use send_message_stream for streaming
-            tool_names = [r.name for r in results]
-            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
-            # Log tool results as input
-            tool_results_summary = []
-            for r in results:
-                result_str = str(r.result) if r.result is not None else "None"
-                tool_results_summary.append(f"{r.name}: {result_str}")
-            self._trace(f"STREAM_TOOL_INPUT>>>\n" + "\n".join(tool_results_summary) + "\n<<<STREAM_TOOL_INPUT")
-            chunk_count = 0
-            for chunk in self._chat.send_message_stream(sdk_parts, config=config):
-                # Check for cancellation
-                if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
-                    was_cancelled = True
-                    finish_reason = FinishReason.CANCELLED
-                    break
-
-                # Extract text from chunk safely (avoids SDK warning about non-text parts)
-                chunk_text = extract_text_from_chunk(chunk)
-                if chunk_text:
-                    chunk_count += 1
-                    self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text)}")
-                    accumulated_text.append(chunk_text)
-                    on_chunk(chunk_text)
-
-                # Extract function calls and other special parts if present
-                if hasattr(chunk, 'candidates') and chunk.candidates:
-                    candidate = chunk.candidates[0]
-                    if hasattr(candidate, 'content') and candidate.content:
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'function_call') and part.function_call:
-                                from .converters import function_call_from_sdk
-                                fc = function_call_from_sdk(part.function_call)
-                                if fc and fc not in function_calls:
-                                    self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
-                                    # Flush any pending text before adding function call
-                                    flush_text_block()
-                                    # Notify caller about function call detection (for UI positioning)
-                                    if on_function_call:
-                                        on_function_call(fc)
-                                    # Add function call as a part
-                                    parts.append(Part.from_function_call(fc))
-                                    function_calls.append(fc)
-
-                            # Capture thought parts (Gemini thinking mode)
-                            elif hasattr(part, 'thought') and part.thought:
-                                self._trace(f"STREAM_TOOL_THOUGHT len={len(part.thought)}")
-                                flush_text_block()
-                                parts.append(Part(thought=part.thought))
-
-                            # Capture executable code parts
-                            elif hasattr(part, 'executable_code') and part.executable_code:
-                                code = part.executable_code
-                                code_str = getattr(code, 'code', str(code)) if code else ""
-                                self._trace(f"STREAM_TOOL_CODE len={len(code_str)}")
-                                flush_text_block()
-                                parts.append(Part(executable_code=code_str))
-
-                            # Capture code execution result parts
-                            elif hasattr(part, 'code_execution_result') and part.code_execution_result:
-                                result = part.code_execution_result
-                                output = getattr(result, 'output', str(result)) if result else ""
-                                self._trace(f"STREAM_TOOL_EXEC_RESULT len={len(output)}")
-                                flush_text_block()
-                                parts.append(Part(code_execution_result=output))
-
-                    # Extract finish reason from last chunk
-                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                        from .converters import finish_reason_from_sdk
-                        finish_reason = finish_reason_from_sdk(candidate.finish_reason)
-
-                # Extract usage if available
-                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-                    metadata = chunk.usage_metadata
-                    usage = TokenUsage(
-                        prompt_tokens=getattr(metadata, 'prompt_token_count', 0) or 0,
-                        output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
-                        total_tokens=getattr(metadata, 'total_token_count', 0) or 0
-                    )
-                    # Extract cached content token count (context caching)
-                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-                    if cached_tokens is not None and cached_tokens > 0:
-                        usage.cache_read_tokens = cached_tokens
-                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens} cached={usage.cache_read_tokens}")
-                    # Notify about usage update for real-time accounting
-                    will_call = on_usage_update is not None and usage.total_tokens > 0
-                    self._trace(f"STREAM_TOOL_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
-                    if on_usage_update and usage.total_tokens > 0:
-                        try:
-                            cb_name = getattr(on_usage_update, '__name__', 'unknown')
-                            cb_module = getattr(on_usage_update, '__module__', 'unknown')
-                            self._trace(f"STREAM_TOOL_USAGE_CALLING callback {cb_module}.{cb_name}...")
-                            on_usage_update(usage)
-                            self._trace("STREAM_TOOL_USAGE_CALLED callback completed")
-                        except Exception as cb_err:
-                            self._trace(f"STREAM_TOOL_USAGE_CALLBACK_ERROR {type(cb_err).__name__}: {cb_err}")
-
-            # Get accumulated output before flushing
-            all_text = ''.join(accumulated_text)
-            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
-            self._trace(f"STREAM_TOOL_OUTPUT>>>\n{all_text}\n<<<STREAM_TOOL_OUTPUT")
-
-        except Exception as e:
-            self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
-            # If cancelled during iteration, treat as cancellation
-            if cancel_token and cancel_token.is_cancelled:
-                was_cancelled = True
-                finish_reason = FinishReason.CANCELLED
-            else:
-                raise
-
-        # Flush any remaining text as final part
-        flush_text_block()
-
-        # If we have function calls, update finish reason
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
-
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None
-        )
-
-        self._last_usage = usage
-
-        # Parse structured output if schema was requested
-        final_text = provider_response.get_text()
-        if response_schema and final_text and not was_cancelled:
-            try:
-                provider_response.structured_output = json.loads(final_text)
-            except json.JSONDecodeError:
-                pass
-
-        return provider_response
+    # ==================== (Legacy streaming methods removed — Phase 4) ====
 
     # ==================== Serialization ====================
 
@@ -1706,49 +1110,8 @@ class GoogleGenAIProvider:
         if hasattr(plugin, "set_client") and self._client:
             plugin.set_client(self._client)
 
-    def _get_cached_content_config(
-        self,
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Any]:
-        """Build a GenerateContentConfig with cached_content if available.
-
-        Calls the cache plugin's ``prepare_request()`` and, when a
-        ``cached_content`` name is returned, builds a config that
-        references the cached prefix instead of re-sending system
-        instruction and tools.
-
-        Args:
-            response_schema: Optional JSON schema for structured output.
-
-        Returns:
-            A ``GenerateContentConfig`` with ``cached_content`` set,
-            or ``None`` if caching is not active.
-        """
-        if not self._cache_plugin:
-            return None
-
-        cache_result = self._cache_plugin.prepare_request(
-            system=self._system_instruction,
-            tools=self._tools or [],
-            messages=[],
-        )
-        cached_content_name = cache_result.get("cached_content")
-        if not cached_content_name:
-            return None
-
-        self._trace(f"CACHE using CachedContent: {cached_content_name}")
-
-        kwargs: Dict[str, Any] = {
-            "cached_content": cached_content_name,
-            "automatic_function_calling": get_types().AutomaticFunctionCallingConfig(
-                disable=True
-            ),
-        }
-        if response_schema:
-            kwargs["response_mime_type"] = "application/json"
-            kwargs["response_schema"] = response_schema
-
-        return get_types().GenerateContentConfig(**kwargs)
+    # (_get_cached_content_config removed — Phase 4: complete() has its own
+    # inline cache logic using explicit parameters instead of instance state.)
 
     # ==================== Error Classification for Retry ====================
 

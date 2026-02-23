@@ -1,32 +1,23 @@
 """SessionHistory - Canonical conversation history owned by the session.
 
-Phase 1 of the session-owned history migration. This wrapper makes history
-ownership explicit: the session holds the canonical copy, synced
-bidirectionally with the provider during the transition period.
-
-After Phase 4 (legacy protocol removal), the provider sync is removed and
-providers receive messages as parameters to a stateless ``complete()`` method.
+The session is the sole owner of conversation history. Providers are stateless
+and receive messages as parameters to ``complete()`` on each call.
 
 Lifecycle:
     1. Created empty in ``JaatoSession.__init__``
-    2. Populated via ``sync_from_provider()`` after each provider operation
-       that mutates history (send_message, send_tool_results, etc.)
-    3. Updated via ``replace()`` after GC operations
+    2. Populated via ``append()`` after each user message and model response
+    3. Updated via ``replace()`` after GC operations or session restore
     4. Read via ``messages`` property by session code (budget tracking,
        turn boundaries, GC input, persistence)
 
 State transitions:
     - ``append(msg)`` → adds a message, sets dirty flag
     - ``replace(msgs)`` → bulk replacement (after GC or restore), sets dirty flag
-    - ``sync_from_provider(provider)`` → reads provider's history as the
-      new canonical state, clears dirty flag
     - ``clear()`` → empties history and clears dirty flag
 
-The ``_dirty`` flag tracks whether session-side mutations have occurred
-that haven't been synced back to the provider. During Phase 1 this flag
-is informational only — the provider is always the authoritative source
-after its own operations. In later phases, the dirty flag will drive
-provider sync decisions.
+The ``_dirty`` flag tracks whether mutations have occurred since the last
+``clear()`` or ``replace()`` call. Used by persistence logic to decide
+whether to write.
 """
 
 import logging
@@ -41,15 +32,12 @@ logger = logging.getLogger(__name__)
 class SessionHistory:
     """Canonical conversation history owned by the session.
 
-    Wraps ``List[Message]`` with mutation tracking. During the Phase 1
-    migration, changes are synced from the provider after each provider
-    operation. After Phase 4, the provider sync is removed and the session
-    becomes the sole history owner.
+    Wraps ``List[Message]`` with mutation tracking. The session is the sole
+    history owner; providers receive messages as parameters to ``complete()``.
 
     Attributes:
         _messages: The canonical message list.
-        _dirty: Whether session-side mutations have occurred since
-            the last provider sync.
+        _dirty: Whether mutations have occurred since the last clear/replace.
     """
 
     def __init__(self) -> None:
@@ -91,26 +79,8 @@ class SessionHistory:
 
     @property
     def dirty(self) -> bool:
-        """Whether session-side mutations have occurred since last sync."""
+        """Whether mutations have occurred since last clear/replace."""
         return self._dirty
-
-    def sync_from_provider(self, provider: object) -> None:
-        """Sync history from the provider's authoritative copy.
-
-        During Phase 1, the provider remains the authoritative source of
-        history after its own operations (send_message, send_tool_results,
-        create_session). This method reads the provider's history and
-        replaces the session's copy.
-
-        Args:
-            provider: A ModelProviderPlugin instance with ``get_history()``.
-        """
-        get_history = getattr(provider, 'get_history', None)
-        if get_history is None:
-            logger.debug("SessionHistory.sync_from_provider: provider has no get_history()")
-            return
-        self._messages = list(get_history())
-        self._dirty = False
 
     def pop_last(self) -> Optional['Message']:
         """Remove and return the last message, or None if empty.
@@ -135,8 +105,8 @@ class SessionHistory:
 
         Unlike ``messages`` (which returns a copy), this gives direct access
         for performance-critical reads where the caller guarantees it will
-        not mutate the list. Used by the stateless provider path to avoid
-        copying the full history on every ``complete()`` call.
+        not mutate the list. Used to avoid copying the full history on every
+        ``complete()`` call.
 
         .. warning:: Do NOT mutate the returned list. Use ``append()``,
            ``replace()``, or ``pop_last()`` for mutations so dirty-tracking
