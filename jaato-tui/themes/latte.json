@@ -149,6 +149,8 @@
 
     "spinner": {"fg": "primary"},
     "separator": {"fg": "muted", "dim": true},
+    "pane_separator": {"fg": "#aaaaaa"},
+    "pane_separator_focused": {"fg": "#0055cc", "bold": true},
     "hint": {"fg": "muted", "italic": true},
     "scroll_indicator": {"fg": "muted", "dim": true, "italic": true},
     "scroll_arrow": {"fg": "primary", "dim": true},

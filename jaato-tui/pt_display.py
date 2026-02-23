@@ -19,7 +19,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer, DynamicContainer
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
@@ -47,6 +47,7 @@ from tool_output_popup import ToolOutputPopup
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings, format_key_for_display
 from theme import ThemeConfig, load_theme
+from pane_manager import PaneManager, PaneSlot, MIN_PANE_WIDTH
 
 
 def consolidate_fragments(fragments):
@@ -490,6 +491,9 @@ class PTDisplay:
             read_only=True,
         )
         self._output_line_fragments: Dict[int, List[Tuple[str, str]]] = {}
+
+        # Pane manager for vertical split-pane layout
+        self._pane_manager = PaneManager()
 
         # Refresh throttling: avoid expensive _sync_output_display() on every event
         self._last_sync_time: float = 0.0
@@ -1138,8 +1142,45 @@ class PTDisplay:
 
         self._app.create_background_task(_open())
 
+    def _on_pane_mouse_scroll(self, pane_index: int, direction: str) -> None:
+        """Handle mouse scroll in a specific pane.
+
+        Routes scroll to the agent visible in that pane.
+
+        Args:
+            pane_index: Which pane was scrolled.
+            direction: "up" or "down".
+        """
+        mouse_scroll_lines = 3
+        slot = self._pane_manager.get_slot(pane_index)
+        agent_id = slot.visible_agent_id
+        buffer = None
+        if agent_id and self._agent_registry:
+            buffer = self._agent_registry.get_buffer(agent_id)
+        if not buffer:
+            buffer = self._output_buffer
+        if direction == "up":
+            buffer.scroll_up(lines=mouse_scroll_lines)
+        else:
+            buffer.scroll_down(lines=mouse_scroll_lines)
+        slot.dirty = True
+        self._sync_output_display()
+        self._force_full_repaint()
+        if self._app:
+            self._app.invalidate()
+
     def _get_active_buffer(self):
-        """Get the active output buffer (selected agent's or main)."""
+        """Get the active output buffer (selected agent's or main).
+
+        In multi-pane mode, returns the buffer for the focused pane's visible agent.
+        Falls back to the selected agent's buffer or main buffer.
+        """
+        if self._pane_manager and self._pane_manager.active_pane_count > 1:
+            slot = self._pane_manager.get_focused_slot()
+            if slot and slot.visible_agent_id and self._agent_registry:
+                buf = self._agent_registry.get_buffer(slot.visible_agent_id)
+                if buf:
+                    return buf
         if self._agent_registry:
             buffer = self._agent_registry.get_selected_buffer()
             if buffer:
@@ -1373,54 +1414,119 @@ class PTDisplay:
         return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _sync_output_display(self):
-        """Sync the output display buffer and fragments from ANSI content.
+        """Sync output display buffers and fragments from ANSI content.
 
-        Converts ANSI output to:
-        1. Plain text in _output_pt_buffer (enables selection)
-        2. Style fragments in _output_line_fragments (enables styling)
+        In single-pane mode (default), renders one buffer identically to the
+        original behavior. In multi-pane mode, renders each active pane's
+        visible agent at the appropriate pane width.
         """
         # Check for terminal resize
         self._update_dimensions()
 
-        # Get ANSI content
-        ansi_content = self._renderer.render(self._get_output_panel_content())
+        if self._pane_manager.active_pane_count <= 1:
+            # Single-pane fast path: identical to original behavior
+            self._sync_single_pane()
+        else:
+            self._sync_multi_pane()
 
-        # Convert to plain text and fragments
+    def _sync_single_pane(self):
+        """Sync output for single-pane mode (original behavior)."""
+        ansi_content = self._renderer.render(self._get_output_panel_content())
         plain_text, all_fragments = ansi_to_plain_and_fragments(ansi_content)
 
-        # Split fragments by line for the processor
-        self._output_line_fragments.clear()
+        slot = self._pane_manager.get_slot(0)
+        slot.line_fragments.clear()
         line_num = 0
         current_line_fragments = []
-        char_pos = 0
 
         for style, text in all_fragments:
-            # Split text by newlines
             parts = text.split('\n')
             for i, part in enumerate(parts):
                 if part:
                     current_line_fragments.append((style, part))
-                if i < len(parts) - 1:  # Newline encountered
-                    self._output_line_fragments[line_num] = current_line_fragments
+                if i < len(parts) - 1:
+                    slot.line_fragments[line_num] = current_line_fragments
                     line_num += 1
                     current_line_fragments = []
 
-        # Store last line if any content
         if current_line_fragments:
-            self._output_line_fragments[line_num] = current_line_fragments
+            slot.line_fragments[line_num] = current_line_fragments
 
-        # Update the buffer with plain text, preserving selection state and cursor position
-        old_selection = self._output_pt_buffer.selection_state
-        old_cursor = self._output_pt_buffer.cursor_position
-        self._output_pt_buffer.set_document(
+        old_selection = slot.pt_buffer.selection_state
+        old_cursor = slot.pt_buffer.cursor_position
+        slot.pt_buffer.set_document(
             Document(plain_text, len(plain_text)),
             bypass_readonly=True
         )
-        # Restore selection and cursor position if selection was active (user might be selecting text)
         if old_selection:
-            self._output_pt_buffer.selection_state = old_selection
-            # Clamp cursor to new document length in case document got shorter
-            self._output_pt_buffer.cursor_position = min(old_cursor, len(plain_text))
+            slot.pt_buffer.selection_state = old_selection
+            slot.pt_buffer.cursor_position = min(old_cursor, len(plain_text))
+        slot.dirty = False
+
+    def _sync_multi_pane(self):
+        """Sync output for multi-pane mode, rendering each pane at its width."""
+        active_count = self._pane_manager.active_pane_count
+        separator_width = active_count - 1
+        pane_width = max(MIN_PANE_WIDTH, (self._width - separator_width) // active_count)
+
+        # Calculate available height (shared across panes)
+        input_height = self._get_input_height()
+        tab_bar_height = 1 if self._agent_tab_bar else 0
+        session_bar_height = 1
+        available_height = self._height - session_bar_height - 1 - tab_bar_height - input_height
+
+        pane_renderer = RichRenderer(pane_width)
+
+        for slot in self._pane_manager.get_active_slots():
+            agent_id = slot.visible_agent_id
+            if not agent_id:
+                # Empty pane: clear buffer
+                slot.pt_buffer.set_document(Document("", 0), bypass_readonly=True)
+                slot.line_fragments.clear()
+                slot.dirty = False
+                continue
+
+            output_buffer = None
+            if self._agent_registry:
+                output_buffer = self._agent_registry.get_buffer(agent_id)
+            if not output_buffer:
+                output_buffer = self._output_buffer
+
+            # Render at pane width
+            panel = output_buffer.render_panel(
+                height=available_height,
+                width=pane_width,
+            )
+            ansi_content = pane_renderer.render(panel)
+            plain_text, all_fragments = ansi_to_plain_and_fragments(ansi_content)
+
+            slot.line_fragments.clear()
+            line_num = 0
+            current_line_fragments = []
+
+            for style, text in all_fragments:
+                parts = text.split('\n')
+                for i, part in enumerate(parts):
+                    if part:
+                        current_line_fragments.append((style, part))
+                    if i < len(parts) - 1:
+                        slot.line_fragments[line_num] = current_line_fragments
+                        line_num += 1
+                        current_line_fragments = []
+
+            if current_line_fragments:
+                slot.line_fragments[line_num] = current_line_fragments
+
+            old_selection = slot.pt_buffer.selection_state
+            old_cursor = slot.pt_buffer.cursor_position
+            slot.pt_buffer.set_document(
+                Document(plain_text, len(plain_text)),
+                bypass_readonly=True
+            )
+            if old_selection:
+                slot.pt_buffer.selection_state = old_selection
+                slot.pt_buffer.cursor_position = min(old_cursor, len(plain_text))
+            slot.dirty = False
 
     def _get_output_panel_content(self):
         """Get the raw Rich panel for output (before ANSI rendering)."""
@@ -2023,14 +2129,58 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("cycle_agents"), filter=not_in_search_mode)
         def handle_f2(event):
-            """Handle cycle_agents keybinding - cycle through agents."""
+            """Handle cycle_agents keybinding - cycle through agents.
+
+            In multi-pane mode, moves focus to the pane containing the newly
+            selected agent and makes it visible in that pane.
+            """
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
+                new_id = self._agent_registry.get_selected_agent_id()
+                # Move focus to the pane containing this agent
+                if new_id and self._pane_manager.active_pane_count > 1:
+                    pane_idx = self._pane_manager.get_pane_for_agent(new_id)
+                    if pane_idx is not None:
+                        self._pane_manager.set_focus(pane_idx)
+                        self._pane_manager.set_visible_agent(pane_idx, new_id)
+                        self._pane_manager.get_slot(pane_idx).dirty = True
                 # Sync output display to show new agent's buffer content
                 self._sync_output_display()
                 # Show the agent details popup briefly
                 if self._agent_tab_bar:
                     self._agent_tab_bar.show_popup()
+                self._app.invalidate()
+
+        # Split pane keybindings
+        @kb.add(*keys.get_key_args("split_pane"), filter=not_in_search_mode)
+        def handle_split_pane(event):
+            """Handle Esc,s - add a vertical pane to the right (max 4)."""
+            if self._pane_manager.split_pane(self._width):
+                self._pane_manager.mark_all_dirty()
+                self._sync_output_display()
+                self._force_full_repaint()
+                self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("join_pane"), filter=not_in_search_mode)
+        def handle_join_pane(event):
+            """Handle Esc,j - remove the rightmost pane."""
+            if self._pane_manager.join_pane():
+                self._pane_manager.mark_all_dirty()
+                self._sync_output_display()
+                self._force_full_repaint()
+                self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("move_agent"), filter=not_in_search_mode)
+        def handle_move_agent(event):
+            """Handle Esc,m - move current agent to next pane cyclically."""
+            if not self._agent_registry:
+                return
+            agent_id = self._agent_registry.get_selected_agent_id()
+            if agent_id and self._pane_manager.move_agent(agent_id, self._width):
+                self._pane_manager.auto_collapse_empty()
+                self._pane_manager.mark_all_dirty()
+                self._sync_output_display()
+                self._force_full_repaint()
                 self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_tools"), filter=not_in_search_mode)
@@ -2241,7 +2391,6 @@ class PTDisplay:
 
         # Output panel (fills remaining space minus pending prompts)
         # Uses BufferControl for mouse selection support, with StyledOutputProcessor for ANSI styling
-        styled_processor = StyledOutputProcessor(self._get_line_fragments, buffer=self._output_pt_buffer)
         def on_selection_complete(text: str) -> None:
             """Copy selected text to clipboard."""
             success = self._clipboard.copy(text)
@@ -2262,21 +2411,64 @@ class PTDisplay:
                 else:
                     self.set_status_message(f"Copy failed ({provider_name})")
 
-        self._output_control = ScrollableBufferControl(
-            buffer=self._output_pt_buffer,
-            input_processors=[styled_processor],
-            focusable=True,
-            on_scroll_up=on_mouse_scroll_up,
-            on_scroll_down=on_mouse_scroll_down,
-            input_buffer=self._input_buffer,  # For returning focus after selection
-            on_selection_complete=on_selection_complete,
-        )
-        output_window = Window(
-            self._output_control,
-            height=get_output_height,
-            wrap_lines=False,
-            style="class:output-panel",
-        )
+        # Pre-allocate 4 pane slots with their own rendering pipelines
+        for i in range(PaneManager.MAX_PANES):
+            pt_buf = Buffer(document=Document("", 0), read_only=True)
+            frags: Dict[int, List[Tuple[str, str]]] = {}
+            proc = StyledOutputProcessor(lambda ln, f=frags: f.get(ln), buffer=pt_buf)
+
+            def _make_scroll_up(idx):
+                def _scroll_up():
+                    self._on_pane_mouse_scroll(idx, "up")
+                return _scroll_up
+
+            def _make_scroll_down(idx):
+                def _scroll_down():
+                    self._on_pane_mouse_scroll(idx, "down")
+                return _scroll_down
+
+            ctrl = ScrollableBufferControl(
+                buffer=pt_buf,
+                input_processors=[proc],
+                focusable=True,
+                on_scroll_up=_make_scroll_up(i),
+                on_scroll_down=_make_scroll_down(i),
+                input_buffer=self._input_buffer,
+                on_selection_complete=on_selection_complete,
+            )
+            win = Window(
+                ctrl,
+                wrap_lines=False,
+                style="class:output-panel",
+                width=Dimension(weight=1),
+            )
+            self._pane_manager.init_slot(i, pt_buf, frags, proc, ctrl, win)
+
+        # Backward compat: pane 0 aliases for existing code paths
+        slot0 = self._pane_manager.get_slot(0)
+        self._output_pt_buffer = slot0.pt_buffer
+        self._output_line_fragments = slot0.line_fragments
+        self._output_control = slot0.control
+
+        # Dynamic output area: single pane = direct window, multi-pane = VSplit with separators
+        def get_output_container():
+            active = self._pane_manager.get_active_slots()
+            if len(active) == 1:
+                return active[0].window
+            children = []
+            for j, slot in enumerate(active):
+                if j > 0:
+                    focused = self._pane_manager.focused_pane
+                    is_adj = (slot.pane_index == focused or
+                              active[j - 1].pane_index == focused)
+                    style = "class:pane-separator.focused" if is_adj else "class:pane-separator"
+                    children.append(Window(width=1, char='│', style=style))
+                children.append(slot.window)
+            return VSplit(children)
+
+        output_area = DynamicContainer(get_output_container)
+        # Wrap in a Window-like container with height control
+        output_window = HSplit([output_area], height=get_output_height)
 
         # Input prompt label - changes based on mode (pager, waiting for channel, search, normal)
         def get_prompt_text():
@@ -2835,13 +3027,21 @@ class PTDisplay:
     # Budget panel methods
 
     def register_agent_name(self, agent_id: str, name: str) -> None:
-        """Register a display name for an agent (used by budget panel tabs).
+        """Register a display name for an agent and assign to a pane.
+
+        Called when an agent is created. Assigns the agent to the focused pane
+        (main agent always goes to pane 0).
 
         Args:
             agent_id: Agent identifier ("main", "subagent_1", etc.)
             name: Human-readable display name.
         """
         self._budget_panel.set_agent_name(agent_id, name)
+        # Assign agent to pane: main always in pane 0, others to focused pane
+        if agent_id == "main":
+            self._pane_manager.assign_agent(agent_id, 0)
+        else:
+            self._pane_manager.assign_agent(agent_id, self._pane_manager.focused_pane)
 
     def update_instruction_budget(self, agent_id: str, budget_snapshot: Dict[str, Any]) -> None:
         """Update the instruction budget for an agent.

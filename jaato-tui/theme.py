@@ -412,6 +412,10 @@ DEFAULT_SEMANTIC_STYLES = {
     "truncation": StyleSpec(fg="primary", dim=True, italic=True),
     "debug_line_number": StyleSpec(fg="muted", dim=True),
 
+    # Pane separators
+    "pane_separator": StyleSpec(fg="#808080"),
+    "pane_separator_focused": StyleSpec(fg="#5f87ff", bold=True),
+
     # Completion menu
     "completion_bg": StyleSpec(bg="surface", fg="text"),
     "completion_selected": StyleSpec(bg="success", fg="text"),
@@ -580,6 +584,9 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         # Inline markdown - darker colors for light background
         semantic["inline_code"] = StyleSpec(fg="#0055aa", bg="#e8e8f0")
         semantic["markdown_link"] = StyleSpec(fg="#0055aa", underline=True)
+        # Pane separators - use darker colors for light background
+        semantic["pane_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["pane_separator_focused"] = StyleSpec(fg="#0055cc", bold=True)
         return ThemeConfig(
             name="light",
             description="Light theme for bright terminals (fallback)",
@@ -622,6 +629,9 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         # Inline markdown - bright colors for high contrast
         semantic["inline_code"] = StyleSpec(fg="#00ffff", bg="#1a1a2e")
         semantic["markdown_link"] = StyleSpec(fg="#66ccff", underline=True)
+        # Pane separators - use bright colors for high contrast
+        semantic["pane_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["pane_separator_focused"] = StyleSpec(fg="#00ffff", bold=True)
         return ThemeConfig(
             name="high-contrast",
             description="High contrast theme for accessibility (fallback)",
@@ -777,6 +787,9 @@ class ThemeConfig:
             "status-bar.error": "status_bar_error",
             # Output panel
             "output-panel": "output_panel_bg",
+            # Pane separators
+            "pane-separator": "pane_separator",
+            "pane-separator.focused": "pane_separator_focused",
             # Plan symbols
             "plan.pending": "plan_pending",
             "plan.in-progress": "plan_in_progress",
