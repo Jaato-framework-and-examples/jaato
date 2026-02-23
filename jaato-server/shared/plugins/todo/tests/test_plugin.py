@@ -59,7 +59,7 @@ class TestTodoPluginToolSchemas:
         # Core tools (always present)
         names = {s.name for s in schemas}
         assert "createPlan" in names
-        assert "updateStep" in names
+        assert "setStepStatus" in names
         assert "getPlanStatus" in names
         assert "completePlan" in names
         # Additional tools for cross-agent collaboration
@@ -86,11 +86,11 @@ class TestTodoPluginToolSchemas:
         assert "title" in schema["required"]
         assert "steps" in schema["required"]
 
-    def test_updateStep_schema(self):
+    def test_setStepStatus_schema(self):
         plugin = TodoPlugin()
         schemas = plugin.get_tool_schemas()
-        update_step = next(s for s in schemas if s.name == "updateStep")
-        schema = update_step.parameters
+        set_step_status = next(s for s in schemas if s.name == "setStepStatus")
+        schema = set_step_status.parameters
 
         assert "step_id" in schema["properties"]
         assert "status" in schema["properties"]
@@ -106,7 +106,7 @@ class TestTodoPluginExecutors:
         executors = plugin.get_executors()
 
         assert "createPlan" in executors
-        assert "updateStep" in executors
+        assert "setStepStatus" in executors
         assert "getPlanStatus" in executors
         assert "completePlan" in executors
         for executor in executors.values():
@@ -196,15 +196,15 @@ class TestCreatePlanExecutor:
         mock_reporter.report_plan_created.assert_called_once()
 
 
-class TestUpdateStepExecutor:
-    """Tests for updateStep executor."""
+class TestSetStepStatusExecutor:
+    """Tests for setStepStatus executor."""
 
-    def test_update_step_to_in_progress(self):
+    def test_set_step_status_to_in_progress(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
 
-        # Create and start plan first (updateStep requires plan to be started)
+        # Create and start plan first (setStepStatus requires plan to be started)
         create_result = executors["createPlan"]({
             "title": "Test",
             "steps": ["Step 1", "Step 2"]
@@ -213,7 +213,7 @@ class TestUpdateStepExecutor:
         step_id = create_result["steps"][0]["step_id"]
 
         # Update step
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": step_id,
             "status": "in_progress"
         })
@@ -221,7 +221,7 @@ class TestUpdateStepExecutor:
         assert result["status"] == "in_progress"
         assert result["step_id"] == step_id
 
-    def test_update_step_to_completed(self):
+    def test_set_step_status_to_completed(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
@@ -233,7 +233,7 @@ class TestUpdateStepExecutor:
         executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": step_id,
             "status": "completed",
             "result": "Done successfully"
@@ -242,7 +242,7 @@ class TestUpdateStepExecutor:
         assert result["status"] == "completed"
         assert result["result"] == "Done successfully"
 
-    def test_update_step_to_failed(self):
+    def test_set_step_status_to_failed(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
@@ -254,7 +254,7 @@ class TestUpdateStepExecutor:
         executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": step_id,
             "status": "failed",
             "error": "Something went wrong"
@@ -263,7 +263,7 @@ class TestUpdateStepExecutor:
         assert result["status"] == "failed"
         assert result["error"] == "Something went wrong"
 
-    def test_update_step_to_skipped(self):
+    def test_set_step_status_to_skipped(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
@@ -275,7 +275,7 @@ class TestUpdateStepExecutor:
         executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": step_id,
             "status": "skipped",
             "result": "Not needed"
@@ -283,12 +283,12 @@ class TestUpdateStepExecutor:
 
         assert result["status"] == "skipped"
 
-    def test_update_step_no_plan(self):
+    def test_set_step_status_no_plan(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": "some-id",
             "status": "completed"
         })
@@ -296,7 +296,7 @@ class TestUpdateStepExecutor:
         assert "error" in result
         assert "No active plan" in result["error"]
 
-    def test_update_step_not_found(self):
+    def test_set_step_status_not_found(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
@@ -307,7 +307,7 @@ class TestUpdateStepExecutor:
         })
         executors["startPlan"]({})  # Start the plan
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": "nonexistent",
             "status": "completed"
         })
@@ -315,7 +315,7 @@ class TestUpdateStepExecutor:
         assert "error" in result
         assert "Step not found" in result["error"]
 
-    def test_update_step_invalid_status(self):
+    def test_set_step_status_invalid_status(self):
         plugin = TodoPlugin()
         plugin.initialize()
         executors = plugin.get_executors()
@@ -326,14 +326,14 @@ class TestUpdateStepExecutor:
         })
         step_id = create_result["steps"][0]["step_id"]
 
-        result = executors["updateStep"]({
+        result = executors["setStepStatus"]({
             "step_id": step_id,
             "status": "invalid_status"
         })
 
         assert "error" in result
 
-    def test_update_step_reports_update(self):
+    def test_set_step_status_reports_update(self):
         plugin = TodoPlugin()
         plugin.initialize()
 
@@ -349,7 +349,7 @@ class TestUpdateStepExecutor:
         step_id = create_result["steps"][0]["step_id"]
 
         mock_reporter.reset_mock()
-        executors["updateStep"]({
+        executors["setStepStatus"]({
             "step_id": step_id,
             "status": "completed"
         })
@@ -543,24 +543,24 @@ class TestTodoPluginProgrammaticAPI:
         assert len(plan.steps) == 2
         assert plan.context["user"] == "test"
 
-    def test_update_step_method(self):
+    def test_set_step_status_method(self):
         plugin = TodoPlugin()
         plugin.initialize()
 
         plan = plugin.create_plan("Test", ["A"])
         step_id = plan.steps[0].step_id
 
-        step = plugin.update_step(step_id, StepStatus.COMPLETED, result="Done")
+        step = plugin.set_step_status(step_id, StepStatus.COMPLETED, result="Done")
 
         assert step is not None
         assert step.status == StepStatus.COMPLETED
         assert step.result == "Done"
 
-    def test_update_step_no_plan(self):
+    def test_set_step_status_no_plan(self):
         plugin = TodoPlugin()
         plugin.initialize()
 
-        step = plugin.update_step("some-id", StepStatus.COMPLETED)
+        step = plugin.set_step_status("some-id", StepStatus.COMPLETED)
 
         assert step is None
 
@@ -628,18 +628,18 @@ class TestTodoPluginWorkflow:
         assert create_result["progress"]["total"] == 4
         assert create_result["progress"]["pending"] == 4
 
-        # Start the plan (required before updateStep)
+        # Start the plan (required before setStepStatus)
         executors["startPlan"]({})
 
         # Start first step
         step1_id = create_result["steps"][0]["step_id"]
-        executors["updateStep"]({
+        executors["setStepStatus"]({
             "step_id": step1_id,
             "status": "in_progress"
         })
 
         # Complete first step
-        executors["updateStep"]({
+        executors["setStepStatus"]({
             "step_id": step1_id,
             "status": "completed",
             "result": "All tests passed"
@@ -653,7 +653,7 @@ class TestTodoPluginWorkflow:
         # Complete remaining steps
         for i in range(1, 4):
             step_id = create_result["steps"][i]["step_id"]
-            executors["updateStep"]({
+            executors["setStepStatus"]({
                 "step_id": step_id,
                 "status": "completed"
             })
@@ -677,17 +677,17 @@ class TestTodoPluginWorkflow:
             "steps": ["Step 1", "Step 2"]
         })
 
-        # Start the plan (required before updateStep)
+        # Start the plan (required before setStepStatus)
         executors["startPlan"]({})
 
         # Complete first step
-        executors["updateStep"]({
+        executors["setStepStatus"]({
             "step_id": create_result["steps"][0]["step_id"],
             "status": "completed"
         })
 
         # Fail second step
-        executors["updateStep"]({
+        executors["setStepStatus"]({
             "step_id": create_result["steps"][1]["step_id"],
             "status": "failed",
             "error": "Network timeout"
