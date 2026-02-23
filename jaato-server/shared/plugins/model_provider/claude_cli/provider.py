@@ -457,6 +457,77 @@ class ClaudeCLIProvider:
             "Use send_tool_results_streaming instead."
         )
 
+    # ==================== Stateless Completion ====================
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion: extract last message, call CLI, return response.
+
+        Unlike send_message(), this method does NOT modify ``self._history``.
+        The caller (session) is responsible for maintaining the message list.
+
+        The CLI manages its own conversation state via ``--resume``, so only
+        the latest user message or tool results need to be sent as a prompt.
+        Prior messages in the list are already known to the CLI session.
+
+        Args:
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider extracts the last message as the prompt.
+            system_instruction: System prompt text (used on first call via CLI
+                args; subsequent calls use ``--resume``).
+            tools: Available tool schemas (used on first call via CLI args).
+            response_schema: Not supported by CLI provider.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback.
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized.
+            ValueError: If messages list is empty.
+        """
+        if not messages:
+            raise ValueError("Messages list must not be empty.")
+
+        # Extract the prompt from the last message
+        last = messages[-1]
+        if last.role == Role.TOOL:
+            # Format tool results as text for the CLI
+            tool_results = [p.function_response for p in last.parts if p.function_response]
+            prompt = self._format_tool_results_as_message(tool_results)
+        else:
+            # USER message — extract text
+            prompt = last.text or ""
+
+        if on_chunk:
+            return self._execute_query_streaming(
+                prompt,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
+                on_thinking=on_thinking,
+                _update_history=False,
+            )
+        else:
+            return self._execute_query(prompt, _update_history=False)
+
     # ==================== Streaming ====================
 
     def supports_streaming(self) -> bool:
@@ -898,8 +969,14 @@ class ClaudeCLIProvider:
 
         return args
 
-    def _execute_query(self, prompt: str) -> ProviderResponse:
-        """Execute a query synchronously."""
+    def _execute_query(self, prompt: str, _update_history: bool = True) -> ProviderResponse:
+        """Execute a query synchronously.
+
+        Args:
+            prompt: The prompt text to send to the CLI.
+            _update_history: If True (default), append messages to
+                ``self._history``. Set to False for stateless ``complete()``.
+        """
         accumulated_text = ""
         accumulated_thinking = ""
         function_calls: List[FunctionCall] = []
@@ -944,8 +1021,9 @@ class ClaudeCLIProvider:
         if function_calls:
             finish_reason = FinishReason.TOOL_USE
 
-        # Add to history
-        self._add_to_history(prompt, accumulated_text, function_calls)
+        # Add to history (unless stateless mode)
+        if _update_history:
+            self._add_to_history(prompt, accumulated_text, function_calls)
 
         # Build parts list
         parts: List[Part] = []
@@ -968,8 +1046,20 @@ class ClaudeCLIProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        _update_history: bool = True,
     ) -> ProviderResponse:
-        """Execute a query with streaming."""
+        """Execute a query with streaming.
+
+        Args:
+            prompt: The prompt text to send to the CLI.
+            on_chunk: Callback for each text chunk.
+            cancel_token: Optional cancellation signal.
+            on_usage_update: Optional callback for token usage updates.
+            on_function_call: Optional callback when function call detected.
+            on_thinking: Optional callback for extended thinking content.
+            _update_history: If True (default), append messages to
+                ``self._history``. Set to False for stateless ``complete()``.
+        """
         accumulated_text = ""
         accumulated_thinking = ""
         function_calls: List[FunctionCall] = []
@@ -1099,8 +1189,8 @@ class ClaudeCLIProvider:
         elif function_calls:
             finish_reason = FinishReason.TOOL_USE
 
-        # Add to history (unless cancelled)
-        if not cancelled:
+        # Add to history (unless cancelled or stateless mode)
+        if not cancelled and _update_history:
             self._add_to_history(prompt, accumulated_text, function_calls)
 
         # Build parts list

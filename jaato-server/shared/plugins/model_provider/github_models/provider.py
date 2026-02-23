@@ -1555,6 +1555,482 @@ class GitHubModelsProvider:
                 return True
         return False
 
+    # ==================== Stateless Completion ====================
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion: convert messages to API format, call API, return response.
+
+        Unlike send_message(), this method does NOT read or modify
+        ``self._history``. The caller (session) is responsible for
+        maintaining the message list and passing it in full each call.
+
+        Handles both the Copilot API and Azure SDK backends transparently.
+
+        When ``on_chunk`` is provided, the response is streamed token-by-token.
+        When ``on_chunk`` is None, the response is returned in batch mode.
+
+        Args:
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
+        """
+        msg_list = list(messages)
+
+        if self._use_copilot_api:
+            return self._complete_copilot(
+                msg_list,
+                system_instruction=system_instruction,
+                tools=tools,
+                response_schema=response_schema,
+                cancel_token=cancel_token,
+                on_chunk=on_chunk,
+                on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
+                on_thinking=on_thinking,
+            )
+        else:
+            return self._complete_azure(
+                msg_list,
+                system_instruction=system_instruction,
+                tools=tools,
+                response_schema=response_schema,
+                cancel_token=cancel_token,
+                on_chunk=on_chunk,
+                on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
+                on_thinking=on_thinking,
+            )
+
+    def _complete_copilot(
+        self,
+        messages: List[Message],
+        *,
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion via the Copilot API backend.
+
+        Builds OpenAI-format messages and tools from explicit parameters,
+        calls the Copilot client, and returns the response without modifying
+        any instance state other than ``_last_usage``.
+
+        Args:
+            messages: Full conversation history in provider-agnostic format.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback.
+            on_function_call: Callback when function call detected.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+        """
+        if not self._copilot_client or not self._model_name:
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
+
+        # Build messages from explicit parameters (NOT self._history)
+        api_messages = self._build_copilot_messages_from(messages, system_instruction)
+        api_tools = self._build_copilot_tools_from(tools)
+
+        if on_chunk:
+            # Streaming mode
+            if self._is_responses_api_model():
+                provider_response = self._copilot_responses_streaming(
+                    messages=api_messages,
+                    tools=api_tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
+                    trace_prefix="COMPLETE_RESPONSES_STREAM",
+                )
+            else:
+                provider_response = self._copilot_streaming_response(
+                    messages=api_messages,
+                    tools=api_tools,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
+                    trace_prefix="COMPLETE_STREAM",
+                )
+        else:
+            # Batch mode
+            if self._is_responses_api_model():
+                response = self._copilot_client.complete_responses(
+                    model=self._copilot_model_name(),
+                    messages=api_messages,
+                    system_instruction=system_instruction,
+                    tools=api_tools,
+                )
+                provider_response = self._responses_api_response_to_provider(response)
+            else:
+                response = self._copilot_client.complete(
+                    model=self._copilot_model_name(),
+                    messages=api_messages,
+                    tools=api_tools,
+                )
+                provider_response = self._copilot_response_to_provider(response)
+
+        # Update per-call accounting (NOT conversation state)
+        self._last_usage = provider_response.usage
+
+        # Handle structured output
+        if response_schema:
+            text = provider_response.get_text()
+            if text and provider_response.finish_reason != FinishReason.CANCELLED:
+                try:
+                    provider_response.structured_output = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+
+        return provider_response
+
+    def _complete_azure(
+        self,
+        messages: List[Message],
+        *,
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion via the Azure AI Inference SDK backend.
+
+        Builds Azure SDK-format messages and tools from explicit parameters,
+        calls the Azure client, and returns the response without modifying
+        any instance state other than ``_last_usage``.
+
+        Args:
+            messages: Full conversation history in provider-agnostic format.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback.
+            on_function_call: Callback when function call detected.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
+
+        # Build messages from explicit parameters (NOT self._history)
+        api_messages = []
+        if system_instruction:
+            api_messages.append(get_models().SystemMessage(content=system_instruction))
+        api_messages.extend(history_to_sdk(messages))
+
+        # Build kwargs from explicit tools and schema
+        kwargs: Dict[str, Any] = {}
+        if tools:
+            sdk_tools = tool_schemas_to_sdk(tools)
+            if sdk_tools:
+                kwargs['tools'] = sdk_tools
+        response_format_json = get_response_format_json()
+        if response_schema and response_format_json is not None:
+            kwargs['response_format'] = response_format_json()
+
+        if on_chunk:
+            # Streaming mode
+            kwargs['stream'] = True
+            return self._complete_azure_streaming(
+                api_messages, kwargs,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                response_schema=response_schema,
+                on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
+                on_thinking=on_thinking,
+            )
+        else:
+            # Batch mode
+            response = self._client.complete(
+                model=self._model_name,
+                messages=api_messages,
+                **kwargs,
+            )
+            provider_response = response_from_sdk(response)
+            self._last_usage = provider_response.usage
+
+            if response_schema:
+                text = provider_response.get_text()
+                if text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+            return provider_response
+
+    def _complete_azure_streaming(
+        self,
+        api_messages: List,
+        kwargs: Dict[str, Any],
+        *,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Process streaming response for the Azure SDK backend in complete() mode.
+
+        Mirrors the streaming logic from ``send_message_streaming()`` but
+        operates on pre-built API messages and does not touch ``self._history``.
+
+        Args:
+            api_messages: Messages already converted to Azure SDK format.
+            kwargs: Completion kwargs (tools, stream=True, response_format).
+            on_chunk: Callback for each text chunk.
+            cancel_token: Optional cancellation signal.
+            response_schema: Optional JSON Schema for structured output parsing.
+            on_usage_update: Real-time token usage callback.
+            on_function_call: Callback when function call detected.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with accumulated parts, usage, and finish reason.
+        """
+        accumulated_text: List[str] = []
+        accumulated_thinking: List[str] = []
+        parts: List[Part] = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls: List = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        def flush_text_block():
+            nonlocal accumulated_text
+            if accumulated_text:
+                parts.append(Part.from_text("".join(accumulated_text)))
+                accumulated_text = []
+
+        try:
+            chunk_count = 0
+            response_stream = self._client.complete(
+                model=self._model_name,
+                messages=api_messages,
+                **kwargs,
+            )
+
+            for chunk in response_stream:
+                if cancel_token and cancel_token.is_cancelled:
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                if hasattr(chunk, 'choices') and chunk.choices:
+                    for choice in chunk.choices:
+                        if hasattr(choice, 'delta') and choice.delta:
+                            delta = choice.delta
+
+                            # Extract reasoning/thinking
+                            if self._enable_thinking:
+                                reasoning_chunk = extract_reasoning_from_stream_delta(delta)
+                                if reasoning_chunk:
+                                    accumulated_thinking.append(reasoning_chunk)
+                                    if on_thinking:
+                                        on_thinking(reasoning_chunk)
+
+                            if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                accumulated_text.append(delta.content)
+                                on_chunk(delta.content)
+
+                            # Extract tool calls
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                from .converters import extract_function_calls_from_stream_delta
+                                new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
+                                for fc in new_calls:
+                                    flush_text_block()
+                                    parts.append(Part.from_function_call(fc))
+                                    if on_function_call:
+                                        on_function_call(fc)
+                                function_calls.extend(new_calls)
+
+                        if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                            finish_reason = self._map_finish_reason(choice.finish_reason)
+
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                        output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                        total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                    )
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
+
+        except Exception as e:
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                self._handle_api_error(e)
+                raise
+
+        flush_text_block()
+
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
+        provider_response = ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+            thinking=thinking,
+        )
+
+        self._last_usage = usage
+
+        if response_schema and not was_cancelled:
+            text = provider_response.get_text()
+            if text:
+                try:
+                    provider_response.structured_output = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+
+        return provider_response
+
+    def _build_copilot_messages_from(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build OpenAI-format messages from an explicit message list.
+
+        Parameterized version of ``_build_copilot_messages()`` that uses
+        the provided messages and system instruction instead of instance state.
+
+        Args:
+            messages: Conversation history in provider-agnostic format.
+            system_instruction: System prompt text.
+
+        Returns:
+            List of OpenAI-format message dicts.
+        """
+        result: List[Dict[str, Any]] = []
+
+        if system_instruction:
+            result.append({"role": "system", "content": system_instruction})
+
+        for msg in messages:
+            if msg.role == Role.USER:
+                result.append({"role": "user", "content": msg.text or ""})
+            elif msg.role == Role.MODEL:
+                text = msg.text or ""
+                tool_calls = []
+                for part in msg.parts:
+                    if part.function_call:
+                        sanitized_name = sanitize_tool_name(part.function_call.name)
+                        tool_calls.append({
+                            "id": part.function_call.id or f"call_{sanitized_name}",
+                            "type": "function",
+                            "function": {
+                                "name": sanitized_name,
+                                "arguments": json.dumps(part.function_call.args or {}),
+                            }
+                        })
+                msg_dict: Dict[str, Any] = {"role": "assistant", "content": text or None}
+                if tool_calls:
+                    msg_dict["tool_calls"] = tool_calls
+                result.append(msg_dict)
+            elif msg.role == Role.TOOL:
+                for part in msg.parts:
+                    if part.function_response:
+                        r = part.function_response.result
+                        content = json.dumps(r) if isinstance(r, dict) else (str(r) if r is not None else "")
+                        sanitized_name = sanitize_tool_name(part.function_response.name)
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": part.function_response.call_id or f"call_{sanitized_name}",
+                            "content": content,
+                        })
+
+        return result
+
+    def _build_copilot_tools_from(
+        self,
+        tools: Optional[List[ToolSchema]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Build OpenAI-format tools from an explicit tool list.
+
+        Parameterized version of ``_build_copilot_tools()`` that uses
+        the provided tools instead of ``self._tools``.
+
+        Args:
+            tools: Tool schemas to convert.
+
+        Returns:
+            List of OpenAI-format tool dicts, or None if no tools.
+        """
+        if not tools:
+            return None
+
+        result = []
+        for tool in tools:
+            sanitized_name = sanitize_tool_name(tool.name)
+            register_tool_name_mapping(sanitized_name, tool.name)
+            tool_dict: Dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": sanitized_name,
+                    "description": tool.description or "",
+                }
+            }
+            if tool.parameters:
+                tool_dict["function"]["parameters"] = tool.parameters
+            result.append(tool_dict)
+
+        return result if result else None
+
     # ==================== Streaming ====================
 
     def _copilot_streaming_response(

@@ -931,6 +931,98 @@ class AntigravityProvider:
                 self._history.pop()
             raise
 
+    # ==================== Stateless Completion ====================
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion: convert messages to API format, call API, return response.
+
+        Unlike send_message(), this method does NOT read or modify
+        ``self._history``. The caller (session) is responsible for
+        maintaining the message list and passing it in full each call.
+
+        When ``on_chunk`` is provided, the response is streamed via SSE.
+        When ``on_chunk`` is None, the response is returned in batch mode.
+
+        Args:
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
+        """
+        if not self.is_connected:
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
+
+        # Build request from explicit parameters (NOT instance state)
+        contents = messages_to_api(list(messages))
+        api_tools = tool_schemas_to_api(tools) if tools else None
+
+        request_body = build_generate_request(
+            contents=contents,
+            system_instruction=system_instruction,
+            tools=api_tools,
+            generation_config=self._build_generation_config(response_schema),
+        )
+
+        try:
+            if on_chunk:
+                # Streaming mode
+                response = self._make_request(
+                    request_body, streaming=True, cancel_token=cancel_token
+                )
+                provider_response = self._process_stream(
+                    response,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_function_call=on_function_call,
+                )
+            else:
+                # Batch mode
+                response = self._make_request(request_body)
+                provider_response = response_from_api(response.json())
+
+            # Update per-call accounting (NOT conversation state)
+            self._last_usage = provider_response.usage
+
+            # Handle structured output
+            if response_schema:
+                text = provider_response.get_text()
+                if text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+            return provider_response
+        except Exception as e:
+            # No history rollback needed — we never modified history
+            raise
+
     # ==================== Streaming ====================
 
     def send_message_streaming(

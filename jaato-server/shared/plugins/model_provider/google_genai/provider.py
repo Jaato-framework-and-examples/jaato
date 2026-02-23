@@ -1017,6 +1017,276 @@ class GoogleGenAIProvider:
         # TODO: Implement when Google GenAI SDK supports thinking mode
         pass
 
+    # ==================== Stateless Completion ====================
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Stateless completion: convert messages to SDK format, call API, return response.
+
+        Unlike send_message(), this method does NOT use the SDK-managed chat
+        session (``self._chat``) and does NOT modify any internal state.  The
+        caller (session) is responsible for maintaining the message list and
+        passing it in full each call.
+
+        Uses ``client.models.generate_content()`` (batch) or
+        ``client.models.generate_content_stream()`` (streaming) directly,
+        bypassing the chat session.
+
+        When ``on_chunk`` is provided, the response is streamed token-by-token.
+        When ``on_chunk`` is None, the response is returned in batch mode.
+
+        Args:
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
+
+        # Convert messages to SDK format (bypasses self._chat)
+        sdk_contents = history_to_sdk(list(messages))
+
+        # Build config from explicit parameters (NOT instance state)
+        # Check cache plugin first (parameterized with explicit args)
+        config = None
+        if self._cache_plugin:
+            cache_result = self._cache_plugin.prepare_request(
+                system=system_instruction,
+                tools=tools or [],
+                messages=[],
+            )
+            cached_content_name = cache_result.get("cached_content")
+            if cached_content_name:
+                self._trace(f"COMPLETE_CACHE using CachedContent: {cached_content_name}")
+                config_kwargs: Dict[str, Any] = {
+                    "cached_content": cached_content_name,
+                    "automatic_function_calling": get_types().AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
+                }
+                if response_schema:
+                    config_kwargs["response_mime_type"] = "application/json"
+                    config_kwargs["response_schema"] = response_schema
+                config = get_types().GenerateContentConfig(**config_kwargs)
+
+        if config is None:
+            # No cache — build config with system instruction and tools
+            sdk_tool = tool_schemas_to_sdk_tool(tools) if tools else None
+            config_kwargs = {
+                "system_instruction": system_instruction,
+                "tools": [sdk_tool] if sdk_tool else None,
+                "automatic_function_calling": get_types().AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            }
+            if response_schema:
+                config_kwargs["response_mime_type"] = "application/json"
+                config_kwargs["response_schema"] = response_schema
+            config = get_types().GenerateContentConfig(**config_kwargs)
+
+        if on_chunk:
+            # Streaming mode — use generate_content_stream (bypasses chat session)
+            return self._complete_streaming(
+                sdk_contents, config,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                response_schema=response_schema,
+                on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
+                on_thinking=on_thinking,
+            )
+        else:
+            # Batch mode
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=sdk_contents,
+                config=config,
+            )
+            provider_response = response_from_sdk(response)
+            self._last_usage = provider_response.usage
+
+            # Handle structured output
+            if response_schema:
+                text = provider_response.get_text()
+                if text:
+                    try:
+                        provider_response.structured_output = json.loads(text)
+                    except json.JSONDecodeError:
+                        pass
+
+            return provider_response
+
+    def _complete_streaming(
+        self,
+        sdk_contents: Any,
+        config: Any,
+        *,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> ProviderResponse:
+        """Process a streaming generate_content call for complete().
+
+        Uses ``client.models.generate_content_stream()`` directly (bypasses
+        ``self._chat``).  Chunk processing mirrors ``send_message_streaming()``
+        but operates on an explicit contents list instead of the chat session.
+
+        Args:
+            sdk_contents: Contents in SDK format (from ``history_to_sdk``).
+            config: GenerateContentConfig with system instruction, tools, etc.
+            on_chunk: Callback for each text chunk.
+            cancel_token: Optional cancellation signal.
+            response_schema: Optional JSON Schema for structured output parsing.
+            on_usage_update: Real-time token usage callback.
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            ProviderResponse with accumulated parts, usage, and finish reason.
+        """
+        accumulated_text: List[str] = []
+        parts: List[Part] = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls: List = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        def flush_text_block():
+            nonlocal accumulated_text
+            if accumulated_text:
+                parts.append(Part.from_text("".join(accumulated_text)))
+                accumulated_text = []
+
+        try:
+            chunk_count = 0
+            for chunk in self._client.models.generate_content_stream(
+                model=self._model_name,
+                contents=sdk_contents,
+                config=config,
+            ):
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"COMPLETE_STREAM_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                # Extract text
+                chunk_text = extract_text_from_chunk(chunk)
+                if chunk_text:
+                    chunk_count += 1
+                    accumulated_text.append(chunk_text)
+                    on_chunk(chunk_text)
+
+                # Extract function calls and special parts
+                if hasattr(chunk, 'candidates') and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'function_call') and part.function_call:
+                                from .converters import function_call_from_sdk
+                                fc = function_call_from_sdk(part.function_call)
+                                if fc and fc not in function_calls:
+                                    flush_text_block()
+                                    if on_function_call:
+                                        on_function_call(fc)
+                                    parts.append(Part.from_function_call(fc))
+                                    function_calls.append(fc)
+                            elif hasattr(part, 'thought') and part.thought:
+                                flush_text_block()
+                                parts.append(Part(thought=part.thought))
+                            elif hasattr(part, 'executable_code') and part.executable_code:
+                                code = part.executable_code
+                                code_str = getattr(code, 'code', str(code)) if code else ""
+                                flush_text_block()
+                                parts.append(Part(executable_code=code_str))
+                            elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                                result = part.code_execution_result
+                                output = getattr(result, 'output', str(result)) if result else ""
+                                flush_text_block()
+                                parts.append(Part(code_execution_result=output))
+
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                        from .converters import finish_reason_from_sdk
+                        finish_reason = finish_reason_from_sdk(candidate.finish_reason)
+
+                # Extract usage
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    metadata = chunk.usage_metadata
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(metadata, 'prompt_token_count', 0) or 0,
+                        output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
+                        total_tokens=getattr(metadata, 'total_token_count', 0) or 0,
+                    )
+                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
+                    if cached_tokens is not None and cached_tokens > 0:
+                        usage.cache_read_tokens = cached_tokens
+                    if on_usage_update and usage.total_tokens > 0:
+                        try:
+                            on_usage_update(usage)
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                raise
+
+        flush_text_block()
+
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        provider_response = ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
+
+        # Update per-call accounting (NOT conversation state)
+        self._last_usage = usage
+
+        # Handle structured output
+        if response_schema and not was_cancelled:
+            text = provider_response.get_text()
+            if text:
+                try:
+                    provider_response.structured_output = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+
+        return provider_response
+
     # ==================== Streaming ====================
 
     def send_message_streaming(
