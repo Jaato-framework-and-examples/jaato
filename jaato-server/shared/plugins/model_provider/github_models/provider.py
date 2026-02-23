@@ -1312,7 +1312,17 @@ class GitHubModelsProvider:
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions."""
+        import httpx
         import requests.exceptions
+
+        # Check for httpx transport errors (Copilot client uses httpx).
+        # TransportError covers both NetworkError (ConnectError, ReadError)
+        # and ProtocolError (RemoteProtocolError) — all transient failures.
+        if isinstance(error, httpx.TransportError):
+            raise InfrastructureError(
+                status_code=0,  # No HTTP status for network-level errors
+                original_error=f"{type(error).__name__}: {error}",
+            ) from error
 
         # Check for chunked encoding errors (response ended prematurely)
         # These are transient network errors that should be retriable

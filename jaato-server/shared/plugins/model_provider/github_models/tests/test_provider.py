@@ -418,6 +418,53 @@ class TestErrorHandling:
         assert "my-org" in str(exc_info.value)
 
 
+    @patch('azure.ai.inference.ChatCompletionsClient')
+    def test_handles_httpx_remote_protocol_error(self, mock_client_class):
+        """Should raise InfrastructureError on httpx.RemoteProtocolError.
+
+        The Copilot client uses httpx, so network errors during streaming
+        are httpx exceptions (not requests). These should be classified as
+        InfrastructureError to trigger retry logic.
+        """
+        import httpx
+        from ..errors import InfrastructureError
+
+        mock_client = MagicMock()
+        mock_client.complete.side_effect = httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = GitHubModelsProvider()
+        provider.initialize(ProviderConfig(api_key="ghp_test"))
+        provider.connect('openai/gpt-4o')
+        provider.create_session()
+
+        with pytest.raises(InfrastructureError):
+            provider.send_message("Test")
+
+    @patch('azure.ai.inference.ChatCompletionsClient')
+    def test_handles_httpx_connect_error(self, mock_client_class):
+        """Should raise InfrastructureError on httpx.ConnectError."""
+        import httpx
+        from ..errors import InfrastructureError
+
+        mock_client = MagicMock()
+        mock_client.complete.side_effect = httpx.ConnectError(
+            "Connection refused"
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = GitHubModelsProvider()
+        provider.initialize(ProviderConfig(api_key="ghp_test"))
+        provider.connect('openai/gpt-4o')
+        provider.create_session()
+
+        with pytest.raises(InfrastructureError):
+            provider.send_message("Test")
+
+
 class TestTokenManagement:
     """Tests for token counting and context limits."""
 
