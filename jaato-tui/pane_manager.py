@@ -140,10 +140,9 @@ class PaneManager:
         """
         if self._active_pane_count >= self.MAX_PANES:
             return False
-        # Check width: (count+1) panes + (count) separators, each pane >= MIN_PANE_WIDTH
+        # Check width: each pane needs at least MIN_PANE_WIDTH columns
         new_count = self._active_pane_count + 1
-        separator_width = new_count - 1
-        if (terminal_width - separator_width) // new_count < MIN_PANE_WIDTH:
+        if terminal_width // new_count < MIN_PANE_WIDTH:
             return False
         self._active_pane_count = new_count
         return True

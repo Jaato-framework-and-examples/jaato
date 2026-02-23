@@ -310,6 +310,110 @@ class AgentTabBar:
 
         return tabs
 
+    def render_pane_aligned(
+        self,
+        pane_slots: list,
+        total_width: int,
+    ) -> List[Tuple[str, str]]:
+        """Render the tab bar with agent names aligned to their pane positions.
+
+        In multi-pane mode, each agent's tab is positioned at the left border
+        of the pane it belongs to. Multiple agents in the same pane are shown
+        side by side separated by │.
+
+        Args:
+            pane_slots: List of PaneSlot objects (only active ones).
+            total_width: Total terminal width.
+
+        Returns:
+            List of (style, text) tuples for prompt_toolkit.
+        """
+        agents = self._registry.get_all_agents()
+        selected_id = self._registry.get_selected_agent_id()
+
+        if not agents:
+            return [("class:agent-tab.dim", " No agents ")]
+
+        # Build agent lookup: agent_id -> AgentInfo
+        agent_map = {a.agent_id: a for a in agents}
+
+        # Calculate pane column offsets (equal-width panes, no separators)
+        pane_count = len(pane_slots)
+        pane_width = total_width // pane_count
+
+        result: List[Tuple[str, str]] = []
+        cursor = 0  # Current column position
+
+        for slot_idx, slot in enumerate(pane_slots):
+            pane_left = slot_idx * pane_width
+
+            # Pad to reach this pane's start position
+            if cursor < pane_left:
+                result.append(("", " " * (pane_left - cursor)))
+                cursor = pane_left
+
+            # Render agents in this pane
+            pane_agent_ids = slot.agent_ids if slot.agent_ids else []
+            # Put visible agent first
+            if slot.visible_agent_id and slot.visible_agent_id in pane_agent_ids:
+                ordered = [slot.visible_agent_id] + [
+                    a for a in pane_agent_ids if a != slot.visible_agent_id
+                ]
+            else:
+                ordered = list(pane_agent_ids)
+
+            # Leading space inside pane (align with panel border)
+            result.append(("", " "))
+            cursor += 1
+
+            first_in_pane = True
+            pane_right = pane_left + pane_width
+            for agent_id in ordered:
+                agent = agent_map.get(agent_id)
+                if not agent:
+                    continue
+
+                # Separator between agents in same pane
+                if not first_in_pane:
+                    if cursor + 3 < pane_right:
+                        result.append(("class:agent-tab.separator", " │ "))
+                        cursor += 3
+                    else:
+                        break  # No room for more agents
+                first_in_pane = False
+
+                is_selected = (agent_id == selected_id)
+                symbol = self.get_status_symbol(agent.status)
+                symbol_style = self._get_symbol_color_style(agent.status)
+
+                # Truncate label to fit in remaining pane space
+                max_label = pane_right - cursor - 3  # symbol + space + margin
+                if max_label < 3:
+                    break
+                label = agent_id
+                if len(label) > max_label:
+                    label = label[:max_label - 1] + "…"
+
+                if is_selected:
+                    name_style = "class:agent-tab.selected reverse"
+                    display_label = f" {label} "
+                else:
+                    name_style = "class:agent-tab.dim"
+                    display_label = label
+
+                result.append((symbol_style, symbol))
+                result.append(("", " "))
+                result.append((name_style, display_label))
+
+                symbol_width = 2 if symbol in ("🏁", "💣") else 1
+                cursor += symbol_width + 1 + len(display_label)
+
+        # Fill remaining width
+        if cursor < total_width:
+            result.append(("", " " * (total_width - cursor)))
+
+        return result
+
     def _adjust_scroll_for_selection(
         self,
         tab_entries: List[Tuple[List[Tuple[str, str]], int, int]],
