@@ -39,7 +39,7 @@ class TodoPlugin:
 
     This plugin exposes tools for the LLM to:
     - createPlan: Register a new execution plan with steps
-    - updateStep: Report progress on a specific step
+    - setStepStatus: Report progress on a specific step
     - getPlanStatus: Query current plan state
     - completePlan: Mark a plan as finished
 
@@ -57,7 +57,7 @@ class TodoPlugin:
         self._current_plan_ids: Dict[Optional[str], str] = {}
 
         # Per-plan locks to ensure atomic read-modify-write cycles.
-        # Without this, parallel tool calls (e.g. addDependentStep + updateStep
+        # Without this, parallel tool calls (e.g. addDependentStep + setStepStatus
         # in the same batch) can race on FileStorage where get_plan returns
         # independent deserialized copies — the last save_plan wins, silently
         # discarding the other's changes.
@@ -282,7 +282,7 @@ class TodoPlugin:
             ToolSchema(
                 name="startPlan",
                 description="Step 2: Confirm the plan before beginning execution. "
-                           "This MUST be called after createPlan and BEFORE any updateStep calls. "
+                           "This MUST be called after createPlan and BEFORE any setStepStatus calls. "
                            "If the plan is rejected: call completePlan with status='cancelled', "
                            "do NOT create another plan and retry.",
                 parameters={
@@ -299,7 +299,7 @@ class TodoPlugin:
                 discoverability="core",
             ),
             ToolSchema(
-                name="updateStep",
+                name="setStepStatus",
                 description="Step 3: Update the status of a step. Can only be called AFTER "
                            "startPlan has been called. Use this to report progress as you work.",
                 parameters={
@@ -542,7 +542,7 @@ class TodoPlugin:
                     "    step_id='validation',\n"
                     "    output={passed: false, errors: ['Type error in foo.ts:42']}\n"
                     "  )\n\n"
-                    "Use regular updateStep(status='completed') for steps that don't need "
+                    "Use regular setStepStatus(status='completed') for steps that don't need "
                     "to pass data to other agents."
                 ),
                 parameters={
@@ -655,7 +655,7 @@ class TodoPlugin:
         return {
             "createPlan": self._execute_create_plan,
             "startPlan": self._execute_start_plan,
-            "updateStep": self._execute_update_step,
+            "setStepStatus": self._execute_set_step_status,
             "getPlanStatus": self._execute_get_plan_status,
             "completePlan": self._execute_complete_plan,
             "addStep": self._execute_add_step,
@@ -680,7 +680,7 @@ class TodoPlugin:
             "- For simple single-agent tasks, just do the work directly\n"
             "- When spawning subagents, ALWAYS use plans to coordinate their work\n\n"
             "# PLAN WORKFLOW (Single Agent)\n"
-            "1. createPlan → 2. startPlan → 3. updateStep → 4. completePlan\n\n"
+            "1. createPlan → 2. startPlan → 3. setStepStatus → 4. completePlan\n\n"
             "# CROSS-AGENT COORDINATION (Multi-Agent)\n\n"
             "When delegating work to subagents, use this pattern:\n\n"
             "**Step 1: Subscribe to events BEFORE spawning subagents**\n"
@@ -749,7 +749,7 @@ class TodoPlugin:
             "- NEVER recreate a plan from scratch while one is active. Use addStep instead.\n"
             "- When a step fails and you need a corrective action: mark it failed, then addStep.\n"
             "- When you realize a step is missing: addStep(description, after_step_id?) to insert it.\n"
-            "- When a step is no longer needed: updateStep(step_id, status='skipped').\n"
+            "- When a step is no longer needed: setStepStatus(step_id, status='skipped').\n"
             "- Only use completePlan(status='failed') + createPlan if the entire plan premise was wrong.\n\n"
             "# STEP STATUS RULES\n\n"
             "- 'completed': ONLY if fully accomplished\n"
@@ -759,7 +759,7 @@ class TodoPlugin:
             "- Be honest - failed steps are more valuable than false completions\n\n"
             "# RULES\n\n"
             "- MUST call startPlan after createPlan\n"
-            "- CANNOT updateStep until startPlan has been called\n"
+            "- CANNOT setStepStatus until startPlan has been called\n"
             "- If startPlan is rejected: call completePlan(status='cancelled')\n"
             "- When using completeStepWithOutput, the output is passed to dependent steps"
         )
@@ -775,7 +775,7 @@ class TodoPlugin:
         """
         return [
             # Core plan management (createPlan excluded - user reviews the plan)
-            "updateStep", "getPlanStatus", "completePlan", "addStep", "plan",
+            "setStepStatus", "getPlanStatus", "completePlan", "addStep", "plan",
             # Cross-agent collaboration (read/write plan state, no side effects)
             "subscribeToTasks", "addDependentStep", "completeStepWithOutput",
             "getBlockedSteps", "getTaskEvents", "listSubscriptions", "unsubscribe",
@@ -820,7 +820,7 @@ class TodoPlugin:
                     f"({len(pending)} pending, {len(in_progress)} in progress). "
                     "Do NOT recreate the plan from scratch. Instead:\n"
                     "- Use addStep(description, after_step_id?) to insert new steps\n"
-                    "- Use updateStep(step_id, status='skipped') to skip steps that are no longer needed\n"
+                    "- Use setStepStatus(step_id, status='skipped') to skip steps that are no longer needed\n"
                     "- Use completePlan(status='failed') first if you truly need to abandon the plan"
                 ),
             }
@@ -889,7 +889,7 @@ class TodoPlugin:
             plan = self._storage.get_plan(plan.plan_id) if self._storage else plan
 
             if plan.started:
-                return {"error": "Plan already started. Proceed with updateStep."}
+                return {"error": "Plan already started. Proceed with setStepStatus."}
 
             # Mark plan as started (user approved)
             plan.started = True
@@ -916,13 +916,13 @@ class TodoPlugin:
             ],
         }
 
-    def _execute_update_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the updateStep tool."""
+    def _execute_set_step_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the setStepStatus tool."""
         step_id = args.get("step_id", "")
         status_str = args.get("status", "")
         result = args.get("result")
         error = args.get("error")
-        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._get_agent_name()}")
+        self._trace(f"setStepStatus: step_id={step_id}, status={status_str}, agent_name={self._get_agent_name()}")
 
         if not step_id:
             return {"error": "step_id is required"}
@@ -943,7 +943,7 @@ class TodoPlugin:
             # Enhanced debugging: show what plan IDs exist
             agent_name = self._get_agent_name()
             known_agents = list(self._current_plan_ids.keys())
-            self._trace(f"updateStep ERROR: No plan for agent={agent_name}, known_agents={known_agents}")
+            self._trace(f"setStepStatus ERROR: No plan for agent={agent_name}, known_agents={known_agents}")
             return {"error": f"No active plan. Create a plan first with createPlan. (agent={agent_name})"}
 
         with self._get_plan_lock(plan.plan_id):
@@ -958,7 +958,7 @@ class TodoPlugin:
             if not step:
                 # Enhanced debugging: show what steps exist in the plan
                 existing_step_ids = [s.step_id for s in plan.steps]
-                self._trace(f"updateStep ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
+                self._trace(f"setStepStatus ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
                 return {"error": f"Step not found: {step_id}"}
 
             # Update step status
@@ -1255,14 +1255,14 @@ class TodoPlugin:
 
         return plan
 
-    def update_step(
+    def set_step_status(
         self,
         step_id: str,
         status: StepStatus,
         result: Optional[str] = None,
         error: Optional[str] = None
     ) -> Optional[TodoStep]:
-        """Update a step programmatically.
+        """Set a step's status programmatically.
 
         Args:
             step_id: ID of the step
