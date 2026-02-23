@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPCRecoveryClient - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+          <li><a href="../guides/connection-recovery.html">Connection Recovery</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-recovery-client.html" class="active">IPCRecoveryClient</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="providers/index.html">Overview</a></li>
+          <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="providers/github-models.html">GitHub Models</a></li>
+          <li><a href="providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="providers/antigravity.html">Antigravity</a></li>
+          <li><a href="providers/ollama.html">Ollama</a></li>
+          <li><a href="providers/zhipuai.html">Zhipu AI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="plugins/index.html">Overview</a></li>
+          <li><a href="plugins/cli.html">CLI</a></li>
+          <li><a href="plugins/file-edit.html">File Edit</a></li>
+          <li><a href="plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="plugins/todo.html">Todo</a></li>
+          <li><a href="plugins/web-search.html">Web Search</a></li>
+          <li><a href="plugins/mcp.html">MCP</a></li>
+          <li><a href="plugins/permission.html">Permission</a></li>
+          <li><a href="plugins/session.html">Session</a></li>
+          <li><a href="plugins/gc.html">GC</a></li>
+          <li><a href="plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Header -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>IPCRecoveryClient</h1>
+          <p class="lead">
+            An IPC client with automatic connection recovery. Wraps
+            <code>IPCClient</code> to provide automatic reconnection when the
+            server becomes unavailable, with session reattachment, exponential
+            backoff, and status callbacks for UI updates.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> jaato_sdk.client <span class="token-keyword">import</span> IPCRecoveryClient, ConnectionState<br>
+            <span class="token-keyword">from</span> jaato_sdk.client.config <span class="token-keyword">import</span> RecoveryConfig, get_recovery_config
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Guide</div>
+            For a walkthrough of connection recovery concepts, state transitions,
+            and UI patterns, see the
+            <a href="../guides/connection-recovery.html">Connection Recovery</a> guide.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick example</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk.client import IPCRecoveryClient, ConnectionState
+from jaato_sdk.client.recovery import ConnectionStatus
+
+def on_status(status: ConnectionStatus):
+    if status.state == ConnectionState.RECONNECTING:
+        print(f"Reconnecting... attempt "
+              f"{status.attempt}/{status.max_attempts}")
+
+async def main():
+    client = IPCRecoveryClient(
+        socket_path="/tmp/jaato.sock",
+        on_status_change=on_status,
+    )
+    await client.connect()
+    session_id = await client.create_session("work")
+    client.set_session_id(session_id)
+
+    await client.send_message("Hello!")
+    async for event in client.events():
+        handle_event(event)
+
+    await client.close()
+
+asyncio.run(main())</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Constructor -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="constructor">Constructor</h2>
+
+          <h3>__init__</h3>
+          <div class="method-signature">
+            <span class="method-name">IPCRecoveryClient</span>(<br>
+            &nbsp;&nbsp;<span class="param">socket_path</span>: <span class="type">str</span> = <span class="type">DEFAULT_SOCKET_PATH</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[RecoveryConfig]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">auto_start</span>: <span class="type">bool</span> = <span class="type">True</span>,<br>
+            &nbsp;&nbsp;<span class="param">env_file</span>: <span class="type">str</span> = <span class="type">".env"</span>,<br>
+            &nbsp;&nbsp;<span class="param">workspace_path</span>: <span class="type">Optional[Path]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_status_change</span>: <span class="type">Optional[StatusCallback]</span> = <span class="type">None</span><br>
+            )
+          </div>
+
+          <p>Creates a new recovery client instance.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">socket_path</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Path to Unix domain socket or Windows named pipe.
+                Defaults to <code>DEFAULT_SOCKET_PATH</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">config</span>
+              <span class="param-type">RecoveryConfig</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Recovery configuration controlling reconnection behavior.
+                If <code>None</code>, loads automatically from config files
+                and environment variables via <code>get_recovery_config()</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">auto_start</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Whether to auto-start the server daemon if it is not already
+                running. Default: <code>True</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">env_file</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Path to <code>.env</code> file passed to the auto-started server.
+                Default: <code>".env"</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">workspace_path</span>
+              <span class="param-type">Path</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Workspace path for loading project-level config
+                (<code>.jaato/client.json</code>).
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_status_change</span>
+              <span class="param-type">StatusCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback invoked on every connection state transition.
+                Receives a <a href="#connectionstatus">ConnectionStatus</a> object.
+                Signature: <code>(status: ConnectionStatus) -> None</code>.
+              </div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">IPCRecoveryClient</div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create with defaults (auto-loads config)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.client import IPCRecoveryClient
+
+# Config loaded from ~/.jaato/client.json,
+# .jaato/client.json, and JAATO_IPC_* env vars
+client = IPCRecoveryClient(
+    socket_path="/tmp/jaato.sock",
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Create with explicit config</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.client import IPCRecoveryClient
+from jaato_sdk.client.config import RecoveryConfig
+
+config = RecoveryConfig(
+    max_attempts=5,
+    base_delay=2.0,
+    max_delay=30.0,
+)
+
+client = IPCRecoveryClient(
+    socket_path="/tmp/jaato.sock",
+    config=config,
+    auto_start=False,
+    on_status_change=on_status,
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Connection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="connection">Connection</h2>
+
+          <h3>connect</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">connect</span>(<span class="param">timeout</span>: <span class="type">float</span> = <span class="type">5.0</span>) -> <span class="type">bool</span>
+          </div>
+
+          <p>
+            Connect to the server. If <code>auto_start</code> is enabled
+            and the server is not running, starts it automatically.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">timeout</span>
+              <span class="param-type">float</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Connection timeout in seconds. Default: <code>5.0</code>.</div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">bool &mdash; True if connected successfully.</div>
+          </div>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <code>ConnectionError</code> if connection fails.<br>
+              <code>ConnectionClosedError</code> if the client is already closed.
+            </div>
+          </div>
+
+          <h3>disconnect</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">disconnect</span>() -> <span class="type">None</span>
+          </div>
+          <p>
+            Disconnect gracefully. Cancels any reconnection in progress and
+            transitions to <code>DISCONNECTED</code>. The client can be
+            reconnected later by calling <code>connect()</code> again.
+          </p>
+
+          <h3>close</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">close</span>() -> <span class="type">None</span>
+          </div>
+          <p>
+            Permanently close the connection. Transitions to the terminal
+            <code>CLOSED</code> state &mdash; no further reconnection attempts
+            will be made.
+          </p>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">close() Is Permanent</div>
+            After calling <code>close()</code>, the client cannot be reconnected.
+            Use <code>disconnect()</code> for temporary disconnection.
+          </div>
+
+          <h3 id="is-connected">is_connected <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> when the state is <code>CONNECTED</code>.</p>
+
+          <h3 id="is-reconnecting">is_reconnecting <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> when the state is <code>RECONNECTING</code>.</p>
+
+          <h3 id="is-closed">is_closed <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> when the state is <code>CLOSED</code>.</p>
+
+          <h3 id="state">state <span class="badge badge-property">property</span></h3>
+          <p>Returns the current <a href="#connectionstate">ConnectionState</a>.</p>
+
+          <h3 id="client-id">client_id <span class="badge badge-property">property</span></h3>
+          <p>Returns the client ID assigned by the server, or <code>None</code> if not connected.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Connection lifecycle</div>
+          <div class="code-block">
+            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+
+# Connect (auto-starts server if needed)
+await client.connect(timeout=10.0)
+
+# Check state
+print(client.is_connected)   # True
+print(client.state)           # ConnectionState.CONNECTED
+print(client.client_id)       # "client-abc123"
+
+# ... use client ...
+
+# Temporary disconnect (can reconnect later)
+await client.disconnect()
+print(client.is_connected)    # False
+
+# Reconnect
+await client.connect()
+
+# Permanent close (no more reconnection)
+await client.close()
+print(client.is_closed)       # True</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sessions -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="sessions">Sessions</h2>
+
+          <h3>create_session</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">create_session</span>(<span class="param">name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>) -> <span class="type">Optional[str]</span>
+          </div>
+
+          <p>Create a new session on the server. Automatically tracks the session ID for recovery.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Human-readable name for the session.</div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">str | None &mdash; Session ID if created, None otherwise.</div>
+          </div>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <code>ReconnectingError</code> if currently reconnecting.<br>
+              <code>ConnectionClosedError</code> if connection is closed.
+            </div>
+          </div>
+
+          <h3>attach_session</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">attach_session</span>(<span class="param">session_id</span>: <span class="type">str</span>) -> <span class="type">bool</span>
+          </div>
+
+          <p>Attach to an existing session. Tracks the session ID for recovery.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">session_id</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The session to attach to.</div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">bool &mdash; True if attach command was sent.</div>
+          </div>
+
+          <h3>set_session_id</h3>
+          <div class="method-signature">
+            <span class="method-name">set_session_id</span>(<span class="param">session_id</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Manually set the session ID for reattachment after reconnection.
+            Call this when the session was created or attached through other
+            means (e.g., from a <code>SessionInfoEvent</code>).
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">session_id</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The session ID to track for recovery.</div>
+            </li>
+          </ul>
+
+          <h3 id="session-id">session_id <span class="badge badge-property">property</span></h3>
+          <p>Returns the current session ID, or <code>None</code> if no session is tracked.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Creating and tracking sessions</div>
+          <div class="code-block">
+            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+await client.connect()
+
+# Create a new session (auto-tracked)
+session_id = await client.create_session("my-session")
+print(client.session_id)  # "session-abc123"
+
+# Or attach to existing session (auto-tracked)
+await client.attach_session("session-xyz789")
+print(client.session_id)  # "session-xyz789"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Manual session tracking</div>
+          <div class="code-block">
+            <pre><code class="language-python"># If you get the session ID from an event
+# instead of create_session/attach_session:
+from jaato_sdk.events import SessionInfoEvent
+
+async for event in client.events():
+    if isinstance(event, SessionInfoEvent):
+        client.set_session_id(event.session_id)
+        # Now recovery will reattach to this session</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Messaging -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="messaging">Messaging</h2>
+
+          <h3>send_message</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">send_message</span>(<br>
+            &nbsp;&nbsp;<span class="param">text</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>Send a message to the model via the server.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">text</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The message text.</div>
+            </li>
+            <li>
+              <span class="param-name">attachments</span>
+              <span class="param-type">list</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">File attachments to include with the message.</div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <code>ReconnectingError</code> if currently reconnecting.<br>
+              <code>ConnectionClosedError</code> if connection is closed.
+            </div>
+          </div>
+
+          <h3>events</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">events</span>() -> <span class="type">AsyncIterator[Event]</span>
+          </div>
+
+          <p>
+            Async iterator that yields events from the server. Automatically
+            handles reconnection &mdash; if the connection is lost and recovery
+            is enabled, the iterator waits for reconnection and then resumes
+            yielding events from the new connection.
+          </p>
+
+          <div class="returns">
+            <div class="returns-label">Yields</div>
+            <div class="returns-type">Event &mdash; Events from the server (AgentOutputEvent, PermissionRequestedEvent, etc.)</div>
+          </div>
+
+          <h3>stop</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">stop</span>() -> <span class="type">None</span>
+          </div>
+          <p>
+            Stop the current operation. Only effective when connected.
+            Does not raise during reconnection.
+          </p>
+
+          <h3>execute_command</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">execute_command</span>(<br>
+            &nbsp;&nbsp;<span class="param">command</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">args</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Execute a server-side command.</p>
+
+          <h3>respond_to_permission</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">respond_to_permission</span>(<br>
+            &nbsp;&nbsp;<span class="param">request_id</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">response</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">edited_arguments</span>: <span class="type">Optional[Dict[str, Any]]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Respond to a permission request from the server.</p>
+
+          <h3>respond_to_clarification</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">respond_to_clarification</span>(<br>
+            &nbsp;&nbsp;<span class="param">request_id</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">response</span>: <span class="type">str</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Respond to a clarification question from the model.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Sending messages and receiving events</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.events import (
+    AgentOutputEvent,
+    PermissionRequestedEvent,
+)
+
+await client.send_message("List files in /tmp")
+
+async for event in client.events():
+    if isinstance(event, AgentOutputEvent):
+        print(event.text, end="")
+
+    elif isinstance(event, PermissionRequestedEvent):
+        await client.respond_to_permission(
+            event.request_id,
+            "y",  # approve
+        )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Handling reconnection in the event loop</div>
+          <div class="code-block">
+            <pre><code class="language-python"># events() handles reconnection automatically.
+# No special try/except needed — the iterator
+# waits during RECONNECTING and resumes when
+# the connection is restored.
+
+async for event in client.events():
+    handle_event(event)
+    # If server restarts, events() reconnects
+    # and resumes yielding from the new connection.</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Queue-and-retry pattern for send</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.client.recovery import (
+    ReconnectingError,
+    ConnectionClosedError,
+)
+
+async def send_with_retry(client, message):
+    while True:
+        try:
+            await client.send_message(message)
+            return
+        except ReconnectingError:
+            # Wait for reconnection, then retry
+            while client.is_reconnecting:
+                await asyncio.sleep(0.5)
+            if client.is_closed:
+                raise ConnectionClosedError()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Status -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="status">Status</h2>
+
+          <h3>get_status</h3>
+          <div class="method-signature">
+            <span class="method-name">get_status</span>() -> <span class="type"><a href="#connectionstatus">ConnectionStatus</a></span>
+          </div>
+
+          <p>
+            Get current connection status. Returns a snapshot of the connection
+            state, reconnection progress, and session info.
+          </p>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">ConnectionStatus &mdash; Current state and recovery details.</div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Polling status</div>
+          <div class="code-block">
+            <pre><code class="language-python">status = client.get_status()
+
+print(f"State: {status.state.value}")
+print(f"Session: {status.session_id}")
+print(f"Client: {status.client_id}")
+
+if status.state == ConnectionState.RECONNECTING:
+    print(f"Attempt: {status.attempt}/{status.max_attempts}")
+    if status.next_retry_in is not None:
+        print(f"Next retry in: {status.next_retry_in:.1f}s")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3 id="recoveryconfig">RecoveryConfig</h3>
+          <div class="method-signature">
+            <span class="token-keyword">@dataclass</span><br>
+            <span class="method-name">RecoveryConfig</span>
+          </div>
+
+          <p>
+            Controls reconnection behavior. Uses exponential backoff with jitter
+            for retry delays.
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>enabled</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code></td>
+                <td>Whether automatic reconnection is enabled</td>
+              </tr>
+              <tr>
+                <td><code>max_attempts</code></td>
+                <td><code>int</code></td>
+                <td><code>10</code></td>
+                <td>Maximum reconnection attempts before giving up (min: 1)</td>
+              </tr>
+              <tr>
+                <td><code>base_delay</code></td>
+                <td><code>float</code></td>
+                <td><code>1.0</code></td>
+                <td>Initial backoff delay in seconds (min: 0.1)</td>
+              </tr>
+              <tr>
+                <td><code>max_delay</code></td>
+                <td><code>float</code></td>
+                <td><code>60.0</code></td>
+                <td>Maximum backoff delay cap in seconds (must be &ge; base_delay)</td>
+              </tr>
+              <tr>
+                <td><code>jitter_factor</code></td>
+                <td><code>float</code></td>
+                <td><code>0.3</code></td>
+                <td>Random jitter range, 0.0&ndash;1.0 (0.3 = &plusmn;30%)</td>
+              </tr>
+              <tr>
+                <td><code>connection_timeout</code></td>
+                <td><code>float</code></td>
+                <td><code>5.0</code></td>
+                <td>Timeout per connection attempt in seconds (min: 1.0)</td>
+              </tr>
+              <tr>
+                <td><code>reattach_session</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code></td>
+                <td>Automatically reattach to previous session after reconnecting</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>get_recovery_config</h3>
+          <div class="method-signature">
+            <span class="method-name">get_recovery_config</span>(<span class="param">workspace_path</span>: <span class="type">Optional[Path]</span> = <span class="type">None</span>) -> <span class="type">RecoveryConfig</span>
+          </div>
+
+          <p>
+            Load recovery config with layered precedence: built-in defaults
+            &rarr; user config (<code>~/.jaato/client.json</code>)
+            &rarr; project config (<code>.jaato/client.json</code>)
+            &rarr; environment variables (highest).
+          </p>
+
+          <h3>load_client_config</h3>
+          <div class="method-signature">
+            <span class="method-name">load_client_config</span>(<span class="param">workspace_path</span>: <span class="type">Optional[Path]</span> = <span class="type">None</span>) -> <span class="type">ClientConfig</span>
+          </div>
+
+          <p>
+            Load the full client configuration. Returns a <code>ClientConfig</code>
+            object containing the <code>recovery</code> section and any future
+            configuration sections.
+          </p>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Config Field</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_IPC_AUTO_RECONNECT</code></td>
+                <td><code>enabled</code></td>
+                <td><code>true</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_RETRY_MAX_ATTEMPTS</code></td>
+                <td><code>max_attempts</code></td>
+                <td><code>10</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_RETRY_BASE_DELAY</code></td>
+                <td><code>base_delay</code></td>
+                <td><code>1.0</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_RETRY_MAX_DELAY</code></td>
+                <td><code>max_delay</code></td>
+                <td><code>60.0</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_RETRY_JITTER</code></td>
+                <td><code>jitter_factor</code></td>
+                <td><code>0.3</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_CONNECTION_TIMEOUT</code></td>
+                <td><code>connection_timeout</code></td>
+                <td><code>5.0</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_IPC_REATTACH_SESSION</code></td>
+                <td><code>reattach_session</code></td>
+                <td><code>true</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">RecoveryConfig</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.client.config import RecoveryConfig
+
+# Custom config
+config = RecoveryConfig(
+    enabled=True,
+    max_attempts=5,
+    base_delay=2.0,
+    max_delay=30.0,
+    jitter_factor=0.2,
+    connection_timeout=10.0,
+    reattach_session=True,
+)
+
+client = IPCRecoveryClient(
+    socket_path="/tmp/jaato.sock",
+    config=config,
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Load from config files</div>
+          <div class="code-block">
+            <pre><code class="language-python">from pathlib import Path
+from jaato_sdk.client.config import (
+    get_recovery_config,
+    load_client_config,
+)
+
+# Load just recovery config
+config = get_recovery_config(
+    workspace_path=Path.cwd()
+)
+
+# Or load full client config
+full_config = load_client_config(
+    workspace_path=Path.cwd()
+)
+config = full_config.recovery</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.jaato/client.json</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "recovery": {
+    "enabled": true,
+    "max_attempts": 10,
+    "base_delay": 1.0,
+    "max_delay": 60.0,
+    "jitter_factor": 0.3,
+    "connection_timeout": 5.0,
+    "reattach_session": true
+  }
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Environment variable overrides</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Override via environment (highest precedence)
+export JAATO_IPC_AUTO_RECONNECT=true
+export JAATO_IPC_RETRY_MAX_ATTEMPTS=20
+export JAATO_IPC_RETRY_BASE_DELAY=0.5
+export JAATO_IPC_CONNECTION_TIMEOUT=10.0</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Types -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="types">Types</h2>
+
+          <h3 id="connectionstate">ConnectionState</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">ConnectionState</span>(Enum)
+          </div>
+
+          <p>Connection state enum. String values match the state names in lowercase.</p>
+
+          <table>
+            <thead>
+              <tr><th>Member</th><th>Value</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>DISCONNECTED</code></td>
+                <td><code>"disconnected"</code></td>
+                <td>Not connected, no reconnection in progress</td>
+              </tr>
+              <tr>
+                <td><code>CONNECTING</code></td>
+                <td><code>"connecting"</code></td>
+                <td>Initial connection or retry attempt in progress</td>
+              </tr>
+              <tr>
+                <td><code>CONNECTED</code></td>
+                <td><code>"connected"</code></td>
+                <td>Successfully connected to server</td>
+              </tr>
+              <tr>
+                <td><code>RECONNECTING</code></td>
+                <td><code>"reconnecting"</code></td>
+                <td>Connection lost, waiting for next retry</td>
+              </tr>
+              <tr>
+                <td><code>DISCONNECTING</code></td>
+                <td><code>"disconnecting"</code></td>
+                <td>Graceful disconnect initiated</td>
+              </tr>
+              <tr>
+                <td><code>CLOSED</code></td>
+                <td><code>"closed"</code></td>
+                <td>Terminal state, no more reconnection attempts</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3 id="connectionstatus">ConnectionStatus</h3>
+          <div class="method-signature">
+            <span class="token-keyword">@dataclass</span><br>
+            <span class="method-name">ConnectionStatus</span>
+          </div>
+
+          <p>Snapshot of connection state for UI display. Passed to the <code>on_status_change</code> callback.</p>
+
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>state</code></td>
+                <td><code>ConnectionState</code></td>
+                <td>Current connection state</td>
+              </tr>
+              <tr>
+                <td><code>attempt</code></td>
+                <td><code>int</code></td>
+                <td>Current reconnection attempt (0 if not reconnecting)</td>
+              </tr>
+              <tr>
+                <td><code>max_attempts</code></td>
+                <td><code>int</code></td>
+                <td>Maximum reconnection attempts configured</td>
+              </tr>
+              <tr>
+                <td><code>next_retry_in</code></td>
+                <td><code>float | None</code></td>
+                <td>Seconds until next retry (None if not waiting)</td>
+              </tr>
+              <tr>
+                <td><code>last_error</code></td>
+                <td><code>str | None</code></td>
+                <td>Description of the last error encountered</td>
+              </tr>
+              <tr>
+                <td><code>session_id</code></td>
+                <td><code>str | None</code></td>
+                <td>ID of the attached session</td>
+              </tr>
+              <tr>
+                <td><code>client_id</code></td>
+                <td><code>str | None</code></td>
+                <td>ID assigned by server</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3 id="statuscallback">StatusCallback</h3>
+          <div class="method-signature">
+            StatusCallback = <span class="type">Callable[[ConnectionStatus], None]</span>
+          </div>
+          <p>Type alias for the status change callback function.</p>
+
+          <h3 id="reconnectingerror">ReconnectingError</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">ReconnectingError</span>(Exception)
+          </div>
+          <p>
+            Raised when an operation (e.g., <code>send_message</code>) is attempted
+            while the client is reconnecting. Catch this to queue messages for retry.
+          </p>
+
+          <h3 id="connectionclosederror">ConnectionClosedError</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">ConnectionClosedError</span>(Exception)
+          </div>
+          <p>
+            Raised when an operation is attempted after the connection has been
+            permanently closed via <code>close()</code> or after max reconnection
+            attempts are exhausted.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Import paths</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Main client and state enum
+from jaato_sdk.client import (
+    IPCRecoveryClient,
+    ConnectionState,
+)
+
+# Recovery-specific types
+from jaato_sdk.client.recovery import (
+    ConnectionStatus,
+    StatusCallback,
+    ReconnectingError,
+    ConnectionClosedError,
+)
+
+# Configuration
+from jaato_sdk.client.config import (
+    RecoveryConfig,
+    ClientConfig,
+    get_recovery_config,
+    load_client_config,
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Exception handling</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.client.recovery import (
+    ReconnectingError,
+    ConnectionClosedError,
+)
+
+try:
+    await client.send_message("Hello!")
+except ReconnectingError:
+    # Queue the message, retry after reconnect
+    message_queue.append("Hello!")
+except ConnectionClosedError:
+    # Connection is permanently closed
+    print("Connection lost. Please restart.")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
