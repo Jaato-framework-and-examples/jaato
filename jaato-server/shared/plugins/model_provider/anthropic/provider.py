@@ -1408,12 +1408,10 @@ class AnthropicProvider:
                                 finish_reason = FinishReason.STOP
                         if "usage" in delta_info:
                             delta_usage = delta_info["usage"]
-                            # Combine with existing input tokens
-                            usage = TokenUsage(
-                                prompt_tokens=usage.prompt_tokens,
-                                output_tokens=delta_usage.output_tokens,
-                                total_tokens=usage.prompt_tokens + delta_usage.output_tokens,
-                            )
+                            # Update output tokens; preserve all fields set by message_start
+                            # (cache_read_tokens, cache_creation_tokens, thinking_tokens, etc.)
+                            usage.output_tokens = delta_usage.output_tokens
+                            usage.total_tokens = usage.prompt_tokens + delta_usage.output_tokens
                             self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                             if on_usage_update and usage.total_tokens > 0:
                                 on_usage_update(usage)
