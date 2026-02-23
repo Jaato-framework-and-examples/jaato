@@ -179,6 +179,11 @@ DEFAULT_KEYBINDINGS = {
     "search_next": "enter",   # Next search match (when in search mode)
     "search_prev": "c-p",     # Previous search match (when in search mode)
     "search_close": "escape", # Close search mode
+
+    # Split panes
+    "split_pane": ["escape", "s"],   # Add vertical pane to the right
+    "join_pane": ["escape", "j"],    # Remove rightmost pane
+    "move_agent": ["escape", "m"],   # Move current agent to next pane
 }
 
 
@@ -367,6 +372,11 @@ class KeybindingConfig:
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
     permission_prev: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_prev"])
+
+    # Split panes
+    split_pane: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["split_pane"].copy() if isinstance(DEFAULT_KEYBINDINGS["split_pane"], list) else DEFAULT_KEYBINDINGS["split_pane"])
+    join_pane: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["join_pane"].copy() if isinstance(DEFAULT_KEYBINDINGS["join_pane"], list) else DEFAULT_KEYBINDINGS["join_pane"])
+    move_agent: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["move_agent"].copy() if isinstance(DEFAULT_KEYBINDINGS["move_agent"], list) else DEFAULT_KEYBINDINGS["move_agent"])
 
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
@@ -563,6 +573,9 @@ class KeybindingConfig:
             "toggle_workspace": self.toggle_workspace,
             "workspace_open_file": self.workspace_open_file,
             "workspace_clear": self.workspace_clear,
+            "split_pane": self.split_pane,
+            "join_pane": self.join_pane,
+            "move_agent": self.move_agent,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
