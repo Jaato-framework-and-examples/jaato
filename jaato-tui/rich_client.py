@@ -4910,9 +4910,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         model_running = True
                         display.add_to_history(text)
 
+                        # Expand @file and %prompt references (client-side)
+                        message_text = input_handler.expand_file_references(parsed.text)
+                        message_text = input_handler.expand_prompt_references(message_text)
+
                         # Inject any pending system hints (hidden from display)
                         pending_hints = _pop_ipc_system_hints(display)
-                        message_text = parsed.text
                         if pending_hints:
                             hints_text = "\n".join(pending_hints)
                             message_text = f"{hints_text}\n\n{message_text}"
