@@ -258,7 +258,7 @@ class TestLoadPrerequisitePolicies:
                 {
                     "policy_id": "plan_before_update",
                     "prerequisite_tool": "createPlan",
-                    "gated_tools": ["updateStep"],
+                    "gated_tools": ["setStepStatus"],
                     "lookback_turns": 5,
                 }
             ]
@@ -271,7 +271,7 @@ class TestLoadPrerequisitePolicies:
         policy = policies[0]
         assert policy.policy_id == "plan_before_update"
         assert policy.prerequisite_tool == "createPlan"
-        assert policy.gated_tools == {"updateStep"}
+        assert policy.gated_tools == {"setStepStatus"}
         assert policy.lookback_turns == 5
         assert policy.owner_plugin == "policy_config"
 
@@ -636,7 +636,7 @@ class TestGenerateDefaultConfig:
         assert len(policies) == 1
         assert policies[0]["policy_id"] == "example_plan_before_update"
         assert policies[0]["prerequisite_tool"] == "createPlan"
-        assert "updateStep" in policies[0]["gated_tools"]
+        assert "setStepStatus" in policies[0]["gated_tools"]
 
     def test_roundtrip_parse(self):
         """Generated default config parses without warnings."""
@@ -833,7 +833,7 @@ class TestPoliciesCommand:
                 {
                     "policy_id": "plan_check",
                     "prerequisite_tool": "createPlan",
-                    "gated_tools": ["updateStep"],
+                    "gated_tools": ["setStepStatus"],
                     "lookback_turns": 5,
                 }
             ]
@@ -847,7 +847,7 @@ class TestPoliciesCommand:
         assert "Loaded policies: 1" in result
         assert "plan_check" in result
         assert "createPlan" in result
-        assert "updateStep" in result
+        assert "setStepStatus" in result
 
     def test_policies_reload(self, tmp_path):
         """Reload command reloads policies from config file."""
@@ -1020,7 +1020,7 @@ class TestSeverityThresholdsDetectorIntegration:
                 {
                     "policy_id": "immediate_block",
                     "prerequisite_tool": "createPlan",
-                    "gated_tools": ["updateStep"],
+                    "gated_tools": ["setStepStatus"],
                     "severity_thresholds": {
                         "minor": 0,
                         "moderate": 0,
@@ -1037,9 +1037,9 @@ class TestSeverityThresholdsDetectorIntegration:
         plugin.set_pattern_hook(lambda p: detected.append(p))
         plugin.set_workspace_path(str(tmp_path))
 
-        # First call to updateStep without createPlan
+        # First call to setStepStatus without createPlan
         plugin.on_turn_start(1)
-        plugin.on_tool_called("updateStep", {})
+        plugin.on_tool_called("setStepStatus", {})
 
         assert len(detected) == 1
         # Because all thresholds are 0, the very first violation is SEVERE
@@ -1056,7 +1056,7 @@ class TestSeverityThresholdsDetectorIntegration:
                 {
                     "policy_id": "lenient",
                     "prerequisite_tool": "createPlan",
-                    "gated_tools": ["updateStep"],
+                    "gated_tools": ["setStepStatus"],
                     "severity_thresholds": {
                         "minor": 0,
                         "moderate": 5,
@@ -1076,7 +1076,7 @@ class TestSeverityThresholdsDetectorIntegration:
         # Simulate multiple violations across turns
         for turn in range(1, 5):
             plugin.on_turn_start(turn)
-            plugin.on_tool_called("updateStep", {})
+            plugin.on_tool_called("setStepStatus", {})
 
         # All 4 violations should be MINOR (threshold for moderate is 5)
         assert len(detected) == 4

@@ -814,7 +814,7 @@ class SubagentPlugin:
             "4. Spawn the subagent with clear instructions to use TODO tools\n\n"
             "CHILD WORKFLOW (in subagent):\n"
             "1. Create its own plan with createPlan for its subtask\n"
-            "2. Execute work and report progress with updateStep\n"
+            "2. Execute work and report progress with setStepStatus\n"
             "3. If you need additional context, ASK the parent - they see your output and can\n"
             "   respond via send_to_subagent with the information you need\n"
             "4. Complete with completePlan - this triggers events to parent\n\n"

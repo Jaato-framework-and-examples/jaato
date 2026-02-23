@@ -58,8 +58,8 @@ class TestPlanLockingConcurrency:
     def teardown_method(self):
         TaskEventBus.reset()
 
-    def test_concurrent_add_step_and_update_step_with_file_storage(self):
-        """Regression: parallel addDependentStep + updateStep should not lose the added step.
+    def test_concurrent_add_step_and_set_step_status_with_file_storage(self):
+        """Regression: parallel addDependentStep + setStepStatus should not lose the added step.
 
         With FileStorage, each get_plan returns a new deserialized object.
         Without locking, the last save_plan wins and the other's changes are lost.
@@ -85,21 +85,21 @@ class TestPlanLockingConcurrency:
                 except Exception as e:
                     errors.append(f"addStep exception: {e}")
 
-            def update_step_thread():
+            def set_step_status_thread():
                 try:
                     barrier.wait(timeout=5)
-                    result = plugin._execute_update_step({
+                    result = plugin._execute_set_step_status({
                         "step_id": step_ids[0],
                         "status": "completed",
                         "result": "done",
                     })
                     if result.get("error"):
-                        errors.append(f"updateStep error: {result['error']}")
+                        errors.append(f"setStepStatus error: {result['error']}")
                 except Exception as e:
-                    errors.append(f"updateStep exception: {e}")
+                    errors.append(f"setStepStatus exception: {e}")
 
             t1 = threading.Thread(target=add_step_thread)
-            t2 = threading.Thread(target=update_step_thread)
+            t2 = threading.Thread(target=set_step_status_thread)
             t1.start()
             t2.start()
             t1.join(timeout=10)
@@ -115,8 +115,8 @@ class TestPlanLockingConcurrency:
             completed = [s for s in final_plan.steps if s.status == StepStatus.COMPLETED]
             assert len(completed) == 1, f"Expected 1 completed step, got {len(completed)}"
 
-    def test_concurrent_update_steps_with_file_storage(self):
-        """Two concurrent updateStep calls should both persist."""
+    def test_concurrent_set_step_status_with_file_storage(self):
+        """Two concurrent setStepStatus calls should both persist."""
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin = _make_plugin("file", f"{tmpdir}/plans")
 
@@ -130,15 +130,15 @@ class TestPlanLockingConcurrency:
             def complete_step(idx):
                 try:
                     barrier.wait(timeout=5)
-                    result = plugin._execute_update_step({
+                    result = plugin._execute_set_step_status({
                         "step_id": step_ids[idx],
                         "status": "completed",
                         "result": f"done-{idx}",
                     })
                     if result.get("error"):
-                        errors.append(f"updateStep[{idx}] error: {result['error']}")
+                        errors.append(f"setStepStatus[{idx}] error: {result['error']}")
                 except Exception as e:
-                    errors.append(f"updateStep[{idx}] exception: {e}")
+                    errors.append(f"setStepStatus[{idx}] exception: {e}")
 
             t1 = threading.Thread(target=complete_step, args=(0,))
             t2 = threading.Thread(target=complete_step, args=(1,))
@@ -407,7 +407,7 @@ class TestAddDependentStepVisibility:
             target_step_id = step_ids[5]  # "Step 6" — will get the dependency
 
             # Mark step 1 as in_progress
-            plugin._execute_update_step({
+            plugin._execute_set_step_status({
                 "step_id": step_ids[0], "status": "in_progress"
             })
 
@@ -429,15 +429,15 @@ class TestAddDependentStepVisibility:
             def complete_step():
                 try:
                     barrier.wait(timeout=5)
-                    result = plugin._execute_update_step({
+                    result = plugin._execute_set_step_status({
                         "step_id": step_ids[0],
                         "status": "completed",
                         "result": "done",
                     })
                     if result.get("error"):
-                        errors.append(f"updateStep: {result['error']}")
+                        errors.append(f"setStepStatus: {result['error']}")
                 except Exception as e:
-                    errors.append(f"updateStep: {e}")
+                    errors.append(f"setStepStatus: {e}")
 
             t1 = threading.Thread(target=add_dependent)
             t2 = threading.Thread(target=complete_step)

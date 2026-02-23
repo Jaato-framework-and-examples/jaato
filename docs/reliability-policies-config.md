@@ -291,7 +291,7 @@ A realistic config combining pattern detection tuning with multiple prerequisite
     {
       "policy_id": "plan_before_update",
       "prerequisite_tool": "createPlan",
-      "gated_tools": ["updateStep", "completeStep"],
+      "gated_tools": ["setStepStatus", "completeStep"],
       "lookback_turns": 8,
       "severity_thresholds": {
         "minor": 0,
