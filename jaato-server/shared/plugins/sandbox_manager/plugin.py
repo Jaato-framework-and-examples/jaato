@@ -746,10 +746,18 @@ class SandboxManagerPlugin:
             path = parts[1] if len(parts) > 1 else ""
             if not path:
                 return {"error": "Usage: sandbox add <readonly|readwrite> <path>"}
+            # Strip surrounding shell-style quotes (model often wraps paths
+            # in quotes like 'C:\Users\...' or "C:\Users\..." which arrive
+            # as literal characters via capture_rest and break os.path.isabs)
+            if len(path) >= 2 and path[0] in ("'", '"') and path[-1] == path[0]:
+                path = path[1:-1]
             return self._cmd_add(path, access=access)
         elif subcommand == "remove":
             if not path:
                 return {"error": "Path is required for 'sandbox remove'"}
+            # Strip surrounding shell-style quotes (same as add above)
+            if len(path) >= 2 and path[0] in ("'", '"') and path[-1] == path[0]:
+                path = path[1:-1]
             return self._cmd_remove(path)
         elif subcommand == "help":
             return self._cmd_help()
