@@ -70,6 +70,21 @@ SHELL_METACHAR_PATTERN = re.compile(
     r'|&\s*$'          # Background execution (& at end)
 )
 
+# Commands whose path arguments are write targets.
+# For commands with mixed semantics (cp, mv, install), the *last* path argument
+# is treated as write; earlier ones are read.  For single-target commands (rm,
+# touch, mkdir, etc.) all path arguments are write targets.
+_WRITE_ALL_CMDS = frozenset({
+    'rm', 'rmdir', 'touch', 'mkdir', 'mkfifo', 'mknod',
+    'truncate', 'shred',
+})
+_WRITE_LAST_CMDS = frozenset({
+    'cp', 'mv', 'install', 'rsync', 'scp',
+})
+_WRITE_OUTPUT_CMDS = frozenset({
+    'tee',
+})
+
 
 class CLIToolPlugin(BackgroundCapableMixin):
     """Plugin that provides CLI command execution capability.
@@ -727,9 +742,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Args:
             path: The path to check.
             mode: Access mode - "read" or "write" (default: "write").
-                 CLI defaults to "write" since commands can both read and
-                 write. This requires "readwrite" authorized paths; "readonly"
-                 paths are not accessible via CLI (use readFile/glob/grep).
+                 Callers should pass the mode inferred from the path's role
+                 in the command. _classify_path_modes() determines this
+                 automatically for _validate_command_paths().
 
         Returns:
             True if the path is allowed, False otherwise.
@@ -765,6 +780,76 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # If path resolution fails, treat as outside workspace for safety
             return False
 
+    def _classify_path_modes(
+        self,
+        command: str,
+        arg_list: Optional[List[str]] = None,
+    ) -> List[tuple]:
+        """Classify each path token in a command as "read" or "write".
+
+        Heuristics (in order of priority):
+        1. Paths after shell redirections (>, >>) are "write".
+        2. All path args of commands in _WRITE_ALL_CMDS are "write".
+        3. The last path arg of commands in _WRITE_LAST_CMDS is "write".
+        4. All path args of commands in _WRITE_OUTPUT_CMDS are "write".
+        5. Everything else defaults to "read".
+
+        Args:
+            command: The shell command string.
+            arg_list: Optional separate argument list.
+
+        Returns:
+            List of (path, mode) tuples where mode is "read" or "write".
+        """
+        # Detect redirect targets first (before shlex parsing).
+        redirect_targets: set = set()
+        for m in re.finditer(r'>{1,2}\s*(\S+)', command):
+            redirect_targets.add(m.group(1))
+
+        # Parse into tokens for command-level analysis.
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+
+        # Determine the base command name.
+        cmd_name = ''
+        if tokens:
+            cmd_name = os.path.basename(tokens[0])
+
+        # Collect all path tokens (same logic as _extract_path_tokens).
+        path_tokens = self._extract_path_tokens(command)
+
+        # Also include explicit arg_list paths.
+        if arg_list:
+            for arg in arg_list:
+                if (arg.startswith('/') or '..' in arg or
+                        arg.startswith('./') or arg.startswith('~')):
+                    if arg not in path_tokens:
+                        path_tokens.append(arg)
+
+        if not path_tokens:
+            return []
+
+        # Classify each path.
+        result = []
+        for path in path_tokens:
+            if path in redirect_targets:
+                result.append((path, 'write'))
+            elif cmd_name in _WRITE_ALL_CMDS:
+                result.append((path, 'write'))
+            elif cmd_name in _WRITE_OUTPUT_CMDS:
+                result.append((path, 'write'))
+            else:
+                result.append((path, 'read'))
+
+        # For _WRITE_LAST_CMDS, upgrade the last path to write.
+        if cmd_name in _WRITE_LAST_CMDS and result:
+            last_path, _ = result[-1]
+            result[-1] = (last_path, 'write')
+
+        return result
+
     def _validate_command_paths(
         self,
         command: str,
@@ -772,37 +857,30 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     ) -> Optional[str]:
         """Validate that all paths in a command are within workspace_root.
 
-        If any path is outside the workspace, returns a fake "not found" error
-        message. The model sees this as if the path simply doesn't exist.
+        Each path is checked with its inferred access mode: paths in write
+        positions (redirections, write commands) require "readwrite"
+        authorization; all other paths only require "read" access.
+
+        If any path is outside the workspace, returns the blocked path for
+        a fake "not found" error. The model sees this as if the path doesn't
+        exist.
 
         Args:
             command: The command string.
             arg_list: Optional separate argument list.
 
         Returns:
-            None if all paths are valid, or an error message if any path
-            is outside workspace_root.
+            None if all paths are valid, or the first blocked path string.
         """
         if not self._workspace_root:
             # No sandboxing configured
             return None
 
-        # Collect paths from command string
-        paths_to_check = self._extract_path_tokens(command)
+        classified = self._classify_path_modes(command, arg_list)
 
-        # Also check explicit arg_list if provided
-        if arg_list:
-            for arg in arg_list:
-                if (arg.startswith('/') or '..' in arg or
-                        arg.startswith('./') or arg.startswith('~')):
-                    paths_to_check.append(arg)
-
-        # Validate each path
-        for path in paths_to_check:
-            if not self._is_path_within_workspace(path):
-                self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace)")
-                # Return a natural-looking error as if the path doesn't exist
-                # Use the first blocked path in the error message
+        for path, mode in classified:
+            if not self._is_path_within_workspace(path, mode=mode):
+                self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace, mode={mode})")
                 return path
 
         return None
