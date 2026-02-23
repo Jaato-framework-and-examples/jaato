@@ -1466,8 +1466,7 @@ class PTDisplay:
     def _sync_multi_pane(self):
         """Sync output for multi-pane mode, rendering each pane at its width."""
         active_count = self._pane_manager.active_pane_count
-        separator_width = active_count - 1
-        pane_width = max(MIN_PANE_WIDTH, (self._width - separator_width) // active_count)
+        pane_width = max(MIN_PANE_WIDTH, self._width // active_count)
 
         # Calculate available height (shared across panes)
         input_height = self._get_input_height()
@@ -1557,7 +1556,12 @@ class PTDisplay:
         return self._output_line_fragments.get(lineno)
 
     def _get_agent_tab_bar_content(self):
-        """Get agent tab bar content as prompt_toolkit formatted text."""
+        """Get agent tab bar content as prompt_toolkit formatted text.
+
+        In multi-pane mode, renders agent names aligned to the left border of
+        their respective pane. In single-pane mode, uses the standard linear
+        tab layout.
+        """
         if not self._agent_tab_bar:
             return []
 
@@ -1565,6 +1569,11 @@ class PTDisplay:
         if self._agent_tab_bar.check_popup_timeout():
             pass  # Popup was hidden, will render without it
 
+        if self._pane_manager.active_pane_count > 1:
+            return self._agent_tab_bar.render_pane_aligned(
+                self._pane_manager.get_active_slots(),
+                self._width,
+            )
         return self._agent_tab_bar.render()
 
     def _get_agent_popup_content(self):
@@ -2455,16 +2464,8 @@ class PTDisplay:
             active = self._pane_manager.get_active_slots()
             if len(active) == 1:
                 return active[0].window
-            children = []
-            for j, slot in enumerate(active):
-                if j > 0:
-                    focused = self._pane_manager.focused_pane
-                    is_adj = (slot.pane_index == focused or
-                              active[j - 1].pane_index == focused)
-                    style = "class:pane-separator.focused" if is_adj else "class:pane-separator"
-                    children.append(Window(width=1, char='│', style=style))
-                children.append(slot.window)
-            return VSplit(children)
+            # No separator needed — each pane's Rich Panel already draws its own border
+            return VSplit([slot.window for slot in active])
 
         output_area = DynamicContainer(get_output_container)
         # Wrap in a Window-like container with height control
