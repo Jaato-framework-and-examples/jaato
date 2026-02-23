@@ -4836,6 +4836,26 @@ NOTES
         else:
             result_dict = {"result": result_data}
 
+        # Strip internal metadata keys (prefixed with '_') before sending
+        # to the model.  These carry scaffolding like _permission, _multimodal
+        # flags, etc. that are not meaningful to the model.
+        result_dict = {
+            k: v for k, v in result_dict.items()
+            if not k.startswith('_')
+        }
+
+        # For error results, extract a clean error string so provider
+        # converters don't double-wrap a dict inside {"error": str(dict)}.
+        # This ensures the model receives a readable message (e.g.,
+        # "Tool not executed. User comment: ...") rather than a repr of
+        # internal scaffolding.
+        if not ok and 'error' in result_dict:
+            error_msg = result_dict['error']
+            # If 'error' is the only remaining key, pass the string directly
+            # so converters don't JSON-encode a single-key dict.
+            if len(result_dict) == 1:
+                result_dict = error_msg
+
         # Run tool result enrichment (e.g., template extraction)
         if ok and self._runtime.registry:
             result_dict = self._enrich_tool_result_dict(fc.name, result_dict)
