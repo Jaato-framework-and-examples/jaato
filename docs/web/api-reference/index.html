@@ -61,6 +61,7 @@
           <li><a href="jaato-client.html">JaatoClient</a></li>
           <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
           <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-recovery-client.html">IPCRecoveryClient</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="tool-executor.html">ToolExecutor</a></li>
           <li><a href="types.html">Types</a></li>
@@ -114,6 +115,13 @@
           <p>
             The main entry point for the framework. Handles connection to AI providers,
             tool configuration, message sending, and conversation history management.
+          </p>
+
+          <h3><a href="ipc-recovery-client.html">IPCRecoveryClient</a></h3>
+          <p>
+            IPC client with automatic connection recovery. Wraps <code>IPCClient</code>
+            with reconnection, session reattachment, and status callbacks for resilient
+            client applications.
           </p>
 
           <h3><a href="plugin-registry.html">PluginRegistry</a></h3>
