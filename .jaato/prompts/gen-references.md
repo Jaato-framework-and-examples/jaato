@@ -86,25 +86,56 @@ If `{{dry_run}}` is true, produce only the summary (with `planned_writes`) and t
 
 The source may contain dozens of documentation folders, validation folders, and template files. To avoid exceeding context window limits, process the knowledge base **progressively** — never load all content at once.
 
-### Phase 0 — Source resolution (detect, fetch, filter)
+### Phase 0 — Source resolution (download first, then process locally)
+
+**Core principle**: All processing happens on local files. If the source is remote, **download everything to a local temporary directory first**, then proceed as if it were a local source. This avoids any attempt to read remote files on-the-fly.
 
 1. **Detect source type**:
-   - If `{{source}}` is a local filesystem path → set `sourceType = "local"`, `repoRoot = {{source}}` (resolved to absolute path).
+   - If `{{source}}` is a local filesystem path → set `sourceType = "local"`, `repoRoot = {{source}}` (resolved to absolute path). **Skip to step 4.**
    - If `{{source}}` is a git URL (starts with `https://`, `git@`, or ends with `.git`) → `sourceType = "git"`.
    - If `{{source}}` is an archive URL (ends with `.zip`, `.tar.gz`, `.tgz`) → `sourceType = "archive"`.
 
-2. **Fetch remote sources** (skip for local):
-   - **Git URL**: Attempt archive download first (GitHub: `<url>/archive/<ref>.zip`). If that fails, fall back to shallow clone: `git clone --depth 1 --branch <ref> <url> <temp_dir>`. Only public repos — if access is denied, fail with: *"Private repositories are not supported. Provide a public repo or a local path."*
-   - **Archive URL**: Download and extract to temp dir.
-   - Set `repoRoot = <temp_dir>` (or `<cache_dir>` if `{{cache}}` is true).
-   - Record `sourceMetadata = { "type": "<sourceType>", "url": "<original-url>", "ref": "<ref>", "fetched_at": "<ISO 8601>" }`.
+2. **Download remote sources to OS temp directory** (mandatory for git and archive sources):
+
+   **You must complete this step before doing anything else.** Do not attempt to list, read, or process any remote files without downloading them first.
+
+   a) Create a temporary directory using the OS temp location:
+      ```bash
+      WORK_DIR=$(mktemp -d /tmp/jaato-source-XXXXXX)
+      ```
+
+   b) Download the content:
+      - **GitHub URL** (contains `github.com`):
+        - Build the archive URL: `https://github.com/<owner>/<repo>/archive/<ref>.zip` (use `{{ref}}` if provided, otherwise `HEAD`).
+        - Download with `curl -fsSL -o "$WORK_DIR/source.zip" "<archive_url>"`.
+        - If curl fails (404, 403, etc.), fall back to shallow clone: `git clone --depth 1 --branch <ref> <url> "$WORK_DIR/repo"`.
+        - If both fail, stop with: *"Could not download repository. Check that the URL is correct and the repo is public."*
+      - **Other git URL**: `git clone --depth 1 --branch <ref> <url> "$WORK_DIR/repo"`.
+      - **Archive URL** (.zip/.tar.gz/.tgz): `curl -fsSL -o "$WORK_DIR/source.archive" "<url>"`.
+
+   c) Extract if downloaded as archive:
+      ```bash
+      cd "$WORK_DIR"
+      unzip -q source.zip       # for .zip
+      # or: tar xzf source.archive  # for .tar.gz/.tgz
+      ```
+      GitHub zip archives extract to a folder named `<repo>-<ref>/`. Identify this folder:
+      ```bash
+      EXTRACTED=$(ls -d "$WORK_DIR"/*/  | head -1)
+      ```
+
+   d) Set `repoRoot = "$EXTRACTED"` (the extracted directory, or `"$WORK_DIR/repo"` if cloned).
+
+   e) **Verify the download succeeded**: List the top-level contents of `repoRoot` to confirm files are present. If empty or missing, fail immediately.
+
+   f) Record `sourceMetadata = { "type": "<sourceType>", "url": "<original-url>", "ref": "<ref>", "fetched_at": "<ISO 8601>" }`.
 
 3. **Cache management** (when `{{cache}}` is true):
    - Cache location: `.jaato/cache/sources/` within the project.
-   - Cache key: hash of `(url, ref)`. If cache hit and not stale, use cached tree and skip download.
-   - If `{{cache}}` is false, use a temp directory and clean it up at the end.
+   - Cache key: hash of `(url, ref)`. If cache hit and not stale, use cached tree as `repoRoot` and skip download.
+   - If `{{cache}}` is false, the temp directory from step 2 will be cleaned up at the end.
 
-4. **Resolve subpaths/patterns**:
+4. **Resolve subpaths/patterns** (operates on local `repoRoot` — always local at this point):
    - If `{{subpaths}}` is empty → treat as `"."` (scan entire `repoRoot`).
    - Otherwise split on commas, trim whitespace, ignore empty items. Each item may be:
      - An exact path (e.g., `"knowledge"`, `"modules/mod-foo"`) — match that directory if it exists.
@@ -116,7 +147,7 @@ The source may contain dozens of documentation folders, validation folders, and 
 
 5. **Apply exclusions**: Filter out directories matching `{{exclude_patterns}}` and built-in exclusions (`node_modules`, `.git`, `__pycache__`, hidden dirs).
 
-After Phase 0, all subsequent phases operate on the resolved set of matched directories under `repoRoot`.
+After Phase 0, `repoRoot` always points to a local directory on disk. All subsequent phases operate on local files under `repoRoot` using standard file-reading tools.
 
 ### Phase 1 — Inventory (read structure only, not content)
 List the directory tree within the matched directories to build a complete inventory of folders and files. Do **not** read any file content yet. Record:
@@ -492,8 +523,8 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
     ```
 
 21. **Cleanup** — After all phases complete:
-    - If source was remote and `{{cache}}` is false: remove temporary clone/extract directories.
-    - If `{{cache}}` is true: keep the cached tree in `.jaato/cache/sources/`.
+    - If source was remote and `{{cache}}` is false: remove the temporary directory created in Phase 0 step 2: `rm -rf "$WORK_DIR"`.
+    - If `{{cache}}` is true: move the downloaded content to `.jaato/cache/sources/` for reuse, then remove the temp directory.
 
 ---
 
@@ -610,10 +641,10 @@ knowledge/
 
 Follow the processing strategy strictly:
 
-1. **Phase 0**: Resolve the source — detect type, fetch if remote, resolve subpaths, apply exclusions. If `{{source}}` is local, this phase simply resolves the path and subpaths.
+1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
 3. **Phase 2**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one. If validation fails, fix the JSON and rewrite before proceeding.
 4. **Phase 3**: Write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
 5. **Phase 4**: Generate subagent profiles using the collected reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
 6. **Report**: Produce the final summary table and write `summary.json`.
-7. **Cleanup**: Remove temporary directories if applicable.
+7. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
