@@ -4964,6 +4964,36 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         await client.disconnect()
 
 
+def _run_init(target: str = ".jaato") -> None:
+    """Copy .jaato.example into the target directory.
+
+    Copies the bundled example configuration directory into the current
+    working directory as ``.jaato/`` (or the path given by *target*).
+    Exits with an error if the target already exists.
+    """
+    import shutil
+
+    source = pathlib.Path(__file__).resolve().parent / ".jaato.example"
+    dest = pathlib.Path(target)
+
+    if dest.exists():
+        sys.exit(
+            f"Error: {dest} already exists.\n"
+            f"Remove or rename it first, or copy individual files from:\n"
+            f"  {source}"
+        )
+
+    if not source.exists():
+        sys.exit(
+            "Error: .jaato.example not found in the installed package.\n"
+            "Try reinstalling jaato-tui: pip install --force-reinstall jaato-tui"
+        )
+
+    shutil.copytree(source, dest)
+    print(f"Initialized {dest}/ with example configuration files.")
+    print(f"Edit the files to customize your setup. See {dest}/README.md for details.")
+
+
 def main():
     import argparse
 
@@ -5048,8 +5078,20 @@ To connect to a specific server: jaato --connect /path/to/socket
         help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
              "Requires --session."
     )
+    parser.add_argument(
+        "--init",
+        nargs="?",
+        const=".jaato",
+        metavar="PATH",
+        help="Initialize .jaato/ config directory with example files and exit (default: .jaato)"
+    )
 
     args = parser.parse_args()
+
+    # Init mode: scaffold config directory and exit
+    if args.init is not None:
+        _run_init(args.init)
+        return
 
     # Resolve socket path: explicit --connect or default
     from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
