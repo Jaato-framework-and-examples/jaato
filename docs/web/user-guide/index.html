@@ -417,6 +417,15 @@ claude login
             <code>.jaato/</code>.
           </p>
 
+          <h3>Initialize project configuration</h3>
+          <p>
+            Run <code>jaato --init</code> to scaffold a <code>.jaato/</code>
+            directory with documented example files for every configuration
+            option. This gives you a ready-to-edit starting point with
+            GC settings, permissions, keybindings, themes, subagent profiles,
+            prompt templates, and more.
+          </p>
+
           <h3>Configuration files</h3>
           <table>
             <thead>
@@ -439,8 +448,36 @@ claude login
                 <td>Tool permission whitelist/blacklist rules</td>
               </tr>
               <tr>
+                <td><code>.jaato/sandbox.json</code></td>
+                <td>Filesystem access boundaries</td>
+              </tr>
+              <tr>
                 <td><code>.jaato/keybindings.json</code></td>
                 <td>Custom keybindings (project-level)</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/reliability-policies.json</code></td>
+                <td>Loop prevention and pattern detection</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/profiles/</code></td>
+                <td>Subagent profile definitions</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/themes/</code></td>
+                <td>Custom and override themes</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/prompts/</code></td>
+                <td>Reusable prompt templates</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/instructions/</code></td>
+                <td>System instructions (markdown)</td>
+              </tr>
+              <tr>
+                <td><code>.jaato/references/</code></td>
+                <td>Reference sources for agent context</td>
               </tr>
               <tr>
                 <td><code>.mcp.json</code></td>
@@ -456,19 +493,44 @@ claude login
           <ul>
             <li><code>~/.jaato/keybindings.json</code> &mdash; global keybindings</li>
             <li><code>~/.jaato/theme.json</code> &mdash; custom theme</li>
+            <li><code>~/.jaato/preferences.json</code> &mdash; saved preferences (theme, format)</li>
+            <li><code>~/.jaato/sandbox_paths.json</code> &mdash; global filesystem boundaries</li>
           </ul>
 
           <div class="callout callout-info">
             <div class="callout-title">Getting started quickly</div>
             <p>
-              Copy the example file to get a documented starting point:
-              <code>cp .env.example .env</code>, then edit it with your
-              provider and credentials.
+              Run <code>jaato --init</code> to generate a fully documented
+              <code>.jaato/</code> directory, then <code>cp .env.example .env</code>
+              and fill in your provider credentials. Every generated config file
+              includes comments explaining each field.
             </p>
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Minimal .env</div>
+          <div class="code-label">Initialize configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Scaffold .jaato/ with all example configs
+jaato --init
+
+# What you get:
+# .jaato/
+# ├── gc.json                   GC / context budget
+# ├── permissions.json          Tool access policies
+# ├── sandbox.json              Filesystem boundaries
+# ├── keybindings.json          Keyboard shortcuts
+# ├── reliability-policies.json Loop prevention
+# ├── keybindings/              Terminal-specific profiles
+# │   ├── vscode.json
+# │   └── tmux.json
+# ├── themes/                   All 6 built-in themes + custom starter
+# ├── profiles/                 Subagent profiles
+# ├── instructions/             System instructions (markdown)
+# ├── prompts/                  Prompt templates
+# └── references/               Reference sources</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Minimal .env</div>
           <div class="code-block">
             <pre><code class="language-bash"># The two required variables
 JAATO_PROVIDER=google_genai
@@ -700,13 +762,17 @@ permissions status</code></pre>
 
           <h3>Themes</h3>
           <p>
-            Three built-in themes: <code>dark</code> (default),
-            <code>light</code>, and <code>high-contrast</code>.
+            Six built-in themes: <code>dark</code> (default),
+            <code>light</code>, <code>high-contrast</code>,
+            <code>dracula</code>, <code>latte</code>, and <code>mocha</code>.
             Switch at any time with <code>/theme</code>.
           </p>
           <p>
             Create a custom theme by placing a <code>theme.json</code> in
             <code>.jaato/</code> or <code>~/.jaato/</code>.
+            Running <code>jaato --init</code> gives you all built-in themes
+            plus a <code>custom-example.json</code> starter in
+            <code>.jaato/themes/</code>.
           </p>
         </div>
         <div class="panel-code">
