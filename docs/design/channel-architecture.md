@@ -254,6 +254,72 @@ The main agent acts as a **proxy**: it receives the subagent's permission/clarif
 
 The subagent never directly interacts with the user. Unrecognized responses always default to the safe choice (deny for permissions, cancel for clarifications). This keeps the security boundary clean while allowing the parent to mediate all subagent interactions.
 
+## Thread-Local Channels and Parallel Tool Execution
+
+### The Problem
+
+The thread-local isolation pattern works correctly when tools execute **sequentially** on the subagent's own thread — the thread where `configure_for_subagent()` set `_thread_local.channel`. However, when the subagent's model returns **2+ tool calls in a single turn**, `_execute_function_calls_parallel()` creates a `ThreadPoolExecutor` with fresh worker threads (`jaato_session.py:3654`).
+
+These worker threads **do not inherit** the spawning thread's `threading.local()` values. When a tool on a worker thread triggers a permission or clarification check:
+
+1. `_get_channel()` finds no `_thread_local.channel` on the worker thread
+2. Falls back to `self._channel` — the **main agent's** channel (e.g. `QueueChannel`)
+3. `isinstance(channel, ParentBridgedChannel)` → `False`
+4. `is_subagent_mode` is `False` → UI hooks fire
+5. `PermissionRequestedEvent` / `PermissionInputModeEvent` emitted to the TUI
+6. The TUI captures the input field, forcing the user to answer a prompt that should have been routed to the parent agent
+
+```
+Subagent thread (spawning)              Worker thread (pool)
+──────────────────────────              ────────────────────
+_thread_local.channel = ParentBridged   _thread_local.channel = (empty)
+                                         │
+configure_for_subagent() ✓               _get_channel() → self._channel
+                                         │                  (main agent's QueueChannel!)
+                                         ▼
+                                        is_subagent_mode = False  ← BUG
+                                        hooks fire → TUI input captured
+```
+
+The existing propagation loop in `_execute_single_tool_for_parallel` (lines 3974-3978) only covers **exposed tool plugins** via `list_exposed()` and `set_session()`. The permission plugin is **not** in the exposed list (it's a special singleton on `JaatoRuntime._permission_plugin`), and neither plugin has a `set_session()` method — so neither is reached by this loop.
+
+### The Fix: Capture and Restore
+
+The fix snapshots the spawning thread's channel references before creating the thread pool, then restores them on each worker thread:
+
+```python
+# In _execute_function_calls_parallel (runs on subagent's thread):
+captured_channels = self._capture_interactive_channels()
+
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    future_to_fc = {
+        executor.submit(
+            self._execute_single_tool_for_parallel, fc, captured_channels
+        ): fc
+        for fc in function_calls
+    }
+
+# In _execute_single_tool_for_parallel (runs on worker thread):
+if captured_channels:
+    self._restore_interactive_channels(captured_channels)
+```
+
+`_capture_interactive_channels()` reads the current thread's channel from:
+- `self._runtime.permission_plugin._get_channel()` — permission plugin (singleton on runtime)
+- `self._runtime.registry.get_plugin('clarification')._get_channel()` — clarification plugin (in registry)
+
+`_restore_interactive_channels()` writes those references into the worker thread's `_thread_local.channel` on both plugins.
+
+After the fix, worker threads see the same `ParentBridgedChannel` that the spawning thread had, so `is_subagent_mode` evaluates correctly and hooks are suppressed.
+
+### Why Not Store the Channel on the Session?
+
+An alternative design would store the channel directly on `JaatoSession` and have `_get_channel()` check the session as a fallback. This was considered but rejected because:
+
+1. **The plugins don't hold session references** — the permission plugin is a singleton that doesn't receive `set_session()`, so it would need a new mechanism to look up the "current session"
+2. **Thread-local is the right abstraction** — the channel must vary per-thread (main agent thread vs subagent thread vs worker thread), which is exactly what `threading.local()` provides
+3. **Capture/restore is minimal and explicit** — it follows the existing pattern (`set_session()` propagation loop) and makes the propagation visible in the parallel execution code
+
 ## Source File Reference
 
 | File | Contents |
@@ -262,5 +328,5 @@ The subagent never directly interacts with the user. Unrecognized responses alwa
 | `shared/plugins/permission/plugin.py` | Permission plugin with thread-local pattern, `is_subagent_mode` checks |
 | `shared/plugins/clarification/channels.py` | Clarification channel hierarchy (Console, Queue, Auto, ParentBridged) |
 | `shared/plugins/clarification/plugin.py` | Clarification plugin with thread-local pattern, `is_subagent_mode` checks |
-| `shared/jaato_session.py` | `inject_prompt()`, `_forward_to_parent()`, `_injection_queue` |
+| `shared/jaato_session.py` | `inject_prompt()`, `_forward_to_parent()`, `_injection_queue`, `_capture_interactive_channels()`, `_restore_interactive_channels()` |
 | `shared/message_queue.py` | `SourceType` enum (PARENT, CHILD, USER, SYSTEM) |
