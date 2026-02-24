@@ -1123,6 +1123,110 @@ class TestEnrichContentTagMatching:
         finally:
             plugin.shutdown()
 
+    def test_hyphenated_tag_matches_space_variant(self):
+        """A hyphenated tag like 'circuit-breaker' matches 'circuit breaker' in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit-breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_hyphenated_tag_matches_hyphen_variant(self):
+        """A hyphenated tag still matches the exact hyphenated form in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit-breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit-breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_space_tag_matches_hyphenated_content(self):
+        """A space-separated tag like 'circuit breaker' matches 'circuit-breaker' in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit-breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_hyphenated_tag_matches_underscore_variant(self):
+        """A hyphenated tag like 'circuit-breaker' matches 'circuit_breaker' in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit-breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit_breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_underscore_tag_matches_hyphen_variant(self):
+        """An underscore tag like 'circuit_breaker' matches 'circuit-breaker' in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit_breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit-breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_underscore_tag_matches_space_variant(self):
+        """An underscore tag like 'circuit_breaker' matches 'circuit breaker' in content."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit_breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "Implement a circuit breaker for the service",
+                "prompt"
+            )
+            assert "tag_matched_references" in result.metadata
+            assert "ref-1" in result.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_hyphenated_tag_no_false_positive_on_partial(self):
+        """A hyphenated tag does not match partial words."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "CB Guide", "tags": ["circuit-breaker"]},
+        ])
+        try:
+            result = plugin._enrich_content(
+                "The motorcircuit-breakerbox was installed",
+                "prompt"
+            )
+            assert result.metadata is None or "tag_matched_references" not in result.metadata
+        finally:
+            plugin.shutdown()
+
     def test_dotted_tag_matches_standalone(self):
         """A tag containing a dot matches when standalone."""
         plugin = _make_plugin_with_selectable_tags([
