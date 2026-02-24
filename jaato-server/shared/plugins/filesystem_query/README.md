@@ -285,6 +285,19 @@ package-lock.json, yarn.lock, etc.       # Lock files
 
 Use `exclude_mode: "replace"` to disable all defaults, or `include_patterns` to force-include specific paths.
 
+### `.gitignore` Integration
+
+When a workspace root is configured, the plugin reads the project's root `.gitignore`
+file and excludes matching paths in addition to the hardcoded defaults above. This
+means project-specific ignores (e.g., `data/`, `generated/`, custom build outputs)
+are automatically respected without manual configuration.
+
+- `.gitignore` patterns are loaded via `GitignoreParser` from `shared.utils.gitignore`
+- Only the root `.gitignore` is read (nested `.gitignore` files are not supported)
+- Negation patterns (`!pattern`) in `.gitignore` are honoured
+- Force-include patterns (`include_patterns`) still take priority over `.gitignore`
+  exclusions
+
 ### Environment Variables
 
 | Variable | Description |
@@ -330,7 +343,8 @@ The file_glob parameter accepts an array of glob patterns:
 
 Tips:
 - Use glob_files first to locate files, then grep_content to search within them
-- Both tools respect .gitignore-style exclusions (node_modules, __pycache__, etc.)
+- Both tools respect the project's `.gitignore` file and also exclude common noise
+  directories by default (node_modules, __pycache__, .git, build, dist, etc.)
 - Use file_glob parameter in grep_content to limit search to specific file types
 - Results are limited to prevent overwhelming output; adjust max_results if needed
 ```
