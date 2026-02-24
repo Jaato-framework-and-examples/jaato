@@ -1,10 +1,16 @@
 # .jaato Configuration Examples
 
-This folder contains example configuration files for **jaato**. Copy it to your
-project root as `.jaato/` and customize the files to suit your workflow.
+This folder contains example configuration files for **jaato**. Initialize your
+project with:
 
 ```bash
-# Quick start: copy the example folder into your project
+# Quick start: creates .jaato/ in the current directory
+jaato init
+```
+
+Or copy manually if you prefer:
+
+```bash
 cp -r .jaato.example /path/to/your/project/.jaato
 ```
 
