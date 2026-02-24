@@ -1,0 +1,36 @@
+{
+  "_comment": "Tmux-friendly keybindings. Avoids Ctrl+B (tmux default prefix).",
+  "_usage": "Auto-detected when $TMUX is set, or set JAATO_KEYBINDING_PROFILE=tmux.",
+
+  "submit": "enter",
+  "newline": ["escape", "enter"],
+  "clear_input": ["escape", "escape"],
+
+  "cancel": "c-c",
+  "exit": "c-d",
+
+  "scroll_up": "pageup",
+  "scroll_down": "pagedown",
+
+  "toggle_plan": "c-p",
+  "toggle_tools": "c-t",
+  "toggle_budget": "f8",
+  "cycle_agents": "c-a",
+  "yank": "c-y",
+  "view_full": "v",
+
+  "tool_nav_enter": "c-n",
+
+  "toggle_workspace": "c-w",
+
+  "open_editor": "c-g",
+
+  "search": "c-f",
+  "search_next": "enter",
+  "search_prev": "c-p",
+  "search_close": "escape",
+
+  "split_pane": ["escape", "s"],
+  "join_pane": ["escape", "j"],
+  "move_agent": ["escape", "m"]
+}

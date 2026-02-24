@@ -1,0 +1,40 @@
+{
+  "_comment": "Loop prevention and pattern detection policies.",
+  "_docs": "Prevents the model from getting stuck in repetitive tool calls or error retries.",
+
+  "pattern_detection": {
+    "repetitive_call_threshold": 3,
+    "error_retry_threshold": 3,
+    "error_retry_overrides": {
+      "web_search": 5,
+      "bash": 2
+    },
+    "introspection_loop_threshold": 2,
+    "max_reads_before_action": 5,
+    "max_turn_duration_seconds": 120.0,
+    "introspection_tool_names": ["list_tools", "get_tool_schemas"],
+    "read_only_tools": ["readFile", "Read", "Glob", "Grep"],
+    "action_tools": ["writeFile", "Write", "Edit", "Bash"],
+    "announce_phrases": ["let me", "proceeding now"]
+  },
+
+  "prerequisite_policies": [
+    {
+      "policy_id": "plan_before_update",
+      "prerequisite_tool": "createPlan",
+      "gated_tools": ["setStepStatus"],
+      "lookback_turns": 5,
+      "severity_thresholds": {
+        "minor": 0,
+        "moderate": 1,
+        "severe": 2
+      },
+      "nudge_templates": {
+        "minor": ["direct", "Call {prerequisite_tool} before using {tool_name}."],
+        "moderate": ["direct", "You MUST call {prerequisite_tool} before {tool_name} (violation #{count})."],
+        "severe": ["interrupt", "BLOCKED: {tool_name} requires {prerequisite_tool} first."]
+      },
+      "expected_action_template": "Call {prerequisite_tool} before using {tool_name}"
+    }
+  ]
+}

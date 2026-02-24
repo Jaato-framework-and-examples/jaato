@@ -1,0 +1,31 @@
+{
+  "name": "analyst-research",
+  "description": "Research and documentation profile. Use for exploring codebases, reading documentation, producing reports, and answering architectural questions.",
+
+  "plugins": [
+    "cli",
+    "filesystem_query",
+    "memory",
+    "references",
+    "todo",
+    "web_search"
+  ],
+
+  "plugin_configs": {},
+
+  "system_instructions": "You are a research analyst. Your goal is to thoroughly investigate the topic, read relevant documentation, and produce clear, well-structured reports. Always cite sources and provide concrete evidence for your conclusions.",
+
+  "max_turns": 15,
+  "auto_approved": false,
+  "icon_name": "document",
+
+  "gc": {
+    "type": "budget",
+    "threshold_percent": 80.0,
+    "target_percent": 60.0,
+    "pressure_percent": 0,
+    "preserve_recent_turns": 5,
+    "summarize_middle_turns": 10,
+    "notify_on_gc": false
+  }
+}
