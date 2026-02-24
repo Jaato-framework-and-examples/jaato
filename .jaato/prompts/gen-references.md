@@ -187,26 +187,100 @@ List the directory tree within the matched directories to build a complete inven
 - Which folders are named `validation/`
 - Which files have `.tpl` or `.tmpl` extensions
 
+### Phase 1.5 — Evaluate parallelization opportunity
+
+After building the inventory, assess whether the work can be split across **parallel subagents** to finish faster. This is optional but strongly recommended for medium-to-large knowledge bases.
+
+**Decision criteria — parallelize when:**
+- The inventory contains **3 or more top-level categories** (e.g., `ADRs/`, `ERIs/`, `modules/`, `skills/`), OR
+- The total number of documentation folders exceeds **10**
+
+**Do NOT parallelize when:**
+- There are fewer than 3 categories and fewer than 10 folders total (overhead outweighs the benefit)
+- `{{dry_run}}` is true (dry runs are fast enough sequentially)
+
+**How to split:**
+1. Partition the matched directories into **groups** — typically one group per top-level category (e.g., all `ADRs/*` folders in one group, all `modules/*` in another). If one category is much larger than the rest, split it further (e.g., `modules/mod-001..mod-010` and `modules/mod-011..mod-020`).
+2. Spawn one **subagent per group**. Each subagent receives:
+   - The `repoRoot` path (local, read-only — all subagents share the same downloaded directory)
+   - Its assigned list of directories to process
+   - The `sourceType` and `sourceMetadata` (for provenance on remote sources)
+   - The output directory `{{output}}/` (no conflicts — each folder produces a unique file ID)
+   - The same extraction and validation rules from Phase 2 (Parts 1–2 of this prompt)
+3. Each subagent executes Phase 2 for its group: reads entry-point files, writes doc-ref and validation-ref JSON files, validates each with `validateReference`, and collects template index entries.
+4. Each subagent returns to the coordinator:
+   - The list of reference IDs it generated
+   - The template index entries it collected (template name → metadata)
+   - Any warnings or skipped folders
+5. The **coordinator** (this agent) waits for all subagents to complete, then:
+   - Merges template index entries from all subagents → proceeds to Phase 3
+   - Merges reference ID lists from all subagents → proceeds to Phase 4
+   - Merges warnings and skipped lists → proceeds to the final report
+
+**Subagent instructions template** — when spawning each subagent, provide instructions equivalent to:
+
+> Process the following directories under `repoRoot` = `<path>`:
+> - `<dir1>`, `<dir2>`, ...
+>
+> For each directory: read the entry-point documentation file (MODULE.md, ERI.md, ADR.md, etc.), extract the first paragraph for the description, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, and fetchHint as described [repeat the relevant rules or reference them].
+>
+> sourceType = `<local|git|archive>`, sourceMetadata = `<metadata dict if remote>`, knowledgeDir = `<.jaato/knowledge/hash>`
+>
+> Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
+
+If parallelization is not warranted, skip this step and proceed with sequential Phase 2 as described below.
+
 ### Phase 2 — Process one category at a time
 Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`). Within each category, process **one folder at a time**:
 1. Read only the entry-point file (e.g., MODULE.md) — extract just the first paragraph for the description
 2. If the entry-point file has YAML frontmatter with `title`, `description`, or `tags`, use those values. Otherwise fall back to the extraction rules (first paragraph, folder name parsing)
-3. Write the reference JSON for that folder immediately
-4. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), write the validation reference JSON
-5. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
-6. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+3. **If source is remote**: Copy the folder from the temp download to a stable workspace location (see "Materializing remote content" below) **before** writing the reference JSON. The reference `path` must point to this permanent copy, not to the temp directory.
+4. Write the reference JSON for that folder immediately
+5. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
+6. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
+7. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+
+#### Materializing remote content
+
+When the source is remote (git or archive), the downloaded content lives in a temporary directory that will be deleted after this prompt finishes. References with `"type": "local"` require their `path` to point to **permanent, readable files on disk**. Therefore, you must copy each referenced folder to a stable location within the workspace.
+
+**Target location**: `.jaato/knowledge/<source-hash>/` where `<source-hash>` is a short deterministic identifier derived from the source URL (e.g., first 8 chars of the SHA-256 of the URL). This creates a structure like:
+```
+.jaato/knowledge/a1b2c3d4/
+├── modules/
+│   ├── mod-code-001-circuit-breaker-java-resilience4j/
+│   │   ├── MODULE.md
+│   │   ├── templates/
+│   │   └── validation/
+│   └── mod-code-015-hexagonal-base-java-spring/
+├── ERIs/
+│   └── eri-code-008-.../
+└── ADRs/
+    └── adr-004-.../
+```
+
+**How to copy**: For each documentation folder being processed, copy it (preserving directory structure relative to `repoRoot`) from the temp download to the knowledge directory:
+```bash
+KNOWLEDGE_DIR=".jaato/knowledge/<source-hash>"
+mkdir -p "$KNOWLEDGE_DIR/$(dirname '<repo-relative-path>')"
+cp -r "$repoRoot/<repo-relative-path>" "$KNOWLEDGE_DIR/<repo-relative-path>"
+```
+
+**Reference `path`**: Set to the **absolute path** of the materialized copy (e.g., `/home/user/project/.jaato/knowledge/a1b2c3d4/modules/mod-code-001-.../`). This ensures the reference works at runtime regardless of whether the temp download still exists.
+
+**When subagents are used (Phase 1.5)**: Each subagent must also materialize its folders before writing references. Pass the `KNOWLEDGE_DIR` path to each subagent so all copies land in the same tree.
 
 ### Phase 3 — Write template index
-After all categories are processed, write the accumulated template index to `{{templates_index}}`.
+After all categories are processed (sequentially or via subagents), merge all collected template index entries and write the unified template index to `{{templates_index}}`. If subagents were used, combine the `template_entries` dicts returned by each subagent before writing.
 
 ### Phase 4 — Generate profiles
-Use only the inventory and the reference IDs collected during Phase 2 (not the file contents) to generate subagent profiles.
+Use only the inventory and the full list of reference IDs collected during Phase 2 — either directly or merged from subagent results — to generate subagent profiles. Do not use file contents.
 
 ### Key constraints
-- **Never read more than one documentation file at a time.** Read a file, extract what you need, write the output, move on.
+- **Never read more than one documentation file at a time** (per agent). Read a file, extract what you need, write the output, move on.
 - **Extract only what is needed** — for descriptions, read only the first paragraph or Purpose section, not the entire file.
 - **For template files**, reading the content is necessary for syntax detection and variable extraction, but write the index entry immediately and move on.
-- **Do not batch-read** multiple folders in parallel. Sequential, one-at-a-time processing is required.
+- **Within a single agent, process folders sequentially** — one at a time. Parallelism is achieved by splitting work across **subagents** (Phase 1.5), not by reading multiple files in one agent.
 
 ---
 
@@ -237,7 +311,7 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
      "name": "<Human Readable Name>",
      "description": "<Brief description extracted from the documentation>",
      "type": "local",
-     "path": "<repo-relative-path-to-folder>",
+     "path": "/absolute/path/to/.jaato/knowledge/<source-hash>/<repo-relative-path>",
      "mode": "selectable",
      "tags": ["<tag1>", "<tag2>"],
      "fetchHint": "<Hint on which file to read first>",
@@ -251,9 +325,9 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
    }
    ```
 
-   **Note on `"type"` field**: Always `"local"` — it describes how the reference is consumed at runtime (content is on local disk, either at the source path or in the cache). The `"source"` object carries provenance for remote origins.
+   **Note on `"type"` field**: Always `"local"` — it describes how the reference is consumed at runtime (content is on local disk). For remote sources, the content has been materialized (copied) into the workspace. The `"source"` object carries provenance for re-fetching if needed.
 
-   **Note on `"path"` field**: For local sources, this is an absolute POSIX path. For remote sources, this is the path relative to the repo root (e.g., `modules/mod-code-001-.../`) — stable across machines and sessions. When `{{cache}}` is true, the cached checkout provides the local content; the `"source"` object allows re-fetching if needed.
+   **Note on `"path"` field**: Always an **absolute POSIX path** pointing to readable content on disk. For local sources, this points directly to the original folder. For remote sources, this points to the materialized copy under `.jaato/knowledge/<source-hash>/` (see "Materializing remote content" in Phase 2). The `"source"` object records the original URL for provenance and re-fetching.
 
 3. **Derive the reference properties**:
    - **id**: Folder name as-is (e.g., `mod-code-001-circuit-breaker-java-resilience4j`)
@@ -265,7 +339,7 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
      - Other patterns → convert hyphens to spaces and title-case
    - **description**: If YAML frontmatter has `description`, use it. Otherwise read the main documentation file and extract the first paragraph or summary
    - **type**: Always `"local"`
-   - **path**: For local sources: absolute POSIX path (see "Computing paths" below). For remote sources: repo-relative path
+   - **path**: Always an absolute POSIX path (see "Computing paths" below). For local sources: points to the original folder. For remote sources: points to the materialized copy under `.jaato/knowledge/`
    - **mode**: Default `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
    - **tags**: If YAML frontmatter has `tags`, use those first. Then augment with: folder path components (e.g., `modules` → `module`), technology keywords in name (e.g., `java`, `spring`, `resilience4j`), and content-type indicators (e.g., `circuit-breaker`, `persistence`). Deduplicate.
    - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`)
@@ -287,7 +361,7 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
      "name": "<Parent Name> - Validation",
      "description": "<Brief description from validation README.md>",
      "type": "local",
-     "path": "<absolute-or-repo-relative-path-to-validation-folder>",
+     "path": "/absolute/path/to/validation-folder",
      "mode": "selectable",
      "tags": ["validation", "<inherited-tags>"],
      "fetchHint": "Read README.md for validation checks and usage"
@@ -300,7 +374,7 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
    - **id**: Parent folder name + `-validation` (e.g., `mod-code-001-circuit-breaker-java-resilience4j-validation`)
    - **name**: Parent's human-readable name + ` - Validation` (e.g., `MOD-001: Circuit Breaker - Java/Resilience4j - Validation`)
    - **description**: Extract the Purpose section or first paragraph from the validation `README.md`
-   - **path**: For local sources: absolute POSIX path to the `validation/` folder. For remote sources: repo-relative path.
+   - **path**: Always an absolute POSIX path to the `validation/` folder. For remote sources: points to the materialized copy under `.jaato/knowledge/`.
    - **tags**: Always include `"validation"`, plus technology and domain tags inherited from the parent folder name
    - **fetchHint**: Always `"Read README.md for validation checks and usage"`
 
@@ -339,12 +413,12 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
     }
     ```
 
-    For **remote** sources, `source_path` is repo-relative and includes a `"source"` provenance object:
+    For **remote** sources, `source_path` points to the materialized copy and includes a `"source"` provenance object:
     ```json
     {
       "<template-name>": {
         "name": "<template-name>",
-        "source_path": "modules/.../templates/domain/Entity.java.tpl",
+        "source_path": "/absolute/path/to/.jaato/knowledge/<hash>/modules/.../templates/domain/Entity.java.tpl",
         "syntax": "mustache",
         "variables": ["Entity", "basePackage", "fields"],
         "origin": "standalone",
@@ -354,7 +428,7 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
     ```
 
     - **origin**: Always `"standalone"` (as opposed to `"embedded"` which is used at runtime for templates extracted from code blocks)
-    - **source_path**: For local sources: absolute POSIX path. For remote sources: repo-relative path.
+    - **source_path**: Always an absolute POSIX path. For remote sources, this points to the materialized copy under `.jaato/knowledge/` (the content was copied there during Phase 2).
     - If `{{templates_index}}` already exists, preserve existing entries with `"origin": "embedded"` — merge standalone entries alongside them
 
 ---
@@ -485,12 +559,20 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
     abs_posix=$(echo "$abs" | sed -e 's#\\#/#g' -e 's:/*$::')
     ```
 
-    **For remote sources** — compute repo-relative paths (relative to `repoRoot`), normalize to POSIX forward slashes, remove leading `./` and trailing slashes:
+    **For remote sources** — compute the absolute path to the **materialized copy** under `.jaato/knowledge/<source-hash>/`, not the temporary download. The folder must have been copied there during Phase 2 (see "Materializing remote content"):
 
     Python:
     ```python
     import os
     rel = os.path.relpath(folder_path, repo_root).replace('\\', '/').rstrip('/')
+    materialized = os.path.join(knowledge_dir, rel)  # knowledge_dir = .jaato/knowledge/<hash>
+    abs_posix = os.path.abspath(materialized).replace('\\', '/').rstrip('/')
+    ```
+
+    Bash:
+    ```bash
+    rel=$(python -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$folder" "$repo_root")
+    abs_posix=$(realpath "$KNOWLEDGE_DIR/$rel" 2>/dev/null)
     ```
 
 18. **Overwrite protection** (when `{{dry_run}}` is false):
@@ -555,8 +637,8 @@ Use only the inventory and the reference IDs collected during Phase 2 (not the f
     ```
 
 21. **Cleanup** — After all phases complete:
-    - If source was remote and `{{cache}}` is false: remove the temporary directory created in Phase 0 step 2: `rm -rf "$WORK_DIR"`.
-    - If `{{cache}}` is true: move the downloaded content to `.jaato/cache/sources/` for reuse, then remove the temp directory.
+    - If source was remote: the referenced content has already been materialized to `.jaato/knowledge/<source-hash>/` during Phase 2. The temporary download directory (`$WORK_DIR`) is now disposable — remove it: `rm -rf "$WORK_DIR"`.
+    - If `{{cache}}` is true: additionally copy the **full** downloaded tree to `.jaato/cache/sources/` before removing `$WORK_DIR`, so future runs with the same URL + ref can skip the download entirely. (The `.jaato/knowledge/` copy is always kept — it's what the references point to.)
 
 ---
 
@@ -675,8 +757,9 @@ Follow the processing strategy strictly:
 
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
-3. **Phase 2**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one. If validation fails, fix the JSON and rewrite before proceeding.
-4. **Phase 3**: Write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
-5. **Phase 4**: Generate subagent profiles using the collected reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
-6. **Report**: Produce the final summary table and write `summary.json`.
-7. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
+3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel. Otherwise proceed sequentially.
+4. **Phase 2**: Process categories (sequentially or via subagents). Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+5. **Phase 3**: Merge template entries (from subagents if parallel), write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
+6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
+7. **Report**: Produce the final summary table and write `summary.json`.
+8. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
