@@ -4965,15 +4965,21 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
 
 def _run_init(target: str = ".jaato") -> None:
-    """Copy .jaato.example into the target directory.
+    """Scaffold project configuration: ``.jaato/`` directory and ``.env.example``.
 
     Copies the bundled example configuration directory into the current
-    working directory as ``.jaato/`` (or the path given by *target*).
-    Exits with an error if the target already exists.
+    working directory as ``.jaato/`` (or the path given by *target*), and
+    copies the bundled ``.env.example`` alongside it so the user can
+    ``cp .env.example .env`` and fill in credentials.
+
+    Exits with an error if the target directory already exists.  The
+    ``.env.example`` copy is skipped (with a note) if the file already
+    exists in the working directory.
     """
     import shutil
 
-    source = pathlib.Path(__file__).resolve().parent / ".jaato.example"
+    pkg_dir = pathlib.Path(__file__).resolve().parent
+    source = pkg_dir / ".jaato.example"
     dest = pathlib.Path(target)
 
     if dest.exists():
@@ -4992,6 +4998,16 @@ def _run_init(target: str = ".jaato") -> None:
     shutil.copytree(source, dest)
     print(f"Initialized {dest}/ with example configuration files.")
     print(f"Edit the files to customize your setup. See {dest}/README.md for details.")
+
+    # Copy .env.example if bundled and not already present
+    env_example_src = pkg_dir / ".env.example"
+    env_example_dst = pathlib.Path(".env.example")
+    if env_example_src.exists():
+        if env_example_dst.exists():
+            print(f"Note: .env.example already exists, skipping copy.")
+        else:
+            shutil.copy2(env_example_src, env_example_dst)
+            print(f"Copied .env.example — run 'cp .env.example .env' and fill in your credentials.")
 
 
 def main():
