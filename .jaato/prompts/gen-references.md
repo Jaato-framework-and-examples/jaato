@@ -44,6 +44,14 @@ params:
     required: false
     default: separate
     description: '"separate" (one file per reference) or "single" (single catalog file). Default separate.'
+  parallel:
+    required: false
+    default: false
+    description: >
+      If true, the agent may spawn subagents to process categories in parallel (Phase 1.5).
+      Subagents can issue permission requests and clarification questions that the user must
+      answer — enable only when the user is actively attending the session. When false, all
+      processing is sequential within a single agent. Default false.
   exclude_patterns:
     required: false
     default: []
@@ -59,7 +67,7 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 - **References output**: `{{output}}`
 - **Templates index**: `{{templates_index}}`
 - **Profiles output**: `{{profiles_dir}}`
-- **Dry run**: `{{dry_run}}` | **Force**: `{{force}}` | **Cache**: `{{cache}}`
+- **Dry run**: `{{dry_run}}` | **Force**: `{{force}}` | **Cache**: `{{cache}}` | **Parallel**: `{{parallel}}`
 - **Merge mode**: `{{merge_mode}}`
 - **Exclude patterns**: `{{exclude_patterns}}`
 
@@ -189,15 +197,30 @@ List the directory tree within the matched directories to build a complete inven
 
 ### Phase 1.5 — Evaluate parallelization opportunity
 
-After building the inventory, assess whether the work can be split across **parallel subagents** to finish faster. This is optional but strongly recommended for medium-to-large knowledge bases.
+**This phase is only available when `{{parallel}}` is true.** If `{{parallel}}` is false, skip directly to Phase 2 (sequential processing).
 
-**Decision criteria — parallelize when:**
-- The inventory contains **3 or more top-level categories** (e.g., `ADRs/`, `ERIs/`, `modules/`, `skills/`), OR
-- The total number of documentation folders exceeds **10**
+After building the inventory, assess whether the work can be split across **parallel subagents** to finish faster.
 
-**Do NOT parallelize when:**
+**Decision criteria — parallelize when ALL of the following are true:**
+- `{{parallel}}` is `true`
+- The inventory contains **3 or more top-level categories** (e.g., `ADRs/`, `ERIs/`, `modules/`, `skills/`), OR the total number of documentation folders exceeds **10**
+- `{{dry_run}}` is `false` (dry runs are fast enough sequentially)
+
+**Do NOT parallelize when ANY of the following are true:**
+- `{{parallel}}` is `false` (user has not opted in)
 - There are fewer than 3 categories and fewer than 10 folders total (overhead outweighs the benefit)
-- `{{dry_run}}` is true (dry runs are fast enough sequentially)
+- `{{dry_run}}` is `true`
+
+#### Subagent interaction warning
+
+Subagents run as independent agents that may need user interaction:
+- **Permission requests**: Subagents executing file writes or shell commands will prompt the user for approval. The user must be actively attending the session to respond, or subagents will block indefinitely.
+- **Clarification questions**: If a subagent encounters ambiguous content (e.g., cannot determine the entry-point file), it may ask the user for guidance.
+- **Multiple simultaneous prompts**: With N subagents running in parallel, the user may receive multiple permission/clarification prompts at the same time.
+
+Before spawning subagents, **inform the user** that subagents will run in parallel and may require their attention for permission approvals or clarifications. For example:
+
+> Spawning N subagents to process categories in parallel. Subagents may prompt you for file-write permissions — please keep the session attended.
 
 **How to split:**
 1. Partition the matched directories into **groups** — typically one group per top-level category (e.g., all `ADRs/*` folders in one group, all `modules/*` in another). If one category is much larger than the rest, split it further (e.g., `modules/mod-001..mod-010` and `modules/mod-011..mod-020`).
@@ -228,7 +251,7 @@ After building the inventory, assess whether the work can be split across **para
 >
 > Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
 
-If parallelization is not warranted, skip this step and proceed with sequential Phase 2 as described below.
+If parallelization is not warranted (even with `{{parallel}}` true), skip this step and proceed with sequential Phase 2.
 
 ### Phase 2 — Process one category at a time
 Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`). Within each category, process **one folder at a time**:
