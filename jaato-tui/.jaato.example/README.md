@@ -5,7 +5,7 @@ project with:
 
 ```bash
 # Quick start: creates .jaato/ in the current directory
-jaato init
+jaato --init
 ```
 
 Or copy manually if you prefer:
