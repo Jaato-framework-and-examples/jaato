@@ -1305,6 +1305,7 @@ class ReferencesPlugin:
             list [all|selected|unselected]  - List reference sources
             select <ref-id>                 - Select a reference source
             unselect <ref-id>               - Unselect a reference source
+            reload                          - Reload catalog from disk
             help                            - Show usage help
         """
         subcommand = args.get("subcommand", "list")
@@ -1322,10 +1323,12 @@ class ReferencesPlugin:
             if not target:
                 return {"error": "Usage: references unselect <ref-id>"}
             return self._cmd_references_unselect(target)
+        elif subcommand == "reload":
+            return self._cmd_references_reload()
         elif subcommand == "help":
             return self._cmd_references_help()
         else:
-            return {"error": f"Unknown subcommand: {subcommand}. Use: list, select, unselect, help"}
+            return {"error": f"Unknown subcommand: {subcommand}. Use: list, select, unselect, reload, help"}
 
     def _cmd_references_list(self, filter_arg: str) -> HelpLines:
         """Execute 'references list [all|selected|unselected]'."""
@@ -1405,6 +1408,107 @@ class ReferencesPlugin:
             "message": f"Unselected reference '{name}' ({ref_id}).",
         }
 
+    def _cmd_references_reload(self) -> Dict[str, Any]:
+        """Execute 'references reload'.
+
+        Reloads the reference catalog from disk (config files and
+        .jaato/references/ directory).  Previously selected sources are
+        preserved when they still exist in the reloaded catalog; selections
+        whose IDs are no longer present are dropped and their sandbox
+        authorizations revoked.
+
+        After reloading, transitive resolution is re-applied for any
+        surviving selections.
+        """
+        workspace = self._workspace_path or self._project_root
+        if not workspace:
+            return {"error": "Cannot reload: no workspace path available."}
+
+        # Snapshot previous state
+        prev_ids = set(s.id for s in self._sources)
+        prev_selected = list(self._selected_source_ids)
+
+        # Deauthorize all currently-selected paths before reloading
+        for sid in self._selected_source_ids:
+            source = next((s for s in self._sources if s.id == sid), None)
+            if source:
+                self._deauthorize_source_path(source)
+
+        # Clear authorized paths registered by this plugin
+        if self._plugin_registry:
+            self._plugin_registry.clear_authorized_paths(self._name)
+
+        # Reload catalog from disk
+        self._reload_catalog(workspace)
+
+        new_ids = set(s.id for s in self._sources)
+        added = new_ids - prev_ids
+        removed = prev_ids - new_ids
+
+        # Restore selections that still exist in the reloaded catalog
+        surviving_selected = [sid for sid in prev_selected if sid in new_ids]
+        dropped_selected = [sid for sid in prev_selected if sid not in new_ids]
+        self._selected_source_ids = surviving_selected
+
+        # Re-authorize paths for surviving selections
+        for sid in surviving_selected:
+            source = next((s for s in self._sources if s.id == sid), None)
+            if source:
+                self._authorize_source_path(source)
+
+        # Re-apply transitive resolution for surviving selections
+        self._transitive_parent_map = {}
+        self._transitive_notification_pending = False
+        if self._transitive_enabled and surviving_selected:
+            full_catalog = {s.id: s for s in self._sources}
+            all_resolved, transitive_parent_map = self._resolve_transitive_references(
+                surviving_selected, full_catalog
+            )
+            self._transitive_parent_map = transitive_parent_map
+            if transitive_parent_map:
+                self._transitive_notification_pending = True
+
+            current_source_ids = {s.id for s in self._sources}
+            for ref_id in all_resolved:
+                if ref_id not in self._selected_source_ids:
+                    self._selected_source_ids.append(ref_id)
+                if ref_id not in current_source_ids and ref_id in full_catalog:
+                    source = full_catalog[ref_id]
+                    self._resolve_source_for_context(source)
+                    self._sources.append(source)
+                    current_source_ids.add(ref_id)
+                # Authorize transitively added sources
+                src = next((s for s in self._sources if s.id == ref_id), None)
+                if src and ref_id not in surviving_selected:
+                    self._authorize_source_path(src)
+
+        self._trace(
+            f"references reload: sources={len(self._sources)}, "
+            f"added={len(added)}, removed={len(removed)}, "
+            f"selected={len(self._selected_source_ids)} "
+            f"(dropped {len(dropped_selected)} stale selections)"
+        )
+
+        result: Dict[str, Any] = {
+            "status": "reloaded",
+            "total_sources": len(self._sources),
+            "message": f"Reloaded {len(self._sources)} reference(s) from disk.",
+        }
+        if added:
+            result["added"] = sorted(added)
+            result["message"] += f" Added: {', '.join(sorted(added))}."
+        if removed:
+            result["removed"] = sorted(removed)
+            result["message"] += f" Removed: {', '.join(sorted(removed))}."
+        if dropped_selected:
+            result["dropped_selected"] = sorted(dropped_selected)
+            result["message"] += (
+                f" Dropped {len(dropped_selected)} stale selection(s): "
+                f"{', '.join(sorted(dropped_selected))}."
+            )
+
+        return result
+
     def _format_list_as_help_lines(self, sources: List[ReferenceSource], filter_label: str) -> HelpLines:
         """Format a list of reference sources as HelpLines for pager display."""
         lines: List[tuple] = []
@@ -1458,6 +1562,12 @@ class ReferencesPlugin:
             ("    unselect <ref-id>", "dim"),
             ("        Unselect a previously selected reference source.", "dim"),
             ("", ""),
+            ("    reload", "dim"),
+            ("        Reload the reference catalog from disk. Picks up new, changed,", "dim"),
+            ("        or removed reference files without restarting the session.", "dim"),
+            ("        Previously selected sources are preserved when they still", "dim"),
+            ("        exist in the reloaded catalog.", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
@@ -1468,6 +1578,7 @@ class ReferencesPlugin:
             ("    references list unselected          Show only unselected references", "dim"),
             ("    references select my-ref-001        Select a reference by ID", "dim"),
             ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
+            ("    references reload                   Reload catalog from disk", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -1592,18 +1703,18 @@ class ReferencesPlugin:
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
-        Single 'references' command with subcommands: list, select, unselect.
+        Single 'references' command with subcommands: list, select, unselect, reload.
         share_with_model=True so the model sees selection changes.
         """
         return [
             UserCommand(
                 name="references",
-                description="Manage reference sources (list|select|unselect)",
+                description="Manage reference sources (list|select|unselect|reload)",
                 share_with_model=True,
                 parameters=[
                     CommandParameter(
                         name="subcommand",
-                        description="Action: list, select, or unselect",
+                        description="Action: list, select, unselect, or reload",
                         required=False,
                     ),
                     CommandParameter(
@@ -1634,6 +1745,7 @@ class ReferencesPlugin:
             CommandCompletion("list", "List reference sources"),
             CommandCompletion("select", "Select a reference source"),
             CommandCompletion("unselect", "Unselect a reference source"),
+            CommandCompletion("reload", "Reload catalog from disk"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
