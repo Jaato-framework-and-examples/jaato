@@ -54,7 +54,23 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-rich_client = ["themes/*.json"]
+rich_client = [
+    "themes/*.json",
+    ".jaato.example/README.md",
+    ".jaato.example/*.json",
+    ".jaato.example/keybindings/README.md",
+    ".jaato.example/keybindings/*.json",
+    ".jaato.example/themes/README.md",
+    ".jaato.example/themes/*.json",
+    ".jaato.example/profiles/README.md",
+    ".jaato.example/profiles/*.json",
+    ".jaato.example/instructions/README.md",
+    ".jaato.example/instructions/*.md",
+    ".jaato.example/prompts/README.md",
+    ".jaato.example/prompts/*.md",
+    ".jaato.example/references/README.md",
+    ".jaato.example/references/*.json",
+]
 
 [tool.setuptools.package-dir]
 rich_client = "."

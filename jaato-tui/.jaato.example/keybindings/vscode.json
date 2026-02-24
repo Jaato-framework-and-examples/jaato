@@ -1,0 +1,39 @@
+{
+  "_comment": "VS Code integrated terminal keybindings.",
+  "_usage": "Auto-detected when running inside VS Code, or set JAATO_KEYBINDING_PROFILE=vscode.",
+
+  "submit": "enter",
+  "newline": ["escape", "enter"],
+  "clear_input": ["escape", "escape"],
+
+  "cancel": "c-c",
+  "exit": ["escape", "q"],
+
+  "scroll_up": "pageup",
+  "scroll_down": "pagedown",
+
+  "toggle_plan": "f3",
+  "toggle_tools": "f4",
+  "toggle_budget": "c-b",
+  "cycle_agents": "f5",
+  "yank": "f6",
+  "view_full": "v",
+
+  "tool_nav_enter": "f7",
+  "tool_expand": "right",
+  "tool_collapse": "left",
+  "tool_exit": "escape",
+
+  "toggle_workspace": "c-w",
+
+  "open_editor": "c-g",
+
+  "search": "c-f",
+  "search_next": "enter",
+  "search_prev": "c-p",
+  "search_close": "escape",
+
+  "split_pane": ["escape", "s"],
+  "join_pane": ["escape", "j"],
+  "move_agent": ["escape", "m"]
+}

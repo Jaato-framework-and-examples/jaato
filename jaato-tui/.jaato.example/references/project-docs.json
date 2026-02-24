@@ -1,0 +1,10 @@
+{
+  "id": "project-readme",
+  "name": "Project README",
+  "description": "Main project documentation with setup instructions, architecture overview, and contribution guidelines.",
+  "type": "local",
+  "path": "./README.md",
+  "mode": "auto",
+  "tags": ["overview", "getting-started", "setup"],
+  "fetchHint": "Read the Getting Started section for setup instructions."
+}
