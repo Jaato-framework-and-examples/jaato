@@ -1,0 +1,61 @@
+{
+  "_comment": "Default keybinding configuration for jaato TUI.",
+  "_syntax": "Keys use prompt_toolkit syntax: 'c-c' for Ctrl+C, 'f2' for F2, etc.",
+  "_multi_key": "Multi-key sequences use arrays: ['escape', 'enter'] for Esc then Enter.",
+  "_profiles": "Terminal-specific overrides live in keybindings/<terminal>.json.",
+
+  "submit": "enter",
+  "newline": ["escape", "enter"],
+  "clear_input": ["escape", "escape"],
+
+  "cancel": "c-c",
+  "exit": "c-d",
+
+  "scroll_up": "pageup",
+  "scroll_down": "pagedown",
+  "scroll_top": "home",
+  "scroll_bottom": "end",
+
+  "mouse_scroll_up": "<scroll-up>",
+  "mouse_scroll_down": "<scroll-down>",
+
+  "nav_up": "up",
+  "nav_down": "down",
+
+  "pager_quit": "q",
+  "pager_next": "space",
+
+  "toggle_plan": "c-p",
+  "toggle_tools": "c-t",
+  "toggle_budget": "c-b",
+  "cycle_agents": "c-a",
+  "yank": "c-y",
+  "view_full": "v",
+
+  "tool_nav_enter": "c-n",
+  "tool_expand": "right",
+  "tool_collapse": "left",
+  "tool_exit": "escape",
+  "tool_output_up": "up",
+  "tool_output_down": "down",
+
+  "tool_output_popup_tab": "c-o",
+
+  "toggle_workspace": "c-w",
+  "workspace_open_file": "enter",
+  "workspace_clear": "delete",
+
+  "permission_next": "tab",
+  "permission_prev": "s-tab",
+
+  "open_editor": "c-g",
+
+  "search": "c-f",
+  "search_next": "enter",
+  "search_prev": "c-p",
+  "search_close": "escape",
+
+  "split_pane": ["escape", "s"],
+  "join_pane": ["escape", "j"],
+  "move_agent": ["escape", "m"]
+}
