@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.utils.gitignore import GitignoreParser
 from ..config_loader import (
     FilesystemQueryConfig,
     ConfigValidationError,
@@ -310,3 +311,101 @@ class TestGetDefaultExcludes:
         assert "node_modules" in excludes
         assert "__pycache__" in excludes
         assert ".venv" in excludes
+
+
+class TestGitignoreIntegration:
+    """Tests for .gitignore integration in FilesystemQueryConfig."""
+
+    def test_should_exclude_gitignore_pattern(self):
+        """Test that .gitignore patterns are respected by should_exclude."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a .gitignore that ignores a custom directory
+            (Path(tmpdir) / ".gitignore").write_text("data/\ngenerated/\n")
+
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig()
+            config.set_gitignore(parser)
+
+            # Should be excluded via .gitignore
+            assert config.should_exclude("data/file.csv") is True
+            assert config.should_exclude("generated/output.py") is True
+            # Should not be excluded
+            assert config.should_exclude("src/main.py") is False
+
+    def test_should_exclude_gitignore_glob_pattern(self):
+        """Test that .gitignore glob patterns work."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".gitignore").write_text("*.log\n*.tmp\n")
+
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig()
+            config.set_gitignore(parser)
+
+            assert config.should_exclude("app.log") is True
+            assert config.should_exclude("debug.tmp") is True
+            assert config.should_exclude("src/output.log") is True
+            assert config.should_exclude("src/main.py") is False
+
+    def test_hardcoded_patterns_checked_before_gitignore(self):
+        """Test that hardcoded patterns still work alongside gitignore."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # .gitignore adds custom patterns
+            (Path(tmpdir) / ".gitignore").write_text("custom_output/\n")
+
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig()
+            config.set_gitignore(parser)
+
+            # Hardcoded excludes still work
+            assert config.should_exclude("node_modules/lodash/index.js") is True
+            assert config.should_exclude("__pycache__/module.pyc") is True
+            # Gitignore exclusion also works
+            assert config.should_exclude("custom_output/report.html") is True
+
+    def test_force_include_overrides_gitignore(self):
+        """Test that force-include patterns override .gitignore exclusions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".gitignore").write_text("data/\n")
+
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig(
+                include_patterns=["data/important"],
+            )
+            config.set_gitignore(parser)
+
+            # Force-included despite .gitignore
+            assert config.should_exclude("data/important/file.csv") is False
+            # Still excluded (not in include patterns)
+            assert config.should_exclude("data/scratch/file.csv") is True
+
+    def test_no_gitignore_parser_no_crash(self):
+        """Test that should_exclude works without a gitignore parser."""
+        config = FilesystemQueryConfig()
+        # No parser set — should work exactly as before
+        assert config.should_exclude("src/main.py") is False
+        assert config.should_exclude("node_modules/lib.js") is True
+
+    def test_gitignore_negation_patterns(self):
+        """Test that .gitignore negation patterns (!) are honoured."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".gitignore").write_text("*.log\n!important.log\n")
+
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig()
+            config.set_gitignore(parser)
+
+            assert config.should_exclude("debug.log") is True
+            assert config.should_exclude("important.log") is False
+
+    def test_no_gitignore_file(self):
+        """Test graceful handling when no .gitignore exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # No .gitignore created
+            parser = GitignoreParser(Path(tmpdir), include_defaults=False)
+            config = FilesystemQueryConfig()
+            config.set_gitignore(parser)
+
+            # Only hardcoded defaults should apply
+            assert config.should_exclude("node_modules/lib.js") is True
+            assert config.should_exclude("src/main.py") is False
+            assert config.should_exclude("data/file.csv") is False
