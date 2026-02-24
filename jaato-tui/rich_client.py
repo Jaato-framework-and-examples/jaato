@@ -5004,6 +5004,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Rich TUI client for Jaato AI assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
         epilog="""
 The client auto-starts the server daemon if not already running.
 To run the server separately: python -m server --ipc-socket /tmp/jaato.sock
