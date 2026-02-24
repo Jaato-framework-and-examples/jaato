@@ -65,7 +65,17 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 
 ## Critical policy
 
-**Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed. Do not call `selectReferences` or `listExtractedTemplates`. However, you **should** use `listTemplateVariables`, `validateReference`, `validateTemplateIndex`, and `validateProfile` — these are read-only analysis tools that help you produce correct output.
+**Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed.
+
+**Tools that are NOT useful during this prompt** (do not call them):
+- `selectReferences`, `listReferences` — the reference catalog does not exist yet; you are creating it. These tools query an empty or stale catalog and will return nothing useful. Calling them wastes turns and may confuse your workflow.
+- `listExtractedTemplates` — same reason: the template index is what you are building.
+
+**Tools that ARE useful** (use them for validation):
+- `listTemplateVariables` — reads a `.tpl`/`.tmpl` file and returns syntax + variables. Use it in Phase 2 for each template file.
+- `validateReference` — validates a reference JSON file you just wrote. Use after every doc-ref and validation-ref write.
+- `validateTemplateIndex` — validates the template index JSON. Use in Phase 3.
+- `validateProfile` — validates a subagent profile JSON. Use in Phase 4.
 
 **Execute autonomously without asking for confirmation.** This prompt is self-contained — everything you need to know is already described here. Do not pause to ask whether you should proceed, do not ask for clarification, and do not present plans for approval. Start immediately, be eager, and work through all phases to completion.
 
@@ -98,6 +108,11 @@ The source may contain dozens of documentation folders, validation folders, and 
 2. **Download remote sources to OS temp directory** (mandatory for git and archive sources):
 
    **You must complete this step before doing anything else.** Do not attempt to list, read, or process any remote files without downloading them first.
+
+   **Which tools to use for downloading:**
+   - Use your **shell/CLI tool** (e.g., `call_service` with the `cli` plugin, or the bash/shell tool) to run `curl`, `git clone`, `unzip`, and other shell commands.
+   - Alternatively, if you have a **`web_fetch`** tool available, you can use it to download the zip archive URL directly.
+   - Do **not** try to use `Read`, `Glob`, or file-reading tools on a URL — those only work on local paths. The source must be downloaded to disk first.
 
    a) Create a temporary directory using the OS temp location:
       ```bash
