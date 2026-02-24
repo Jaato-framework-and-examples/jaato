@@ -54,6 +54,30 @@ permissions, token ledger) but gets its own session with the profile's settings.
 | `icon_name` | No | `null` | Predefined icon identifier |
 | `gc` | No | `null` | GC config (recommended for max_turns > 15) |
 
+## Provider and Model Overrides
+
+Profiles can override the provider and model used by the subagent. This lets you
+route different tasks to different providers — for example, use a cheap/fast model
+for the main session but a stronger model for research subagents.
+
+```json
+{
+  "name": "my-profile",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  ...
+}
+```
+
+The resolution priority is:
+
+1. **Profile-level** — `provider` / `model` fields in the profile JSON
+2. **Config-level** — `default_provider` / `default_model` in subagent config
+3. **Parent session** — inherits from the session that spawned the subagent
+
+If both fields are omitted (or `null`), the subagent inherits whatever provider
+and model the parent session uses.
+
 ## Common Plugin Sets
 
 - **Research**: `["cli", "filesystem_query", "memory", "references", "todo", "web_search"]`
@@ -72,4 +96,5 @@ permissions, token ledger) but gets its own session with the profile's settings.
 See the included example profiles:
 
 - **analyst-research.json** -- Research and documentation agent
+- **researcher-claude.json** -- Research agent with provider/model override
 - **validator-tier1-universal.json** -- Basic quality gate validator

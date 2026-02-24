@@ -1,0 +1,35 @@
+{
+  "name": "researcher-claude",
+  "description": "Deep research profile using Anthropic Claude. Overrides the parent session's provider and model so this subagent always uses Claude regardless of what the main session is configured with. Useful when your primary provider is a fast/cheap model but you want a stronger model for research tasks.",
+
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+
+  "plugins": [
+    "cli",
+    "filesystem_query",
+    "memory",
+    "references",
+    "todo",
+    "web_search",
+    "web_fetch"
+  ],
+
+  "plugin_configs": {},
+
+  "system_instructions": "You are a deep research agent. Investigate thoroughly using web search, codebase exploration, and documentation. Synthesize findings into clear, well-structured reports with citations.",
+
+  "max_turns": 20,
+  "auto_approved": false,
+  "icon_name": "search",
+
+  "gc": {
+    "type": "budget",
+    "threshold_percent": 80.0,
+    "target_percent": 60.0,
+    "pressure_percent": 0,
+    "preserve_recent_turns": 5,
+    "summarize_middle_turns": 10,
+    "notify_on_gc": false
+  }
+}
