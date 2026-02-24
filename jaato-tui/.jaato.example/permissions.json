@@ -1,0 +1,46 @@
+{
+  "_comment": "Tool permission policies. Controls which tools the model can invoke.",
+  "_docs": "defaultPolicy: 'allow' (auto-approve all), 'deny' (block all), 'ask' (prompt user).",
+
+  "version": "1.0",
+
+  "defaultPolicy": "ask",
+
+  "blacklist": {
+    "tools": [],
+    "patterns": [
+      "rm -rf /*",
+      "sudo *",
+      "chmod 777 *",
+      "shutdown *",
+      "reboot *"
+    ],
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+      }
+    }
+  },
+
+  "whitelist": {
+    "tools": [],
+    "patterns": [
+      "git status",
+      "git diff *",
+      "git log *",
+      "npm test",
+      "npm run lint",
+      "python -m pytest *",
+      "cat *",
+      "ls *",
+      "grep *"
+    ],
+    "arguments": {}
+  },
+
+  "channel": {
+    "type": "console",
+    "endpoint": null,
+    "timeout": 30
+  }
+}

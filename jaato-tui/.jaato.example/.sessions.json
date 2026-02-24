@@ -1,0 +1,12 @@
+{
+  "_comment": "Session persistence and auto-resumption configuration.",
+
+  "storage_path": ".jaato/sessions",
+  "auto_save_on_exit": true,
+  "auto_save_interval": null,
+  "checkpoint_after_turns": 10,
+  "auto_resume_last": false,
+  "request_description_after_turns": 3,
+  "max_sessions": 20,
+  "plugin_config": {}
+}

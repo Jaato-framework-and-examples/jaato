@@ -1,0 +1,29 @@
+{
+  "_comment": "Workspace-level filesystem access boundaries.",
+  "_docs": "Paths can be simple strings or objects with access/added_at fields. Denied paths always override allowed paths.",
+
+  "allowed_paths": [
+    {
+      "path": "/home/user/projects/my-app",
+      "access": "readwrite",
+      "added_at": "2025-01-15T10:00:00Z"
+    },
+    {
+      "path": "/home/user/projects/shared-libs",
+      "access": "readonly"
+    }
+  ],
+
+  "denied_paths": [
+    "/etc/passwd",
+    "/etc/shadow",
+    {
+      "path": "/home/user/.ssh",
+      "access": "readwrite"
+    },
+    {
+      "path": "/home/user/.aws",
+      "access": "readwrite"
+    }
+  ]
+}
