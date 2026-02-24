@@ -204,7 +204,8 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
 
     **Optional fields with defaults**: `plugins` (default `[]` = inherit parent), `plugin_configs` (default `{}`), `system_instructions` (default `null` = inherit parent), `model` (default `null` = inherit parent), `provider` (default `null` = inherit parent), `max_turns` (default `10`), `auto_approved` (default `false`), `icon` (3-line ASCII art array or `null`), `icon_name` (`null`), `gc` (`null`)
 
-    For long-running profiles (max_turns > 15), add GC config:
+    For long-running profiles (max_turns > 15), add GC budget config to prevent context window exhaustion. The `"budget"` GC type removes content in priority order: enrichment → ephemeral → oldest conversation turns → preservable (only under pressure). LOCKED entries are never removed.
+
     ```json
     "gc": {
       "type": "budget",
@@ -212,10 +213,23 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
       "target_percent": 60.0,
       "pressure_percent": 0,
       "preserve_recent_turns": 5,
-      "summarize_middle_turns": 10,
       "notify_on_gc": false
     }
     ```
+
+    | Field | Default | Description |
+    |-------|---------|-------------|
+    | `type` | `"truncate"` | GC strategy. Use `"budget"` for policy-aware removal. |
+    | `threshold_percent` | `80.0` | Trigger GC when context usage exceeds this %. |
+    | `target_percent` | `60.0` | Target context usage after GC. |
+    | `pressure_percent` | `90.0` | When exceeded, PRESERVABLE content may be removed. Set to `0` for **continuous mode** — GC runs every turn above target, PRESERVABLE never touched. |
+    | `preserve_recent_turns` | `5` | Number of recent turns always kept. |
+    | `notify_on_gc` | `true` | Inject a notification into history after GC. |
+
+    **Guidelines for choosing values:**
+    - Skill profiles with many tool calls: use `pressure_percent: 0` (continuous mode) to prevent sudden large evictions
+    - Validator profiles: use defaults (`pressure_percent: 90`) — shorter runs rarely hit pressure
+    - Set `notify_on_gc: false` for auto_approved profiles to avoid noise
 
 13. **Generate profiles for these categories**:
 
@@ -223,12 +237,12 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
     - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice")
     - **Name**: Match the knowledge folder id (e.g., `skill-code-001-add-circuit-breaker-java-resilience4j`)
     - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope
-    - **Plugins**: `["artifact_tracker", "background", "cli", "filesystem_query", "lsp", "mcp", "memory", "references", "template"]`
+    - **Plugins**: `["artifact_tracker", "background", "cli", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo"]`
     - **plugin_configs.references.preselected**: Include the ERI, module, and any dependency references needed for the skill. Always include the enablement knowledge base if one exists
     - **plugin_configs.references.exclude_tools**: `["selectReferences"]` (enforce preselected knowledge)
     - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
     - **system_instructions**: Instruct the subagent to read the enablement knowledge base first, then follow the skill specification and apply templates from module dependencies
-    - **max_turns**: 15–20 depending on complexity. Add `gc` config if > 15
+    - **max_turns**: 15–20 depending on complexity. Add `gc` budget config if > 15 (use `pressure_percent: 0` for continuous mode)
     - **auto_approved**: `false`
     - **icon_name**: Choose from `"circuit_breaker"`, `"microservice"`, `"api"`, `"document"` based on domain
 
@@ -241,7 +255,7 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
       - **max_turns**: 10, **auto_approved**: true
     - **Tier 3 — Pattern compliance**: Verify implementations match skill/module templates
       - **preselected**: Enablement + relevant ADRs + skills + validation references discovered in Part 2
-      - **Plugins**: Include `"lsp"` with config
+      - **Plugins**: Include `"lsp"` and `"todo"` with config
       - **max_turns**: 15, **auto_approved**: true
     - **Tier 4 — CI/CD**: Build and integration validation
       - **preselected**: Enablement only
@@ -251,12 +265,12 @@ Use only the inventory and the reference IDs collected during Phase 1 (not the f
     ### c) Analyst profiles (research and documentation)
     - **When**: The knowledge base has a `model/` folder or high-level documentation
     - **Name**: e.g., `analyst-codebase-documentation`
-    - **Plugins**: `["cli", "filesystem_query", "memory", "references", "web_search"]`
-    - **max_turns**: 15, **auto_approved**: false, **icon_name**: `"document"`
+    - **Plugins**: `["cli", "filesystem_query", "memory", "references", "todo", "web_search"]`
+    - **max_turns**: 15, **auto_approved**: false, **icon_name**: `"document"`, **gc**: budget config with defaults
 
     ### d) Investigator profiles (web research)
     - **Name**: e.g., `investigator-web-research`
-    - **Plugins**: `["memory", "web_search", "web_fetch"]`
+    - **Plugins**: `["memory", "todo", "web_search", "web_fetch"]`
     - **max_turns**: 10, **auto_approved**: false, **icon_name**: `"search"`
 
 14. **Save each profile** as `{{profiles_dir}}/<name>.json`.
