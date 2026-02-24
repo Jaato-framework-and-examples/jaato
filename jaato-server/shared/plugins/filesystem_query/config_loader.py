@@ -5,6 +5,11 @@ with hardcoded defaults. Supports three configuration sources (in priority order
 1. Runtime config passed to initialize()
 2. Config file (.jaato/filesystem_query.json or env var path)
 3. Hardcoded defaults
+
+Additionally, when a workspace root is available, the plugin integrates with
+``GitignoreParser`` to honour the project's ``.gitignore`` file.  Gitignore-based
+exclusions are checked *after* the hardcoded/config-file patterns and are still
+subject to force-include overrides.
 """
 
 import json
@@ -12,7 +17,10 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from shared.utils.gitignore import GitignoreParser
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +88,14 @@ DEFAULT_CONTEXT_LINES = 2
 class FilesystemQueryConfig:
     """Structured configuration for the filesystem_query plugin.
 
+    Exclusion is checked in this order:
+    1. Force-include patterns (``include_patterns``) — if matched, the path is
+       never excluded regardless of other rules.
+    2. Hardcoded/config-file exclude patterns (``exclude_patterns`` merged with
+       ``DEFAULT_EXCLUDE_PATTERNS`` according to ``exclude_mode``).
+    3. ``.gitignore`` patterns via an optional ``GitignoreParser`` instance
+       injected at runtime with :meth:`set_gitignore`.
+
     Attributes:
         version: Config format version.
         exclude_patterns: Glob patterns to exclude from searches.
@@ -100,6 +116,12 @@ class FilesystemQueryConfig:
     max_file_size_kb: int = DEFAULT_MAX_FILE_SIZE_KB
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     context_lines: int = DEFAULT_CONTEXT_LINES
+
+    # Runtime-only: GitignoreParser instance for .gitignore-based exclusions.
+    # Not part of serialized config; injected via set_gitignore().
+    _gitignore: Optional["GitignoreParser"] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def get_effective_excludes(self) -> List[str]:
         """Compute the final list of exclude patterns.
@@ -135,11 +157,30 @@ class FilesystemQueryConfig:
                 return True
         return False
 
+    def set_gitignore(self, parser: "GitignoreParser") -> None:
+        """Inject a ``GitignoreParser`` for ``.gitignore``-based exclusions.
+
+        When set, :meth:`should_exclude` will also consult the parser after
+        checking the hardcoded/config-file patterns.  Force-include patterns
+        still take priority.
+
+        Args:
+            parser: A ``GitignoreParser`` instance initialised with the
+                workspace root.
+        """
+        self._gitignore = parser
+
     def should_exclude(self, path: str) -> bool:
         """Check if a path should be excluded from search.
 
+        The check proceeds in order:
+        1. Force-include patterns — if matched, return ``False`` immediately.
+        2. Hardcoded/config-file exclude patterns — if matched, return ``True``.
+        3. ``.gitignore`` patterns (via ``GitignoreParser``) — if matched,
+           return ``True``.
+
         Args:
-            path: The file or directory path to check.
+            path: The file or directory path to check (relative to workspace).
 
         Returns:
             True if the path should be excluded (and not force-included).
@@ -159,6 +200,11 @@ class FilesystemQueryConfig:
                     return True
             # Also check full path match
             if fnmatch(path_str, pattern):
+                return True
+
+        # Check .gitignore patterns if a parser is available
+        if self._gitignore is not None:
+            if self._gitignore.is_ignored(Path(path_str)):
                 return True
 
         return False

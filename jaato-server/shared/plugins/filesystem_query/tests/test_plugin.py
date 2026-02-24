@@ -813,3 +813,136 @@ class TestPathScopeValidation:
         plugin.initialize(config={"path_scope": config})
 
         assert plugin._path_scope_config is config
+
+
+class TestGitignoreIntegration:
+    """Tests for .gitignore integration in the filesystem_query plugin."""
+
+    def test_glob_files_respects_gitignore(self):
+        """Test that glob_files excludes files matched by .gitignore."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create .gitignore excluding a custom directory
+            (Path(tmpdir) / ".gitignore").write_text("output/\n")
+
+            # Create files: one in normal dir, one in gitignored dir
+            src_dir = Path(tmpdir) / "src"
+            src_dir.mkdir()
+            (src_dir / "main.py").write_text("# main")
+
+            output_dir = Path(tmpdir) / "output"
+            output_dir.mkdir()
+            (output_dir / "result.py").write_text("# result")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_glob_files({
+                "pattern": "**/*.py",
+                "root": tmpdir,
+            })
+
+            # Should only find src/main.py, not output/result.py
+            paths = [f["path"] for f in result["files"]]
+            assert "src/main.py" in paths
+            assert "output/result.py" not in paths
+
+    def test_grep_content_respects_gitignore(self):
+        """Test that grep_content excludes files matched by .gitignore."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".gitignore").write_text("output/\n")
+
+            (Path(tmpdir) / "main.py").write_text("searchable content")
+
+            output_dir = Path(tmpdir) / "output"
+            output_dir.mkdir()
+            (output_dir / "result.py").write_text("searchable content")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_grep_content({
+                "pattern": "searchable",
+                "path": tmpdir,
+            })
+
+            # Should only find in main.py, not output/result.py
+            assert result["files_with_matches"] == 1
+            assert result["matches"][0]["file"] == "main.py"
+
+    def test_gitignore_glob_patterns(self):
+        """Test that .gitignore glob patterns are respected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".gitignore").write_text("*.log\n*.dat\n")
+
+            (Path(tmpdir) / "main.py").write_text("# main")
+            (Path(tmpdir) / "app.log").write_text("log data")
+            (Path(tmpdir) / "data.dat").write_text("binary data")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_glob_files({
+                "pattern": "*",
+                "root": tmpdir,
+            })
+
+            paths = [f["path"] for f in result["files"]]
+            assert "main.py" in paths
+            assert "app.log" not in paths
+            assert "data.dat" not in paths
+
+    def test_no_gitignore_still_works(self):
+        """Test that plugin works without a .gitignore file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # No .gitignore
+            (Path(tmpdir) / "main.py").write_text("# main")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_glob_files({
+                "pattern": "*.py",
+                "root": tmpdir,
+            })
+
+            assert result["total"] == 1
+            assert result["files"][0]["path"] == "main.py"
+
+    def test_set_workspace_path_reloads_gitignore(self):
+        """Test that changing workspace reloads the .gitignore."""
+        with tempfile.TemporaryDirectory() as tmpdir1, \
+             tempfile.TemporaryDirectory() as tmpdir2:
+            # First workspace ignores "data/"
+            (Path(tmpdir1) / ".gitignore").write_text("data/\n")
+            (Path(tmpdir1) / "main.py").write_text("# main")
+            data_dir1 = Path(tmpdir1) / "data"
+            data_dir1.mkdir()
+            (data_dir1 / "file.py").write_text("# data")
+
+            # Second workspace has no .gitignore
+            (Path(tmpdir2) / "main.py").write_text("# main")
+            data_dir2 = Path(tmpdir2) / "data"
+            data_dir2.mkdir()
+            (data_dir2 / "file.py").write_text("# data")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir1})
+
+            # First workspace: data/ excluded
+            result = plugin._execute_glob_files({
+                "pattern": "**/*.py",
+                "root": tmpdir1,
+            })
+            paths = [f["path"] for f in result["files"]]
+            assert "data/file.py" not in paths
+
+            # Switch workspace
+            plugin.set_workspace_path(tmpdir2)
+
+            # Second workspace: data/ not excluded
+            result = plugin._execute_glob_files({
+                "pattern": "**/*.py",
+                "root": tmpdir2,
+            })
+            paths = [f["path"] for f in result["files"]]
+            assert "data/file.py" in paths

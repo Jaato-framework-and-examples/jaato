@@ -25,6 +25,7 @@ from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
+from shared.utils.gitignore import GitignoreParser
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .config_loader import (
     FilesystemQueryConfig,
@@ -128,6 +129,11 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         # Whether to allow /tmp paths (default: True)
         self._allow_tmp = config.get("allow_tmp", True)
 
+        # Integrate .gitignore patterns from the workspace root.
+        # include_defaults=False avoids duplicating the patterns already
+        # covered by DEFAULT_EXCLUDE_PATTERNS.
+        self._setup_gitignore()
+
         self._initialized = True
         logger.info(
             "FilesystemQueryPlugin initialized (max_results=%d, timeout=%ds, workspace=%s, allow_tmp=%s)",
@@ -164,6 +170,8 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         """Update the workspace root path.
 
         Called when a client connects with a different working directory.
+        Re-creates the ``GitignoreParser`` for the new workspace so that the
+        correct ``.gitignore`` is consulted.
 
         Args:
             path: The new workspace root path, or None to disable sandboxing.
@@ -172,7 +180,40 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
             self._workspace_root = os.path.realpath(os.path.abspath(path))
         else:
             self._workspace_root = None
+        self._setup_gitignore()
         logger.debug("FilesystemQueryPlugin workspace_root=%s", self._workspace_root)
+
+    def _setup_gitignore(self) -> None:
+        """Create and inject a ``GitignoreParser`` for the current workspace.
+
+        If a workspace root is configured and a config object exists, a new
+        ``GitignoreParser`` is created with ``include_defaults=False`` (the
+        plugin's own ``DEFAULT_EXCLUDE_PATTERNS`` already cover those) and
+        injected into the config via :meth:`FilesystemQueryConfig.set_gitignore`.
+
+        When no workspace root is available the gitignore parser is cleared.
+        """
+        if self._config is None:
+            return
+        if self._workspace_root:
+            try:
+                parser = GitignoreParser(
+                    Path(self._workspace_root),
+                    include_defaults=False,
+                )
+                self._config.set_gitignore(parser)
+                logger.debug(
+                    "FilesystemQueryPlugin: loaded .gitignore from %s",
+                    self._workspace_root,
+                )
+            except Exception:
+                logger.debug(
+                    "FilesystemQueryPlugin: failed to load .gitignore from %s",
+                    self._workspace_root,
+                    exc_info=True,
+                )
+        else:
+            self._config.set_gitignore(None)  # type: ignore[arg-type]
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path, making relative paths relative to workspace_root.
@@ -380,8 +421,9 @@ IMPORTANT: Always prefer these tools over CLI commands:
 - Use `glob_files` instead of `find`, `ls -R`, or shell globbing
 - Use `grep_content` instead of `grep`, `rg`, or `ack`
 
-These tools provide structured JSON output, automatic exclusion of noise directories
-(node_modules, __pycache__, .git, etc.), and don't require shell escaping.
+These tools provide structured JSON output, respect the project's .gitignore,
+automatically exclude common noise directories (node_modules, __pycache__, .git, etc.),
+and don't require shell escaping.
 
 ## glob_files
 Find files by name pattern. Use glob syntax:
