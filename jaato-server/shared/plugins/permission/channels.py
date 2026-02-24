@@ -1150,10 +1150,15 @@ class ParentBridgedChannel(Channel):
     """
 
     def __init__(self):
-        """Initialize the parent-bridged channel."""
+        """Initialize the parent-bridged channel.
+
+        The timeout defaults to 300s but can be overridden by the
+        JAATO_PERMISSION_TIMEOUT env var at runtime.  A value of 0
+        or negative means wait forever (no timeout).
+        """
         self._session: Optional[Any] = None  # JaatoSession reference
         self._pending_request_id: Optional[str] = None
-        self._timeout: float = 300.0  # 5 minute timeout for parent response
+        self._default_timeout: float = 300.0  # 5 minute default for parent response
 
     @property
     def name(self) -> str:
@@ -1241,6 +1246,11 @@ class ParentBridgedChannel(Channel):
     def _wait_for_response(self, request_id: str) -> Optional[str]:
         """Wait for parent's response on injection queue.
 
+        The timeout is resolved at call time from the
+        JAATO_PERMISSION_TIMEOUT env var (falling back to
+        ``_default_timeout``).  A value of 0 or negative means wait
+        forever, consistent with the other channel implementations.
+
         Args:
             request_id: The request ID to match.
 
@@ -1257,11 +1267,21 @@ class ParentBridgedChannel(Channel):
         if not injection_queue:
             return None
 
+        # Apply env var override at runtime (matches QueueChannel pattern)
+        timeout = self._default_timeout
+        env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")
+        if env_timeout is not None:
+            try:
+                timeout = float(env_timeout)
+            except ValueError:
+                pass
+        no_timeout = timeout <= 0  # 0 or negative means wait forever
+
         poll_interval = 0.1
         elapsed = 0.0
         held_messages = []  # Messages that aren't our response
 
-        while elapsed < self._timeout:
+        while no_timeout or elapsed < timeout:
             # Check for cancellation
             cancel_token = getattr(self._session, '_cancel_token', None)
             if cancel_token and hasattr(cancel_token, 'is_cancelled'):
