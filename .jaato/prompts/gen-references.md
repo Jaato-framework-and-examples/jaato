@@ -493,7 +493,7 @@ Use only the inventory and the full list of reference IDs collected during Phase
     - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice")
     - **Name**: Match the knowledge folder id (e.g., `skill-code-001-add-circuit-breaker-java-resilience4j`)
     - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope
-    - **Plugins**: `["artifact_tracker", "background", "cli", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo"]`
+    - **Plugins**: `["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo", "waypoint"]`
     - **plugin_configs.references.preselected**: Include the ERI, module, and any dependency references needed for the skill. Always include the enablement knowledge base if one exists
     - **plugin_configs.references.exclude_tools**: `["selectReferences"]` (enforce preselected knowledge)
     - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
@@ -504,16 +504,20 @@ Use only the inventory and the full list of reference IDs collected during Phase
 
     ### b) Validator profiles (tiered validation matching validation folders)
     - **Tier 1 — Universal**: Basic quality gates for all code (syntax, formatting, secrets, security)
+      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo"]`
       - **preselected**: Only the enablement knowledge base
       - **max_turns**: 5, **auto_approved**: true
     - **Tier 2 — Technology**: Language/framework-specific checks (e.g., Java/Spring conventions)
+      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo"]`
       - **preselected**: Enablement + technology-scoped ADRs
       - **max_turns**: 10, **auto_approved**: true
     - **Tier 3 — Pattern compliance**: Verify implementations match skill/module templates
+      - **Plugins**: `["cli", "environment", "file_edit", "filesystem_query", "lsp", "references", "todo", "waypoint"]`
+      - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
       - **preselected**: Enablement + relevant ADRs + skills + validation references discovered in Part 2
-      - **Plugins**: Include `"lsp"` and `"todo"` with config
       - **max_turns**: 15, **auto_approved**: true
     - **Tier 4 — CI/CD**: Build and integration validation
+      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo", "web_fetch"]`
       - **preselected**: Enablement only
       - **max_turns**: 10, **auto_approved**: true
     - All validators use **icon_name**: `"validator"`
@@ -521,7 +525,7 @@ Use only the inventory and the full list of reference IDs collected during Phase
     ### c) Analyst profiles (research and documentation)
     - **When**: The knowledge base has a `model/` folder or high-level documentation
     - **Name**: e.g., `analyst-codebase-documentation`
-    - **Plugins**: `["cli", "filesystem_query", "memory", "references", "todo", "web_search"]`
+    - **Plugins**: `["cli", "environment", "filesystem_query", "memory", "references", "todo", "web_fetch", "web_search"]`
     - **max_turns**: 15, **auto_approved**: false, **icon_name**: `"document"`, **gc**: budget config with defaults
 
     ### d) Investigator profiles (web research)
