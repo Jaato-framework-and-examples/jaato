@@ -4964,8 +4964,44 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         await client.disconnect()
 
 
+def _run_init(target: str = ".jaato") -> None:
+    """Copy .jaato.example into the target directory.
+
+    Copies the bundled example configuration directory into the current
+    working directory as ``.jaato/`` (or the path given by *target*).
+    Exits with an error if the target already exists.
+    """
+    import shutil
+
+    source = pathlib.Path(__file__).resolve().parent / ".jaato.example"
+    dest = pathlib.Path(target)
+
+    if dest.exists():
+        sys.exit(
+            f"Error: {dest} already exists.\n"
+            f"Remove or rename it first, or copy individual files from:\n"
+            f"  {source}"
+        )
+
+    if not source.exists():
+        sys.exit(
+            "Error: .jaato.example not found in the installed package.\n"
+            "Try reinstalling jaato-tui: pip install --force-reinstall jaato-tui"
+        )
+
+    shutil.copytree(source, dest)
+    print(f"Initialized {dest}/ with example configuration files.")
+    print(f"Edit the files to customize your setup. See {dest}/README.md for details.")
+
+
 def main():
     import argparse
+
+    # Handle 'init' subcommand before argparse (keeps flag-based CLI intact)
+    if len(sys.argv) >= 2 and sys.argv[1] == "init":
+        target = sys.argv[2] if len(sys.argv) >= 3 else ".jaato"
+        _run_init(target)
+        return
 
     # Configure UTF-8 encoding for Windows console (before any output)
     from console_encoding import configure_utf8_output
@@ -4975,6 +5011,9 @@ def main():
         description="Rich TUI client for Jaato AI assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+commands:
+  jaato init [PATH]   Initialize .jaato/ config directory (default: .jaato)
+
 The client auto-starts the server daemon if not already running.
 To run the server separately: python -m server --ipc-socket /tmp/jaato.sock
 To connect to a specific server: jaato --connect /path/to/socket
