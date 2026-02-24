@@ -1556,6 +1556,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Jaato Server - Multi-client AI assistant backend",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
         epilog="""
 Examples:
   # Start with IPC socket (local clients)
