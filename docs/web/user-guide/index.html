@@ -219,13 +219,15 @@ pip install -e jaato-sdk/. \
             <li><code>jaato-server --restart</code> &mdash; restart with the same parameters</li>
           </ul>
 
-          <div class="callout callout-warning">
+          <div class="callout callout-info">
             <div class="callout-title">Windows note</div>
             <p>
-              On Windows, <code>--daemon</code> is not supported. Run the server
-              in a separate terminal window, or use <code>start /b jaato-server</code>
-              to background it. The TUI auto-starts the server if it isn't already
-              running, so you can often just run <code>jaato</code> directly.
+              On Windows, jaato uses named pipes instead of Unix sockets. The
+              <code>--daemon</code> flag works under MSYS2 environments.
+              From a native <code>cmd.exe</code> or PowerShell prompt, you can
+              use <code>start /b jaato-server</code> to background it, or just
+              run <code>jaato</code> directly &mdash; the TUI auto-starts the
+              server if it isn't already running.
             </p>
           </div>
         </div>
@@ -260,10 +262,10 @@ jaato-server --status</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Start the server (Windows)</div>
           <div class="code-block">
-            <pre><code class="language-bash"># Run in a separate terminal (uses \\.\pipe\jaato)
-jaato-server
+            <pre><code class="language-bash"># MSYS2: same as Linux/macOS (uses \\.\pipe\jaato)
+jaato-server --daemon
 
-# Or background it
+# cmd.exe / PowerShell: background with start
 start /b jaato-server</code></pre>
           </div>
 
