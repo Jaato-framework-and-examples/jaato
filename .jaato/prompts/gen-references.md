@@ -187,6 +187,49 @@ List the directory tree within the matched directories to build a complete inven
 - Which folders are named `validation/`
 - Which files have `.tpl` or `.tmpl` extensions
 
+### Phase 1.5 — Evaluate parallelization opportunity
+
+After building the inventory, assess whether the work can be split across **parallel subagents** to finish faster. This is optional but strongly recommended for medium-to-large knowledge bases.
+
+**Decision criteria — parallelize when:**
+- The inventory contains **3 or more top-level categories** (e.g., `ADRs/`, `ERIs/`, `modules/`, `skills/`), OR
+- The total number of documentation folders exceeds **10**
+
+**Do NOT parallelize when:**
+- There are fewer than 3 categories and fewer than 10 folders total (overhead outweighs the benefit)
+- `{{dry_run}}` is true (dry runs are fast enough sequentially)
+
+**How to split:**
+1. Partition the matched directories into **groups** — typically one group per top-level category (e.g., all `ADRs/*` folders in one group, all `modules/*` in another). If one category is much larger than the rest, split it further (e.g., `modules/mod-001..mod-010` and `modules/mod-011..mod-020`).
+2. Spawn one **subagent per group**. Each subagent receives:
+   - The `repoRoot` path (local, read-only — all subagents share the same downloaded directory)
+   - Its assigned list of directories to process
+   - The `sourceType` and `sourceMetadata` (for provenance on remote sources)
+   - The output directory `{{output}}/` (no conflicts — each folder produces a unique file ID)
+   - The same extraction and validation rules from Phase 2 (Parts 1–2 of this prompt)
+3. Each subagent executes Phase 2 for its group: reads entry-point files, writes doc-ref and validation-ref JSON files, validates each with `validateReference`, and collects template index entries.
+4. Each subagent returns to the coordinator:
+   - The list of reference IDs it generated
+   - The template index entries it collected (template name → metadata)
+   - Any warnings or skipped folders
+5. The **coordinator** (this agent) waits for all subagents to complete, then:
+   - Merges template index entries from all subagents → proceeds to Phase 3
+   - Merges reference ID lists from all subagents → proceeds to Phase 4
+   - Merges warnings and skipped lists → proceeds to the final report
+
+**Subagent instructions template** — when spawning each subagent, provide instructions equivalent to:
+
+> Process the following directories under `repoRoot` = `<path>`:
+> - `<dir1>`, `<dir2>`, ...
+>
+> For each directory: read the entry-point documentation file (MODULE.md, ERI.md, ADR.md, etc.), extract the first paragraph for the description, and write a reference JSON to `<output>/`. If the folder has a `validation/` subfolder, process it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, and fetchHint as described [repeat the relevant rules or reference them].
+>
+> sourceType = `<local|git|archive>`, sourceMetadata = `<metadata dict if remote>`
+>
+> Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
+
+If parallelization is not warranted, skip this step and proceed with sequential Phase 2 as described below.
+
 ### Phase 2 — Process one category at a time
 Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`). Within each category, process **one folder at a time**:
 1. Read only the entry-point file (e.g., MODULE.md) — extract just the first paragraph for the description
@@ -197,16 +240,16 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
 6. **Release the file content from working memory** — once the JSON is written you no longer need the source text
 
 ### Phase 3 — Write template index
-After all categories are processed, write the accumulated template index to `{{templates_index}}`.
+After all categories are processed (sequentially or via subagents), merge all collected template index entries and write the unified template index to `{{templates_index}}`. If subagents were used, combine the `template_entries` dicts returned by each subagent before writing.
 
 ### Phase 4 — Generate profiles
-Use only the inventory and the reference IDs collected during Phase 2 (not the file contents) to generate subagent profiles.
+Use only the inventory and the full list of reference IDs collected during Phase 2 — either directly or merged from subagent results — to generate subagent profiles. Do not use file contents.
 
 ### Key constraints
-- **Never read more than one documentation file at a time.** Read a file, extract what you need, write the output, move on.
+- **Never read more than one documentation file at a time** (per agent). Read a file, extract what you need, write the output, move on.
 - **Extract only what is needed** — for descriptions, read only the first paragraph or Purpose section, not the entire file.
 - **For template files**, reading the content is necessary for syntax detection and variable extraction, but write the index entry immediately and move on.
-- **Do not batch-read** multiple folders in parallel. Sequential, one-at-a-time processing is required.
+- **Within a single agent, process folders sequentially** — one at a time. Parallelism is achieved by splitting work across **subagents** (Phase 1.5), not by reading multiple files in one agent.
 
 ---
 
@@ -675,8 +718,9 @@ Follow the processing strategy strictly:
 
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
-3. **Phase 2**: Process one top-level category at a time (e.g., `ADRs/` first, then `ERIs/`, then `modules/`). Within each category, handle one folder at a time: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. Move to the next folder only after finishing the current one. If validation fails, fix the JSON and rewrite before proceeding.
-4. **Phase 3**: Write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
-5. **Phase 4**: Generate subagent profiles using the collected reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
-6. **Report**: Produce the final summary table and write `summary.json`.
-7. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
+3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel. Otherwise proceed sequentially.
+4. **Phase 2**: Process categories (sequentially or via subagents). Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+5. **Phase 3**: Merge template entries (from subagents if parallel), write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
+6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
+7. **Report**: Produce the final summary table and write `summary.json`.
+8. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
