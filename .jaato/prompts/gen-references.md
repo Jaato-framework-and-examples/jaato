@@ -487,32 +487,47 @@ Use only the inventory and the full list of reference IDs collected during Phase
     - Validator profiles: use defaults (`pressure_percent: 90`) — shorter runs rarely hit pressure
     - Set `notify_on_gc: false` for auto_approved profiles to avoid noise
 
-13. **Generate profiles for these categories**:
+13. **Subagent interaction model** — When a subagent with `auto_approved: false` executes a tool that requires permission, or calls `request_clarification`, the request is **forwarded to the parent agent** as an XML injection (`<permission_request>` or `<clarification_request>`). The subagent **blocks** until the parent responds. If the parent agent doesn't know this will happen, it will appear to hang — the parent waits for the subagent to finish, the subagent waits for the parent to respond, deadlock.
+
+    To prevent this, generated profiles must address both sides of the interaction:
+
+    **In the profile's `description`** — include an interaction hint so the orchestrating agent knows what to expect:
+    - For `auto_approved: false` profiles: append `"⚠ This subagent may request permissions or clarifications — monitor and respond promptly to avoid blocking."`
+    - For `auto_approved: true` profiles: no hint needed (permissions are auto-granted)
+
+    **In the profile's `system_instructions`** — include guidance for the subagent about how its requests are handled:
+    - For `auto_approved: false`: `"When you need permission to execute a tool or need clarification from the user, your request will be forwarded to the orchestrating agent. Proceed with other work if possible while waiting, but do not assume the request was denied if there is a delay."`
+    - For `auto_approved: true`: `"Tool permissions are auto-approved for this profile. If a tool fails, diagnose the error rather than requesting manual intervention."`
+
+    **In validator profiles** that may need to download/install tools (e.g., linters, formatters): include `web_fetch` in the plugin list so the subagent can fetch installers or tool binaries without blocking on the parent for a manual download step.
+
+14. **Generate profiles for these categories**:
 
     ### a) Skill profiles (one per skill/module that represents an actionable flow)
     - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice")
     - **Name**: Match the knowledge folder id (e.g., `skill-code-001-add-circuit-breaker-java-resilience4j`)
-    - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope
+    - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope. End with interaction hint (see item 13).
     - **Plugins**: `["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo", "waypoint"]`
     - **plugin_configs.references.preselected**: Include the ERI, module, and any dependency references needed for the skill. Always include the enablement knowledge base if one exists
     - **plugin_configs.references.exclude_tools**: `["selectReferences"]` (enforce preselected knowledge)
     - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
-    - **system_instructions**: Instruct the subagent to read the enablement knowledge base first, then follow the skill specification and apply templates from module dependencies
+    - **system_instructions**: Instruct the subagent to read the enablement knowledge base first, then follow the skill specification and apply templates from module dependencies. Include the `auto_approved: false` interaction guidance from item 13.
     - **max_turns**: 15–20 depending on complexity. Add `gc` budget config if > 15 (use `pressure_percent: 0` for continuous mode)
     - **auto_approved**: `false`
     - **icon_name**: Choose from `"circuit_breaker"`, `"microservice"`, `"api"`, `"document"` based on domain
 
     ### b) Validator profiles (tiered validation matching validation folders)
+    - **system_instructions** (all tiers): Include the `auto_approved: true` interaction guidance from item 13.
     - **Tier 1 — Universal**: Basic quality gates for all code (syntax, formatting, secrets, security)
-      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo"]`
+      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo", "web_fetch"]`
       - **preselected**: Only the enablement knowledge base
       - **max_turns**: 5, **auto_approved**: true
     - **Tier 2 — Technology**: Language/framework-specific checks (e.g., Java/Spring conventions)
-      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo"]`
+      - **Plugins**: `["cli", "environment", "filesystem_query", "references", "todo", "web_fetch"]`
       - **preselected**: Enablement + technology-scoped ADRs
       - **max_turns**: 10, **auto_approved**: true
     - **Tier 3 — Pattern compliance**: Verify implementations match skill/module templates
-      - **Plugins**: `["cli", "environment", "file_edit", "filesystem_query", "lsp", "references", "todo", "waypoint"]`
+      - **Plugins**: `["cli", "environment", "file_edit", "filesystem_query", "lsp", "references", "todo", "waypoint", "web_fetch"]`
       - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
       - **preselected**: Enablement + relevant ADRs + skills + validation references discovered in Part 2
       - **max_turns**: 15, **auto_approved**: true
@@ -521,33 +536,38 @@ Use only the inventory and the full list of reference IDs collected during Phase
       - **preselected**: Enablement only
       - **max_turns**: 10, **auto_approved**: true
     - All validators use **icon_name**: `"validator"`
+    - **Note**: `web_fetch` is included in all tiers so validators can download and install tools (linters, formatters, security scanners) autonomously without blocking on the parent for manual steps.
 
     ### c) Analyst profiles (research and documentation)
     - **When**: The knowledge base has a `model/` folder or high-level documentation
     - **Name**: e.g., `analyst-codebase-documentation`
+    - **Description**: End with interaction hint (see item 13) since `auto_approved: false`.
     - **Plugins**: `["cli", "environment", "filesystem_query", "memory", "references", "todo", "web_fetch", "web_search"]`
+    - **system_instructions**: Include the `auto_approved: false` interaction guidance from item 13.
     - **max_turns**: 15, **auto_approved**: false, **icon_name**: `"document"`, **gc**: budget config with defaults
 
     ### d) Investigator profiles (web research)
     - **Name**: e.g., `investigator-web-research`
+    - **Description**: End with interaction hint (see item 13) since `auto_approved: false`.
     - **Plugins**: `["memory", "todo", "web_search", "web_fetch"]`
+    - **system_instructions**: Include the `auto_approved: false` interaction guidance from item 13.
     - **max_turns**: 10, **auto_approved**: false, **icon_name**: `"search"`
 
-14. **Save each profile** as `{{profiles_dir}}/<name>.json`.
+15. **Save each profile** as `{{profiles_dir}}/<name>.json`.
 
-15. **When updating existing profiles**: If a profile file already exists in `{{profiles_dir}}/`, read it first and preserve any manual customizations (e.g., `system_instructions`, `gc` config, `icon`). Only update the `plugin_configs.references.preselected` list and `description` to reflect the current state of the knowledge base. Do not overwrite fields that have been manually tuned.
+16. **When updating existing profiles**: If a profile file already exists in `{{profiles_dir}}/`, read it first and preserve any manual customizations (e.g., `system_instructions`, `gc` config, `icon`). Only update the `plugin_configs.references.preselected` list and `description` to reflect the current state of the knowledge base. Do not overwrite fields that have been manually tuned.
 
 ---
 
 ## Common rules
 
-16. **Skip folders that**:
+17. **Skip folders that**:
     - Don't contain any documentation, validation, or template files
     - Are hidden (start with `.`)
     - Are named `node_modules`, `__pycache__`, `.git`, etc.
     - Match any pattern in `{{exclude_patterns}}`
 
-17. **Computing paths**:
+18. **Computing paths**:
 
     **For local sources** — compute absolute filesystem paths, normalize to POSIX forward slashes (`/`), remove trailing slashes:
 
@@ -579,15 +599,15 @@ Use only the inventory and the full list of reference IDs collected during Phase
     abs_posix=$(realpath "$KNOWLEDGE_DIR/$rel" 2>/dev/null)
     ```
 
-18. **Overwrite protection** (when `{{dry_run}}` is false):
+19. **Overwrite protection** (when `{{dry_run}}` is false):
     - If an output file already exists and `{{force}}` is false → skip it, record in summary as `"skipped"` with reason `"exists"`.
     - If `{{force}}` is true → create a timestamped backup in `{{output}}/backups/` before overwriting.
 
-19. **Merge mode**:
+20. **Merge mode**:
     - `"separate"` (default): Write one `<id>.json` file per reference into `{{output}}/`.
     - `"single"`: Accumulate all references into a single `{{output}}/references.json` array.
 
-20. **Report results** — After all artifacts have been written (or planned), produce two outputs:
+21. **Report results** — After all artifacts have been written (or planned), produce two outputs:
 
     **a) Human-readable summary table** (always produced, shown as agent output):
 
@@ -640,7 +660,7 @@ Use only the inventory and the full list of reference IDs collected during Phase
     }
     ```
 
-21. **Cleanup** — After all phases complete:
+22. **Cleanup** — After all phases complete:
     - If source was remote: the referenced content has already been materialized to `.jaato/knowledge/<source-hash>/` during Phase 2. The temporary download directory (`$WORK_DIR`) is now disposable — remove it: `rm -rf "$WORK_DIR"`.
     - If `{{cache}}` is true: additionally copy the **full** downloaded tree to `.jaato/cache/sources/` before removing `$WORK_DIR`, so future runs with the same URL + ref can skip the download entirely. (The `.jaato/knowledge/` copy is always kept — it's what the references point to.)
 
