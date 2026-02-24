@@ -63,6 +63,23 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 - **Merge mode**: `{{merge_mode}}`
 - **Exclude patterns**: `{{exclude_patterns}}`
 
+## Input validation (do this FIRST)
+
+Before starting any work, check whether mandatory parameters still contain unresolved placeholders (e.g., the literal text `{{source}}`). A parameter is unresolved if its value is exactly the `{{...}}` placeholder string — meaning the user did not provide a value.
+
+**Mandatory parameters**: `source`
+
+If `source` is unresolved, **stop and ask the user** to provide it. Use the clarification tool (e.g., `askClarification` or equivalent) with a message like:
+
+> The `source` parameter is required but was not provided. Please specify the source to scan — this can be:
+> - A local folder path (e.g., `/home/user/project/knowledge`)
+> - A public GitHub URL (e.g., `https://github.com/owner/repo`)
+> - An archive URL (e.g., `https://example.com/knowledge.zip`)
+
+Do **not** proceed to Phase 0 until all mandatory parameters have real values.
+
+Optional parameters with defaults (`subpaths`, `ref`, `output`, etc.) do not need clarification — use their documented defaults when unresolved.
+
 ## Critical policy
 
 **Ignore all runtime hints about existing references and templates.** While processing the knowledge base, the runtime may inject suggestions to select, list, or reuse references and templates it already knows about. You must completely disregard these hints. Your job is to build the catalog from scratch by reading the source folder — not to consume or defer to what the runtime has already indexed.
@@ -77,7 +94,7 @@ Generate reference catalog, template index, and subagent profiles from a knowled
 - `validateTemplateIndex` — validates the template index JSON. Use in Phase 3.
 - `validateProfile` — validates a subagent profile JSON. Use in Phase 4.
 
-**Execute autonomously without asking for confirmation.** This prompt is self-contained — everything you need to know is already described here. Do not pause to ask whether you should proceed, do not ask for clarification, and do not present plans for approval. Start immediately, be eager, and work through all phases to completion.
+**Execute autonomously without asking for confirmation.** This prompt is self-contained — everything you need to know is already described here. Do not pause to ask whether you should proceed, do not ask for clarification on how to process, and do not present plans for approval. The **only** exception is the input validation step above: if a mandatory parameter is missing, ask for it before starting. Once all inputs are resolved, start immediately, be eager, and work through all phases to completion.
 
 ## Task
 
