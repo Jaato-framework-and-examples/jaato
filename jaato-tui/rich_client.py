@@ -4997,12 +4997,6 @@ def _run_init(target: str = ".jaato") -> None:
 def main():
     import argparse
 
-    # Handle 'init' subcommand before argparse (keeps flag-based CLI intact)
-    if len(sys.argv) >= 2 and sys.argv[1] == "init":
-        target = sys.argv[2] if len(sys.argv) >= 3 else ".jaato"
-        _run_init(target)
-        return
-
     # Configure UTF-8 encoding for Windows console (before any output)
     from console_encoding import configure_utf8_output
     configure_utf8_output()
@@ -5011,9 +5005,6 @@ def main():
         description="Rich TUI client for Jaato AI assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-commands:
-  jaato init [PATH]   Initialize .jaato/ config directory (default: .jaato)
-
 The client auto-starts the server daemon if not already running.
 To run the server separately: python -m server --ipc-socket /tmp/jaato.sock
 To connect to a specific server: jaato --connect /path/to/socket
@@ -5087,8 +5078,20 @@ To connect to a specific server: jaato --connect /path/to/socket
         help="Send a command to the session and exit (e.g., 'stop', 'reset', 'permissions default deny'). "
              "Requires --session."
     )
+    parser.add_argument(
+        "--init",
+        nargs="?",
+        const=".jaato",
+        metavar="PATH",
+        help="Initialize .jaato/ config directory with example files and exit (default: .jaato)"
+    )
 
     args = parser.parse_args()
+
+    # Init mode: scaffold config directory and exit
+    if args.init is not None:
+        _run_init(args.init)
+        return
 
     # Resolve socket path: explicit --connect or default
     from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
