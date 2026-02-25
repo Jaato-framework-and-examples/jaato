@@ -229,6 +229,19 @@ Before spawning subagents, **inform the user** that subagents will run in parall
 
 > Spawning N subagents to process categories in parallel. Subagents may prompt you for file-write permissions — please keep the session attended.
 
+#### Event subscriptions for subagent coordination
+
+Before spawning subagents, subscribe to task events so you can track their progress and receive their results. Use `subscribeToTasks` with the event types you need:
+
+- **`plan_created`** — Notifies you when a subagent creates its plan, revealing the step IDs and structure. Subscribe to this if you intend to wire up cross-agent dependencies via `addDependentStep` (linking your own steps to specific subagent steps for automatic unblocking).
+- **`step_completed`** — Delivers each subagent step's structured output as it finishes. This is how you receive the `{ reference_ids, template_entries, warnings, skipped }` data from subagents.
+- **`step_failed`** — Notifies you immediately if a subagent step fails, so you can account for partial results during the merge.
+- **`plan_completed`** — Notifies you when a subagent's entire plan finishes. Subscribe to this if you are **not** using step-level dependencies and need a clear signal that a subagent is fully done, rather than inferring completion by counting `step_completed` events against the `plan_created` step list.
+
+**Which events to choose depends on your coordination strategy:**
+- If you use `addDependentStep` to set up step-level dependencies: `plan_created`, `step_completed`, and `step_failed` are sufficient — your dependent steps auto-unblock when the relevant subagent steps complete, making `plan_completed` redundant.
+- If you are simply waiting for injected event notifications without formal dependencies: include `plan_completed` as well, so you get an unambiguous "this subagent is done" signal without having to track step counts yourself.
+
 **How to split:**
 1. Partition the matched directories into **groups** — typically one group per top-level category (e.g., all `ADRs/*` folders in one group, all `modules/*` in another). If one category is much larger than the rest, split it further (e.g., `modules/mod-001..mod-010` and `modules/mod-011..mod-020`).
 2. Spawn one **subagent per group**. Each subagent receives:
