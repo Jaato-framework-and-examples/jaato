@@ -811,7 +811,7 @@ class TestGetTaskEventsExecutor:
         return event
 
     def test_basic_get_events(self):
-        """getTaskEvents returns events without wait_seconds."""
+        """getTaskEvents returns events without timeout."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
         event = self._publish_event()
@@ -856,15 +856,15 @@ class TestGetTaskEventsExecutor:
         assert result["count"] == 0
         assert "last_event_id" not in result
 
-    def test_wait_seconds_returns_immediately_with_events(self):
-        """wait_seconds does not delay when events already exist."""
+    def test_timeout_returns_immediately_with_events(self):
+        """timeout does not delay when events already exist."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
         self._publish_event("sub")
 
         start = time.monotonic()
         result = executors["getTaskEvents"]({
-            "wait_seconds": 5,
+            "timeout": 5,
             "agent_id": "sub",
         })
         elapsed = time.monotonic() - start
@@ -872,8 +872,8 @@ class TestGetTaskEventsExecutor:
         assert result["count"] == 1
         assert elapsed < 1.0
 
-    def test_wait_seconds_blocks_until_event(self):
-        """wait_seconds blocks and returns when a new event is published."""
+    def test_timeout_blocks_until_event(self):
+        """timeout blocks and returns when a new event is published."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
@@ -881,7 +881,7 @@ class TestGetTaskEventsExecutor:
 
         def call_tool():
             r = executors["getTaskEvents"]({
-                "wait_seconds": 10,
+                "timeout": 10,
                 "agent_id": "sub",
             })
             result_holder.append(r)
@@ -899,14 +899,14 @@ class TestGetTaskEventsExecutor:
         assert result_holder[0]["count"] == 1
         assert result_holder[0]["events"][0]["event_id"] == event.event_id
 
-    def test_wait_seconds_timeout_returns_empty(self):
-        """wait_seconds returns empty after timeout with no events."""
+    def test_timeout_returns_empty(self):
+        """timeout returns empty after timeout with no events."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
         start = time.monotonic()
         result = executors["getTaskEvents"]({
-            "wait_seconds": 0.3,
+            "timeout": 0.3,
             "agent_id": "nobody",
         })
         elapsed = time.monotonic() - start
@@ -914,8 +914,8 @@ class TestGetTaskEventsExecutor:
         assert result["count"] == 0
         assert elapsed >= 0.25
 
-    def test_wait_seconds_with_after_event(self):
-        """wait_seconds combined with after_event for incremental consumption."""
+    def test_timeout_with_after_event(self):
+        """timeout combined with after_event for incremental consumption."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
@@ -925,7 +925,7 @@ class TestGetTaskEventsExecutor:
 
         def call_tool():
             r = executors["getTaskEvents"]({
-                "wait_seconds": 10,
+                "timeout": 10,
                 "after_event": event1.event_id,
             })
             result_holder.append(r)
@@ -941,39 +941,39 @@ class TestGetTaskEventsExecutor:
         assert result_holder[0]["count"] == 1
         assert result_holder[0]["events"][0]["event_id"] == event2.event_id
 
-    def test_wait_seconds_clamped(self):
-        """wait_seconds is clamped to [0, 30]."""
+    def test_timeout_clamped(self):
+        """timeout is clamped to [0, 30]."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
         # Negative → treated as 0 (immediate return)
         start = time.monotonic()
-        result = executors["getTaskEvents"]({"wait_seconds": -5})
+        result = executors["getTaskEvents"]({"timeout": -5})
         elapsed = time.monotonic() - start
         assert elapsed < 0.5
 
         # Invalid type → treated as 0
-        result = executors["getTaskEvents"]({"wait_seconds": "not_a_number"})
+        result = executors["getTaskEvents"]({"timeout": "not_a_number"})
         assert result["count"] == 0
 
-    def test_wait_seconds_requires_narrowing(self):
-        """wait_seconds without any filters or cursor returns an error."""
+    def test_timeout_requires_narrowing(self):
+        """timeout without any filters or cursor returns an error."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
-        result = executors["getTaskEvents"]({"wait_seconds": 5})
+        result = executors["getTaskEvents"]({"timeout": 5})
         assert "error" in result
-        assert "wait_seconds requires" in result["error"]
+        assert "timeout requires" in result["error"]
 
-    def test_wait_seconds_accepted_with_agent_id(self):
-        """wait_seconds is accepted when agent_id narrows the query."""
+    def test_timeout_accepted_with_agent_id(self):
+        """timeout is accepted when agent_id narrows the query."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
         # Should not error — agent_id provides narrowing.
         start = time.monotonic()
         result = executors["getTaskEvents"]({
-            "wait_seconds": 0.2,
+            "timeout": 0.2,
             "agent_id": "sub",
         })
         elapsed = time.monotonic() - start
@@ -982,14 +982,14 @@ class TestGetTaskEventsExecutor:
         # Should have waited (no events from "sub").
         assert elapsed >= 0.15
 
-    def test_wait_seconds_accepted_with_event_types(self):
-        """wait_seconds is accepted when event_types narrows the query."""
+    def test_timeout_accepted_with_event_types(self):
+        """timeout is accepted when event_types narrows the query."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
 
         start = time.monotonic()
         result = executors["getTaskEvents"]({
-            "wait_seconds": 0.2,
+            "timeout": 0.2,
             "event_types": ["step_completed"],
         })
         elapsed = time.monotonic() - start
@@ -997,15 +997,15 @@ class TestGetTaskEventsExecutor:
         assert "error" not in result
         assert elapsed >= 0.15
 
-    def test_wait_seconds_accepted_with_after_event(self):
-        """wait_seconds is accepted when after_event provides a cursor."""
+    def test_timeout_accepted_with_after_event(self):
+        """timeout is accepted when after_event provides a cursor."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
         event = self._publish_event()
 
         start = time.monotonic()
         result = executors["getTaskEvents"]({
-            "wait_seconds": 0.2,
+            "timeout": 0.2,
             "after_event": event.event_id,
         })
         elapsed = time.monotonic() - start
