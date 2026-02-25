@@ -353,7 +353,25 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 
 If parallelization is not warranted (even with `{{parallel}}` true), skip this step and proceed with sequential Phase 2.
 
-### Phase 2 — Process one category at a time
+#### Coordinator discipline after spawning subagents
+
+**CRITICAL**: Once you have spawned subagents, you are the **coordinator**. Your only job is to **wait** for all subagents to return their results, then merge and proceed to Phase 3.
+
+You **must NOT**:
+- Start processing folders yourself while subagents are running. You will be slower than N subagents working in parallel, and you will produce duplicate or conflicting output files.
+- "Help out" by picking up unassigned folders. All folders were assigned to subagents when you spawned them — there is nothing left for you to do.
+- Decide mid-wait that parallelization was a mistake and switch to sequential processing. If subagents are already running, you cannot cancel them — they will keep writing files. Doing the same work yourself creates duplicates and race conditions on the output directory.
+
+You **must**:
+- Wait for every subagent to return its `{ "reference_ids", "template_entries", "warnings", "skipped" }` result.
+- Merge the results and proceed to Phase 3 (template index) → Phase 4 (profiles) → final report.
+
+**Skip Phase 2 entirely when subagents were spawned.** Phase 2 is the sequential fallback — it exists for when Phase 1.5 decides not to parallelize. The two paths are mutually exclusive: either subagents do the work (Phase 1.5) or you do it yourself (Phase 2), never both.
+
+### Phase 2 — Process one category at a time (sequential fallback)
+
+**Skip this phase if you spawned subagents in Phase 1.5.** This phase is only for sequential processing when parallelization was not used.
+
 Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`, then `model/domains/`, then `model/standards/`). Within each category, process **one folder at a time**:
 1. Identify the entry-point file using the priority order from "Recognized entry-point files" above. Read only that file — extract just the first paragraph for the description
 2. If the entry-point file has YAML frontmatter with `title`, `description`, or `tags`, use those values. Otherwise fall back to the extraction rules (first paragraph, folder name parsing)
@@ -1008,9 +1026,9 @@ Follow the processing strategy strictly:
 
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
-3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel. Otherwise proceed sequentially.
-4. **Phase 2**: Process categories (sequentially or via subagents). Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
-5. **Phase 3**: Merge template entries (from subagents if parallel), write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
+3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel, then **wait for all to complete** (do NOT start Phase 2). Otherwise skip to Phase 2.
+4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
 6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
 7. **Report**: Produce the final summary table and write `summary.json`.
 8. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
