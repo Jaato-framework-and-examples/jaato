@@ -898,6 +898,9 @@ class ReferencesPlugin:
         # Build preselected paths index for reference-read detection.
         # Maps normalized resolved_path → (ref_id, ref_name) for all
         # preselected LOCAL sources (including transitively resolved ones).
+        # For directory references, only the directory path is stored;
+        # _detect_preselected_read uses startswith + "/" to match files
+        # inside the directory without needing per-file entries.
         self._preselected_paths = {}
         for sid in self._selected_source_ids:
             source = next((s for s in self._sources if s.id == sid), None)
@@ -1911,6 +1914,13 @@ class ReferencesPlugin:
         so that Windows backslash paths, MSYS2 paths, and Unix paths all match
         correctly.
 
+        Three matching strategies are tried in order:
+        1. Exact match after normpath (handles file refs and expanded dir files).
+        2. Directory containment via startswith with path separator (handles
+           directory refs when the arg is a file inside the directory).
+        3. Substring containment (handles CLI commands like
+           ``cat /path/to/file.md`` where the path is embedded in a command).
+
         Args:
             tool_args: The tool call arguments dict (e.g., ``{"command": "cat foo.md"}``
                 or ``{"path": "docs/spec.md"}``).
@@ -1924,15 +1934,25 @@ class ReferencesPlugin:
                 continue
             # Normalize the argument value for comparison
             norm_value = normalize_for_comparison(value)
+            norm_arg_path = normalize_for_comparison(os.path.normpath(value))
             for norm_path, (ref_id, ref_name) in self._preselected_paths.items():
-                # Check both exact path match and substring containment
-                # (handles CLI commands like "cat /path/to/file.md")
-                norm_arg_path = normalize_for_comparison(os.path.normpath(value))
+                # 1. Exact path match (covers files and expanded dir entries)
                 if norm_arg_path == norm_path:
                     return (ref_id, ref_name)
-                # Substring check for CLI commands containing the path
-                if norm_path in norm_value:
+                # 2. Directory containment: arg is a file inside the ref dir
+                #    Use startswith + "/" to avoid partial name matches
+                #    (e.g., "/refs-old/file" should NOT match "/refs")
+                if norm_arg_path.startswith(norm_path + "/"):
                     return (ref_id, ref_name)
+                # 3. Substring fallback for CLI commands containing the path.
+                #    Require a path boundary after the match (/, space, quote,
+                #    or end-of-string) to avoid partial-name false positives
+                #    like "/refs" matching "/refs-old/file".
+                idx = norm_value.find(norm_path)
+                if idx >= 0:
+                    end_idx = idx + len(norm_path)
+                    if end_idx >= len(norm_value) or norm_value[end_idx] in ('/', ' ', '"', "'"):
+                        return (ref_id, ref_name)
         return None
 
     def get_preselected_paths(self) -> Dict[str, Tuple[str, str]]:

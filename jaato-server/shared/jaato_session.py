@@ -5124,14 +5124,32 @@ NOTES
         if not ref_id:
             return
 
-        # Skip if already pinned (idempotent — first read wins)
+        import time as _time
+
+        # For directory references the model reads multiple files, each
+        # triggering a pin signal with the same ref_id.  Accumulate content
+        # so the budget reflects the total reference cost.
         if ref_id in self._pinned_references:
+            existing = self._pinned_references[ref_id]
+            existing.content += f"\n\n{content}"
+
+            # Also append the new file content to the system instruction
+            pinned_block = (
+                f"\n<!-- pinned_ref_id={ref_id} (continued) -->\n"
+                f"{content}"
+            )
+            self._system_instruction = (self._system_instruction or "") + pinned_block
+
+            history = self.get_history()
+            self._create_provider_session(history)
+            self._update_pinned_references_budget()
+
             self._trace(
-                f"PIN_REF: Reference '{ref_id}' already pinned, skipping"
+                f"PIN_REF: Appended to existing reference '{ref_id}' "
+                f"({ref_name}), new_content_len={len(content)}, "
+                f"total_len={len(existing.content)}"
             )
             return
-
-        import time as _time
 
         pinned = _PinnedReference(
             ref_id=ref_id,
