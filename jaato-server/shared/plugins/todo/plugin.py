@@ -598,11 +598,11 @@ class TodoPlugin:
                     "- Debug why a dependency hasn't resolved\n"
                     "- Review what happened while you were working\n\n"
                     "If subscribed to events, you'll see them inline - this is for history review.\n\n"
-                    "LONG-POLL: Set wait_seconds (1-30) to avoid busy-polling. The tool "
+                    "LONG-POLL: Set timeout (1-30) to avoid busy-polling. The tool "
                     "blocks until events matching your filters (agent_id, event_types) "
                     "appear after the after_event cursor, or the timeout expires. "
                     "Combine with after_event to only receive events newer than your last read.\n\n"
-                    "IMPORTANT: wait_seconds requires at least one of agent_id, event_types, "
+                    "IMPORTANT: timeout requires at least one of agent_id, event_types, "
                     "or after_event. Without narrowing, every event from any agent would "
                     "satisfy the query and the wait would return immediately, making it useless."
                 ),
@@ -622,7 +622,7 @@ class TodoPlugin:
                             "type": "integer",
                             "description": "Maximum events to return (default: 20)"
                         },
-                        "wait_seconds": {
+                        "timeout": {
                             "type": "number",
                             "description": (
                                 "Long-poll timeout in seconds (0-30). When set, the tool "
@@ -1739,7 +1739,7 @@ class TodoPlugin:
     def _execute_get_task_events(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getTaskEvents tool.
 
-        Supports long-polling via ``wait_seconds``: when set, the tool blocks
+        Supports long-polling via ``timeout``: when set, the tool blocks
         until matching events arrive or the timeout expires, rather than
         returning an empty result immediately. Combined with ``after_event``
         (the last event_id the caller saw), this enables efficient incremental
@@ -1748,12 +1748,12 @@ class TodoPlugin:
         agent_id = args.get("agent_id")
         event_types_raw = args.get("event_types", [])
         limit = args.get("limit", 20)
-        wait_seconds = args.get("wait_seconds", 0)
+        poll_timeout = args.get("timeout", 0)
         after_event = args.get("after_event")
 
         self._trace(
             f"getTaskEvents: agent={agent_id}, types={event_types_raw}, "
-            f"limit={limit}, wait={wait_seconds}, after={after_event}"
+            f"limit={limit}, timeout={poll_timeout}, after={after_event}"
         )
 
         if not self._event_bus:
@@ -1769,31 +1769,31 @@ class TodoPlugin:
                 except ValueError:
                     pass  # Skip invalid
 
-        # Clamp wait_seconds to [0, 30]
+        # Clamp timeout to [0, 30]
         try:
-            wait_seconds = float(wait_seconds)
+            poll_timeout = float(poll_timeout)
         except (TypeError, ValueError):
-            wait_seconds = 0
-        wait_seconds = min(max(wait_seconds, 0), 30)
+            poll_timeout = 0
+        poll_timeout = min(max(poll_timeout, 0), 30)
 
-        # Guard: wait_seconds without any narrowing is almost always a
+        # Guard: timeout without any narrowing is almost always a
         # mistake — every published event matches, so the wait returns
         # on the very first event from any agent.  Return an error that
         # tells the model what to fix instead of silently doing nothing.
-        if wait_seconds > 0 and not agent_id and not event_types and not after_event:
+        if poll_timeout > 0 and not agent_id and not event_types and not after_event:
             return {
                 "error": (
-                    "wait_seconds requires at least one of: agent_id, "
+                    "timeout requires at least one of: agent_id, "
                     "event_types, or after_event.  Without any narrowing "
                     "the wait returns on the first event from any agent, "
-                    "making the sleep ineffective."
+                    "making the timeout ineffective."
                 )
             }
 
-        if wait_seconds > 0:
+        if poll_timeout > 0:
             # Long-poll path: block until events arrive or timeout.
             events = self._event_bus.wait_for_events(
-                timeout=wait_seconds,
+                timeout=poll_timeout,
                 agent_id=agent_id,
                 event_types=event_types,
                 after_event_id=after_event,
