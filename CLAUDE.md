@@ -172,6 +172,12 @@ Session/client methods:
 - `client.is_processing` / `session.is_running`: Check if message in progress
 - `client.set_streaming_enabled(bool)`: Toggle streaming mode
 
+### Server Version Check
+
+The server includes its package version (`server_version`) in the `ConnectedEvent`'s `server_info` dict, read from `importlib.metadata` at runtime. The SDK exposes it as `IPCClient.server_version` (and `IPCRecoveryClient.server_version`) after connect.
+
+Each client declares its own minimum — e.g., the TUI sets `MIN_SERVER_VERSION = "0.2.27"` and refuses to connect if the server is older. If a client doesn't declare a minimum, no check is performed. `IncompatibleServerError` is classified as permanent by the recovery client (no retries).
+
 ### Proactive Garbage Collection
 
 The framework monitors token usage during streaming and automatically triggers GC when thresholds are exceeded:

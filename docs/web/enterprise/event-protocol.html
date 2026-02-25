@@ -256,7 +256,7 @@
 
         <h2 id="connection-lifecycle">Connection Lifecycle</h2>
         <p>
-          When a client connects, it receives a <code>ConnectedEvent</code> with protocol version and server capabilities, followed by a <code>SessionInfoEvent</code> containing the full state snapshot: session metadata, available tools, model list, and command history. This allows the client to fully initialize without additional requests.
+          When a client connects, it receives a <code>ConnectedEvent</code> with protocol version and <code>server_info</code> (including <code>server_version</code> — the server's package version from <code>pyproject.toml</code>), followed by a <code>SessionInfoEvent</code> containing the full state snapshot: session metadata, available tools, model list, and command history. Clients can compare <code>server_version</code> against their own minimum to refuse connection to obsolete servers. This allows the client to fully initialize without additional requests.
         </p>
         <p>
           On reconnection (e.g., after network drop), the server calls <code>emit_current_state()</code> which replays all relevant events: session info, tracked agents and their status, instruction budgets, and clears any stale pending permission/clarification requests.

@@ -150,7 +150,7 @@ The 40+ event types are organized into functional categories:
 │       ▼                                                              │
 │  ConnectedEvent                                                      │
 │  ├─ protocol_version: "1.0"                                         │
-│  └─ server_info: {capabilities, version, ...}                       │
+│  └─ server_info: {client_id, server_version, transport, ...}        │
 │       │                                                              │
 │       ▼                                                              │
 │  SessionInfoEvent (full state snapshot)                               │
@@ -176,7 +176,14 @@ The 40+ event types are organized into functional categories:
 | `ConnectedEvent` | `protocol_version`, `server_info` | Client establishes connection |
 | `SessionInfoEvent` | `session_id`, `sessions`, `tools`, `models`, `user_inputs` | On connect/attach; full state snapshot for client initialization |
 
+**`server_info` fields (IPC):** `client_id`, `transport`, `socket_path`, `server_version`
+
+**`server_info` fields (WebSocket):** `client_id`, `workspace_mode`, `server_version`, `model_provider`, `model_name`
+
+`server_version` is the server's package version (from `pyproject.toml` via `importlib.metadata`). Clients can compare it against their own minimum to refuse connection to obsolete servers. The SDK exposes it as `IPCClient.server_version` after connect. Pre-0.2.28 servers do not include this field.
+
 **Client Reaction (Rich Client):**
+- Checks `server_version` against `MIN_SERVER_VERSION`; refuses connection if too old
 - Stores sessions/tools/models for tab completion
 - Restores command history from `user_inputs`
 - Updates status bar with model and session info

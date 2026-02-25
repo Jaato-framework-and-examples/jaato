@@ -229,6 +229,14 @@ After max attempts exceeded:
 Connection lost permanently: Max retries exceeded
 ```
 
+After connecting to an incompatible (too-old) server:
+
+```
+Error: Server version 0.2.10 is not supported by this client (requires >= 0.2.27). Please upgrade the server.
+```
+
+`IncompatibleServerError` is classified as a **permanent** error — the recovery client will not retry, since an old server won't become newer on reconnection.
+
 ### User Actions During Recovery
 
 | Action | Behavior |
