@@ -52,6 +52,10 @@ jobs:
           echo "Version ${version} is available for publishing"
         working-directory: jaato-tui
 
+      - name: Generate combined README
+        run: python ../scripts/build_readme.py
+        working-directory: jaato-tui
+
       - name: Build package
         run: python -m build .
         working-directory: jaato-tui

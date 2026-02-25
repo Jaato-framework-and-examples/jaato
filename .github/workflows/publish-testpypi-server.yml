@@ -51,6 +51,9 @@ jobs:
           fi
           echo "Version ${version} is available for publishing"
 
+      - name: Generate combined README
+        run: python scripts/build_readme.py --dir jaato-server
+
       - name: Build package
         run: python -m build jaato-server/
 
