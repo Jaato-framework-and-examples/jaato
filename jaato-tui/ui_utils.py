@@ -191,6 +191,60 @@ def ellipsize_path_pair(
 
 
 # =============================================================================
+# Name Ellipsization (middle-ellipsis for short labels)
+# =============================================================================
+
+
+def ellipsize_name(name: str, max_width: int, *, ellipsis: str = "…") -> str:
+    """Ellipsize a name in the middle, preserving both start and end.
+
+    Unlike ``ellipsize_path`` (which operates on path segments), this function
+    works at the *character* level and is intended for short labels such as
+    agent IDs or session names where both the prefix **and** the suffix carry
+    meaning (e.g. ``"validator-tier3"`` → ``"valid…tier3"``).
+
+    The visible characters are split roughly in half between the head and tail
+    of the original string, with a slight bias toward the tail so that
+    distinguishing suffixes are preserved.
+
+    Args:
+        name: The string to ellipsize.
+        max_width: Maximum width in characters.  Must be at least
+            ``len(ellipsis) + 2`` for any truncation to occur; if not, the
+            name is hard-truncated to *max_width*.
+        ellipsis: The ellipsis string to insert (default: ``"…"`` U+2026).
+
+    Returns:
+        The original *name* unchanged if it fits within *max_width*, otherwise
+        a middle-ellipsized version.
+
+    Examples:
+        >>> ellipsize_name("validator-tier3-secondary", 15)
+        'valida…econdary'
+        >>> ellipsize_name("short", 15)
+        'short'
+    """
+    if not name or max_width <= 0:
+        return name
+
+    if len(name) <= max_width:
+        return name
+
+    ell_len = len(ellipsis)
+
+    # Need room for at least one char on each side of the ellipsis
+    if max_width < ell_len + 2:
+        return name[:max_width]
+
+    available = max_width - ell_len
+    # Bias toward the tail so distinguishing suffixes are preserved
+    tail_len = (available + 1) // 2
+    head_len = available - tail_len
+
+    return name[:head_len] + ellipsis + name[-tail_len:]
+
+
+# =============================================================================
 # Permission & Tool Formatting
 # =============================================================================
 
