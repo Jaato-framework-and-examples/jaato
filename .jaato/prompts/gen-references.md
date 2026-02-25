@@ -97,12 +97,16 @@ Optional parameters with defaults (`subpaths`, `ref`, `output`, etc.) do not nee
 - `listExtractedTemplates` — same reason: the template index is what you are building.
 
 **Tools that ARE useful** (use them for validation):
-- `listTemplateVariables` — reads a `.tpl`/`.tmpl` file and returns syntax + variables. Use it in Phase 2 for each template file.
-- `validateReference` — validates a reference JSON file you just wrote. Use after every doc-ref and validation-ref write.
-- `validateTemplateIndex` — validates the template index JSON. Use in Phase 3.
-- `validateProfile` — validates a subagent profile JSON. Use in Phase 4.
+- `listTemplateVariables` *(category: `code`, discoverable)* — reads a `.tpl`/`.tmpl` file and returns syntax + variables. Use it in Phase 2 for each template file.
+- `validateReference` *(category: `knowledge`, discoverable)* — validates a reference JSON file you just wrote. Use after every doc-ref and validation-ref write.
+- `validateTemplateIndex` *(category: `code`, discoverable)* — validates the template index JSON. Use in Phase 3.
+- `validateProfile` *(category: `coordination`, discoverable)* — validates a subagent profile JSON. Use in Phase 4.
+
+**Tool discovery reminder:** The tools above are **discoverable** — they are not visible in your initial tool list. Before using them, you MUST call `list_tools()` to see available categories, then `get_tool_schemas(tools=["<tool_name>"])` to load each tool's schema. Do this early (e.g., at the start of Phase 2) so tools are available when needed. Do not skip validation steps because a tool "isn't available" — discover it first.
 
 **Execute autonomously without asking for confirmation.** This prompt is self-contained — everything you need to know is already described here. Do not pause to ask whether you should proceed, do not ask for clarification on how to process, and do not present plans for approval. The **only** exception is the input validation step above: if a mandatory parameter is missing, ask for it before starting. Once all inputs are resolved, start immediately, be eager, and work through all phases to completion.
+
+**There are no time constraints — complete ALL work fully.** You are not operating under any deadline, token budget pressure, or complexity ceiling. Do not use phrases like "given the complexity and time constraints", "for brevity", "to save time", or any similar justification to skip, abbreviate, or simplify steps. Every phase, every folder, every validation call, and every profile described in this prompt is expected to be executed in full. If the knowledge base has 50 folders, process all 50. If there are 30 templates, index all 30. Partial completion is not acceptable — the outputs of this prompt feed directly into runtime systems that expect a complete catalog. Cutting corners produces an incomplete catalog that silently breaks downstream workflows.
 
 ## Task
 
@@ -327,7 +331,7 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >
 > ---
 >
-> **Template index entries** — if the folder contains `.tpl`/`.tmpl` files, call `listTemplateVariables(template_name=<absolute-path>)` for each and collect entries in this shape:
+> **Template index entries** — if the folder contains `.tpl`/`.tmpl` files, call `listTemplateVariables` *(category: `code`, discoverable)* with `(template_name=<absolute-path>)` for each and collect entries in this shape:
 >
 > ```json
 > {
@@ -347,7 +351,7 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >
 > If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. Materialize validation subfolders too.
 >
-> Validate every reference JSON with `validateReference`. Fix and rewrite if validation fails.
+> Validate every reference JSON with `validateReference` *(category: `knowledge`, discoverable)*. Fix and rewrite if validation fails.
 >
 > Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
 
@@ -578,7 +582,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 
 9. **Find standalone template files** — files with `.tpl` or `.tmpl` extensions anywhere within the resolved directories.
 
-10. **For each template file**, use `listTemplateVariables` to extract syntax and variables:
+10. **For each template file**, use `listTemplateVariables` *(category: `code`, discoverable)* to extract syntax and variables:
 
     Call `listTemplateVariables(template_name=<absolute-path-to-template-file>)`. The tool reads the file, auto-detects the syntax (Jinja2 vs Mustache), and returns the complete, deduplicated variable list using proper parsing (Jinja2 AST analysis or Mustache regex). Use its `syntax` and `variables` output directly for the index entry — do **not** manually parse template variables yourself.
 
@@ -654,6 +658,15 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 
     **Optional fields with defaults**: `plugins` (default `[]` = inherit parent), `plugin_configs` (default `{}`), `system_instructions` (default `null` = inherit parent), `model` (default `null` = inherit parent), `provider` (default `null` = inherit parent), `max_turns` (default `10`), `auto_approved` (default `false`), `icon` (3-line ASCII art array or `null`), `icon_name` (`null`), `gc` (`null`)
 
+    **`plugin_configs` — only include plugins that accept configuration.** Each key in `plugin_configs` must be a plugin name that actually reads that config during initialization. Do NOT invent config keys for plugins that don't support them. The supported plugin configs are:
+
+    | Plugin | Supported config keys | Notes |
+    |--------|----------------------|-------|
+    | `references` | `preselected` (list of reference IDs), `exclude_tools` (list of tool names to hide) | The **only** plugin that supports preselection |
+    | `lsp` | `config_path` (path to `.lsp.json`) | |
+
+    **Do NOT add `plugin_configs` entries for any other plugin** — especially not `template`, `cli`, `file_edit`, `todo`, `memory`, `web_fetch`, etc. These plugins do not read custom config from profiles (the subagent system auto-injects `agent_name` and `base_path` for them internally). Adding unsupported config keys is silently ignored at best and confusing at worst.
+
     For long-running profiles (max_turns > 15), add GC budget config to prevent context window exhaustion. The `"budget"` GC type removes content in priority order: enrichment → ephemeral → oldest conversation turns → preservable (only under pressure). LOCKED entries are never removed.
 
     ```json
@@ -693,7 +706,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     - For `auto_approved: false`: `"When you need permission to execute a tool or need clarification from the user, your request will be forwarded to the orchestrating agent. Proceed with other work if possible while waiting, but do not assume the request was denied if there is a delay."`
     - For `auto_approved: true`: `"Tool permissions are auto-approved for this profile. If a tool fails, diagnose the error rather than requesting manual intervention."`
 
-    **In validator profiles** that may need to download/install tools (e.g., linters, formatters): include `web_fetch` in the plugin list so the subagent can fetch installers or tool binaries without blocking on the parent for a manual download step.
+    **In validator profiles** that may need to download/install tools (e.g., linters, formatters): include `web_fetch` *(category: `web`, discoverable)* in the plugin list so the subagent can fetch installers or tool binaries without blocking on the parent for a manual download step.
 
 14. **Generate profiles for these categories**:
 
@@ -730,7 +743,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
       - **preselected**: Enablement only
       - **max_turns**: 10, **auto_approved**: true
     - All validators use **icon_name**: `"validator"`
-    - **Note**: `web_fetch` is included in all tiers so validators can download and install tools (linters, formatters, security scanners) autonomously without blocking on the parent for manual steps.
+    - **Note**: `web_fetch` *(category: `web`, discoverable)* is included in all tiers so validators can download and install tools (linters, formatters, security scanners) autonomously without blocking on the parent for manual steps.
 
     ### c) Analyst profiles (research and documentation)
     - **When**: The knowledge base has a `model/` folder or high-level documentation
@@ -1027,8 +1040,8 @@ Follow the processing strategy strictly:
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
 3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel, then **wait for all to complete** (do NOT start Phase 2). Otherwise skip to Phase 2.
-4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
-5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`**. Fix and rewrite if validation fails.
-6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`**. Fix and rewrite any profile that fails validation.
+4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`** *(category: `code`, discoverable)*. Fix and rewrite if validation fails.
+6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
 7. **Report**: Produce the final summary table and write `summary.json`.
 8. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
