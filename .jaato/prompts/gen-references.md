@@ -640,7 +640,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     {
       "name": "<unique-identifier>",
       "description": "<when to use, triggers, scope>",
-      "plugins": ["<plugin1>", "<plugin2>"],
+      "plugins": ["<plugin1>", "<plugin2>(preload)", "<plugin3>"],
       "plugin_configs": {
         "references": {
           "preselected": ["<reference-id-1>", "<reference-id-2>"],
@@ -657,6 +657,17 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     **Required fields**: `name`, `description`
 
     **Optional fields with defaults**: `plugins` (default `[]` = inherit parent), `plugin_configs` (default `{}`), `system_instructions` (default `null` = inherit parent), `model` (default `null` = inherit parent), `provider` (default `null` = inherit parent), `max_turns` (default `10`), `auto_approved` (default `false`), `icon` (3-line ASCII art array or `null`), `icon_name` (`null`), `gc` (`null`)
+
+    **Plugin annotations** — Plugin names in the `plugins` list support a `(preload)` suffix:
+    - `"template(preload)"` — Forces all of the plugin's tools (including discoverable ones) into the initial context, bypassing deferred tool loading. The plugin's system instructions are also included from the start.
+    - Use `(preload)` when the model must see a plugin's tools **before** it discovers alternatives. For example, `template(preload)` ensures `writeFileFromTemplate` is visible before `writeNewFile`, steering the model toward template-based file creation.
+    - Plugins without `(preload)` follow normal deferred loading — only their `core` tools appear initially; discoverable tools are activated on demand via `list_tools`.
+
+    **Plugin ordering** — The order of entries in the `plugins` list controls the order in which tool schemas appear in the model's tool declarations. The model is biased toward tools it sees first. Use this to steer tool selection:
+    - Place `template(preload)` **before** `file_edit` so `writeFileFromTemplate` appears before `writeNewFile`
+    - Place domain-specific plugins before general-purpose ones
+    - Place `artifact_tracker` first (lightweight metadata, always relevant)
+    - Place `memory` and `todo` last (utility plugins, low priority in tool ordering)
 
     **`plugin_configs` — only include plugins that accept configuration.** Each key in `plugin_configs` must be a plugin name that actually reads that config during initialization. Do NOT invent config keys for plugins that don't support them. The supported plugin configs are:
 
@@ -714,7 +725,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice")
     - **Name**: Match the knowledge folder id (e.g., `skill-code-001-add-circuit-breaker-java-resilience4j`)
     - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope. End with interaction hint (see item 13).
-    - **Plugins**: `["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo", "waypoint"]`
+    - **Plugins**: `["artifact_tracker", "background", "cli", "environment", "references", "template(preload)", "file_edit", "filesystem_query", "lsp", "mcp", "todo", "waypoint", "memory"]` — Note: `template(preload)` is placed before `file_edit` so `writeFileFromTemplate` appears before `writeNewFile` in tool declarations, steering the model toward template-based file creation when templates are available.
     - **plugin_configs.references.preselected**: Include the ERI, module, and any dependency references needed for the skill. Always include the enablement knowledge base if one exists
     - **plugin_configs.references.exclude_tools**: `["selectReferences"]` (enforce preselected knowledge)
     - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
@@ -734,7 +745,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
       - **preselected**: Enablement + technology-scoped ADRs
       - **max_turns**: 10, **auto_approved**: true
     - **Tier 3 — Pattern compliance**: Verify implementations match skill/module templates
-      - **Plugins**: `["cli", "environment", "file_edit", "filesystem_query", "lsp", "references", "todo", "waypoint", "web_fetch"]`
+      - **Plugins**: `["cli", "environment", "references", "template(preload)", "file_edit", "filesystem_query", "lsp", "todo", "waypoint", "web_fetch"]` — `template(preload)` before `file_edit` for template-first corrections
       - **plugin_configs.lsp.config_path**: `"${workspaceRoot}/.lsp.json"`
       - **preselected**: Enablement + relevant ADRs + skills + validation references discovered in Part 2
       - **max_turns**: 15, **auto_approved**: true
