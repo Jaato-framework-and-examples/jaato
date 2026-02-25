@@ -139,6 +139,7 @@ def _make_session(
     session._system_instruction = None
     session._tools = []
     session._deferred_plugin_instructions = set()
+    session._preloaded_plugins = set()
 
     return session
 

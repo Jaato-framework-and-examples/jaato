@@ -11,6 +11,50 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 logger = logging.getLogger(__name__)
 
 
+def parse_plugin_entry(entry: str) -> Tuple[str, bool]:
+    """Parse a plugin entry that may have a ``(preload)`` suffix.
+
+    Plugin names in profile ``plugins`` lists can include a ``(preload)``
+    annotation to force all of the plugin's tools (including discoverable
+    ones) to be loaded into the initial context rather than deferred.
+
+    Args:
+        entry: Plugin entry string, e.g. ``"template"`` or ``"template(preload)"``.
+
+    Returns:
+        Tuple of (plugin_name, is_preloaded).
+
+    Examples:
+        >>> parse_plugin_entry("template(preload)")
+        ('template', True)
+        >>> parse_plugin_entry("cli")
+        ('cli', False)
+    """
+    match = re.match(r'^(\w+)\(preload\)$', entry)
+    if match:
+        return match.group(1), True
+    return entry, False
+
+
+def parse_plugin_list(entries: List[str]) -> Tuple[List[str], set]:
+    """Parse a list of plugin entries, separating names from preload annotations.
+
+    Args:
+        entries: List of plugin entry strings, possibly with ``(preload)`` suffixes.
+
+    Returns:
+        Tuple of (clean_plugin_names, preloaded_plugin_names_set).
+    """
+    clean_names: List[str] = []
+    preloaded: set = set()
+    for entry in entries:
+        name, is_preloaded = parse_plugin_entry(entry)
+        clean_names.append(name)
+        if is_preloaded:
+            preloaded.add(name)
+    return clean_names, preloaded
+
+
 def expand_variables(
     value: Any,
     context: Optional[Dict[str, str]] = None,
@@ -280,7 +324,12 @@ class SubagentProfile:
     Attributes:
         name: Unique identifier for this subagent profile.
         description: Human-readable description of what this subagent does.
-        plugins: List of plugin names to enable for this subagent.
+        plugins: List of plugin names to enable for this subagent (clean names,
+            ``(preload)`` suffixes stripped during parsing).
+        preloaded_plugins: Set of plugin names that should bypass deferred tool
+            loading — all their tools (including discoverable) are loaded into
+            the initial context. Derived from ``(preload)`` annotations in the
+            raw ``plugins`` list during profile parsing.
         plugin_configs: Per-plugin configuration overrides.
         system_instructions: Additional system instructions for the subagent.
         model: Optional model override (uses parent's model if not specified).
@@ -295,6 +344,7 @@ class SubagentProfile:
     name: str
     description: str
     plugins: List[str] = field(default_factory=list)
+    preloaded_plugins: set = field(default_factory=set)
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     system_instructions: Optional[str] = None
     model: Optional[str] = None
@@ -403,11 +453,16 @@ def discover_profiles(
         if 'gc' in data and data['gc']:
             gc_config = GCProfileConfig.from_dict(data['gc'])
 
+        # Parse plugin entries, separating (preload) annotations
+        raw_plugins = data.get('plugins', [])
+        clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+
         # Create SubagentProfile from parsed data
         profile = SubagentProfile(
             name=name,
             description=data.get('description', ''),
-            plugins=data.get('plugins', []),
+            plugins=clean_plugins,
+            preloaded_plugins=preloaded,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
             model=data.get('model'),
@@ -621,10 +676,15 @@ class SubagentConfig:
             if 'gc' in profile_data and profile_data['gc']:
                 gc_config = GCProfileConfig.from_dict(profile_data['gc'])
 
+            # Parse plugin entries, separating (preload) annotations
+            raw_plugins = profile_data.get('plugins', [])
+            clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+
             profiles[name] = SubagentProfile(
                 name=name,
                 description=profile_data.get('description', ''),
-                plugins=profile_data.get('plugins', []),
+                plugins=clean_plugins,
+                preloaded_plugins=preloaded,
                 plugin_configs=profile_data.get('plugin_configs', {}),
                 system_instructions=profile_data.get('system_instructions'),
                 model=profile_data.get('model'),

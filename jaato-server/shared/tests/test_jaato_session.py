@@ -87,7 +87,7 @@ class TestJaatoSessionConfigure:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
         session.configure(tools=["cli"])
 
-        mock_runtime.get_tool_schemas.assert_called_with(["cli"])
+        mock_runtime.get_tool_schemas.assert_called_with(["cli"], preloaded_plugins=set())
 
     def test_configure_with_system_instructions(self):
         """Test that configure can add system instructions."""

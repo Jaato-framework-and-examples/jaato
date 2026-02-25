@@ -69,7 +69,7 @@ Examples of what TO do:
      - *For Test files:* Add new test cases for new functions, update existing tests for modified function signatures, or refactor tests for renamed symbols.
      - *For Documentation:* Re-generate documentation to reflect the new code structure.
      - *For Configuration files:* Update configuration values or structures to match the changes in the source code.
-   - **Apply the Fix (if necessary):** If a change is required, use the appropriate file editing or template rendering tools (`updateFile`, `renderTemplateToFile`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
+   - **Apply the Fix (if necessary):** If a change is required, use the appropriate file editing or template rendering tools (`updateFile`, `writeFileFromTemplate`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
 
 **3. Validation and Closure:**
    - **Self-Validate (if updated):** If the artifact was modified, you MUST run validation checks.
@@ -410,7 +410,7 @@ When creating a detailed plan, you MUST evaluate each step against the available
 Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEdit`, `findAndReplace`), you MUST call `listAvailableTemplates` at least once in the current or recent turns to check whether a template exists that can produce or contribute to the target file. This is non-negotiable.
 
 **The Rule:**
-1. **Before creating a new file** (`writeNewFile`, `multiFileEdit` with create operations): Call `listAvailableTemplates`. If a matching template exists, use `renderTemplateToFile` instead of writing content manually.
+1. **Before creating a new file** (`writeNewFile`, `multiFileEdit` with create operations): Call `listAvailableTemplates`. If a matching template exists, use `writeFileFromTemplate` instead of writing content manually.
 2. **Before modifying an existing file** (`updateFile`, `multiFileEdit` with edit operations): Call `listAvailableTemplates`. A template may provide the content you need to patch into the file — render it mentally or to a scratch location, then apply the relevant portion as a patch.
 3. **After checking**: If no template matches your task, proceed freely with file-writing tools. The check itself is the gate, not the outcome.
 
@@ -421,7 +421,7 @@ Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEd
 - Skipping it is never worth the risk of producing non-standard code
 
 **Direct vs. Indirect Template Usage:**
-- **Direct**: Template produces a complete file → use `renderTemplateToFile`
+- **Direct**: Template produces a complete file → use `writeFileFromTemplate`
 - **Indirect**: Template produces content that must be layered onto an existing file → render the template to understand the pattern, then use `updateFile` or `multiFileEdit` to apply the relevant sections as a patch. The template serves as the source of truth for the new code, even when the delivery mechanism is a patch.
 
 **Anti-patterns:**

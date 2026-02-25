@@ -24,7 +24,7 @@ class ReferenceContents:
 
     Fields:
         templates: Subfolder with authoritative template files (.tpl/.tmpl)
-            that the model must use via ``renderTemplateToFile`` instead of
+            that the model must use via ``writeFileFromTemplate`` instead of
             extracting embedded templates from documentation.
         validation: Subfolder with mandatory post-implementation validation
             shell scripts that the model must run after completing an

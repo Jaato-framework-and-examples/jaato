@@ -269,6 +269,7 @@ class JaatoSession:
         # a tool from one of these plugins, the instructions are injected into
         # the system prompt and the budget.
         self._deferred_plugin_instructions: Set[str] = set()
+        self._preloaded_plugins: set = set()
 
         # Priority-aware message queue for agent communication
         # Uses double-linked list for efficient mid-queue removal of parent messages
@@ -974,7 +975,8 @@ class JaatoSession:
         tools: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
-        skip_provider: bool = False
+        skip_provider: bool = False,
+        preloaded_plugins: Optional[set] = None
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -986,7 +988,12 @@ class JaatoSession:
                            Plugins will be re-initialized with these configs.
             skip_provider: If True, skip provider creation (for auth-pending mode).
                           User commands will be available but model calls won't work.
+            preloaded_plugins: Optional set of plugin names that should bypass
+                              deferred tool loading. All their tools (including
+                              discoverable) are loaded into the initial context.
         """
+        # Store preloaded plugins for use in deferred instruction collection
+        self._preloaded_plugins = preloaded_plugins or set()
         # Store tool plugin names
         self._tool_plugins = tools
 
@@ -1023,7 +1030,7 @@ class JaatoSession:
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
 
         # Get tool schemas and executors from runtime
-        self._tools = self._runtime.get_tool_schemas(tools)
+        self._tools = self._runtime.get_tool_schemas(tools, preloaded_plugins=self._preloaded_plugins)
         executors = self._runtime.get_executors(tools)
 
         # Register executors
@@ -1436,9 +1443,10 @@ class JaatoSession:
 
         if self._runtime.registry:
             for plugin_name in self._runtime.registry._exposed:
-                if deferred_enabled and not self._runtime.registry.plugin_has_core_tools(plugin_name):
+                if deferred_enabled and plugin_name not in self._preloaded_plugins and not self._runtime.registry.plugin_has_core_tools(plugin_name):
                     # Remember this plugin's instructions are deferred so we
                     # can inject them when the model discovers its tools.
+                    # Exception: preloaded plugins always include instructions.
                     plugin = self._runtime.registry.get_plugin(plugin_name)
                     if plugin and hasattr(plugin, 'get_system_instructions'):
                         instr = plugin.get_system_instructions()

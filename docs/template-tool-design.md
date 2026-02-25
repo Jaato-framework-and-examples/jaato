@@ -1,7 +1,7 @@
 # Template Rendering Tool Design
 
 > **Status: Implemented** - See `shared/plugins/template/` for the implementation.
-> The plugin includes both the `renderTemplate` tool and automatic template extraction
+> The plugin includes both the `writeFileFromTemplate` tool and automatic template extraction
 > via prompt enrichment.
 
 ## Overview
@@ -13,7 +13,7 @@ The goal is to replace error-prone manual string substitution with reliable, reu
 
 The template plugin has been implemented with two key features:
 
-1. **Template Rendering (`renderTemplate`)**: Jinja2-based template rendering with variable
+1. **Template Rendering (`writeFileFromTemplate`)**: Jinja2-based template rendering with variable
    substitution, writing results to files.
 
 2. **Automatic Template Extraction (Prompt Enrichment)**: The plugin subscribes to the prompt
@@ -97,7 +97,7 @@ This is a small, low-risk refactor that enables clean code sharing without plugi
 ```python
 {% raw %}
 ToolSchema(
-    name="renderTemplate",
+    name="writeFileFromTemplate",
     description="Render a template with variable substitution and write the result to a file. "
                 "Templates support variable substitution ({{name}}), conditionals "
                 "({% if condition %}...{% endif %}), and loops ({% for item in items %}...{% endfor %}).",
@@ -291,7 +291,7 @@ def format_permission_request(
 ) -> Optional[PermissionDisplayInfo]:
     """Show rendered template preview for approval."""
 
-    if tool_name == "renderTemplate":
+    if tool_name == "writeFileFromTemplate":
         output_path = arguments.get("output_path", "")
 
         # Render the template (same logic as executor)
@@ -374,7 +374,7 @@ All template operations write files, so none should be auto-approved. This match
 def get_system_instructions(self) -> Optional[str]:
     return """You have access to template rendering tools.
 
-Use `renderTemplate` to generate files from templates with variable substitution.
+Use `writeFileFromTemplate` to generate files from templates with variable substitution.
 
 Templates use Jinja2 syntax:
 - Variables: {{ variable_name }}
@@ -383,14 +383,14 @@ Templates use Jinja2 syntax:
 - Filters: {{ name | upper }}, {{ value | default('fallback') }}
 
 Example:
-  renderTemplate(
+  writeFileFromTemplate(
     template="Hello {{ name }}, welcome to {{ project }}!",
     variables={"name": "Alice", "project": "jaato"},
     output_path="greeting.txt"
   )
 
 For reusable templates, check .templates/ directory:
-  renderTemplate(
+  writeFileFromTemplate(
     template_path=".templates/service.java.tmpl",
     variables={"class_name": "OrderService", "package": "com.example.orders"},
     output_path="src/main/java/com/example/orders/OrderService.java"
@@ -422,11 +422,11 @@ Template rendering requires approval since it writes files."""
 
 ### 3. Two Ways to Write Files
 
-**Concern**: Now agents have `writeNewFile` and `renderTemplate` for creating files.
+**Concern**: Now agents have `writeNewFile` and `writeFileFromTemplate` for creating files.
 
 **Clarification**:
 - `writeNewFile`: Direct content, agent has already composed the final text
-- `renderTemplate`: Templated content, separating structure from data
+- `writeFileFromTemplate`: Templated content, separating structure from data
 - System instructions should clarify when to use each
 - They complement rather than compete
 
@@ -454,7 +454,7 @@ Template rendering requires approval since it writes files."""
 | Aspect | Decision |
 |--------|----------|
 | Location | New `shared/plugins/template/` plugin |
-| Tool Name | `renderTemplate` |
+| Tool Name | `writeFileFromTemplate` |
 | Template Sources | Inline (`template`) or file (`template_path`) |
 | Syntax | Jinja2 (restricted: no include/import) |
 | Template Storage | `.templates/` convention, any path allowed |

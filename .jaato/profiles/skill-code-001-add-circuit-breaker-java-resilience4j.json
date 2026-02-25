@@ -1,11 +1,42 @@
 {
   "name": "skill-code-001-add-circuit-breaker-java-resilience4j",
   "description": "[ADD Flow] Add circuit breaker (Java/Resilience4j). Use ERI and module templates to modify codebases to introduce circuit breaker patterns.",
-  "plugins": ["artifact_tracker", "background", "cli", "filesystem_query", "lsp", "mcp", "memory", "references", "template"],
-  "plugin_configs": {"references": {"preselected": ["eri-code-008-circuit-breaker-java-resilience4j","mod-code-001-circuit-breaker-java-resilience4j"], "exclude_tools": ["selectReferences"]}, "lsp": {"config_path": "${workspaceRoot}/.lsp.json"}},
+  "plugins": [
+    "artifact_tracker",
+    "background",
+    "cli",
+    "filesystem_query",
+    "lsp",
+    "mcp",
+    "memory",
+    "references",
+    "template(preload)"
+  ],
+  "plugin_configs": {
+    "references": {
+      "preselected": [
+        "eri-code-008-circuit-breaker-java-resilience4j",
+        "mod-code-001-circuit-breaker-java-resilience4j"
+      ],
+      "exclude_tools": [
+        "selectReferences"
+      ]
+    },
+    "lsp": {
+      "config_path": "${workspaceRoot}/.lsp.json"
+    }
+  },
   "system_instructions": "Read enablement knowledge and ERI first; then apply module templates to add circuit breaker patterns to the target codebase.",
   "max_turns": 18,
   "auto_approved": false,
   "icon_name": "circuit_breaker",
-  "gc": {"type": "budget","threshold_percent": 80.0,"target_percent": 60.0,"pressure_percent": 0,"preserve_recent_turns": 5,"summarize_middle_turns": 10,"notify_on_gc": false}
+  "gc": {
+    "type": "budget",
+    "threshold_percent": 80.0,
+    "target_percent": 60.0,
+    "pressure_percent": 0,
+    "preserve_recent_turns": 5,
+    "summarize_middle_turns": 10,
+    "notify_on_gc": false
+  }
 }

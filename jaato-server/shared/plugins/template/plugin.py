@@ -123,8 +123,7 @@ class TemplatePlugin:
     .jaato/templates/index.json for inspectability.
 
     Tools provided:
-    - renderTemplate: Render a template with variables and write to file
-    - renderTemplateToFile: Same as renderTemplate with overwrite option
+    - writeFileFromTemplate: Render a template with variables and write to file
     - listAvailableTemplates: List all templates in the unified index
     - listTemplateVariables: List all variables required by a template
 
@@ -251,7 +250,7 @@ class TemplatePlugin:
                         NudgeType.DIRECT_INSTRUCTION,
                         "NOTICE: You called {tool_name} without checking templates first. "
                         "Call listAvailableTemplates before writing files to check if a template "
-                        "can produce or contribute to the target file (directly via renderTemplateToFile "
+                        "can produce or contribute to the target file (directly via writeFileFromTemplate "
                         "or indirectly as a patch source)."
                     ),
                     PatternSeverity.MODERATE: (
@@ -279,64 +278,12 @@ class TemplatePlugin:
         """Return tool schemas for template tools."""
         return [
             ToolSchema(
-                name="renderTemplate",
+                name="writeFileFromTemplate",
                 description=(
                     "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
                     "and write the result to a file. When a template exists for your task (check "
                     ".jaato/templates/ or use listAvailableTemplates), you MUST use this tool instead "
                     "of writing code manually. Templates ensure consistency and reduce errors. "
-                    "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
-                    "Jinja2: {{name}}, {% if %}, {% for %}. "
-                    "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
-                    "Provide either 'template' for inline content or 'template_name' for a registered template."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "template": {
-                            "type": "string",
-                            "description": "Inline template content. Mutually exclusive with template_name."
-                        },
-                        "template_name": {
-                            "type": "string",
-                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl'). Resolved via the template index. Mutually exclusive with template."
-                        },
-                        "variables": {
-                            "type": "object",
-                            "description": "Key-value pairs for template variable substitution.",
-                            "additionalProperties": True
-                        },
-                        "output_path": {
-                            "type": "string",
-                            "description": "Path where rendered content should be written."
-                        }
-                    },
-                    "required": ["variables", "output_path"]
-                },
-                category="code",
-                discoverability="discoverable",
-                traits=frozenset({TRAIT_FILE_WRITER}),
-            ),
-            ToolSchema(
-                name="listAvailableTemplates",
-                description=(
-                    "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
-                    "session. If a template exists for your task, you MUST use renderTemplate "
-                    "instead of writing code manually. Shows both standalone templates (from "
-                    "referenced directories) and embedded templates (extracted from documentation)."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                },
-                category="code",
-                discoverability="discoverable",
-            ),
-            ToolSchema(
-                name="renderTemplateToFile",
-                description=(
-                    "Render a template and write directly to a file. "
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}, {{ name | filter }}. "
                     "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
@@ -379,6 +326,22 @@ class TemplatePlugin:
                 traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
+                name="listAvailableTemplates",
+                description=(
+                    "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
+                    "session. If a template exists for your task, you MUST use writeFileFromTemplate "
+                    "instead of writing code manually. Shows both standalone templates (from "
+                    "referenced directories) and embedded templates (extracted from documentation)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                },
+                category="code",
+                discoverability="discoverable",
+            ),
+            ToolSchema(
                 name="validateTemplateIndex",
                 description=(
                     "Validate a template index JSON file against the expected schema. "
@@ -402,7 +365,7 @@ class TemplatePlugin:
             ToolSchema(
                 name="listTemplateVariables",
                 description=(
-                    "List all variables required by a template. Call this before renderTemplateToFile "
+                    "List all variables required by a template. Call this before writeFileFromTemplate "
                     "to know exactly what variables to provide. Analyzes the template and returns "
                     "all variable names that need to be substituted."
                 ),
@@ -424,9 +387,8 @@ class TemplatePlugin:
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return executor functions for each tool."""
         return {
-            "renderTemplate": self._execute_render_template,
+            "writeFileFromTemplate": self._execute_write_file_from_template,
             "listAvailableTemplates": self._execute_list_available,
-            "renderTemplateToFile": self._execute_render_template_to_file,
             "listTemplateVariables": self._execute_list_template_variables,
             "validateTemplateIndex": self._execute_validate_template_index,
         }
@@ -451,12 +413,12 @@ showing the **exact variable names** required. Look for annotations like:
   ...
 ```
 
-**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile. Do NOT guess or
+**USE THESE EXACT VARIABLE NAMES** when calling writeFileFromTemplate. Do NOT guess or
 invent variable names - use the ones shown in the annotation.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplateToFile(output_path, template_name, variables)** - PREFERRED tool for file generation
+**writeFileFromTemplate(output_path, template_name, variables)** - PREFERRED tool for file generation
   - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
   - The system resolves the name to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
@@ -464,10 +426,6 @@ invent variable names - use the ones shown in the annotation.
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
   - Returns: {"success": true, "path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
-
-**renderTemplate(template_name, variables, output_path)** - Alternative (same functionality)
-  - Also creates parent directories automatically
-  - Returns: {"success": true, "path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
 
 **listAvailableTemplates()** - List all available templates
   - Shows all templates discovered in this session (embedded + standalone)
@@ -489,13 +447,13 @@ create all necessary parent directories when writing files.
 ```
 # NEVER DO THIS - mkdir with template notation creates literal garbage directories
 cli_based_tool: mkdir -p src/main/java/{{package}}/domain/{model,service}
-renderTemplate: ...
+writeFileFromTemplate: ...
 ```
 
 **CORRECT approach:**
 ```
-# Just call renderTemplateToFile for each file - directories are created automatically
-renderTemplateToFile(
+# Just call writeFileFromTemplate for each file - directories are created automatically
+writeFileFromTemplate(
     output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
     template_name="Entity.java.tpl",
     variables={"Entity": "Customer", "basePackage": "com.bank.customer"}
@@ -507,15 +465,15 @@ renderTemplateToFile(
 1. **output_path must be a CONCRETE path** - all variables must be substituted BEFORE calling the tool
 2. **NEVER include `{` or `}` in output_path** - these are for template CONTENT only, not file paths
 3. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
-4. **Generate ONE file at a time** - call renderTemplateToFile once per output file
+4. **Generate ONE file at a time** - call writeFileFromTemplate once per output file
 
 **Example - Generating multiple files:**
 ```
-# For each entity, call renderTemplateToFile with concrete paths:
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
+# For each entity, call writeFileFromTemplate with concrete paths:
+writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
+writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
+writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
+writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
 ```
 
 ### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
@@ -529,14 +487,14 @@ call `listAvailableTemplates` at least once in the current or recent turns:
 
 **The workflow is always:**
 1. Call `listAvailableTemplates` to check what templates are available
-2. If a template matches your task **directly** → use `renderTemplateToFile`
+2. If a template matches your task **directly** → use `writeFileFromTemplate`
 3. If a template matches your task **indirectly** (the template provides content
    that should be layered onto an existing file) → render it mentally, then apply
    the relevant sections via `updateFile` or `multiFileEdit` as a patch
 4. If NO template matches → proceed freely with file-writing tools
 
 **Direct vs. Indirect Template Usage:**
-- **Direct**: Template produces a complete new file → `renderTemplateToFile`
+- **Direct**: Template produces a complete new file → `writeFileFromTemplate`
 - **Indirect**: Template provides a pattern or code fragment that must be merged
   into an existing file (e.g., adding resilience annotations to a Java class).
   The template is the **source of truth** for the new code — render it to
@@ -609,7 +567,7 @@ Template rendering writes files to the workspace."""
     ) -> Optional[PermissionDisplayInfo]:
         """Format permission request for file writing tools.
 
-        Provides custom display formatting for renderTemplateToFile to show
+        Provides custom display formatting for writeFileFromTemplate to show
         the user what file will be created and with what content.
 
         Args:
@@ -620,7 +578,7 @@ Template rendering writes files to the workspace."""
         Returns:
             PermissionDisplayInfo with formatted content, or None to use default.
         """
-        if tool_name != "renderTemplateToFile":
+        if tool_name != "writeFileFromTemplate":
             return None
 
         output_path = arguments.get("output_path", "")
@@ -741,7 +699,7 @@ Template rendering writes files to the workspace."""
                 f"  Syntax: {entry.syntax}\n"
                 f"  Required variables: [{var_list}]\n"
                 f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                f"  Call: renderTemplateToFile(\n"
+                f"  Call: writeFileFromTemplate(\n"
                 f"      template_name=\"{entry.name}\",\n"
                 f"      variables={{{var_dict_example}}},\n"
                 f"      output_path=\"<your-output-file>\"\n"
@@ -917,7 +875,7 @@ Template rendering writes files to the workspace."""
                     f"  Syntax: {syntax}\n"
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: renderTemplateToFile(\n"
+                    f"  Call: writeFileFromTemplate(\n"
                     f"      template_name=\"{rel_path}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
@@ -1698,81 +1656,6 @@ Template rendering writes files to the workspace."""
             return {}
         return {} if raw is None else {}
 
-    def _execute_render_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute renderTemplate tool.
-
-        Supports both Jinja2 and Mustache template syntax (auto-detected).
-        """
-        template = args.get("template")
-        template_name_arg = args.get("template_name")
-        variables = self._coerce_variables(args.get("variables"))
-        output_path = args.get("output_path", "")
-
-        # Validation
-        if not output_path:
-            return {"error": "output_path is required"}
-
-        if not template and not template_name_arg:
-            return {"error": "Either 'template' or 'template_name' must be provided"}
-
-        if template and template_name_arg:
-            return {"error": "Provide either 'template' or 'template_name', not both"}
-
-        # Get template content
-        template_source = "inline"
-        if template_name_arg:
-            resolved_path, paths_tried = self._resolve_template_path(template_name_arg)
-            if resolved_path is None:
-                return {
-                    "error": f"Template not found: {template_name_arg}",
-                    "paths_tried": paths_tried
-                }
-            try:
-                template = resolved_path.read_text(encoding="utf-8")
-                template_source = str(resolved_path)
-            except IOError as e:
-                return {
-                    "error": f"Failed to read template: {e}",
-                    "resolved_path": str(resolved_path)
-                }
-
-        # Detect syntax and render using appropriate engine
-        syntax = self._detect_template_syntax(template)
-        rendered, error = self._render_template(template, variables)
-        if error:
-            return error
-
-        # Write output
-        try:
-            out_path = Path(output_path)
-            if not out_path.is_absolute():
-                if self._base_path is None:
-                    return {
-                        "error": "No workspace path configured — cannot resolve relative output path",
-                        "status": "no_workspace"
-                    }
-                out_path = self._base_path / out_path
-
-            # Create parent directories
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-
-            out_path.write_text(rendered, encoding="utf-8")
-        except IOError as e:
-            return {
-                "error": f"Failed to write output: {e}",
-                "status": "write_error"
-            }
-
-        return {
-            "success": True,
-            "path": str(out_path),
-            "size": len(rendered),
-            "lines": rendered.count('\n') + 1,
-            "variables_used": list(variables.keys()),
-            "template_syntax": syntax,
-            "template_source": template_source
-        }
-
     def _execute_list_available(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all templates available in this session.
 
@@ -1781,7 +1664,7 @@ Template rendering writes files to the workspace."""
         standalone templates (discovered in referenced directories, left
         in their original location).
 
-        Each entry includes the template name (used for renderTemplateToFile),
+        Each entry includes the template name (used for writeFileFromTemplate),
         its origin, syntax, required variables, and source path.
         """
         if not self._template_index:
@@ -1818,8 +1701,8 @@ Template rendering writes files to the workspace."""
             "count": len(templates)
         }
 
-    def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute renderTemplateToFile tool.
+    def _execute_write_file_from_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute writeFileFromTemplate tool.
 
         Renders a template and writes the result to a file.
         Supports both Jinja2 and Mustache template syntax (auto-detected).
@@ -1914,7 +1797,7 @@ Template rendering writes files to the workspace."""
                 "output_path": str(out_path)
             }
 
-        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
+        self._trace(f"writeFileFromTemplate: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
 
         return {
             "success": True,

@@ -531,7 +531,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
    - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`, `"Read DOMAIN.md for domain definition"`)
    - **contents** (**required**, exact field name `"contents"`, must be an object — never an array or renamed field):
      An object declaring which typed subfolders exist in this reference directory. **Always include all four keys** — set each to the relative path string if the subfolder exists, or `null` if absent:
-     - `"templates"`: e.g., `"templates/"` if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `renderTemplateToFile` — the runtime suppresses extraction of embedded templates from documentation when this is set.
+     - `"templates"`: e.g., `"templates/"` if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `writeFileFromTemplate` — the runtime suppresses extraction of embedded templates from documentation when this is set.
      - `"validation"`: e.g., `"validation/"` if the folder contains a `validation/` subfolder with shell scripts that must be run as post-implementation checks.
      - `"policies"`: e.g., `"policies/"` if the folder contains a `policies/` subfolder with markdown documents defining implementation constraints.
      - `"scripts"`: e.g., `"scripts/"` if the folder contains a `scripts/` subfolder with helper scripts the model can use during implementation.

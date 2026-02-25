@@ -345,7 +345,8 @@ class SubagentPlugin:
                     tools=profile.plugins,
                     system_instructions=profile.system_instructions,
                     plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
-                    provider_name=provider
+                    provider_name=provider,
+                    preloaded_plugins=profile.preloaded_plugins or None,
                 )
 
                 # Restore parent session reference (was overwritten by configure())
@@ -2151,7 +2152,8 @@ class SubagentPlugin:
                 tools=profile.plugins,
                 system_instructions=profile.system_instructions,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
-                provider_name=provider
+                provider_name=provider,
+                preloaded_plugins=profile.preloaded_plugins or None,
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 

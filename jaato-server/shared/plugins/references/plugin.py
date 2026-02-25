@@ -1990,7 +1990,7 @@ class ReferencesPlugin:
             )
             if template_files:
                 lines = [
-                    "**Mandatory Templates** — Use `renderTemplateToFile` with these template IDs:"
+                    "**Mandatory Templates** — Use `writeFileFromTemplate` with these template IDs:"
                 ]
                 for tpl in template_files:
                     lines.append(f"  - `{tpl}`")

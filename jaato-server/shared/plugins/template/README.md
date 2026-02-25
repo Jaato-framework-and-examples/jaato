@@ -4,12 +4,12 @@ The template plugin provides Jinja2-based template rendering and automatic extra
 
 ## Features
 
-### 1. Template Rendering (`renderTemplate`)
+### 1. Template Rendering (`writeFileFromTemplate`)
 
 Render Jinja2 templates with variable substitution and write results to files.
 
 ```python
-renderTemplate(
+writeFileFromTemplate(
     template="Hello {{ name }}, welcome to {{ project }}!",
     variables={"name": "Alice", "project": "jaato"},
     output_path="greeting.txt"
@@ -19,7 +19,7 @@ renderTemplate(
 Or use a template file:
 
 ```python
-renderTemplate(
+writeFileFromTemplate(
     template_path=".jaato/templates/service.java.tmpl",
     variables={"className": "OrderService", "package": "com.example"},
     output_path="src/main/java/com/example/OrderService.java"
@@ -59,17 +59,17 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │  **Extracted Templates:**                                       │
 │  [Template extracted: .jaato/templates/mod-code-001-basic...]   │
 │    Variables: circuitBreakerName, fallbackMethodName, ...       │
-│    Use: renderTemplate(template_path="...", variables={...})    │
+│    Use: writeFileFromTemplate(template_path="...", variables={...})    │
 │  ---                                                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3. Simple Template Rendering (`renderTemplateToFile`)
+### 3. Simple Template Rendering (`writeFileFromTemplate`)
 
 A convenience tool for simple `{{variable}}` substitution that writes directly to a file:
 
 ```python
-renderTemplateToFile(
+writeFileFromTemplate(
     output_path="/src/main/java/com/bank/CustomerService.java",
     template_path="/templates/service.java.tmpl",
     variables={"class_name": "CustomerService", "package": "com.bank.customer"}
@@ -79,14 +79,14 @@ renderTemplateToFile(
 Or with an inline template:
 
 ```python
-renderTemplateToFile(
+writeFileFromTemplate(
     output_path="/src/CustomerService.java",
     template="package {{package}};\n\npublic class {{class_name}} {}",
     variables={"class_name": "CustomerService", "package": "com.bank"}
 )
 ```
 
-**Key differences from `renderTemplate`:**
+**Key differences from the full Jinja2 mode:**
 - Uses simple `{{variable}}` substitution only (no Jinja2 conditionals/loops)
 - Has `overwrite` parameter (default: `false`) - errors if file exists
 - Returns `bytes_written` instead of `size`/`lines`
@@ -130,7 +130,7 @@ listAvailableTemplates()
 
 ## Template Syntax
 
-### For `renderTemplate` (Full Jinja2)
+### For `writeFileFromTemplate` (Full Jinja2)
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
@@ -139,7 +139,7 @@ listAvailableTemplates()
 | `{% for %}` | Loop | `{% for item in items %}...{% endfor %}` |
 | `{{ x \| filter }}` | Filters | `{{ name \| upper }}` |
 
-### For `renderTemplateToFile` (Simple)
+### For `writeFileFromTemplate` (Simple)
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
@@ -197,12 +197,12 @@ This directory can be gitignored as templates are extracted on-demand.
 
 ## Security
 
-**For `renderTemplate` (Jinja2):**
+**For `writeFileFromTemplate` (Jinja2):**
 - Uses Jinja2's `SandboxedEnvironment` to prevent arbitrary code execution
 - `{% include %}` and `{% import %}` are disabled
 - `StrictUndefined` mode catches typos in variable names
 
-**For `renderTemplateToFile` (simple):**
+**For `writeFileFromTemplate` (simple):**
 - Uses regex-based substitution (no code execution risk)
 - Validates all template variables are provided
 - Prevents accidental file overwrite (requires explicit `overwrite=true`)
@@ -213,12 +213,12 @@ This directory can be gitignored as templates are extracted on-demand.
 
 ## Dependencies
 
-Jinja2 is required for `renderTemplate` only:
+Jinja2 is required for `writeFileFromTemplate` (full Jinja2 mode) only:
 
 ```bash
 pip install Jinja2
 ```
 
-The plugin gracefully reports if Jinja2 is not installed when `renderTemplate` is called.
+The plugin gracefully reports if Jinja2 is not installed when `writeFileFromTemplate` is called.
 
-**Note:** `renderTemplateToFile` does not require Jinja2—it uses built-in regex substitution.
+**Note:** `writeFileFromTemplate` (simple mode) does not require Jinja2—it uses built-in regex substitution.

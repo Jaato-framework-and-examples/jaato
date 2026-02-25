@@ -82,6 +82,7 @@ def _make_session(
     session._ui_hooks = None
     session._gc_plugin = None
     session._gc_config = None
+    session._preloaded_plugins = set()
 
     return session
 
