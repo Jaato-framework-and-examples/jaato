@@ -14,7 +14,7 @@ When --dir is omitted, uses the current working directory.
 import argparse
 import subprocess
 import sys
-from datetime import date, timezone
+from datetime import date
 from pathlib import Path
 
 try:
@@ -33,18 +33,27 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def _find_last_bump_sha(pkg_name: str, repo_root: Path) -> str | None:
-    """Return the SHA of the most recent 'Bump <pkg-name>' commit, or None."""
+def _find_previous_bump_sha(pkg_name: str, repo_root: Path) -> str | None:
+    """Return the SHA of the second-most-recent 'Bump <pkg-name>' commit.
+
+    The most recent bump is for the *current* version being built, so the
+    changelog should cover commits since the *previous* bump (i.e. the one
+    before it).  Returns None when fewer than two bump commits exist (first
+    release — include everything).
+    """
     log = _git(
         "log", "--oneline", "--format=%H %s", f"--grep=Bump {pkg_name}",
         cwd=repo_root,
     )
+    bumps: list[str] = []
     for line in log.splitlines():
         if not line:
             continue
         sha, subject = line.split(" ", 1)
         if subject.startswith(f"Bump {pkg_name}"):
-            return sha
+            bumps.append(sha)
+            if len(bumps) == 2:
+                return bumps[1]
     return None
 
 
@@ -111,7 +120,7 @@ def main() -> None:
     # Find repo root
     repo_root = Path(_git("rev-parse", "--show-toplevel", cwd=pkg_dir))
 
-    bump_sha = _find_last_bump_sha(pkg_name, repo_root)
+    bump_sha = _find_previous_bump_sha(pkg_name, repo_root)
     commits = _collect_commits(bump_sha, pkg_dir, repo_root)
     changelog = _build_changelog(version, commits)
 
