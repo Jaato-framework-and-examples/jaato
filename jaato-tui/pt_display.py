@@ -1577,7 +1577,12 @@ class PTDisplay:
         return self._agent_tab_bar.render()
 
     def _get_agent_popup_content(self):
-        """Get agent details popup content as prompt_toolkit formatted text."""
+        """Get agent details popup content as prompt_toolkit formatted text.
+
+        In multi-pane mode the tooltip is padded with leading spaces so it
+        appears directly below the selected agent's tab in the pane-aligned
+        tab bar.  In single-pane mode it appears at the default left position.
+        """
         if not self._agent_tab_bar or not self._agent_tab_bar.is_popup_visible:
             return []
 
@@ -1589,7 +1594,23 @@ class PTDisplay:
         if not agent:
             return []
 
-        return self._agent_tab_bar.render_popup(agent)
+        popup = self._agent_tab_bar.render_popup(agent)
+
+        # Position tooltip below the agent's tab in the tab bar.
+        # In multi-pane mode, align with the agent's pane-aligned tab offset.
+        # In single-pane mode, use a 1-char left margin (matching old layout).
+        if self._pane_manager.active_pane_count > 1:
+            offset = self._agent_tab_bar.get_selected_agent_tab_offset(
+                self._pane_manager.get_active_slots(),
+                self._width,
+            )
+        else:
+            offset = 1
+
+        if offset > 0:
+            popup = [("", " " * offset)] + popup
+
+        return popup
 
     def set_status_message(self, message: str, timeout: float = 2.0) -> None:
         """Set a temporary status bar message.
@@ -2656,7 +2677,7 @@ class PTDisplay:
                 ),
                 Float(
                     top=2,  # Below session bar, aligned with selected tab
-                    left=1,
+                    left=0,
                     content=agent_popup_window,
                     z_index=50,
                 ),
