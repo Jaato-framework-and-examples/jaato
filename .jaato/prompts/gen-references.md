@@ -191,8 +191,8 @@ After Phase 0, `repoRoot` always points to a local directory on disk. All subseq
 
 ### Phase 1 — Inventory (read structure only, not content)
 List the directory tree within the matched directories to build a complete inventory of folders and files. Do **not** read any file content yet. Record:
-- Which folders contain documentation files (MODULE.md, ERI.md, ADR.md, etc.)
-- Which folders are named `validation/` (post-implementation validation scripts)
+- Which folders contain documentation entry-point files (see "Recognized entry-point files" below)
+- Which folders are named `validation/` **and are subfolders of a documentation folder** (post-implementation validation scripts). A top-level or standalone `validation/` directory matched by a subpath pattern is a documentation folder, not a validation subfolder.
 - Which folders are named `templates/` (standalone template files)
 - Which folders are named `policies/` (implementation constraint documents)
 - Which folders are named `scripts/` (helper scripts for implementation)
@@ -248,7 +248,7 @@ Before spawning subagents, **inform the user** that subagents will run in parall
 > Process the following directories under `repoRoot` = `<path>`:
 > - `<dir1>`, `<dir2>`, ...
 >
-> For each directory: read the entry-point documentation file (MODULE.md, ERI.md, ADR.md, etc.), extract the first paragraph for the description, detect typed subfolders (`templates/`, `validation/`, `policies/`, `scripts/`) and populate the `contents` property, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, fetchHint, and contents as described [repeat the relevant rules or reference them].
+> For each directory: identify the entry-point file using priority order (MODULE.md > SKILL.md > ERI.md > ADR.md > DOMAIN.md > CAPABILITY.md > FLOW.md > OVERVIEW.md > README.md), read it, extract the first paragraph for the description, detect typed subfolders (`templates/`, `validation/`, `policies/`, `scripts/`) and populate the `contents` property, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, fetchHint, and contents as described [repeat the relevant rules or reference them].
 >
 > sourceType = `<local|git|archive>`, sourceMetadata = `<metadata dict if remote>`, knowledgeDir = `<.jaato/knowledge/hash>`
 >
@@ -257,15 +257,16 @@ Before spawning subagents, **inform the user** that subagents will run in parall
 If parallelization is not warranted (even with `{{parallel}}` true), skip this step and proceed with sequential Phase 2.
 
 ### Phase 2 — Process one category at a time
-Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`). Within each category, process **one folder at a time**:
-1. Read only the entry-point file (e.g., MODULE.md) — extract just the first paragraph for the description
+Work through the knowledge base **one top-level category at a time** (e.g., `ADRs/`, then `ERIs/`, then `modules/`, then `model/domains/`, then `model/standards/`). Within each category, process **one folder at a time**:
+1. Identify the entry-point file using the priority order from "Recognized entry-point files" above. Read only that file — extract just the first paragraph for the description
 2. If the entry-point file has YAML frontmatter with `title`, `description`, or `tags`, use those values. Otherwise fall back to the extraction rules (first paragraph, folder name parsing)
 3. **If source is remote**: Copy the folder from the temp download to a stable workspace location (see "Materializing remote content" below) **before** writing the reference JSON. The reference `path` must point to this permanent copy, not to the temp directory.
-4. **Detect typed subfolders** — check if the folder contains any of these subfolders and record them for the `contents` property:
+4. **Detect typed subfolders** — check if the **current documentation folder** contains any of these **child** subfolders and record them for the `contents` property:
    - `templates/` — contains `.tpl`/`.tmpl` files (authoritative standalone templates)
    - `validation/` — contains shell scripts for post-implementation checks
    - `policies/` — contains markdown documents with implementation constraints
    - `scripts/` — contains helper scripts for use during implementation
+   **Important**: This detection applies only to **immediate children** of the documentation folder being processed. A directory named `validation/` that was itself matched by a subpath pattern (e.g., `model/standards/validation/` matched by `model/standards/*`) is a **documentation folder in its own right**, not a validation subfolder. Only treat `validation/` as a typed subfolder when it appears **inside** another documentation folder (e.g., `modules/mod-code-001-.../validation/`).
 5. Write the reference JSON for that folder immediately, including the `contents` property with the relative path for each detected subfolder (or `null` for absent ones)
 6. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
 7. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
@@ -315,9 +316,29 @@ Use only the inventory and the full list of reference IDs collected during Phase
 
 ---
 
+## Recognized entry-point files
+
+A folder is a "documentation folder" if it contains at least one of these entry-point files. When a folder contains **multiple** entry-point files, use the **first match** from this priority-ordered list:
+
+1. `MODULE.md`
+2. `SKILL.md`
+3. `ERI.md`
+4. `ADR.md`
+5. `DOMAIN.md`
+6. `CAPABILITY.md`
+7. `FLOW.md`
+8. `OVERVIEW.md`
+9. `README.md`
+
+`README.md` has the **lowest** priority because it often serves as an index or container description rather than the primary documentation. When a folder contains both `README.md` and a more specific entry-point (e.g., `DOMAIN.md`), always prefer the specific one.
+
+**This list is exhaustive.** If a folder contains only `.md` files not in this list (e.g., `TAG-TAXONOMY.md`, `ASSET-STANDARDS-v1.4.md`), it is still a valid documentation folder if it has a `README.md`. Standalone `.md` files that are not entry-points are treated as supplementary content within the folder.
+
+---
+
 ## Part 1: Documentation references
 
-1. **Traverse** the resolved directories (from Phase 0) to find documentation folders — folders containing `MODULE.md`, `SKILL.md`, `ERI.md`, `ADR.md`, `OVERVIEW.md`, `README.md`, or similar entry-point `.md` files.
+1. **Traverse** the resolved directories (from Phase 0) to find documentation folders — folders containing any of the recognized entry-point files listed above.
 
 2. **For each documentation folder**, create a JSON file:
 
@@ -379,13 +400,13 @@ Use only the inventory and the full list of reference IDs collected during Phase
      - `skill-NNN-xxx` → `SKILL-NNN: Xxx (formatted)`
      - `eri-code-NNN-xxx` → `ERI-NNN: Xxx (formatted)`
      - `adr-NNN-xxx` → `ADR-NNN: Xxx (formatted)`
-     - Other patterns → convert hyphens to spaces and title-case
+     - Other patterns (e.g., `code`, `authoring`, `traceability`) → convert hyphens to spaces and title-case
    - **description**: If YAML frontmatter has `description`, use it. Otherwise read the main documentation file and extract the first paragraph or summary
    - **type**: Always `"local"`
    - **path**: Always an absolute POSIX path (see "Computing paths" below). For local sources: points to the original folder. For remote sources: points to the materialized copy under `.jaato/knowledge/`
    - **mode**: Default `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
    - **tags**: If YAML frontmatter has `tags`, use those first. Then augment with: folder path components (e.g., `modules` → `module`), technology keywords in name (e.g., `java`, `spring`, `resilience4j`), and content-type indicators (e.g., `circuit-breaker`, `persistence`). Deduplicate.
-   - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`)
+   - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`, `"Read DOMAIN.md for domain definition"`)
    - **contents**: An object declaring which typed subfolders exist in this reference directory. For each of the four subfolder types, set the value to the relative subfolder path if it exists, or `null` if it does not. Always include all four keys:
      - `"templates"`: Set to the relative path (e.g., `"templates/"`) if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `renderTemplateToFile` — the runtime suppresses extraction of embedded templates from documentation when this is set.
      - `"validation"`: Set to the relative path (e.g., `"validation/"`) if the folder contains a `validation/` subfolder with shell scripts that must be run as post-implementation checks.
@@ -398,9 +419,10 @@ Use only the inventory and the full list of reference IDs collected during Phase
 
 ## Part 2: Validation references
 
-5. **Find validation folders** — folders named `validation` anywhere within the resolved directories.
+5. **Find validation subfolders** — folders named `validation` that are **immediate children of a documentation folder** processed in Part 1.
    - These typically live inside module folders (e.g., `modules/mod-code-001-.../validation/`)
    - Each contains a `README.md` describing checks and one or more shell scripts.
+   - **Do NOT treat a directory as a validation subfolder if it was matched directly by a subpath pattern** (e.g., `model/standards/validation/` matched by `model/standards/*`). Such directories are documentation folders and were already processed in Part 1.
 
 6. **For each validation folder**, create a JSON file:
    ```json
@@ -733,6 +755,22 @@ subpaths="modules/*,ERIs/*"
 
 Only scans directories matching `modules/*` and `ERIs/*` under the knowledge folder.
 
+### Multi-level subpath patterns
+
+```
+source="https://github.com/owner/knowledge-repo"
+subpaths="knowledge/*,model/domains/*,model/standards/*,modules/*"
+dry_run=false
+```
+
+Subpath patterns can be multi-level (e.g., `model/domains/*`, `model/standards/*`). These are resolved relative to the source root just like single-level patterns. The `*` expands the **last** path component:
+- `knowledge/*` → matches `knowledge/ADRs/`, `knowledge/ERIs/`, etc.
+- `model/domains/*` → matches `model/domains/code/`, `model/domains/design/`, etc. (each with `DOMAIN.md`)
+- `model/standards/*` → matches `model/standards/authoring/`, `model/standards/traceability/`, `model/standards/validation/`
+- `modules/*` → matches `modules/mod-code-001-...`, `modules/mod-code-015-...`, etc.
+
+All matched directories are then traversed to find documentation folders with recognized entry-point files.
+
 ### Public GitHub repository
 
 ```
@@ -747,47 +785,78 @@ Downloads the archive of the `main` branch, scans `docs/*` and `knowledge/` dire
 
 ### Full example folder structure
 
-For a folder structure:
+For a folder structure (with subpaths `knowledge/*,model/domains/*,model/standards/*,modules/*`):
 ```
 knowledge/
-├── model/
-│   └── ENABLEMENT-MODEL-v3.0.md
-├── modules/
-│   ├── mod-code-001-circuit-breaker-java-resilience4j/
-│   │   ├── MODULE.md
-│   │   ├── templates/
-│   │   ├── policies/
-│   │   │   └── naming-conventions.md
-│   │   ├── scripts/
-│   │   │   └── generate-config.sh
-│   │   └── validation/
-│   │       ├── README.md
-│   │       └── circuit-breaker-check.sh
-│   └── mod-code-015-hexagonal-base-java-spring/
-│       ├── MODULE.md
-│       ├── templates/
-│       │   ├── Application.java.tpl
-│       │   ├── domain/
-│       │   │   └── Entity.java.tpl
-│       │   └── adapter/
-│       │       └── RestController.java.tpl
-│       └── validation/
-│           └── README.md
+├── ADRs/
+│   └── adr-004-resilience-patterns/
+│       └── ADR.md
 ├── ERIs/
 │   └── eri-code-008-circuit-breaker-java-resilience4j/
 │       └── ERI.md
-└── ADRs/
-    └── adr-004-resilience-patterns/
-        └── ADR.md
+model/
+├── domains/
+│   ├── README.md
+│   ├── code/
+│   │   ├── DOMAIN.md              ← entry-point: DOMAIN.md
+│   │   ├── TAG-TAXONOMY.md
+│   │   └── capabilities/
+│   ├── design/
+│   │   └── DOMAIN.md              ← entry-point: DOMAIN.md
+│   ├── governance/
+│   │   └── DOMAIN.md
+│   └── qa/
+│       └── DOMAIN.md
+├── standards/
+│   ├── ASSET-STANDARDS-v1.4.md    ← standalone file, parent = standards/
+│   ├── DETERMINISM-RULES.md       ← standalone file, parent = standards/
+│   ├── authoring/
+│   │   ├── README.md              ← entry-point: README.md (has MODULE.md, ADR.md etc. too)
+│   │   ├── ADR.md
+│   │   ├── ERI.md
+│   │   └── MODULE.md
+│   ├── traceability/
+│   │   ├── README.md              ← entry-point: README.md
+│   │   └── profiles/
+│   └── validation/                ← documentation folder (NOT a validation subfolder)
+│       └── README.md              ← entry-point: README.md
+modules/
+├── mod-code-001-circuit-breaker-java-resilience4j/
+│   ├── MODULE.md
+│   ├── templates/
+│   ├── policies/
+│   │   └── naming-conventions.md
+│   ├── scripts/
+│   │   └── generate-config.sh
+│   └── validation/                ← validation subfolder (inside a doc folder)
+│       ├── README.md
+│       └── circuit-breaker-check.sh
+└── mod-code-015-hexagonal-base-java-spring/
+    ├── MODULE.md
+    ├── templates/
+    │   ├── Application.java.tpl
+    │   ├── domain/
+    │   │   └── Entity.java.tpl
+    │   └── adapter/
+    │       └── RestController.java.tpl
+    └── validation/
+        └── README.md
 ```
 
 **Generated reference files** in `{{output}}/`:
-- `mod-code-001-circuit-breaker-java-resilience4j.json` (documentation, contents: templates + policies + scripts + validation)
-- `mod-code-001-circuit-breaker-java-resilience4j-validation.json` (validation)
-- `mod-code-015-hexagonal-base-java-spring.json` (documentation, contents: templates + validation)
-- `mod-code-015-hexagonal-base-java-spring-validation.json` (validation)
-- `eri-code-008-circuit-breaker-java-resilience4j.json` (documentation, no contents)
 - `adr-004-resilience-patterns.json` (documentation, no contents)
+- `eri-code-008-circuit-breaker-java-resilience4j.json` (documentation, no contents)
+- `code.json` (documentation from `model/domains/code/`, entry-point: DOMAIN.md)
+- `design.json` (documentation from `model/domains/design/`, entry-point: DOMAIN.md)
+- `governance.json` (documentation from `model/domains/governance/`, entry-point: DOMAIN.md)
+- `qa.json` (documentation from `model/domains/qa/`, entry-point: DOMAIN.md)
+- `authoring.json` (documentation from `model/standards/authoring/`, entry-point: README.md)
+- `traceability.json` (documentation from `model/standards/traceability/`, entry-point: README.md)
+- `validation.json` (documentation from `model/standards/validation/`, entry-point: README.md — this is a doc folder, NOT a validation subfolder)
+- `mod-code-001-circuit-breaker-java-resilience4j.json` (documentation, contents: templates + policies + scripts + validation)
+- `mod-code-001-circuit-breaker-java-resilience4j-validation.json` (validation subfolder)
+- `mod-code-015-hexagonal-base-java-spring.json` (documentation, contents: templates + validation)
+- `mod-code-015-hexagonal-base-java-spring-validation.json` (validation subfolder)
 
 **Generated template index** at `{{templates_index}}`:
 ```json
