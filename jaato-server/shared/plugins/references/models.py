@@ -7,7 +7,67 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+
+# Valid keys for the ``contents`` mapping on a ReferenceSource.
+# Each key names a type of subfolder that a reference directory may contain.
+VALID_CONTENTS_KEYS: Set[str] = {"templates", "validation", "policies", "scripts"}
+
+
+@dataclass
+class ReferenceContents:
+    """Declares which typed subfolders exist within a reference directory.
+
+    Each field is either a relative subfolder path (string) when the
+    reference contains that type of content, or ``None`` when it does not.
+
+    Fields:
+        templates: Subfolder with authoritative template files (.tpl/.tmpl)
+            that the model must use via ``renderTemplateToFile`` instead of
+            extracting embedded templates from documentation.
+        validation: Subfolder with mandatory post-implementation validation
+            shell scripts that the model must run after completing an
+            implementation that used this reference.
+        policies: Subfolder with markdown documents defining implementation
+            constraints the model must follow.
+        scripts: Subfolder with deterministic helper scripts the model can
+            invoke during implementation to avoid re-inventing common
+            operations.
+    """
+    templates: Optional[str] = None
+    validation: Optional[str] = None
+    policies: Optional[str] = None
+    scripts: Optional[str] = None
+
+    def has_any(self) -> bool:
+        """Return True if any content type is declared."""
+        return any([self.templates, self.validation, self.policies, self.scripts])
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        """Serialize to a dict (always includes all keys, null for absent)."""
+        return {
+            "templates": self.templates,
+            "validation": self.validation,
+            "policies": self.policies,
+            "scripts": self.scripts,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> 'ReferenceContents':
+        """Create from a dict, tolerating missing or extra keys.
+
+        Args:
+            data: Raw dict from JSON, or None (returns all-None instance).
+        """
+        if not data or not isinstance(data, dict):
+            return cls()
+        return cls(
+            templates=data.get("templates"),
+            validation=data.get("validation"),
+            policies=data.get("policies"),
+            scripts=data.get("scripts"),
+        )
 
 
 class SourceType(Enum):
@@ -52,6 +112,11 @@ class ReferenceSource:
 
     # Tags for topic-based discovery
     tags: List[str] = field(default_factory=list)
+
+    # Typed subfolders present in this reference directory.
+    # Non-None values are relative paths to the subfolder (e.g., "templates/").
+    # Only meaningful for LOCAL directory references.
+    contents: ReferenceContents = field(default_factory=ReferenceContents)
 
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
@@ -162,6 +227,9 @@ class ReferenceSource:
         if self.fetch_hint is not None:
             result["fetchHint"] = self.fetch_hint
 
+        if self.contents.has_any():
+            result["contents"] = self.contents.to_dict()
+
         return result
 
     @classmethod
@@ -194,6 +262,7 @@ class ReferenceSource:
             content=data.get("content"),
             fetch_hint=data.get("fetchHint"),
             tags=data.get("tags", []),
+            contents=ReferenceContents.from_dict(data.get("contents")),
         )
 
 
