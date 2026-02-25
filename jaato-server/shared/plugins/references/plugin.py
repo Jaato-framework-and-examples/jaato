@@ -37,6 +37,7 @@ from jaato_sdk.plugins.base import (
     ToolResultEnrichmentResult,
 )
 
+from shared.path_utils import normalize_for_comparison
 from shared.trace import trace as _trace_write
 
 
@@ -89,6 +90,12 @@ class ReferencesPlugin:
         # When True, runtime selections (selectReferences tool and
         # 'references select' command) also trigger transitive resolution.
         self._transitive_enabled: bool = True
+        # Mapping from normalized resolved_path to (ref_id, ref_name) for
+        # preselected LOCAL references. Built during initialize() and used
+        # by enrich_tool_result() to detect when the model reads a
+        # preselected reference file. Paths are normalized using
+        # normalize_for_comparison() for cross-platform matching.
+        self._preselected_paths: Dict[str, Tuple[str, str]] = {}
 
     @property
     def name(self) -> str:
@@ -888,6 +895,19 @@ class ReferencesPlugin:
                 if source:
                     self._authorize_source_path(source)
 
+        # Build preselected paths index for reference-read detection.
+        # Maps normalized resolved_path → (ref_id, ref_name) for all
+        # preselected LOCAL sources (including transitively resolved ones).
+        self._preselected_paths = {}
+        for sid in self._selected_source_ids:
+            source = next((s for s in self._sources if s.id == sid), None)
+            if source and source.type == SourceType.LOCAL and source.resolved_path:
+                norm = normalize_for_comparison(os.path.normpath(source.resolved_path))
+                self._preselected_paths[norm] = (source.id, source.name)
+                self._trace(
+                    f"initialize: preselected_path '{source.id}': {norm}"
+                )
+
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
@@ -896,6 +916,7 @@ class ReferencesPlugin:
         self._channel = None
         self._sources = []
         self._selected_source_ids = []
+        self._preselected_paths = {}
         self._transitive_parent_map = {}
         self._transitive_notification_pending = False
         self._initialized = False
@@ -1830,27 +1851,109 @@ class ReferencesPlugin:
     def enrich_tool_result(
         self,
         tool_name: str,
-        result: str
+        result: str,
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
-        """Detect references in tool results via @id mentions and tag matching.
+        """Detect references in tool results via @id mentions, tag matching,
+        and preselected reference file reads.
 
-        Two detection passes (delegated to _enrich_content):
-        1. @reference-id patterns are expanded with full instructions.
-        2. Words matching unselected source tags trigger lightweight hints
-           so the model knows to call selectReferences.
+        Three detection passes:
+        1. Preselected reference read detection: checks if tool_args contain
+           a file path matching a preselected reference's resolved_path.
+           When detected, sets ``pinned_reference`` metadata so the session
+           can pin the content for GC protection.
+        2. @reference-id patterns are expanded with full instructions
+           (delegated to _enrich_content).
+        3. Words matching unselected source tags trigger lightweight hints
+           so the model knows to call selectReferences (delegated to
+           _enrich_content).
 
         Args:
             tool_name: Name of the tool that produced the result.
             result: The tool's output as a string.
+            tool_args: Optional tool call arguments for detecting which file
+                was read (e.g., CLI ``command`` or readFile ``path``).
 
         Returns:
-            ToolResultEnrichmentResult with expanded/hinted references.
+            ToolResultEnrichmentResult with expanded/hinted references and
+            optional ``pinned_reference`` metadata.
         """
         enrichment = self._enrich_content(result, f"tool:{tool_name}")
+        metadata = dict(enrichment.metadata) if enrichment.metadata else {}
+
+        # Detect preselected reference reads from tool arguments
+        if tool_args and self._preselected_paths:
+            matched = self._detect_preselected_read(tool_args)
+            if matched:
+                ref_id, ref_name = matched
+                metadata["pinned_reference"] = {
+                    "ref_id": ref_id,
+                    "ref_name": ref_name,
+                }
+                self._trace(
+                    f"enrich_tool_result: detected preselected reference "
+                    f"read: {ref_id} via {tool_name}"
+                )
+
         return ToolResultEnrichmentResult(
             result=enrichment.prompt,
-            metadata=enrichment.metadata
+            metadata=metadata
         )
+
+    def _detect_preselected_read(
+        self, tool_args: Dict[str, Any]
+    ) -> Optional[Tuple[str, str]]:
+        """Check if tool arguments reference a preselected reference file.
+
+        Scans all string values in tool_args for paths matching any
+        preselected reference's resolved_path.  Both sides of the comparison
+        are normalized via ``normalize_for_comparison`` and ``os.path.normpath``
+        so that Windows backslash paths, MSYS2 paths, and Unix paths all match
+        correctly.
+
+        Args:
+            tool_args: The tool call arguments dict (e.g., ``{"command": "cat foo.md"}``
+                or ``{"path": "docs/spec.md"}``).
+
+        Returns:
+            ``(ref_id, ref_name)`` tuple if a preselected reference path was
+            found in the arguments, ``None`` otherwise.
+        """
+        for value in tool_args.values():
+            if not isinstance(value, str):
+                continue
+            # Normalize the argument value for comparison
+            norm_value = normalize_for_comparison(value)
+            for norm_path, (ref_id, ref_name) in self._preselected_paths.items():
+                # Check both exact path match and substring containment
+                # (handles CLI commands like "cat /path/to/file.md")
+                norm_arg_path = normalize_for_comparison(os.path.normpath(value))
+                if norm_arg_path == norm_path:
+                    return (ref_id, ref_name)
+                # Substring check for CLI commands containing the path
+                if norm_path in norm_value:
+                    return (ref_id, ref_name)
+        return None
+
+    def get_preselected_paths(self) -> Dict[str, Tuple[str, str]]:
+        """Return the preselected paths index.
+
+        Returns:
+            Mapping from normalized resolved_path to ``(ref_id, ref_name)``
+            for all preselected LOCAL references.
+        """
+        return dict(self._preselected_paths)
+
+    def get_source_by_id(self, ref_id: str) -> Optional[ReferenceSource]:
+        """Look up a reference source by its ID.
+
+        Args:
+            ref_id: The reference source ID.
+
+        Returns:
+            The ``ReferenceSource`` if found, ``None`` otherwise.
+        """
+        return next((s for s in self._sources if s.id == ref_id), None)
 
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.

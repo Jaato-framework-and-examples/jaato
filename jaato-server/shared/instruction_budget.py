@@ -56,6 +56,7 @@ class SystemChildType(Enum):
     BASE = "base"           # User-provided .jaato/instructions/*.md - LOCKED
     CLIENT = "client"       # Programmatic system_instructions param - LOCKED
     FRAMEWORK = "framework" # Task completion, parallel tool guidance - LOCKED
+    SELECTED_REFERENCES = "selected_references"  # Pinned preselected reference content - LOCKED
 
 
 # Default GC policies per system child type
@@ -63,6 +64,7 @@ DEFAULT_SYSTEM_POLICIES: Dict[SystemChildType, GCPolicy] = {
     SystemChildType.BASE: GCPolicy.LOCKED,
     SystemChildType.CLIENT: GCPolicy.LOCKED,
     SystemChildType.FRAMEWORK: GCPolicy.LOCKED,
+    SystemChildType.SELECTED_REFERENCES: GCPolicy.LOCKED,
 }
 
 

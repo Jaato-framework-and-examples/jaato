@@ -1150,7 +1150,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
     def enrich_tool_result(
         self,
         tool_name: str,
-        result: str
+        result: str,
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
         """Auto-discover dependents when files are modified.
 
