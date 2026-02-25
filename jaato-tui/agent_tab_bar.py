@@ -476,6 +476,92 @@ class AgentTabBar:
         }
         return style_map.get(status, "class:agent-tab.symbol.awaiting")
 
+    def get_selected_agent_tab_offset(
+        self,
+        pane_slots: list,
+        total_width: int,
+    ) -> int:
+        """Calculate the x-offset of the selected agent's tab in pane-aligned mode.
+
+        Mirrors the cursor-tracking logic in ``render_pane_aligned()`` to find
+        the column where the selected agent's status symbol starts.  Used to
+        position the tooltip popup directly below the agent's name in the tab
+        bar when multiple panes are active.
+
+        Args:
+            pane_slots: List of active PaneSlot objects.
+            total_width: Total terminal width.
+
+        Returns:
+            Column offset (0-based) of the selected agent's tab, or 0 if not
+            found.
+        """
+        selected_id = self._registry.get_selected_agent_id()
+        if not selected_id:
+            return 0
+
+        pane_count = len(pane_slots)
+        if pane_count == 0:
+            return 0
+        pane_width = total_width // pane_count
+
+        for slot_idx, slot in enumerate(pane_slots):
+            pane_left = slot_idx * pane_width
+            cursor = pane_left
+
+            pane_agent_ids = slot.agent_ids if slot.agent_ids else []
+            if slot.visible_agent_id and slot.visible_agent_id in pane_agent_ids:
+                ordered = [slot.visible_agent_id] + [
+                    a for a in pane_agent_ids if a != slot.visible_agent_id
+                ]
+            else:
+                ordered = list(pane_agent_ids)
+
+            # Leading space inside pane
+            cursor += 1
+
+            pane_right = pane_left + pane_width
+            first_in_pane = True
+            for agent_id in ordered:
+                if not first_in_pane:
+                    if cursor + 3 < pane_right:
+                        cursor += 3  # separator " │ "
+                    else:
+                        break
+                first_in_pane = False
+
+                if agent_id == selected_id:
+                    return cursor
+
+                # Advance cursor past this agent's tab entry
+                agent = None
+                for a in self._registry.get_all_agents():
+                    if a.agent_id == agent_id:
+                        agent = a
+                        break
+                if not agent:
+                    continue
+
+                symbol = self.get_status_symbol(agent.status)
+                symbol_width = 2 if symbol in ("🏁", "💣") else 1
+                is_selected = (agent_id == selected_id)
+
+                max_label = pane_right - cursor - 3
+                if max_label < 3:
+                    break
+                label = agent_id
+                if len(label) > max_label:
+                    label = label[:max_label - 1] + "…"
+
+                if is_selected:
+                    display_label = f" {label} "
+                else:
+                    display_label = label
+
+                cursor += symbol_width + 1 + len(display_label)
+
+        return 0
+
     def render_popup(self, agent: "AgentInfo") -> List[Tuple[str, str]]:
         """Render a minimal tooltip showing only the subagent name.
 
