@@ -1,0 +1,78 @@
+{
+  "_comment": "Blocks all Java ecosystem tools: JDK utilities, Maven, Gradle, Ant, and wrapper scripts. Uses both pattern matching (glob on command signature) and argument matching (startswith on command string) for defense in depth.",
+  "version": "1.0",
+  "defaultPolicy": "ask",
+
+  "blacklist": {
+    "tools": [],
+    "patterns": [
+      "java", "java *",
+      "javac", "javac *",
+      "javap", "javap *",
+      "javadoc", "javadoc *",
+      "jshell", "jshell *",
+      "jar", "jar *",
+      "jdb", "jdb *",
+      "jlink", "jlink *",
+      "jpackage", "jpackage *",
+      "jdeps", "jdeps *",
+      "jcmd", "jcmd *",
+      "jconsole", "jconsole *",
+      "jinfo", "jinfo *",
+      "jmap", "jmap *",
+      "jps", "jps *",
+      "jstack", "jstack *",
+      "jstat", "jstat *",
+      "jstatd", "jstatd *",
+      "mvn", "mvn *",
+      "mvnw", "mvnw *",
+      "./mvnw", "./mvnw *",
+      "gradle", "gradle *",
+      "gradlew", "gradlew *",
+      "./gradlew", "./gradlew *",
+      "ant", "ant *",
+      "*/bin/java", "*/bin/java *",
+      "*/bin/javac", "*/bin/javac *",
+      "*/bin/mvn", "*/bin/mvn *",
+      "*/bin/gradle", "*/bin/gradle *",
+      "shell_spawn(*java*)",
+      "shell_spawn(*javac*)",
+      "shell_spawn(*mvn*)",
+      "shell_spawn(*gradle*)",
+      "shell_spawn(*ant*)",
+      "shell_spawn(*jshell*)"
+    ],
+    "arguments": {
+      "cli_based_tool": {
+        "command": [
+          "java", "javac", "javap", "javadoc", "jshell", "jar", "jdb",
+          "jlink", "jpackage", "jdeps", "jcmd", "jconsole", "jinfo",
+          "jmap", "jps", "jstack", "jstat", "jstatd",
+          "mvn", "./mvnw", "mvnw",
+          "gradle", "./gradlew", "gradlew",
+          "ant"
+        ]
+      },
+      "shell_spawn": {
+        "command": [
+          "java", "javac", "javap", "javadoc", "jshell", "jar", "jdb",
+          "jlink", "jpackage", "jdeps",
+          "mvn", "./mvnw", "mvnw",
+          "gradle", "./gradlew", "gradlew",
+          "ant"
+        ]
+      }
+    }
+  },
+
+  "whitelist": {
+    "tools": [],
+    "patterns": [],
+    "arguments": {}
+  },
+
+  "channel": {
+    "type": "console",
+    "timeout": 30
+  }
+}
