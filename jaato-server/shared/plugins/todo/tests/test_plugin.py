@@ -860,10 +860,13 @@ class TestGetTaskEventsExecutor:
         """wait_seconds does not delay when events already exist."""
         plugin = self._make_plugin()
         executors = plugin.get_executors()
-        self._publish_event()
+        self._publish_event("sub")
 
         start = time.monotonic()
-        result = executors["getTaskEvents"]({"wait_seconds": 5})
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 5,
+            "agent_id": "sub",
+        })
         elapsed = time.monotonic() - start
 
         assert result["count"] == 1
@@ -877,7 +880,10 @@ class TestGetTaskEventsExecutor:
         result_holder: list = []
 
         def call_tool():
-            r = executors["getTaskEvents"]({"wait_seconds": 10})
+            r = executors["getTaskEvents"]({
+                "wait_seconds": 10,
+                "agent_id": "sub",
+            })
             result_holder.append(r)
 
         t = threading.Thread(target=call_tool)
@@ -886,7 +892,7 @@ class TestGetTaskEventsExecutor:
         # Give the tool time to enter the wait.
         time.sleep(0.3)
 
-        event = self._publish_event()
+        event = self._publish_event("sub")
         t.join(timeout=5)
 
         assert len(result_holder) == 1
@@ -899,7 +905,10 @@ class TestGetTaskEventsExecutor:
         executors = plugin.get_executors()
 
         start = time.monotonic()
-        result = executors["getTaskEvents"]({"wait_seconds": 0.3})
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.3,
+            "agent_id": "nobody",
+        })
         elapsed = time.monotonic() - start
 
         assert result["count"] == 0
@@ -946,3 +955,60 @@ class TestGetTaskEventsExecutor:
         # Invalid type → treated as 0
         result = executors["getTaskEvents"]({"wait_seconds": "not_a_number"})
         assert result["count"] == 0
+
+    def test_wait_seconds_requires_narrowing(self):
+        """wait_seconds without any filters or cursor returns an error."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        result = executors["getTaskEvents"]({"wait_seconds": 5})
+        assert "error" in result
+        assert "wait_seconds requires" in result["error"]
+
+    def test_wait_seconds_accepted_with_agent_id(self):
+        """wait_seconds is accepted when agent_id narrows the query."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        # Should not error — agent_id provides narrowing.
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "agent_id": "sub",
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        # Should have waited (no events from "sub").
+        assert elapsed >= 0.15
+
+    def test_wait_seconds_accepted_with_event_types(self):
+        """wait_seconds is accepted when event_types narrows the query."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "event_types": ["step_completed"],
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        assert elapsed >= 0.15
+
+    def test_wait_seconds_accepted_with_after_event(self):
+        """wait_seconds is accepted when after_event provides a cursor."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+        event = self._publish_event()
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "after_event": event.event_id,
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        assert elapsed >= 0.15

@@ -1773,6 +1773,20 @@ class TodoPlugin:
             wait_seconds = 0
         wait_seconds = min(max(wait_seconds, 0), 30)
 
+        # Guard: wait_seconds without any narrowing is almost always a
+        # mistake — every published event matches, so the wait returns
+        # on the very first event from any agent.  Return an error that
+        # tells the model what to fix instead of silently doing nothing.
+        if wait_seconds > 0 and not agent_id and not event_types and not after_event:
+            return {
+                "error": (
+                    "wait_seconds requires at least one of: agent_id, "
+                    "event_types, or after_event.  Without any narrowing "
+                    "the wait returns on the first event from any agent, "
+                    "making the sleep ineffective."
+                )
+            }
+
         if wait_seconds > 0:
             # Long-poll path: block until events arrive or timeout.
             events = self._event_bus.wait_for_events(
