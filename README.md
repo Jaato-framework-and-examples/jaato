@@ -13,9 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="https://apanoia.github.io/jaato/web/index.html">Documentation</a> &bull;
+  <a href="https://jaato-framework-and-examples.github.io/jaato/web/index.html">Documentation</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
-  <a href="https://apanoia.github.io/jaato/web/api-reference/plugins/index.html">Plugin Reference</a> &bull;
+  <a href="https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html">Plugin Reference</a> &bull;
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
@@ -163,7 +163,7 @@ jaato ships with **55+ built-in plugins** organized by function. Plugins are aut
 
 Plus additional plugins for caching (per-provider), output formatting (code blocks, diffs, tables, Mermaid, notebooks), content filtering, and authentication (per-provider OAuth flows).
 
-For the complete reference, see the **[Plugin Documentation](https://apanoia.github.io/jaato/web/api-reference/plugins/index.html)**. For plugin development, see [Plugin Development Guide](jaato-server/shared/plugins/README.md).
+For the complete reference, see the **[Plugin Documentation](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html)**. For plugin development, see [Plugin Development Guide](jaato-server/shared/plugins/README.md).
 
 ## Quick Start
 
@@ -201,7 +201,7 @@ python3 -m venv .venv
 
 ### Configuration
 
-1. **Set up your AI provider** - Configure credentials for your chosen provider (see [Provider Setup Guides](https://apanoia.github.io/jaato/web/api-reference/providers/index.html))
+1. **Set up your AI provider** - Configure credentials for your chosen provider (see [Provider Setup Guides](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html))
 2. **Configure environment** - Copy `.env.example` to `.env` and edit with your credentials
 3. **Optional: Add MCP servers** - Configure external tool integrations in `.mcp.json`
 
@@ -410,15 +410,15 @@ termtosvg -c "python demo-scripts/run_demo.py demo.yaml" -g 100x40 demo.svg
 
 ## Documentation
 
-**[Full Documentation](https://apanoia.github.io/jaato/web/index.html)** - Complete reference with examples, guides, and API documentation.
+**[Full Documentation](https://jaato-framework-and-examples.github.io/jaato/web/index.html)** - Complete reference with examples, guides, and API documentation.
 
 | Resource | Description |
 |----------|-------------|
 | [Architecture Overview](docs/architecture.md) | Server-first architecture, event protocol, component diagrams |
 | [Design Philosophy](docs/design-philosophy.md) | Opinionated design decisions and rationale |
-| [Plugin Reference](https://apanoia.github.io/jaato/web/api-reference/plugins/index.html) | All built-in plugins with configuration and examples |
+| [Plugin Reference](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html) | All built-in plugins with configuration and examples |
 | [Plugin Development](jaato-server/shared/plugins/README.md) | Guide for creating custom plugins |
-| [Provider Setup](https://apanoia.github.io/jaato/web/api-reference/providers/index.html) | Configuration guides for each model provider |
+| [Provider Setup](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html) | Configuration guides for each model provider |
 | [GCP/Vertex AI Setup](docs/gcp-setup.md) | Google Cloud Platform setup walkthrough |
 | [OpenTelemetry Design](docs/opentelemetry-design.md) | Tracing integration architecture |
 | [Reliability Policies](docs/reliability-policies-config.md) | Per-tool thresholds and retry configuration |
