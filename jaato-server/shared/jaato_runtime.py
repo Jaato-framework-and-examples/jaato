@@ -229,6 +229,9 @@ class JaatoRuntime:
         (e.g. ``00-system-instructions.md``, ``10-coding-standards.md``,
         ``15-review-policy.md``) control the order.
 
+        ``README.md`` is excluded — it documents the folder layout and is
+        not meant to be injected as system instructions.
+
         Args:
             instructions_dir: Path to the instructions directory.
 
@@ -238,6 +241,8 @@ class JaatoRuntime:
         """
         parts: List[str] = []
         for md_file in sorted(instructions_dir.glob("*.md")):
+            if md_file.name.upper() == "README.MD":
+                continue  # Skip README files — they document the folder, not instructions
             if md_file.is_file():
                 try:
                     content = md_file.read_text(encoding='utf-8')
