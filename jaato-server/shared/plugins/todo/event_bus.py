@@ -477,6 +477,7 @@ class TaskEventBus:
         self,
         agent_id: Optional[str] = None,
         event_types: Optional[List[TaskEventType]] = None,
+        after_event_id: Optional[str] = None,
         limit: int = 50
     ) -> List[TaskEvent]:
         """Get recent events from history, optionally filtered.
@@ -484,6 +485,11 @@ class TaskEventBus:
         Args:
             agent_id: Filter by source agent ID.
             event_types: Filter by event types.
+            after_event_id: Cursor — only return events published after this
+                            event ID.  Pass the last ``event_id`` you received
+                            to consume the stream incrementally.  If the ID has
+                            been evicted from the rolling history window, all
+                            available events are returned.
             limit: Maximum number of events to return.
 
         Returns:
@@ -491,6 +497,18 @@ class TaskEventBus:
         """
         with self._sub_lock:
             events = list(self._event_history)
+
+        # Advance past the cursor
+        if after_event_id:
+            idx = None
+            for i, e in enumerate(events):
+                if e.event_id == after_event_id:
+                    idx = i
+                    break
+            if idx is not None:
+                events = events[idx + 1:]
+            # If the event_id wasn't found the cursor has been evicted
+            # from the rolling window — return everything available.
 
         if agent_id:
             events = [e for e in events if e.source_agent == agent_id]
@@ -507,20 +525,21 @@ class TaskEventBus:
         after_event_id: Optional[str] = None,
         limit: int = 50
     ) -> List[TaskEvent]:
-        """Wait for matching events, returning early when they arrive.
+        """Wait for events, returning early when they arrive.
 
-        Implements long-polling: if matching events already exist, returns
-        immediately. Otherwise, blocks up to ``timeout`` seconds for new
-        events to be published and returns whatever matches at that point.
+        Implements long-polling: if events already exist (given the cursor
+        and filters), returns immediately.  Otherwise blocks up to
+        ``timeout`` seconds for new events to be published.
+
+        Delegates all filtering and cursor logic to
+        :meth:`get_recent_events`; this method only adds the blocking
+        wait on top.
 
         Args:
             timeout: Maximum seconds to wait (capped at 30).
             agent_id: Filter by source agent ID.
             event_types: Filter by event types.
-            after_event_id: Only return events published after this event ID.
-                            Enables incremental consumption — pass the last
-                            ``event_id`` you received to avoid re-reading old
-                            events.
+            after_event_id: Cursor — only return events after this event ID.
             limit: Maximum number of events to return.
 
         Returns:
@@ -528,32 +547,16 @@ class TaskEventBus:
         """
         timeout = min(max(timeout, 0), 30)
 
-        def _matching_events() -> List[TaskEvent]:
-            """Snapshot matching events from history (caller holds no lock)."""
-            with self._sub_lock:
-                events = list(self._event_history)
+        def _poll() -> List[TaskEvent]:
+            return self.get_recent_events(
+                agent_id=agent_id,
+                event_types=event_types,
+                after_event_id=after_event_id,
+                limit=limit,
+            )
 
-            # Trim to events after the cursor
-            if after_event_id:
-                idx = None
-                for i, e in enumerate(events):
-                    if e.event_id == after_event_id:
-                        idx = i
-                        break
-                if idx is not None:
-                    events = events[idx + 1:]
-                # If the event_id wasn't found, return all events
-                # (it may have been evicted from the rolling window).
-
-            if agent_id:
-                events = [e for e in events if e.source_agent == agent_id]
-            if event_types:
-                events = [e for e in events if e.event_type in event_types]
-
-            return events[-limit:]
-
-        # Fast path: matching events already exist.
-        result = _matching_events()
+        # Fast path: events already exist.
+        result = _poll()
         if result or timeout <= 0:
             return result
 
@@ -567,12 +570,12 @@ class TaskEventBus:
                     break
                 self._event_condition.wait(timeout=remaining)
                 # Re-check after wakeup.
-                result = _matching_events()
+                result = _poll()
                 if result:
                     return result
 
         # Final check after timeout.
-        return _matching_events()
+        return _poll()
 
     def clear_history(self) -> int:
         """Clear the event history.

@@ -1787,17 +1787,9 @@ class TodoPlugin:
             events = self._event_bus.get_recent_events(
                 agent_id=agent_id,
                 event_types=event_types,
+                after_event_id=after_event,
                 limit=limit,
             )
-            # Apply after_event filter for the non-waiting path too.
-            if after_event and events:
-                idx = None
-                for i, e in enumerate(events):
-                    if e.event_id == after_event:
-                        idx = i
-                        break
-                if idx is not None:
-                    events = events[idx + 1:]
 
         result: Dict[str, Any] = {
             "events": [e.to_dict() for e in events],
