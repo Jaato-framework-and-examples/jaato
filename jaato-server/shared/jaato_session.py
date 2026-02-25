@@ -3651,10 +3651,18 @@ NOTES
         results: Dict[str, _ToolExecutionResult] = {}
         max_workers = min(len(function_calls), 8)  # Cap at 8 concurrent tools
 
+        # Capture interactive plugin channels from the spawning thread.
+        # Thread-local channels (set by configure_for_subagent) are only
+        # visible on this thread.  Worker threads in the pool below won't
+        # inherit them, so we snapshot them here and pass them explicitly.
+        captured_channels = self._capture_interactive_channels()
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_fc = {
-                executor.submit(self._execute_single_tool_for_parallel, fc): fc
+                executor.submit(
+                    self._execute_single_tool_for_parallel, fc, captured_channels
+                ): fc
                 for fc in function_calls
             }
 
@@ -3950,9 +3958,75 @@ NOTES
             plugin_type=plugin_type
         )
 
+    def _capture_interactive_channels(self) -> Dict[str, Any]:
+        """Snapshot interactive plugin channels from the current thread.
+
+        Both the permission and clarification plugins use
+        ``threading.local()`` to isolate per-session channels (see
+        ``configure_for_subagent``).  When we spawn a
+        ``ThreadPoolExecutor`` for parallel tool execution the worker
+        threads don't inherit these thread-local values, so the plugins
+        fall back to ``self._channel`` — the main agent's channel.
+
+        For subagents this means permission prompts escape to the user
+        instead of being routed through ``ParentBridgedChannel``.
+
+        This method captures the *current* thread's channel references so
+        they can be passed to ``_restore_interactive_channels`` on each
+        worker thread.
+
+        Returns:
+            Dict with ``permission_channel`` and ``clarification_channel``
+            keys (values may be ``None`` when no override is active).
+        """
+        channels: Dict[str, Any] = {
+            'permission_channel': None,
+            'clarification_channel': None,
+        }
+
+        # Permission plugin — lives on the runtime, not in the registry
+        perm = self._runtime.permission_plugin if self._runtime else None
+        if perm and hasattr(perm, '_get_channel'):
+            channels['permission_channel'] = perm._get_channel()
+
+        # Clarification plugin — lives in the registry
+        if self._runtime and self._runtime.registry:
+            clari = self._runtime.registry.get_plugin('clarification')
+            if clari and hasattr(clari, '_get_channel'):
+                channels['clarification_channel'] = clari._get_channel()
+
+        return channels
+
+    def _restore_interactive_channels(self, channels: Dict[str, Any]) -> None:
+        """Restore captured interactive channels into the current thread.
+
+        Called on each worker thread in the parallel tool pool to ensure
+        that permission and clarification requests use the same channel
+        that was active on the spawning thread (e.g.
+        ``ParentBridgedChannel`` for subagents).
+
+        Args:
+            channels: Dict produced by ``_capture_interactive_channels``.
+        """
+        perm_channel = channels.get('permission_channel')
+        clari_channel = channels.get('clarification_channel')
+
+        # Permission plugin
+        if perm_channel is not None:
+            perm = self._runtime.permission_plugin if self._runtime else None
+            if perm and hasattr(perm, '_thread_local'):
+                perm._thread_local.channel = perm_channel
+
+        # Clarification plugin
+        if clari_channel is not None and self._runtime and self._runtime.registry:
+            clari = self._runtime.registry.get_plugin('clarification')
+            if clari and hasattr(clari, '_thread_local'):
+                clari._thread_local.channel = clari_channel
+
     def _execute_single_tool_for_parallel(
         self,
-        fc: FunctionCall
+        fc: FunctionCall,
+        captured_channels: Optional[Dict[str, Any]] = None,
     ) -> _ToolExecutionResult:
         """Execute a single tool for parallel execution.
 
@@ -3961,6 +4035,15 @@ NOTES
         - Does not emit start/end hooks (handled by caller)
         - Includes telemetry for this thread
         - Propagates session to worker thread's thread-local storage
+        - Restores interactive plugin channels captured from spawning thread
+
+        Args:
+            fc: The function call to execute.
+            captured_channels: Channel references captured from the spawning
+                thread by ``_capture_interactive_channels()``.  Restored into
+                this worker thread's thread-local storage so that permission
+                and clarification requests route through the correct channel
+                (e.g. ``ParentBridgedChannel`` for subagents).
         """
         name = fc.name
         args = fc.args
@@ -3976,6 +4059,13 @@ NOTES
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
+
+        # Restore interactive channels that were captured from the spawning
+        # thread.  Without this, worker threads fall back to the main
+        # agent's default channel, causing subagent permission/clarification
+        # requests to surface as user-facing prompts (the input-capture bug).
+        if captured_channels:
+            self._restore_interactive_channels(captured_channels)
 
         # Determine plugin type for telemetry
         plugin_type = "unknown"
