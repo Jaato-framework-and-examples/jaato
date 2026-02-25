@@ -794,7 +794,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     import asyncio
     from pathlib import Path
-    from jaato_sdk.client.ipc import IPCClient
+    from jaato_sdk.client.ipc import IPCClient, IncompatibleServerError
     from jaato_sdk.client.recovery import (
         IPCRecoveryClient,
         ConnectionState,
@@ -849,6 +849,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         WorkspaceFilesChangedEvent,
         WorkspaceFilesSnapshotEvent,
     )
+
+    # Minimum server version this TUI release requires.
+    # Bump this when the TUI starts depending on a new server feature.
+    MIN_SERVER_VERSION = "0.2.27"
 
     # Load keybindings and theme
     keybindings = load_keybindings()
@@ -1115,7 +1119,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         if not connected:
             print("Connection failed: Server did not respond with handshake")
             return
+
+        # Check server version against our minimum requirement
+        sv = client.server_version
+        if sv is not None:
+            def _parse_version(v: str) -> tuple:
+                return tuple(int(x) for x in v.split("."))
+            if _parse_version(sv) < _parse_version(MIN_SERVER_VERSION):
+                raise IncompatibleServerError(sv, MIN_SERVER_VERSION)
+
         print("Connected!")
+
+    except IncompatibleServerError as e:
+        print(f"Error: {e}")
+        return
 
     except ConnectionError as e:
         print(f"Connection failed: {e}")

@@ -59,6 +59,12 @@ from .workspace_manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 
+def _get_server_version() -> str:
+    """Read the jaato-server package version from installed metadata."""
+    from importlib.metadata import version as pkg_version
+    return pkg_version("jaato-server")
+
+
 @dataclass
 class ClientConnection:
     """Represents a connected client."""
@@ -284,6 +290,7 @@ class JaatoWSServer:
             server_info = {
                 "client_id": client_id,
                 "workspace_mode": self._workspace_manager is not None,
+                "server_version": _get_server_version(),
             }
 
             if self._jaato_server:

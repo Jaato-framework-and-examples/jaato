@@ -340,6 +340,11 @@ class IPCBackend(Backend):
         return self._client.is_connected if self._client else False
 
     @property
+    def server_version(self) -> Optional[str]:
+        """Server package version reported at connect time, or None."""
+        return self._raw_client.server_version
+
+    @property
     def is_reconnecting(self) -> bool:
         """Check if the client is currently reconnecting."""
         if self._recovery_client:

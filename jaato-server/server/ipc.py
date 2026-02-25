@@ -95,6 +95,12 @@ from jaato_sdk.events import (
 logger = logging.getLogger(__name__)
 
 
+def _get_server_version() -> str:
+    """Read the jaato-server package version from installed metadata."""
+    from importlib.metadata import version as pkg_version
+    return pkg_version("jaato-server")
+
+
 # Message framing: 4-byte length prefix (big-endian) + JSON payload
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
@@ -400,6 +406,7 @@ class JaatoIPCServer:
                     "client_id": client_id,
                     "transport": "ipc",
                     "socket_path": self.socket_path,
+                    "server_version": _get_server_version(),
                 },
             )
             logger.info(f"Sending ConnectedEvent to {client_id}...")

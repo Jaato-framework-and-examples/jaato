@@ -75,6 +75,26 @@ else:
     DEFAULT_PID_FILE = "/tmp/jaato.pid"
 
 
+class IncompatibleServerError(Exception):
+    """Raised when the server version is below the client's minimum requirement.
+
+    This error is non-retryable: an old server will not become newer on retry.
+    Clients should catch this and display a clear upgrade message.
+
+    Attributes:
+        server_version: The version reported by the server.
+        min_version: The minimum version required by the client.
+    """
+
+    def __init__(self, server_version: str, min_version: str):
+        self.server_version = server_version
+        self.min_version = min_version
+        super().__init__(
+            f"Server version {server_version} is not supported by this client "
+            f"(requires >= {min_version}). Please upgrade the server."
+        )
+
+
 class IPCClient:
     r"""Client for connecting to Jaato server via IPC.
 
@@ -116,6 +136,7 @@ class IPCClient:
         self._connected = False
         self._session_id: Optional[str] = None
         self._client_id: Optional[str] = None
+        self._server_version: Optional[str] = None
 
         # Event callback
         self._on_event: Optional[Callable[[Event], None]] = None
@@ -249,6 +270,16 @@ class IPCClient:
     def client_id(self) -> Optional[str]:
         """Get the client ID assigned by server."""
         return self._client_id
+
+    @property
+    def server_version(self) -> Optional[str]:
+        """Get the server's package version, available after connect().
+
+        Returns the ``server_version`` string from the ``ConnectedEvent``
+        server_info dict, or ``None`` if the server did not report one
+        (pre-0.2.28 servers).
+        """
+        return self._server_version
 
     def supports_reconnection(self) -> bool:
         """Check if this client supports reconnection.
@@ -412,6 +443,7 @@ class IPCClient:
                 event = deserialize_event(message)
                 if isinstance(event, ConnectedEvent):
                     self._client_id = event.server_info.get("client_id")
+                    self._server_version = event.server_info.get("server_version")
                     # Send our working directory to the server
                     import os
                     cwd = self.workspace_path or os.getcwd()
@@ -443,6 +475,7 @@ class IPCClient:
         self._writer = None
         self._session_id = None
         self._client_id = None
+        self._server_version = None
 
     async def _send_client_config(self) -> None:
         """Send client configuration to the server.

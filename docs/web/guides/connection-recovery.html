@@ -447,6 +447,11 @@ client = IPCRecoveryClient(
                 <td>Connection permanently closed</td>
                 <td>Inform user, offer manual reconnect</td>
               </tr>
+              <tr>
+                <td><code>IncompatibleServerError</code></td>
+                <td>Server version below client's minimum</td>
+                <td>Display upgrade message; not retried by recovery client</td>
+              </tr>
             </tbody>
           </table>
 

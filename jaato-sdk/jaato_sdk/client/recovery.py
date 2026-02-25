@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from jaato_sdk.client.config import RecoveryConfig
-from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient
+from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient, IncompatibleServerError
 from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
@@ -242,6 +242,17 @@ class IPCRecoveryClient:
         """Get the client ID assigned by server."""
         return self._client_id
 
+    @property
+    def server_version(self) -> Optional[str]:
+        """Get the server's package version, available after connect().
+
+        Delegates to the underlying ``IPCClient.server_version``.
+        Returns ``None`` if not connected or the server did not report a version.
+        """
+        if self._client:
+            return self._client.server_version
+        return None
+
     # =========================================================================
     # Connection Management
     # =========================================================================
@@ -298,6 +309,12 @@ class IPCRecoveryClient:
                 return True
 
             raise ConnectionError("Connection failed")
+
+        except IncompatibleServerError:
+            # Server too old — propagate directly, retrying won't help
+            async with self._state_lock:
+                self._transition_to(ConnectionState.CLOSED)
+            raise
 
         except asyncio.TimeoutError:
             logger.warning(f"Connection timeout to {self._socket_path}")
@@ -879,6 +896,9 @@ class IPCRecoveryClient:
         exc_str = str(exc).lower()
 
         # Permanent errors - don't retry
+        if isinstance(exc, IncompatibleServerError):
+            # Server is too old; retrying won't change its version
+            return "permanent"
         if isinstance(exc, FileNotFoundError):
             # Socket file deleted - server likely not restarting
             return "permanent"
@@ -906,6 +926,7 @@ __all__ = [
     "ConnectionError",
     "ConnectionState",
     "ConnectionStatus",
+    "IncompatibleServerError",
     "IPCRecoveryClient",
     "ReconnectingError",
     "StatusCallback",

@@ -171,9 +171,10 @@ sequenceDiagram
     IPCServer->>IPCServer: Create asyncio.Queue for client
     IPCServer->>IPCServer: Start _broadcast_to_client() task
 
-    IPCServer->>IPCClient: ConnectedEvent(client_id="ipc_1")
+    IPCServer->>IPCClient: ConnectedEvent(client_id="ipc_1", server_version="0.2.27")
     Note over IPCClient,IPCServer: 4-byte length prefix + JSON payload
 
+    IPCClient->>IPCClient: Store server_version from server_info
     IPCClient->>RichClient: Connection established
 
     RichClient->>IPCClient: send_event(ClientConfigRequest)
