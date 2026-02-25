@@ -220,6 +220,10 @@ class JaatoServer:
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
+        # Continuation text stashed by continuation_callback when called from
+        # _drain_child_messages() while _model_running is still True.  Processed
+        # in the model_thread finally block after _model_running is cleared.
+        self._pending_continuation: Optional[str] = None
 
         # Model info
         self._model_provider: str = ""
@@ -2047,16 +2051,22 @@ class JaatoServer:
             # Set up callback for when child messages need continuation
             # This triggers a new turn when subagent sends messages while parent is idle
             def continuation_callback(child_messages: str):
-                # Only trigger if not already running a model call
-                if not server._model_running and child_messages:
+                if not child_messages:
+                    return
+                if not server._model_running:
+                    # Normal path: parent is idle between turns
                     server._trace(f"CONTINUATION: Child messages drained ({len(child_messages)} chars), triggering new turn")
-                    # Signal main agent is active
                     server.emit(AgentStatusChangedEvent(
                         agent_id="main",
                         status="active",
                     ))
-                    # Start model thread with child messages as the prompt
                     server._start_model_thread(child_messages)
+                else:
+                    # Called from _drain_child_messages() inside send_message()
+                    # while _model_running is still True.  Stash for the
+                    # model_thread finally block to pick up.
+                    server._pending_continuation = child_messages
+                    server._trace(f"CONTINUATION: Stashed {len(child_messages)} chars (model still running)")
 
             session.set_continuation_callback(continuation_callback)
 
@@ -2224,6 +2234,22 @@ class JaatoServer:
             finally:
                 server._model_running = False
                 server._model_thread = None
+
+                # Process continuation stashed during _drain_child_messages().
+                # The stash write (in continuation_callback) and this read both
+                # run on the same model_thread, so no race condition.
+                pending = server._pending_continuation
+                server._pending_continuation = None
+                if pending:
+                    server._trace(f"CONTINUATION: Processing stashed {len(pending)} chars")
+                    server.emit(AgentStatusChangedEvent(
+                        agent_id="main",
+                        status="active",
+                    ))
+                    server._start_model_thread(pending)
+                    clear_logging_context()
+                    return  # new thread handles idle/done status
+
                 # Determine whether the main agent is truly finished or just
                 # paused waiting for external input.
                 #   "idle"  – waiting for user input or subagent results
