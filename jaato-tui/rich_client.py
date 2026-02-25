@@ -1478,13 +1478,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 }
                 agent_id = getattr(event, 'agent_id', None)
 
-                # Build step_id → step number mapping so tool args display
-                # human-readable "Step #N" instead of raw UUIDs
+                # Build step_id → description mapping so tool args display
+                # human-readable task descriptions instead of raw UUIDs
                 step_id_map = {}
                 for i, step in enumerate(event.steps):
                     sid = step.get("step_id")
                     if sid:
-                        step_id_map[sid] = i + 1
+                        desc = step.get("content", "")
+                        step_id_map[sid] = desc if desc else f"Step #{i + 1}"
                 target_agent = agent_id or "main"
                 buffer = agent_registry.get_buffer(target_agent)
                 if buffer:

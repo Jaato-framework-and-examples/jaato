@@ -162,6 +162,11 @@ class AgentRegistry:
                         _, call_id, chunk = event
                         agent_info.output_buffer.append_tool_output(call_id, chunk)
 
+            # Broadcast agent name to all buffers so tool args can show
+            # human-readable names instead of raw agent_id values
+            for info in self._agents.values():
+                info.output_buffer.update_agent_name(agent_id, name)
+
     def queue_output(self, agent_id: str, source: str, text: str, mode: str) -> None:
         """Queue output for an agent that hasn't been created yet.
 
