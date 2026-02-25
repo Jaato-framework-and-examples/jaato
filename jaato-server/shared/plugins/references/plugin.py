@@ -1920,12 +1920,21 @@ class ReferencesPlugin:
                 # The boundary character class includes '.' and '/' so that
                 # tags do not match inside dotted names (java.util, file.java)
                 # or path segments (/usr/lib/java/).
+                # Hyphens, spaces, and underscores are treated as
+                # interchangeable separators so that "circuit-breaker"
+                # matches "circuit breaker", "circuit_breaker", and
+                # vice versa.
                 content_lower = content.lower()
                 matched_sources: Dict[str, List[str]] = {}  # source_id → [matched_tags]
                 for tag, sources in tag_to_sources.items():
-                    # Match tag as a whole word (not inside dotted/path names)
+                    # Match tag as a whole word (not inside dotted/path names).
+                    # After escaping, normalize escaped hyphens (\-),
+                    # escaped spaces (\ ), and literal underscores into
+                    # [ _-] so all separator variants match interchangeably.
+                    escaped = re.escape(tag.lower())
+                    escaped = re.sub(r'\\-|\\ |_', '[ _-]', escaped)
                     tag_pattern = re.compile(
-                        r'(?<![a-zA-Z0-9_./-])' + re.escape(tag.lower()) + r'(?![a-zA-Z0-9_./-])'
+                        r'(?<![a-zA-Z0-9_./-])' + escaped + r'(?![a-zA-Z0-9_./-])'
                     )
                     if tag_pattern.search(content_lower):
                         for source in sources:
