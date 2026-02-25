@@ -261,13 +261,16 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
 1. Identify the entry-point file using the priority order from "Recognized entry-point files" above. Read only that file — extract just the first paragraph for the description
 2. If the entry-point file has YAML frontmatter with `title`, `description`, or `tags`, use those values. Otherwise fall back to the extraction rules (first paragraph, folder name parsing)
 3. **If source is remote**: Copy the folder from the temp download to a stable workspace location (see "Materializing remote content" below) **before** writing the reference JSON. The reference `path` must point to this permanent copy, not to the temp directory.
-4. **Detect typed subfolders** — check if the **current documentation folder** contains any of these **child** subfolders and record them for the `contents` property:
+4. **Build the `"contents"` object** — check if the **current documentation folder** contains any of these **immediate child** directories:
    - `templates/` — contains `.tpl`/`.tmpl` files (authoritative standalone templates)
    - `validation/` — contains shell scripts for post-implementation checks
    - `policies/` — contains markdown documents with implementation constraints
    - `scripts/` — contains helper scripts for use during implementation
+
+   For each, set the corresponding key in the `"contents"` object to the relative path (e.g., `"templates/"`) if present, or `null` if absent. **Always include all four keys.** The result must be an object — not an array, not a list of names. Example: `{"templates": "templates/", "validation": null, "policies": null, "scripts": null}`.
+
    **Important**: This detection applies only to **immediate children** of the documentation folder being processed. A directory named `validation/` that was itself matched by a subpath pattern (e.g., `model/standards/validation/` matched by `model/standards/*`) is a **documentation folder in its own right**, not a validation subfolder. Only treat `validation/` as a typed subfolder when it appears **inside** another documentation folder (e.g., `modules/mod-code-001-.../validation/`).
-5. Write the reference JSON for that folder immediately, including the `contents` property with the relative path for each detected subfolder (or `null` for absent ones)
+5. Write the reference JSON for that folder immediately. The JSON **must** include the `"contents"` property exactly as built in step 4 (an object with four keys, not an array or renamed field like `"subfolders"`)
 6. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
 7. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
 8. **Release the file content from working memory** — once the JSON is written you no longer need the source text
@@ -407,11 +410,15 @@ A folder is a "documentation folder" if it contains at least one of these entry-
    - **mode**: Default `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
    - **tags**: If YAML frontmatter has `tags`, use those first. Then augment with: folder path components (e.g., `modules` → `module`), technology keywords in name (e.g., `java`, `spring`, `resilience4j`), and content-type indicators (e.g., `circuit-breaker`, `persistence`). Deduplicate.
    - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`, `"Read DOMAIN.md for domain definition"`)
-   - **contents**: An object declaring which typed subfolders exist in this reference directory. For each of the four subfolder types, set the value to the relative subfolder path if it exists, or `null` if it does not. Always include all four keys:
-     - `"templates"`: Set to the relative path (e.g., `"templates/"`) if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `renderTemplateToFile` — the runtime suppresses extraction of embedded templates from documentation when this is set.
-     - `"validation"`: Set to the relative path (e.g., `"validation/"`) if the folder contains a `validation/` subfolder with shell scripts that must be run as post-implementation checks.
-     - `"policies"`: Set to the relative path (e.g., `"policies/"`) if the folder contains a `policies/` subfolder with markdown documents defining implementation constraints.
-     - `"scripts"`: Set to the relative path (e.g., `"scripts/"`) if the folder contains a `scripts/` subfolder with helper scripts the model can use during implementation.
+   - **contents** (**required**, exact field name `"contents"`, must be an object — never an array or renamed field):
+     An object declaring which typed subfolders exist in this reference directory. **Always include all four keys** — set each to the relative path string if the subfolder exists, or `null` if absent:
+     - `"templates"`: e.g., `"templates/"` if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `renderTemplateToFile` — the runtime suppresses extraction of embedded templates from documentation when this is set.
+     - `"validation"`: e.g., `"validation/"` if the folder contains a `validation/` subfolder with shell scripts that must be run as post-implementation checks.
+     - `"policies"`: e.g., `"policies/"` if the folder contains a `policies/` subfolder with markdown documents defining implementation constraints.
+     - `"scripts"`: e.g., `"scripts/"` if the folder contains a `scripts/` subfolder with helper scripts the model can use during implementation.
+
+     Correct: `"contents": {"templates": "templates/", "validation": "validation/", "policies": null, "scripts": null}`
+     Wrong:   `"subfolders": ["templates", "validation"]` — wrong field name, wrong type (array instead of object), missing null keys
 
 4. **Save** as `{{output}}/<id>.json` (or add to single catalog if `{{merge_mode}}` is `"single"`).
 
