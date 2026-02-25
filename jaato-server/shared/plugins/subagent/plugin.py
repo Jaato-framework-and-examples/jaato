@@ -86,7 +86,18 @@ class SubagentPlugin:
     """
 
     def __init__(self):
-        """Initialize the subagent plugin."""
+        """Initialize the subagent plugin.
+
+        State isolation: Each parent session (owner) gets its own view of
+        subagents.  The ``_active_sessions`` dict stores *all* subagents
+        across owners, but every entry carries an ``owner_id`` that ties it
+        back to the parent session that spawned it.  Tool executors
+        (``list_active_subagents``, ``close_subagent``, etc.) filter by
+        owner so a session can only see and manage its own children.
+
+        The ``_owner_counters`` dict maintains per-owner ID counters so
+        each parent's subagents are numbered starting from 1 independently.
+        """
         self._config: Optional[SubagentConfig] = None
         self._initialized: bool = False
         self._parent_plugins: List[str] = []
@@ -98,9 +109,11 @@ class SubagentPlugin:
         self._runtime: Optional['JaatoRuntime'] = None
         # UI hooks for agent lifecycle integration
         self._ui_hooks: Optional['AgentUIHooks'] = None
-        self._subagent_counter: int = 0  # Counter for generating unique subagent IDs
+        self._subagent_counter: int = 0  # Global counter for generating unique subagent IDs (fallback)
+        self._owner_counters: Dict[int, int] = {}  # owner id(session) -> per-owner counter
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
         # Session registry for multi-turn conversations and bidirectional communication
+        # Each entry includes an 'owner_id' (id() of the parent session) for isolation.
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
         self._sessions_lock = threading.Lock()  # Protect session registry access
         # Parent session reference for output forwarding and cancellation propagation
@@ -190,7 +203,22 @@ class SubagentPlugin:
         )
 
     def shutdown(self) -> None:
-        """Clean up plugin resources."""
+        """Clean up plugin resources.
+
+        Cancels any running subagents and clears all session state so
+        the plugin can be safely re-initialised or garbage-collected.
+        """
+        # Cancel all running subagents before clearing state
+        with self._sessions_lock:
+            for agent_id, info in list(self._active_sessions.items()):
+                session = info.get('session')
+                if session and getattr(session, 'is_running', False):
+                    if getattr(session, 'supports_stop', False):
+                        session.request_stop()
+            self._active_sessions.clear()
+        self._owner_counters.clear()
+        self._subagent_counter = 0
+        self._parent_session = None
         self._config = None
         self._initialized = False
         logger.info("Subagent plugin shutdown")
@@ -202,6 +230,9 @@ class SubagentPlugin:
     def get_persistence_state(self) -> Dict[str, Any]:
         """Export subagent registry for session persistence.
 
+        Only exports subagents owned by the current parent session,
+        ensuring each session's persistence is isolated.
+
         Returns a lightweight registry suitable for storing in SessionState.metadata.
         The full state for each subagent should be saved separately to per-agent files
         using get_agent_full_state().
@@ -211,8 +242,10 @@ class SubagentPlugin:
         """
         from .serializer import serialize_subagent_registry
 
+        owner_id = self._get_owner_id()
         with self._sessions_lock:
-            return serialize_subagent_registry(self._active_sessions)
+            owned = self._get_owned_sessions(owner_id)
+            return serialize_subagent_registry(owned)
 
     def get_agent_full_state(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get full serializable state for a specific subagent.
@@ -336,23 +369,28 @@ class SubagentPlugin:
                 if parent_session:
                     session.set_parent_session(parent_session)
 
-                # Register in active sessions
+                # Register in active sessions with owner tracking
+                owner_id = id(parent_session) if parent_session else 0
                 with self._sessions_lock:
                     self._active_sessions[agent_id] = {
                         'session': session,
                         'profile': profile,
                         'agent_id': agent_id,
+                        'owner_id': owner_id,
                         'created_at': session_data.get('created_at', datetime.now()),
                         'last_activity': session_data.get('last_activity', datetime.now()),
                         'turn_count': session_data.get('turn_count', 0),
                         'max_turns': session_data.get('max_turns', profile.max_turns),
                     }
 
-                # Update counter to avoid ID collisions
+                # Update per-owner counter to avoid ID collisions
                 # Extract numeric suffix from agent_id like "subagent_5"
                 if agent_id.startswith("subagent_"):
                     try:
                         num = int(agent_id.split("_")[1])
+                        cur = self._owner_counters.get(owner_id, 0)
+                        if num >= cur:
+                            self._owner_counters[owner_id] = num + 1
                         if num >= self._subagent_counter:
                             self._subagent_counter = num + 1
                     except (IndexError, ValueError):
@@ -1072,6 +1110,58 @@ class SubagentPlugin:
         self._workspace_path = path
         logger.debug("SubagentPlugin: workspace path set to %s", path)
 
+    # ------------------------------------------------------------------
+    # Owner-scoped helpers (session isolation)
+    # ------------------------------------------------------------------
+
+    def _get_owner_id(self) -> int:
+        """Return the identity of the current parent session.
+
+        Uses ``id(self._parent_session)`` so that each JaatoSession
+        object maps to a unique owner.  Returns 0 when no parent
+        session is set (should not happen during normal tool execution).
+        """
+        return id(self._parent_session) if self._parent_session else 0
+
+    def _get_owned_sessions(self, owner_id: int) -> Dict[str, Dict[str, Any]]:
+        """Return the subset of ``_active_sessions`` owned by *owner_id*.
+
+        Caller **must** hold ``_sessions_lock``.
+
+        Args:
+            owner_id: The ``id()`` of the owning parent session.
+
+        Returns:
+            Dict of agent_id -> session info for subagents belonging
+            to the given owner.
+        """
+        return {
+            aid: info for aid, info in self._active_sessions.items()
+            if info.get('owner_id') == owner_id
+        }
+
+    def _next_agent_id(self, owner_id: int) -> str:
+        """Generate the next subagent ID scoped to *owner_id*.
+
+        Caller **must** hold ``_sessions_lock``.
+
+        Each owner maintains an independent counter so that the main
+        session's subagents are numbered ``subagent_1``, ``subagent_2``,
+        etc., independently from any nested subagent hierarchies.
+
+        Args:
+            owner_id: The ``id()`` of the owning parent session.
+
+        Returns:
+            A new agent ID string like ``"subagent_3"``.
+        """
+        counter = self._owner_counters.get(owner_id, 0) + 1
+        self._owner_counters[owner_id] = counter
+        if self._parent_agent_id == "main":
+            return f"subagent_{counter}"
+        else:
+            return f"{self._parent_agent_id}.subagent_{counter}"
+
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
 
@@ -1271,9 +1361,12 @@ class SubagentPlugin:
                 'error': 'No message provided'
             }
 
-        # Look up active session
+        # Look up active session (owner-filtered)
+        owner_id = self._get_owner_id()
         with self._sessions_lock:
             session_info = self._active_sessions.get(subagent_id)
+            if session_info and session_info.get('owner_id') != owner_id:
+                session_info = None  # Not owned by this parent
 
         if not session_info:
             return {
@@ -1439,10 +1532,11 @@ class SubagentPlugin:
                 )
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Close an active subagent session.
+        """Close an active subagent session owned by the current parent.
 
         If the session is still running, it will be cancelled first before
-        being removed from the registry.
+        being removed from the registry.  Only subagents owned by the
+        current parent session can be closed.
 
         Args:
             args: Tool arguments containing:
@@ -1459,8 +1553,10 @@ class SubagentPlugin:
                 'message': 'No subagent_id provided'
             }
 
+        owner_id = self._get_owner_id()
         with self._sessions_lock:
-            if subagent_id not in self._active_sessions:
+            info = self._active_sessions.get(subagent_id)
+            if not info or info.get('owner_id') != owner_id:
                 return {
                     'success': False,
                     'message': f'No active session found with ID: {subagent_id}'
@@ -1489,7 +1585,9 @@ class SubagentPlugin:
             }
 
     def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Cancel a running subagent operation.
+        """Cancel a running subagent operation owned by the current parent.
+
+        Only subagents owned by the current parent session can be cancelled.
 
         Args:
             args: Tool arguments containing:
@@ -1506,7 +1604,11 @@ class SubagentPlugin:
                 'message': 'No subagent_id provided'
             }
 
-        session_info = self._active_sessions.get(subagent_id)
+        owner_id = self._get_owner_id()
+        with self._sessions_lock:
+            session_info = self._active_sessions.get(subagent_id)
+            if session_info and session_info.get('owner_id') != owner_id:
+                session_info = None  # Not owned by this parent
         if not session_info:
             return {
                 'success': False,
@@ -1554,7 +1656,10 @@ class SubagentPlugin:
             }
 
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List active subagent sessions.
+        """List active subagent sessions owned by the current parent.
+
+        Only returns subagents that were spawned by the current parent
+        session, ensuring session isolation.
 
         Args:
             args: Tool arguments (unused).
@@ -1563,10 +1668,12 @@ class SubagentPlugin:
             Dict containing list of active sessions with activity phase info.
         """
         sessions = []
+        owner_id = self._get_owner_id()
 
-        # List active sessions
+        # List active sessions filtered by owner
         with self._sessions_lock:
-            for agent_id, info in self._active_sessions.items():
+            owned = self._get_owned_sessions(owner_id)
+            for agent_id, info in owned.items():
                 session = info.get('session')
                 is_running = session.is_running if session else False
                 supports_stop = session.supports_stop if session else False
@@ -1602,26 +1709,35 @@ class SubagentPlugin:
             'count': len(sessions)
         }
 
-    def cancel_all_running(self) -> int:
-        """Cancel all currently running subagent operations.
+    def cancel_all_running(self, owner_only: bool = True) -> int:
+        """Cancel running subagent operations.
 
-        This is useful for propagating parent cancellation to all children,
-        or for cleanup when the parent session is interrupted.
+        By default only cancels subagents owned by the current parent
+        session.  Pass ``owner_only=False`` to cancel across all owners
+        (e.g. during plugin shutdown).
+
+        Args:
+            owner_only: If True (default), only cancel subagents owned
+                by the current ``_parent_session``.
 
         Returns:
             Number of subagents that were cancelled.
         """
+        owner_id = self._get_owner_id() if owner_only else None
         cancelled_count = 0
-        for agent_id, info in self._active_sessions.items():
-            session = info.get('session')
-            if session and session.is_running and session.supports_stop:
-                if session.request_stop():
-                    cancelled_count += 1
-                    if self._ui_hooks:
-                        self._ui_hooks.on_agent_status_changed(
-                            agent_id=agent_id,
-                            status="cancelled"
-                        )
+        with self._sessions_lock:
+            for agent_id, info in self._active_sessions.items():
+                if owner_id is not None and info.get('owner_id') != owner_id:
+                    continue
+                session = info.get('session')
+                if session and session.is_running and session.supports_stop:
+                    if session.request_stop():
+                        cancelled_count += 1
+                        if self._ui_hooks:
+                            self._ui_hooks.on_agent_status_changed(
+                                agent_id=agent_id,
+                                status="cancelled"
+                            )
         return cancelled_count
 
     def _format_shared_context(
@@ -1871,12 +1987,10 @@ class SubagentPlugin:
         if profile.system_instructions:
             full_prompt = f"{profile.system_instructions}\n\n{full_prompt}"
 
-        # Generate agent_id
-        self._subagent_counter += 1
-        if self._parent_agent_id == "main":
-            agent_id = f"subagent_{self._subagent_counter}"
-        else:
-            agent_id = f"{self._parent_agent_id}.{profile.name}"
+        # Generate agent_id scoped to the owning parent session
+        owner_id = self._get_owner_id()
+        with self._sessions_lock:
+            agent_id = self._next_agent_id(owner_id)
 
         # parent_cwd already resolved above (before profile creation)
         logger.debug(
@@ -1894,7 +2008,8 @@ class SubagentPlugin:
             agent_id,
             profile,
             full_prompt,
-            parent_cwd
+            parent_cwd,
+            owner_id
         )
 
         # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
@@ -1910,7 +2025,8 @@ class SubagentPlugin:
         agent_id: str,
         profile: SubagentProfile,
         prompt: str,
-        parent_cwd: str
+        parent_cwd: str,
+        owner_id: int = 0
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -1922,6 +2038,7 @@ class SubagentPlugin:
             profile: SubagentProfile defining the subagent's configuration.
             prompt: The prompt to send to the subagent.
             parent_cwd: Parent's working directory for resolving relative paths.
+            owner_id: ``id()`` of the parent session that owns this subagent.
         """
         # Get workspace path from runtime registry as authoritative source
         # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
@@ -2131,6 +2248,7 @@ class SubagentPlugin:
                     'session': session,
                     'profile': profile,
                     'agent_id': agent_id,
+                    'owner_id': owner_id,
                     'created_at': datetime.now(),
                     'last_activity': datetime.now(),
                     'turn_count': 0,
