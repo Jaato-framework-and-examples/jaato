@@ -806,7 +806,8 @@ Template rendering writes files to the workspace."""
     def enrich_tool_result(
         self,
         tool_name: str,
-        result: str
+        result: str,
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
         """Detect embedded templates in tool results and extract them.
 

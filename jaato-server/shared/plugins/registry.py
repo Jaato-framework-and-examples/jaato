@@ -1841,7 +1841,8 @@ class PluginRegistry:
         tool_name: str,
         result: str,
         output_callback: Optional[OutputCallback] = None,
-        terminal_width: Optional[int] = None
+        terminal_width: Optional[int] = None,
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
         """Run a tool result through all subscribed enrichment plugins.
 
@@ -1857,6 +1858,9 @@ class PluginRegistry:
                 (e.g., subagents) that need notifications routed to their
                 specific output panel.
             terminal_width: Terminal width for formatting (uses registry default if not provided).
+            tool_args: Optional tool call arguments, passed through to plugins
+                that need them for context-aware enrichment (e.g., detecting
+                which file was read by a CLI tool).
 
         Returns:
             ToolResultEnrichmentResult with enriched result.
@@ -1869,7 +1873,9 @@ class PluginRegistry:
             try:
                 if hasattr(plugin, 'enrich_tool_result'):
                     before = current_result
-                    enrichment = plugin.enrich_tool_result(tool_name, current_result)
+                    enrichment = plugin.enrich_tool_result(
+                        tool_name, current_result, tool_args=tool_args
+                    )
                     current_result = enrichment.result
                     if enrichment.metadata:
                         combined_metadata[plugin.name] = enrichment.metadata
