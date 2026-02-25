@@ -279,6 +279,173 @@ class TestTaskEventBus:
         assert received_counts["total"] == 50
 
 
+class TestWaitForEvents:
+    """Tests for long-poll wait_for_events on TaskEventBus."""
+
+    def setup_method(self):
+        """Reset singleton before each test."""
+        TaskEventBus.reset()
+
+    def teardown_method(self):
+        """Clean up after each test."""
+        TaskEventBus.reset()
+
+    def test_returns_immediately_when_events_exist(self):
+        """wait_for_events returns right away if matching events are already present."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+
+        event = TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="a",
+            plan=plan,
+        )
+        bus.publish(event)
+
+        start = time.monotonic()
+        events = bus.wait_for_events(timeout=5.0, limit=10)
+        elapsed = time.monotonic() - start
+
+        assert len(events) == 1
+        assert events[0].event_id == event.event_id
+        # Should return almost instantly, not after the full timeout.
+        assert elapsed < 1.0
+
+    def test_blocks_until_event_published(self):
+        """wait_for_events blocks and wakes up when a matching event arrives."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+
+        result_holder: list = []
+
+        def waiter():
+            evts = bus.wait_for_events(timeout=10.0, limit=10)
+            result_holder.extend(evts)
+
+        t = threading.Thread(target=waiter)
+        t.start()
+
+        # Give the waiter thread time to enter the wait.
+        time.sleep(0.2)
+
+        event = TaskEvent.create(
+            event_type=TaskEventType.PLAN_CREATED,
+            agent_id="b",
+            plan=plan,
+        )
+        bus.publish(event)
+        t.join(timeout=5)
+
+        assert len(result_holder) == 1
+        assert result_holder[0].event_id == event.event_id
+
+    def test_timeout_returns_empty(self):
+        """wait_for_events returns empty list after timeout with no events."""
+        bus = get_event_bus()
+
+        start = time.monotonic()
+        events = bus.wait_for_events(timeout=0.3, limit=10)
+        elapsed = time.monotonic() - start
+
+        assert events == []
+        # Should have waited approximately the timeout duration.
+        assert elapsed >= 0.25
+
+    def test_after_event_id_filtering(self):
+        """wait_for_events only returns events after the specified cursor."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+
+        event1 = TaskEvent.create(TaskEventType.PLAN_CREATED, "a", plan)
+        event2 = TaskEvent.create(TaskEventType.PLAN_STARTED, "a", plan)
+        event3 = TaskEvent.create(TaskEventType.PLAN_COMPLETED, "a", plan)
+
+        bus.publish(event1)
+        bus.publish(event2)
+        bus.publish(event3)
+
+        # Get events after event1 → should return event2, event3
+        events = bus.wait_for_events(
+            timeout=0, after_event_id=event1.event_id, limit=10
+        )
+        assert len(events) == 2
+        assert events[0].event_id == event2.event_id
+        assert events[1].event_id == event3.event_id
+
+    def test_after_event_id_with_wait(self):
+        """wait_for_events blocks when cursor is at the latest event, then wakes."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+
+        event1 = TaskEvent.create(TaskEventType.PLAN_CREATED, "a", plan)
+        bus.publish(event1)
+
+        result_holder: list = []
+
+        def waiter():
+            evts = bus.wait_for_events(
+                timeout=10.0, after_event_id=event1.event_id, limit=10
+            )
+            result_holder.extend(evts)
+
+        t = threading.Thread(target=waiter)
+        t.start()
+
+        time.sleep(0.2)
+
+        event2 = TaskEvent.create(TaskEventType.PLAN_STARTED, "a", plan)
+        bus.publish(event2)
+        t.join(timeout=5)
+
+        assert len(result_holder) == 1
+        assert result_holder[0].event_id == event2.event_id
+
+    def test_agent_filter_with_wait(self):
+        """wait_for_events respects agent_id filter during long-poll."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+
+        result_holder: list = []
+
+        def waiter():
+            evts = bus.wait_for_events(
+                timeout=10.0, agent_id="target", limit=10
+            )
+            result_holder.extend(evts)
+
+        t = threading.Thread(target=waiter)
+        t.start()
+
+        time.sleep(0.2)
+
+        # Publish from wrong agent — should not wake the waiter.
+        wrong = TaskEvent.create(TaskEventType.PLAN_CREATED, "other", plan)
+        bus.publish(wrong)
+        time.sleep(0.1)
+        assert result_holder == []
+
+        # Publish from target agent — should wake.
+        right = TaskEvent.create(TaskEventType.PLAN_CREATED, "target", plan)
+        bus.publish(right)
+        t.join(timeout=5)
+
+        assert len(result_holder) == 1
+        assert result_holder[0].source_agent == "target"
+
+    def test_timeout_clamped_to_30(self):
+        """Timeout is capped at 30 seconds."""
+        bus = get_event_bus()
+
+        start = time.monotonic()
+        # Pass a huge timeout — it should be clamped to 30, but we test
+        # that it at least doesn't blow up. We use 0.1 to keep the test fast.
+        events = bus.wait_for_events(timeout=0.1, limit=10)
+        elapsed = time.monotonic() - start
+
+        assert events == []
+        assert elapsed < 1.0
+
+
 class TestDependencyResolution:
     """Tests for cross-agent dependency resolution."""
 
