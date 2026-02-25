@@ -243,14 +243,111 @@ Before spawning subagents, **inform the user** that subagents will run in parall
    - Merges reference ID lists from all subagents → proceeds to Phase 4
    - Merges warnings and skipped lists → proceeds to the final report
 
-**Subagent instructions template** — when spawning each subagent, provide instructions equivalent to:
+**Subagent instructions template** — when spawning each subagent, you **must** include the full artifact schemas inline. Subagents do not have access to this prompt — they only see the instructions you give them. If you omit the schemas, subagents will invent their own field names and the output will fail validation.
+
+Provide instructions equivalent to the following (substitute the `<placeholders>` but keep all schemas verbatim):
 
 > Process the following directories under `repoRoot` = `<path>`:
 > - `<dir1>`, `<dir2>`, ...
 >
-> For each directory: identify the entry-point file using priority order (MODULE.md > SKILL.md > ERI.md > ADR.md > DOMAIN.md > CAPABILITY.md > FLOW.md > OVERVIEW.md > README.md), read it, extract the first paragraph for the description, detect typed subfolders (`templates/`, `validation/`, `policies/`, `scripts/`) and populate the `contents` property, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, fetchHint, and contents as described [repeat the relevant rules or reference them].
->
 > sourceType = `<local|git|archive>`, sourceMetadata = `<metadata dict if remote>`, knowledgeDir = `<.jaato/knowledge/hash>`
+>
+> ---
+>
+> **Entry-point priority** (use the first match):
+> MODULE.md > SKILL.md > ERI.md > ADR.md > DOMAIN.md > CAPABILITY.md > FLOW.md > OVERVIEW.md > README.md
+>
+> ---
+>
+> **For each directory**, produce a documentation reference JSON file at `<output>/<id>.json`:
+>
+> ```json
+> {
+>   "id": "<folder-name>",
+>   "name": "<Human Readable Name>",
+>   "description": "<First paragraph from entry-point file>",
+>   "type": "local",
+>   "path": "/absolute/path/to/folder",
+>   "mode": "selectable",
+>   "tags": ["<tag1>", "<tag2>"],
+>   "fetchHint": "<Hint on which file to read first>",
+>   "contents": {
+>     "templates": "templates/",
+>     "validation": "validation/",
+>     "policies": null,
+>     "scripts": null
+>   }
+> }
+> ```
+>
+> For remote sources, add a `"source"` object:
+> ```json
+> "source": {
+>   "type": "<git|archive>",
+>   "url": "<original-source-url>",
+>   "ref": "<ref-if-applicable>",
+>   "subpath": "<matched-subpath>",
+>   "fetched_at": "<ISO 8601>"
+> }
+> ```
+>
+> Property rules:
+> - **id**: Folder name as-is (e.g., `mod-code-001-circuit-breaker-java-resilience4j`)
+> - **name**: Parse folder name → human-readable. `mod-code-NNN-xxx` → `MOD-NNN: Xxx`, `eri-code-NNN-xxx` → `ERI-NNN: Xxx`, `adr-NNN-xxx` → `ADR-NNN: Xxx`, `skill-NNN-xxx` → `SKILL-NNN: Xxx`. Others: hyphens to spaces, title-case. Use YAML frontmatter `title` if available.
+> - **description**: YAML frontmatter `description` if available, otherwise first paragraph from entry-point file.
+> - **type**: Always `"local"`.
+> - **path**: Absolute POSIX path. For remote sources: point to materialized copy under `.jaato/knowledge/`.
+> - **mode**: Default `"selectable"`.
+> - **tags**: YAML frontmatter `tags` first, then augment with folder path components, technology keywords, content-type indicators. Deduplicate.
+> - **fetchHint**: e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`.
+> - **contents** (required, exact field name, must be an object with exactly four keys):
+>   - `"templates"`: relative path (e.g., `"templates/"`) if present, else `null`
+>   - `"validation"`: relative path (e.g., `"validation/"`) if present, else `null`
+>   - `"policies"`: relative path (e.g., `"policies/"`) if present, else `null`
+>   - `"scripts"`: relative path (e.g., `"scripts/"`) if present, else `null`
+>
+> ---
+>
+> **Validation references** — if a folder has a `validation/` subfolder, also write `<output>/<parent-id>-validation.json`:
+>
+> ```json
+> {
+>   "id": "<parent-folder-name>-validation",
+>   "name": "<Parent Name> - Validation",
+>   "description": "<First paragraph from validation/README.md>",
+>   "type": "local",
+>   "path": "/absolute/path/to/validation-folder",
+>   "mode": "selectable",
+>   "tags": ["validation", "<inherited-tags>"],
+>   "fetchHint": "Read README.md for validation checks and usage"
+> }
+> ```
+>
+> For remote sources, include the `"source"` provenance object as above.
+>
+> ---
+>
+> **Template index entries** — if the folder contains `.tpl`/`.tmpl` files, call `listTemplateVariables(template_name=<absolute-path>)` for each and collect entries in this shape:
+>
+> ```json
+> {
+>   "<reference-id>/<relative-path-from-templates-dir>": {
+>     "name": "<reference-id>/<relative-path-from-templates-dir>",
+>     "source_path": "/absolute/path/to/template.tpl",
+>     "syntax": "mustache|jinja2",
+>     "variables": ["var1", "var2"],
+>     "origin": "standalone"
+>   }
+> }
+> ```
+>
+> Template name = `<reference-id>/<relative-path-from-templates-dir>` (e.g., `mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl`). For remote sources, add `"source": { "type": "...", "url": "...", "ref": "...", "fetched_at": "..." }` to each entry.
+>
+> ---
+>
+> If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. Materialize validation subfolders too.
+>
+> Validate every reference JSON with `validateReference`. Fix and rewrite if validation fails.
 >
 > Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
 
