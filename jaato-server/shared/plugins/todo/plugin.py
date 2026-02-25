@@ -599,9 +599,9 @@ class TodoPlugin:
                     "- Review what happened while you were working\n\n"
                     "If subscribed to events, you'll see them inline - this is for history review.\n\n"
                     "LONG-POLL: Set wait_seconds (1-30) to avoid busy-polling. The tool "
-                    "blocks until events satisfying your filters (agent_id, event_types, "
-                    "after_event) exist, or the timeout expires. Combine with after_event "
-                    "to only receive events newer than your last read."
+                    "blocks until events matching your filters (agent_id, event_types) "
+                    "appear after the after_event cursor, or the timeout expires. "
+                    "Combine with after_event to only receive events newer than your last read."
                 ),
                 parameters={
                     "type": "object",
@@ -623,9 +623,9 @@ class TodoPlugin:
                             "type": "number",
                             "description": (
                                 "Long-poll timeout in seconds (0-30). When set, the tool "
-                                "blocks until events that satisfy your other filters "
-                                "(agent_id, event_types, after_event) exist, or the "
-                                "timeout expires — whichever comes first. "
+                                "blocks until events matching your filters (agent_id, "
+                                "event_types) appear after the after_event cursor, or "
+                                "the timeout expires — whichever comes first. "
                                 "Use this to avoid rapid polling when monitoring "
                                 "subagent progress. Default: 0 (no wait)."
                             )
