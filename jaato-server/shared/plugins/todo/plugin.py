@@ -601,7 +601,10 @@ class TodoPlugin:
                     "LONG-POLL: Set wait_seconds (1-30) to avoid busy-polling. The tool "
                     "blocks until events matching your filters (agent_id, event_types) "
                     "appear after the after_event cursor, or the timeout expires. "
-                    "Combine with after_event to only receive events newer than your last read."
+                    "Combine with after_event to only receive events newer than your last read.\n\n"
+                    "IMPORTANT: wait_seconds requires at least one of agent_id, event_types, "
+                    "or after_event. Without narrowing, every event from any agent would "
+                    "satisfy the query and the wait would return immediately, making it useless."
                 ),
                 parameters={
                     "type": "object",
@@ -626,8 +629,8 @@ class TodoPlugin:
                                 "blocks until events matching your filters (agent_id, "
                                 "event_types) appear after the after_event cursor, or "
                                 "the timeout expires — whichever comes first. "
-                                "Use this to avoid rapid polling when monitoring "
-                                "subagent progress. Default: 0 (no wait)."
+                                "Requires at least one of agent_id, event_types, or "
+                                "after_event to be set. Default: 0 (no wait)."
                             )
                         },
                         "after_event": {
