@@ -460,9 +460,11 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 
     Call `listTemplateVariables(template_name=<absolute-path-to-template-file>)`. The tool reads the file, auto-detects the syntax (Jinja2 vs Mustache), and returns the complete, deduplicated variable list using proper parsing (Jinja2 AST analysis or Mustache regex). Use its `syntax` and `variables` output directly for the index entry — do **not** manually parse template variables yourself.
 
-    **Name resolution** (to handle collisions like multiple `Entity.java.tpl`):
-    - If filename is unique across all discovered templates → use as-is (e.g., `Application.java.tpl`)
-    - If duplicated → prefix with parent folder path relative to the containing module's `templates/` directory (e.g., `domain/Entity.java.tpl`, `application/dto/Response.java.tpl`)
+    **Name resolution** — always namespace by the owning reference ID to avoid cross-module collisions:
+    - Template name = `<reference-id>/<relative-path-from-templates-dir>` (e.g., `mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl`)
+    - The `<reference-id>` is the `id` of the documentation folder that contains the `templates/` directory
+    - The `<relative-path-from-templates-dir>` is the template file's path relative to that `templates/` directory (e.g., `domain/Entity.java.tpl`, `Application.java.tpl`)
+    - This guarantees uniqueness even when multiple modules have identically-named templates with different content (e.g., `mod-code-001-.../templates/config/Config.java.tpl` vs `mod-code-015-.../templates/config/Config.java.tpl`)
 
 11. **Build the unified index** at `{{templates_index}}`:
 
@@ -486,9 +488,9 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     For **remote** sources, `source_path` points to the materialized copy and includes a `"source"` provenance object:
     ```json
     {
-      "<template-name>": {
-        "name": "<template-name>",
-        "source_path": "/absolute/path/to/.jaato/knowledge/<hash>/modules/.../templates/domain/Entity.java.tpl",
+      "mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl": {
+        "name": "mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl",
+        "source_path": "/absolute/path/to/.jaato/knowledge/<hash>/modules/mod-code-015-.../templates/domain/Entity.java.tpl",
         "syntax": "mustache",
         "variables": ["Entity", "basePackage", "fields"],
         "origin": "standalone",
@@ -864,23 +866,23 @@ modules/
   "generated_at": "2026-02-24T12:00:00",
   "template_count": 3,
   "templates": {
-    "Application.java.tpl": {
-      "name": "Application.java.tpl",
-      "source_path": "/.../templates/Application.java.tpl",
+    "mod-code-015-hexagonal-base-java-spring/Application.java.tpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring/Application.java.tpl",
+      "source_path": "/.../mod-code-015-hexagonal-base-java-spring/templates/Application.java.tpl",
       "syntax": "mustache",
       "variables": ["ServiceName", "basePackage", "serviceName"],
       "origin": "standalone"
     },
-    "domain/Entity.java.tpl": {
-      "name": "domain/Entity.java.tpl",
-      "source_path": "/.../templates/domain/Entity.java.tpl",
+    "mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring/domain/Entity.java.tpl",
+      "source_path": "/.../mod-code-015-hexagonal-base-java-spring/templates/domain/Entity.java.tpl",
       "syntax": "mustache",
       "variables": ["Entity", "basePackage", "fields"],
       "origin": "standalone"
     },
-    "adapter/RestController.java.tpl": {
-      "name": "adapter/RestController.java.tpl",
-      "source_path": "/.../templates/adapter/RestController.java.tpl",
+    "mod-code-015-hexagonal-base-java-spring/adapter/RestController.java.tpl": {
+      "name": "mod-code-015-hexagonal-base-java-spring/adapter/RestController.java.tpl",
+      "source_path": "/.../mod-code-015-hexagonal-base-java-spring/templates/adapter/RestController.java.tpl",
       "syntax": "mustache",
       "variables": ["Entity", "basePackage"],
       "origin": "standalone"
