@@ -450,13 +450,13 @@ class TestReferenceIntegration:
 
 class TestRenderWithIndex:
     def test_render_template_by_name(self, plugin, template_dir):
-        """renderTemplateToFile should resolve template_name via index."""
+        """writeFileFromTemplate should resolve template_name via index."""
         entries = plugin._discover_standalone_templates(template_dir)
         for entry in entries:
             plugin._template_index[entry.name] = entry
 
         output_file = plugin._base_path / "output" / "CustomerRepository.java"
-        result = plugin._execute_render_template_to_file({
+        result = plugin._execute_write_file_from_template({
             "template_name": "Repository.java.tpl",
             "variables": {
                 "basePackage": "com.bank.customer",
@@ -474,7 +474,7 @@ class TestRenderWithIndex:
 
     def test_render_template_name_not_found(self, plugin):
         """Should return error when template name isn't in index."""
-        result = plugin._execute_render_template_to_file({
+        result = plugin._execute_write_file_from_template({
             "template_name": "NonExistent.java.tpl",
             "variables": {},
             "output_path": "/tmp/out.java",
@@ -736,15 +736,15 @@ class TestMustacheDottedPaths:
         assert error is None
         assert rendered == "deep"
 
-    def test_renderTemplateToFile_with_dotted_sections(self, plugin):
-        """renderTemplateToFile should handle dotted section paths."""
+    def test_writeFileFromTemplate_with_dotted_sections(self, plugin):
+        """writeFileFromTemplate should handle dotted section paths."""
         template = (
             "{{#fields}}"
             "{{#validation.required}}required: {{fieldName}}\n{{/validation.required}}"
             "{{/fields}}"
         )
         output_file = plugin._base_path / "output" / "test.txt"
-        result = plugin._execute_render_template_to_file({
+        result = plugin._execute_write_file_from_template({
             "template": template,
             "variables": {
                 "fields": [

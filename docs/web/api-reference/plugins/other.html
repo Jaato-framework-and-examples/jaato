@@ -538,7 +538,7 @@ loadImage(path="./diagram.png")
           <table>
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>template</code></td></tr>
-              <tr><td><strong>Tools</strong></td><td><code>renderTemplate</code>, <code>listAvailableTemplates</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>writeFileFromTemplate</code>, <code>listAvailableTemplates</code></td></tr>
               <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment (priority: 40)</td></tr>
               <tr><td><strong>Auto-approved</strong></td><td><code>listAvailableTemplates</code> only</td></tr>
             </tbody>
@@ -584,14 +584,14 @@ public {{ returnType }} {{ methodName }}() { ... }
 **Extracted Templates:**
 [Template extracted: .jaato/templates/mod-code-001-basic.java.tmpl]
   Variables: circuitBreakerName, methodName, returnType
-  Use: renderTemplate(template_path="...", variables={...})
+  Use: writeFileFromTemplate(template_path="...", variables={...})
 ---</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Render template</div>
           <div class="code-block">
             <pre><code class="language-python"># Use extracted template
-renderTemplate(
+writeFileFromTemplate(
     template_path=".jaato/templates/mod-code-001-basic.java.tmpl",
     variables={
         "circuitBreakerName": "orderService",
@@ -602,7 +602,7 @@ renderTemplate(
 )
 
 # Or use inline template
-renderTemplate(
+writeFileFromTemplate(
     template="Hello {{ name }}!",
     variables={"name": "Alice"},
     output_path="greeting.txt"

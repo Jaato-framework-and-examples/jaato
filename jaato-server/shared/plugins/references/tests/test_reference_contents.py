@@ -310,7 +310,7 @@ class TestBuildContentsAnnotation:
         )
         assert result is not None
         assert "Mandatory Templates" in result
-        assert "renderTemplateToFile" in result
+        assert "writeFileFromTemplate" in result
         assert "Application.java.tpl" in result
         assert "Entity.java.tpl" in result
 

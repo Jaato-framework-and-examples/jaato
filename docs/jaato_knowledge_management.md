@@ -419,7 +419,7 @@ The template plugin runs after references, processing the content that reference
 │  │  Append annotations to system instructions:                   │    │
 │  │  "TEMPLATE AVAILABLE: Entity.java.tpl                         │    │
 │  │   Variables: Entity, basePackage, entityFields                │    │
-│  │   Use: renderTemplate(template_name="Entity.java.tpl", ...)" │    │
+│  │   Use: writeFileFromTemplate(template_name="Entity.java.tpl", ...)" │    │
 │  │                                                               │    │
 │  │  Persist index to .jaato/templates/index.json                 │    │
 │  └─────────────────────────────────────────────────────────────┘    │
@@ -514,7 +514,7 @@ When the system makes implicit decisions (transitive selections, tag matches), i
 │     │  "TEMPLATE AVAILABLE: Entity.java.tpl                     │    │
 │     │   Syntax: mustache                                        │    │
 │     │   Variables: Entity, basePackage, entityFields             │    │
-│     │   Use: renderTemplate(template_name=...)"                 │    │
+│     │   Use: writeFileFromTemplate(template_name=...)"                 │    │
 │     └──────────────────────────────────────────────────────────┘    │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -542,7 +542,7 @@ All templates -- whether extracted from documentation or discovered as standalon
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  Model refers to templates BY NAME only:                             │
-│  renderTemplate(template_name="Entity.java.tpl", ...)               │
+│  writeFileFromTemplate(template_name="Entity.java.tpl", ...)               │
 │       │                                                              │
 │       ▼                                                              │
 │  ┌─────────────────────────────────────────────────────────────┐    │
@@ -622,12 +622,11 @@ Only LOCAL sources that are currently selected contribute template directories. 
 
 ## Part 8: Template Tools
 
-The template plugin exposes four tools for code generation:
+The template plugin exposes three tools for code generation:
 
 | Tool | Purpose | Discoverability |
 |------|---------|----------------|
-| `renderTemplate` | Render template with full Jinja2 or Mustache support | Discoverable |
-| `renderTemplateToFile` | Render and write to file with overwrite control | Discoverable |
+| `writeFileFromTemplate` | Render template and write to file with overwrite control | Discoverable |
 | `listAvailableTemplates` | List all templates in the unified index | Discoverable |
 | `listTemplateVariables` | List variables required by a specific template | Discoverable |
 
@@ -638,7 +637,7 @@ The template plugin exposes four tools for code generation:
 │                    TEMPLATE RENDERING FLOW                            │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  renderTemplateToFile(                                               │
+│  writeFileFromTemplate(                                               │
 │    template_name="Repository.java.tpl",                              │
 │    variables={"Entity": "Customer", "basePackage": "com.bank"},      │
 │    output_path="src/.../CustomerRepository.java"                     │
@@ -784,7 +783,7 @@ End-to-end flow from configuration to code generation:
 │           │                                                          │
 │           ▼                                                          │
 │  ┌─────────────────┐                                                │
-│  │  GENERATE        │  Model uses renderTemplate with indexed        │
+│  │  GENERATE        │  Model uses writeFileFromTemplate with indexed  │
 │  │  (code)          │  templates and resolved variables               │
 │  │                  │  → Consistent, pattern-compliant output        │
 │  └─────────────────┘                                                │

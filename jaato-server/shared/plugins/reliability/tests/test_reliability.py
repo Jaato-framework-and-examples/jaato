@@ -1732,8 +1732,8 @@ class TestTemplatePrerequisiteDetection:
 
         # readFile is not gated — should not trigger
         plugin.on_tool_called("readFile", {"path": "/tmp/test.txt"})
-        # renderTemplateToFile is not gated — it IS a template tool
-        plugin.on_tool_called("renderTemplateToFile", {"template_name": "Foo.tpl", "output_path": "/tmp/Foo.java", "variables": {}})
+        # writeFileFromTemplate is not gated — it IS a template tool
+        plugin.on_tool_called("writeFileFromTemplate", {"template_name": "Foo.tpl", "output_path": "/tmp/Foo.java", "variables": {}})
 
         template_patterns = [p for p in patterns if p.policy_id == "template_check"]
         assert len(template_patterns) == 0
@@ -2007,7 +2007,7 @@ class TestNudgeStrategy:
                     NudgeType.DIRECT_INSTRUCTION,
                     "NOTICE: You called {tool_name} without checking templates first. "
                     "Call listAvailableTemplates before writing files to check if a template "
-                    "can produce or contribute to the target file (directly via renderTemplateToFile "
+                    "can produce or contribute to the target file (directly via writeFileFromTemplate "
                     "or indirectly as a patch source)."
                 ),
                 PatternSeverity.MODERATE: (

@@ -637,7 +637,8 @@ class JaatoRuntime:
         tools: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        preloaded_plugins: Optional[set] = None
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -656,6 +657,9 @@ class JaatoRuntime:
             provider_name: Optional provider override for cross-provider subagents.
                           If specified, the session uses a different AI provider
                           (e.g., 'anthropic', 'google_genai') than the runtime default.
+            preloaded_plugins: Optional set of plugin names that should bypass
+                              deferred tool loading. All their tools (including
+                              discoverable) are loaded into the initial context.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -678,7 +682,8 @@ class JaatoRuntime:
         session.configure(
             tools=tools,
             system_instructions=system_instructions,
-            plugin_configs=plugin_configs
+            plugin_configs=plugin_configs,
+            preloaded_plugins=preloaded_plugins
         )
 
         return session
@@ -840,7 +845,8 @@ class JaatoRuntime:
 
     def get_tool_schemas(
         self,
-        plugin_names: Optional[List[str]] = None
+        plugin_names: Optional[List[str]] = None,
+        preloaded_plugins: Optional[set] = None
     ) -> List[ToolSchema]:
         """Get tool schemas, optionally filtered by plugin names.
 
@@ -849,9 +855,14 @@ class JaatoRuntime:
         (list_tools, get_tool_schemas). This applies to both main agents and
         subagents for consistent behavior.
 
+        Plugins listed in ``preloaded_plugins`` bypass deferral — all their
+        tools (including discoverable) are loaded into the initial context.
+
         Args:
             plugin_names: Optional list of plugin names to include.
                          If None, returns all exposed tool schemas.
+            preloaded_plugins: Optional set of plugin names that should bypass
+                              deferred tool loading.
 
         Returns:
             List of ToolSchema objects.
@@ -869,11 +880,12 @@ class JaatoRuntime:
         # Filter to specific plugins
         schemas = []
         deferred_enabled = _is_deferred_tools_enabled()
+        _preloaded = preloaded_plugins or set()
         for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_tool_schemas'):
                 plugin_schemas = plugin.get_tool_schemas()
-                if deferred_enabled:
+                if deferred_enabled and name not in _preloaded:
                     # Filter to core tools only - others discovered via introspection
                     plugin_schemas = [
                         s for s in plugin_schemas
@@ -935,6 +947,7 @@ class JaatoRuntime:
         plugin_names: Optional[List[str]] = None,
         additional: Optional[str] = None,
         presentation_context: Optional['PresentationContext'] = None,
+        preloaded_plugins: Optional[set] = None,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
@@ -952,6 +965,9 @@ class JaatoRuntime:
         This ensures base behavioral rules (like transparency, no silent pauses)
         apply consistently to all agents (main and subagents).
 
+        Plugins listed in ``preloaded_plugins`` bypass deferral — their system
+        instructions are included even if they have no core tools.
+
         Args:
             plugin_names: Optional list of plugin names to include.
                          If None, returns full cached system instructions.
@@ -960,6 +976,8 @@ class JaatoRuntime:
                 provided, a compact display-constraint block is appended so
                 the model can adapt its output format (tables, lists, etc.)
                 to the client's capabilities.
+            preloaded_plugins: Optional set of plugin names that should bypass
+                              deferred tool loading for system instructions.
 
         Returns:
             Combined system instructions string, or None.
@@ -981,12 +999,14 @@ class JaatoRuntime:
 
             # Build from specific plugins, then run enrichment
             parts = []
+            _preloaded = preloaded_plugins or set()
             if self._registry:
                 for name in effective_plugins:
                     # When deferred tools are enabled, skip system instructions
                     # from plugins that have no core tools — their instructions
                     # will be injected when the model discovers their tools.
-                    if deferred_enabled and not self._registry.plugin_has_core_tools(name):
+                    # Exception: preloaded plugins always include instructions.
+                    if deferred_enabled and name not in _preloaded and not self._registry.plugin_has_core_tools(name):
                         continue
                     plugin = self._registry.get_plugin(name)
                     if plugin and hasattr(plugin, 'get_system_instructions'):
