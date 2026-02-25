@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-tui"
-version = "0.1.27"
+version = "0.1.28"
 description = "Jaato TUI - Terminal user interface for jaato server"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
