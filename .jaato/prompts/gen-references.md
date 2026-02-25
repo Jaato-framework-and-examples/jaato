@@ -658,6 +658,15 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 
     **Optional fields with defaults**: `plugins` (default `[]` = inherit parent), `plugin_configs` (default `{}`), `system_instructions` (default `null` = inherit parent), `model` (default `null` = inherit parent), `provider` (default `null` = inherit parent), `max_turns` (default `10`), `auto_approved` (default `false`), `icon` (3-line ASCII art array or `null`), `icon_name` (`null`), `gc` (`null`)
 
+    **`plugin_configs` — only include plugins that accept configuration.** Each key in `plugin_configs` must be a plugin name that actually reads that config during initialization. Do NOT invent config keys for plugins that don't support them. The supported plugin configs are:
+
+    | Plugin | Supported config keys | Notes |
+    |--------|----------------------|-------|
+    | `references` | `preselected` (list of reference IDs), `exclude_tools` (list of tool names to hide) | The **only** plugin that supports preselection |
+    | `lsp` | `config_path` (path to `.lsp.json`) | |
+
+    **Do NOT add `plugin_configs` entries for any other plugin** — especially not `template`, `cli`, `file_edit`, `todo`, `memory`, `web_fetch`, etc. These plugins do not read custom config from profiles (the subagent system auto-injects `agent_name` and `base_path` for them internally). Adding unsupported config keys is silently ignored at best and confusing at worst.
+
     For long-running profiles (max_turns > 15), add GC budget config to prevent context window exhaustion. The `"budget"` GC type removes content in priority order: enrichment → ephemeral → oldest conversation turns → preservable (only under pressure). LOCKED entries are never removed.
 
     ```json
