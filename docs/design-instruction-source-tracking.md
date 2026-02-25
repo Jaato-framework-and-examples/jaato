@@ -182,7 +182,7 @@ from enum import Enum
 
 class InstructionSource(Enum):
     """The 4 tracked instruction source layers"""
-    SYSTEM = "system"           # System instructions (children: base, client, framework)
+    SYSTEM = "system"           # System instructions (children: base, client, framework, selected_references)
     PLUGIN = "plugin"           # Plugin instructions (children: per-tool)
     ENRICHMENT = "enrichment"   # Prompt enrichment pipeline additions
     CONVERSATION = "conversation"  # Message history (children: per-turn)
@@ -193,6 +193,7 @@ class SystemChildType(Enum):
     BASE = "base"           # User-provided .jaato/instructions/*.md (or legacy single file)
     CLIENT = "client"       # Programmatic system_instructions param
     FRAMEWORK = "framework" # Task completion, parallel tool guidance
+    SELECTED_REFERENCES = "selected_references"  # Pinned preselected reference content
 
 
 class GCPolicy(Enum):
