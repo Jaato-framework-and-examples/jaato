@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
 
-from .models import ReferenceSource, InjectionMode, SourceType
+from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths, validate_reference_file
 from jaato_sdk.plugins.base import (
@@ -898,6 +898,9 @@ class ReferencesPlugin:
         # Build preselected paths index for reference-read detection.
         # Maps normalized resolved_path → (ref_id, ref_name) for all
         # preselected LOCAL sources (including transitively resolved ones).
+        # For directory references, only the directory path is stored;
+        # _detect_preselected_read uses startswith + "/" to match files
+        # inside the directory without needing per-file entries.
         self._preselected_paths = {}
         for sid in self._selected_source_ids:
             source = next((s for s in self._sources if s.id == sid), None)
@@ -1855,16 +1858,20 @@ class ReferencesPlugin:
         tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
         """Detect references in tool results via @id mentions, tag matching,
-        and preselected reference file reads.
+        preselected reference file reads, and reference-context annotations.
 
-        Three detection passes:
+        Four detection passes:
         1. Preselected reference read detection: checks if tool_args contain
            a file path matching a preselected reference's resolved_path.
            When detected, sets ``pinned_reference`` metadata so the session
            can pin the content for GC protection.
-        2. @reference-id patterns are expanded with full instructions
+        2. Reference-context annotation: when a markdown file in the **root**
+           of a selected reference directory is read and the reference declares
+           ``contents`` (templates, validation, policies, scripts), appends
+           guidance so the model knows about available resources.
+        3. @reference-id patterns are expanded with full instructions
            (delegated to _enrich_content).
-        3. Words matching unselected source tags trigger lightweight hints
+        4. Words matching unselected source tags trigger lightweight hints
            so the model knows to call selectReferences (delegated to
            _enrich_content).
 
@@ -1876,9 +1883,10 @@ class ReferencesPlugin:
 
         Returns:
             ToolResultEnrichmentResult with expanded/hinted references and
-            optional ``pinned_reference`` metadata.
+            optional ``pinned_reference`` and ``reference_contents`` metadata.
         """
         enrichment = self._enrich_content(result, f"tool:{tool_name}")
+        enriched_result = enrichment.prompt
         metadata = dict(enrichment.metadata) if enrichment.metadata else {}
 
         # Detect preselected reference reads from tool arguments
@@ -1895,10 +1903,183 @@ class ReferencesPlugin:
                     f"read: {ref_id} via {tool_name}"
                 )
 
+                # Annotate with reference-context if reading a root markdown
+                annotation = self._build_contents_annotation(ref_id, tool_args)
+                if annotation:
+                    enriched_result = enriched_result + "\n\n" + annotation
+                    metadata["reference_contents"] = ref_id
+
         return ToolResultEnrichmentResult(
-            result=enrichment.prompt,
+            result=enriched_result,
             metadata=metadata
         )
+
+    def _is_root_markdown_read(
+        self, ref_id: str, tool_args: Dict[str, Any]
+    ) -> bool:
+        """Check if tool_args indicate reading a markdown file in the reference root.
+
+        A "root markdown" is a ``.md`` file directly inside the reference's
+        resolved directory (not inside a subfolder like templates/ or validation/).
+
+        Args:
+            ref_id: The matched reference source ID.
+            tool_args: The tool call arguments dict.
+
+        Returns:
+            True if a root-level markdown file is being read.
+        """
+        source = self.get_source_by_id(ref_id)
+        if not source or not source.resolved_path:
+            return False
+
+        ref_dir = os.path.normpath(source.resolved_path)
+
+        for value in tool_args.values():
+            if not isinstance(value, str):
+                continue
+            norm_value = os.path.normpath(value)
+            # Check the file is directly inside the reference root (not a subfolder)
+            parent = os.path.dirname(norm_value)
+            if os.path.normpath(parent) != ref_dir:
+                continue
+            # Check it's a markdown file
+            if norm_value.lower().endswith(".md"):
+                return True
+        return False
+
+    def _build_contents_annotation(
+        self, ref_id: str, tool_args: Dict[str, Any]
+    ) -> Optional[str]:
+        """Build a reference-context annotation for a root markdown read.
+
+        When the model reads a markdown file in the root of a reference
+        directory that declares ``contents``, returns an annotation block
+        informing the model about available templates, policies, scripts,
+        and validation checks.
+
+        Args:
+            ref_id: The matched reference source ID.
+            tool_args: The tool call arguments dict.
+
+        Returns:
+            Annotation string to append to the tool result, or None if not
+            applicable (not a root markdown, or no contents declared).
+        """
+        if not tool_args:
+            return None
+
+        if not self._is_root_markdown_read(ref_id, tool_args):
+            return None
+
+        source = self.get_source_by_id(ref_id)
+        if not source or not source.contents.has_any():
+            return None
+
+        ref_dir = source.resolved_path
+        contents = source.contents
+        sections: List[str] = []
+
+        sections.append(f"---\n**Reference Context: {source.name}**")
+
+        # Templates annotation
+        if contents.templates:
+            templates_dir = os.path.join(ref_dir, contents.templates)
+            template_files = self._list_subfolder_files(
+                templates_dir, extensions=(".tpl", ".tmpl")
+            )
+            if template_files:
+                lines = [
+                    "**Mandatory Templates** — Use `renderTemplateToFile` with these template IDs:"
+                ]
+                for tpl in template_files:
+                    lines.append(f"  - `{tpl}`")
+                sections.append("\n".join(lines))
+
+        # Policies annotation
+        if contents.policies:
+            policies_dir = os.path.join(ref_dir, contents.policies)
+            policy_files = self._list_subfolder_files(
+                policies_dir, extensions=(".md",)
+            )
+            if policy_files:
+                lines = [
+                    "**Implementation Policies** — You must read and follow these constraints:"
+                ]
+                for pol in policy_files:
+                    lines.append(f"  - `{os.path.join(policies_dir, pol)}`")
+                sections.append("\n".join(lines))
+
+        # Scripts annotation
+        if contents.scripts:
+            scripts_dir = os.path.join(ref_dir, contents.scripts)
+            script_files = self._list_subfolder_files(scripts_dir)
+            if script_files:
+                lines = [
+                    "**Helper Scripts** — Available for use during implementation:"
+                ]
+                for scr in script_files:
+                    lines.append(f"  - `{os.path.join(scripts_dir, scr)}`")
+                sections.append("\n".join(lines))
+
+        # Validation annotation
+        if contents.validation:
+            validation_dir = os.path.join(ref_dir, contents.validation)
+            validation_files = self._list_subfolder_files(validation_dir)
+            if validation_files:
+                lines = [
+                    "**Post-Implementation Validation** — You MUST run these checks after implementation:"
+                ]
+                for val in validation_files:
+                    lines.append(f"  - `{os.path.join(validation_dir, val)}`")
+                sections.append("\n".join(lines))
+
+        if len(sections) <= 1:
+            # Only the header, no actual content found
+            return None
+
+        sections.append("---")
+
+        self._trace(
+            f"_build_contents_annotation: annotated {ref_id} with "
+            f"{len(sections) - 2} content sections"
+        )
+        return "\n\n".join(sections)
+
+    def _list_subfolder_files(
+        self,
+        directory: str,
+        extensions: Optional[tuple] = None,
+        max_files: int = 50
+    ) -> List[str]:
+        """List files in a subfolder, optionally filtering by extension.
+
+        Args:
+            directory: Absolute path to the subfolder.
+            extensions: Tuple of file extensions to include (e.g., (".tpl", ".tmpl")).
+                If None, includes all files.
+            max_files: Maximum number of files to return.
+
+        Returns:
+            Sorted list of filenames relative to the directory.
+        """
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            return []
+        files: List[str] = []
+        try:
+            for item in sorted(dir_path.rglob("*")):
+                if not item.is_file():
+                    continue
+                if extensions and not item.name.lower().endswith(extensions):
+                    continue
+                rel = str(item.relative_to(dir_path))
+                files.append(rel)
+                if len(files) >= max_files:
+                    break
+        except (PermissionError, OSError):
+            pass
+        return files
 
     def _detect_preselected_read(
         self, tool_args: Dict[str, Any]
@@ -1910,6 +2091,13 @@ class ReferencesPlugin:
         are normalized via ``normalize_for_comparison`` and ``os.path.normpath``
         so that Windows backslash paths, MSYS2 paths, and Unix paths all match
         correctly.
+
+        Three matching strategies are tried in order:
+        1. Exact match after normpath (handles file refs and expanded dir files).
+        2. Directory containment via startswith with path separator (handles
+           directory refs when the arg is a file inside the directory).
+        3. Substring containment (handles CLI commands like
+           ``cat /path/to/file.md`` where the path is embedded in a command).
 
         Args:
             tool_args: The tool call arguments dict (e.g., ``{"command": "cat foo.md"}``
@@ -1924,15 +2112,25 @@ class ReferencesPlugin:
                 continue
             # Normalize the argument value for comparison
             norm_value = normalize_for_comparison(value)
+            norm_arg_path = normalize_for_comparison(os.path.normpath(value))
             for norm_path, (ref_id, ref_name) in self._preselected_paths.items():
-                # Check both exact path match and substring containment
-                # (handles CLI commands like "cat /path/to/file.md")
-                norm_arg_path = normalize_for_comparison(os.path.normpath(value))
+                # 1. Exact path match (covers files and expanded dir entries)
                 if norm_arg_path == norm_path:
                     return (ref_id, ref_name)
-                # Substring check for CLI commands containing the path
-                if norm_path in norm_value:
+                # 2. Directory containment: arg is a file inside the ref dir
+                #    Use startswith + "/" to avoid partial name matches
+                #    (e.g., "/refs-old/file" should NOT match "/refs")
+                if norm_arg_path.startswith(norm_path + "/"):
                     return (ref_id, ref_name)
+                # 3. Substring fallback for CLI commands containing the path.
+                #    Require a path boundary after the match (/, space, quote,
+                #    or end-of-string) to avoid partial-name false positives
+                #    like "/refs" matching "/refs-old/file".
+                idx = norm_value.find(norm_path)
+                if idx >= 0:
+                    end_idx = idx + len(norm_path)
+                    if end_idx >= len(norm_value) or norm_value[end_idx] in ('/', ' ', '"', "'"):
+                        return (ref_id, ref_name)
         return None
 
     def get_preselected_paths(self) -> Dict[str, Tuple[str, str]]:
@@ -1954,6 +2152,35 @@ class ReferencesPlugin:
             The ``ReferenceSource`` if found, ``None`` otherwise.
         """
         return next((s for s in self._sources if s.id == ref_id), None)
+
+    def file_belongs_to_reference_with_templates(
+        self, file_path: str
+    ) -> bool:
+        """Check if a file path is inside a selected reference that declares templates.
+
+        Used by the template plugin to suppress embedded template extraction
+        when the reference already provides authoritative standalone templates.
+
+        Args:
+            file_path: Absolute path to the file being inspected.
+
+        Returns:
+            True if the file is inside a selected reference directory that
+            has ``contents.templates`` set to a non-null value.
+        """
+        if not self._preselected_paths:
+            return False
+
+        norm_file = normalize_for_comparison(os.path.normpath(file_path))
+
+        for norm_path, (ref_id, _ref_name) in self._preselected_paths.items():
+            # Check if file is inside this reference directory
+            if not (norm_file == norm_path or norm_file.startswith(norm_path + "/")):
+                continue
+            source = self.get_source_by_id(ref_id)
+            if source and source.contents.templates:
+                return True
+        return False
 
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.

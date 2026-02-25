@@ -815,15 +815,26 @@ Template rendering writes files to the workspace."""
         syntax. When found, extracts them to .jaato/templates/ and annotates
         the result.
 
+        Extraction is **suppressed** when the file being read belongs to a
+        reference that declares ``contents.templates`` — the standalone
+        templates in the reference folder are authoritative and should be
+        used instead of extracting embedded snippets from documentation.
+
         Args:
             tool_name: Name of the tool that produced the result.
             result: The tool's output as a string.
+            tool_args: Optional tool call arguments for path detection.
 
         Returns:
             ToolResultEnrichmentResult with annotated result and extraction metadata.
         """
         result_preview = result[:100].replace('\n', '\\n') + ('...' if len(result) > 100 else '')
         self._trace(f"enrich_tool_result [{tool_name}]: {len(result)} chars, preview: {result_preview}")
+
+        # Suppress extraction when file belongs to a reference with standalone templates
+        if tool_args and self._should_suppress_extraction(tool_args):
+            self._trace("  suppressed: file belongs to reference with contents.templates")
+            return ToolResultEnrichmentResult(result=result)
 
         # Find all code blocks in the result
         code_blocks = self._find_code_blocks(result)
@@ -1035,6 +1046,42 @@ Template rendering writes files to the workspace."""
             self._trace(f"  discovered: {index_name} ({syntax}, {len(variables)} vars)")
 
         return entries
+
+    def _should_suppress_extraction(self, tool_args: Dict[str, Any]) -> bool:
+        """Check if embedded template extraction should be suppressed.
+
+        Returns True when the file being read belongs to a selected reference
+        that declares ``contents.templates``. In that case, the reference's
+        standalone templates are authoritative and embedded extraction would
+        produce duplicates.
+
+        Args:
+            tool_args: The tool call arguments dict (looks for ``path`` key).
+
+        Returns:
+            True if extraction should be suppressed.
+        """
+        if not self._plugin_registry:
+            return False
+
+        # Extract file path from tool args
+        file_path = tool_args.get("path") or tool_args.get("file_path")
+        if not file_path or not isinstance(file_path, str):
+            return False
+
+        try:
+            ref_plugin = self._plugin_registry.get_plugin("references")
+        except Exception:
+            return False
+
+        if ref_plugin is None:
+            return False
+
+        try:
+            return ref_plugin.file_belongs_to_reference_with_templates(file_path)
+        except Exception as e:
+            self._trace(f"_should_suppress_extraction: error querying references: {e}")
+            return False
 
     def _get_reference_directories(self) -> List[Path]:
         """Query the references plugin for selected LOCAL directory sources.
