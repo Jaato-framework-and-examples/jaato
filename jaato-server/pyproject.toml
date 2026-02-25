@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jaato-server"
 version = "0.2.27"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
-readme = "README.md"
+readme = "PKG_README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
@@ -57,6 +57,10 @@ dependencies = [
     "ast-grep-py>=0.30.0",  # AST-based code search
     "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
 ]
+
+[project.urls]
+Repository = "https://github.com/Jaato-framework-and-examples/jaato"
+Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 
 [project.optional-dependencies]
 dev = [

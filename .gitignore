@@ -18,6 +18,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+PKG_README.md
 
 # Generated search index (built in CI)
 docs/web/assets/js/search-index.json
