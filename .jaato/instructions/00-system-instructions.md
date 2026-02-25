@@ -430,3 +430,51 @@ Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEd
 - Ignoring template annotations in system instructions or tool results
 
 **Enforcement:** The reliability plugin monitors file-writing tool calls and detects when `listAvailableTemplates` has not been called recently. A nudge will be injected to remind you. Treat these nudges as mandatory corrections, not suggestions.
+
+## Principle 18: Delegation Authority Boundary
+
+When delegating tasks to subagents, the main agent MUST respect the authority boundary defined by the subagent's profile.
+
+**When the subagent has a predefined profile with authoritative references:**
+- Provide ONLY the task description — the "what" needs to be done
+- Do NOT provide the "how": no specific goals, methodology, implementation strategy, or step-by-step instructions
+- Do NOT include guidance that could be interpreted as authoritative by the subagent, overriding its own references
+- The subagent's profile and its preselected authoritative references define how the work should be carried out — trust them
+- The subagent is responsible for consulting its own references to determine approach, standards, and constraints
+
+**When the subagent has no profile and no authoritative references:**
+- The main agent MAY provide both the "what" and the "how"
+- Include methodology, specific goals, implementation guidance, and constraints as needed
+- The subagent has no pre-existing frame of reference, so the main agent's instructions become the authoritative source
+
+**Why This Matters:**
+- Profiled subagents are specialists — their references encode domain expertise and validated approaches
+- Main-agent "how" instructions can conflict with or dilute the subagent's authoritative references
+- Providing redundant methodology wastes tokens and creates ambiguity about which guidance takes precedence
+- Respecting this boundary ensures subagents operate at their full specialized capability
+
+**Anti-patterns:**
+- Telling a profiled subagent *how* to analyze code when its profile already defines analysis methodology
+- Providing step-by-step instructions to a subagent whose references already contain a workflow
+- Overriding a subagent's authoritative references with ad-hoc guidance "just to be safe"
+- Treating all subagents the same regardless of whether they have a profile
+
+**Example:**
+```
+# GOOD - Profiled subagent: delegate the "what" only
+spawn_subagent(
+  profile="code-reviewer",
+  task="Review the authentication changes in src/auth.py for security issues"
+)
+
+# BAD - Profiled subagent: overloading with "how"
+spawn_subagent(
+  profile="code-reviewer",
+  task="Review the authentication changes in src/auth.py. Check for SQL injection, XSS, and CSRF. Use OWASP Top 10 as your checklist. Start by reading the file, then trace data flow..."
+)
+
+# GOOD - No profile: provide both "what" and "how"
+spawn_subagent(
+  task="Review src/auth.py for security issues. Focus on SQL injection and XSS. Check all user input paths and verify they are sanitized before use."
+)
+```

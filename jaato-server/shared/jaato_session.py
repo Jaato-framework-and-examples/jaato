@@ -95,6 +95,29 @@ class _ToolExecutionResult:
 
 
 @dataclass
+class _PinnedReference:
+    """A preselected reference whose content has been read and pinned.
+
+    When the model reads a file matching a preselected reference's
+    resolved_path, the content is captured here and appended to the
+    system instruction.  This ensures the reference content survives
+    garbage collection — the original tool result in conversation history
+    can be freely GC'd (EPHEMERAL/WORKING) while the pinned copy lives
+    in the system instruction (LOCKED under SYSTEM.SELECTED_REFERENCES).
+
+    Attributes:
+        ref_id: Reference source ID from the catalog.
+        ref_name: Human-readable reference name.
+        content: The captured file content (tool result text).
+        pinned_at: Unix timestamp when the content was pinned.
+    """
+    ref_id: str
+    ref_name: str
+    content: str
+    pinned_at: float
+
+
+@dataclass
 class _TokenCountRequest:
     """A pending token-count request for a single instruction text.
 
@@ -300,6 +323,14 @@ class JaatoSession:
         # Background thread for Phase 2 instruction token counting.
         # Set by _start_background_token_counting(), joined before GC.
         self._budget_counting_thread: Optional[threading.Thread] = None
+
+        # Pinned preselected references: content captured when the model
+        # reads a file matching a preselected reference's resolved_path.
+        # Keyed by ref_id.  Pinned content is appended to the system
+        # instruction (LOCKED under SYSTEM.SELECTED_REFERENCES) so it
+        # survives GC, while the original tool result in conversation
+        # history remains EPHEMERAL and can be freely collected.
+        self._pinned_references: Dict[str, _PinnedReference] = {}
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -1381,6 +1412,18 @@ class JaatoSession:
             gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
             label="Framework",
         ))
+
+        # 4. Pinned preselected references (content read by the model and
+        #    promoted to system instruction for GC protection)
+        for ref_id, pinned in getattr(self, '_pinned_references', {}).items():
+            child_key = f"{SystemChildType.SELECTED_REFERENCES.value}:{ref_id}"
+            requests.append(_TokenCountRequest(
+                text=pinned.content,
+                source=InstructionSource.SYSTEM,
+                child_key=child_key,
+                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.SELECTED_REFERENCES],
+                label=f"ref: {pinned.ref_name}",
+            ))
 
         # --- PLUGIN children ---
         # When deferred tool loading is enabled, only include system
@@ -4908,9 +4951,12 @@ NOTES
                     fc.name,
                     result_data,
                     output_callback=self._current_output_callback,
-                    terminal_width=self._terminal_width
+                    terminal_width=self._terminal_width,
+                    tool_args=fc.args
                 )
                 result_data = enrichment.result
+                # Check for preselected reference pinning signal
+                self._check_and_pin_reference(enrichment.metadata, result_data)
 
             return ToolResult(
                 call_id=fc.id,
@@ -4948,7 +4994,9 @@ NOTES
 
         # Run tool result enrichment (e.g., template extraction)
         if ok and self._runtime.registry:
-            result_dict = self._enrich_tool_result_dict(fc.name, result_dict)
+            result_dict = self._enrich_tool_result_dict(
+                fc.name, result_dict, tool_args=fc.args
+            )
 
         return ToolResult(
             call_id=fc.id,
@@ -4961,7 +5009,8 @@ NOTES
     def _enrich_tool_result_dict(
         self,
         tool_name: str,
-        result_dict: Dict[str, Any]
+        result_dict: Dict[str, Any],
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Run tool result enrichment on tool results.
 
@@ -4969,6 +5018,9 @@ NOTES
         1. For file-writing tools (writeNewFile, updateFile): Pass the full JSON
            result so enrichers can extract file paths and run diagnostics.
         2. For other tools with large text fields: Enrich individual text fields.
+
+        Also checks enrichment metadata for preselected reference pinning
+        signals and delegates to ``_check_and_pin_reference`` when detected.
 
         Note: Passes the session's output callback to enrich_tool_result() so that
         enrichment notifications are routed to the correct agent panel. This is
@@ -4978,6 +5030,7 @@ NOTES
         Args:
             tool_name: Name of the tool that produced the result.
             result_dict: The result dictionary to enrich.
+            tool_args: Optional tool call arguments for context-aware enrichment.
 
         Returns:
             Enriched result dictionary.
@@ -4998,7 +5051,8 @@ NOTES
                 tool_name,
                 result_json,
                 output_callback=self._current_output_callback,
-                terminal_width=self._terminal_width
+                terminal_width=self._terminal_width,
+                tool_args=tool_args
             )
             if enrichment.result != result_json:
                 try:
@@ -5006,6 +5060,7 @@ NOTES
                 except json.JSONDecodeError:
                     # If enrichment broke JSON, keep original and append as text
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
+            self._check_and_pin_reference(enrichment.metadata, result_json)
             return enriched_dict
 
         # For other tools: enrich large text fields
@@ -5021,12 +5076,146 @@ NOTES
                         tool_name,
                         value,
                         output_callback=self._current_output_callback,
-                        terminal_width=self._terminal_width
+                        terminal_width=self._terminal_width,
+                        tool_args=tool_args
                     )
                     if enrichment.result != value:
                         enriched_dict[field] = enrichment.result
+                    # Check for pinning signal (only need first match)
+                    self._check_and_pin_reference(enrichment.metadata, value)
 
         return enriched_dict
+
+    def _check_and_pin_reference(
+        self,
+        enrichment_metadata: Dict[str, Any],
+        content: str
+    ) -> None:
+        """Check enrichment metadata for a preselected reference pinning signal.
+
+        When the references plugin detects that a tool result contains content
+        from a preselected reference file, it sets ``pinned_reference`` metadata.
+        This method captures that signal, stores the content in
+        ``_pinned_references``, and appends it to the system instruction so it
+        survives garbage collection.
+
+        The pinned content is tracked in the instruction budget under
+        ``SYSTEM.SELECTED_REFERENCES`` with LOCKED GC policy, ensuring it is
+        never garbage-collected.  The original tool result in conversation
+        history remains EPHEMERAL and can be freely collected.
+
+        Args:
+            enrichment_metadata: Combined metadata from all enrichment plugins,
+                keyed by plugin name (e.g., ``{"references": {"pinned_reference": {...}}}``).
+            content: The tool result content to pin.
+        """
+        if not enrichment_metadata:
+            return
+
+        # Look for pinning signal from the references plugin
+        refs_meta = enrichment_metadata.get("references", {})
+        pin_info = refs_meta.get("pinned_reference")
+        if not pin_info:
+            return
+
+        ref_id = pin_info.get("ref_id")
+        ref_name = pin_info.get("ref_name", ref_id)
+
+        if not ref_id:
+            return
+
+        # Skip if already pinned (idempotent — first read wins)
+        if ref_id in self._pinned_references:
+            self._trace(
+                f"PIN_REF: Reference '{ref_id}' already pinned, skipping"
+            )
+            return
+
+        import time as _time
+
+        pinned = _PinnedReference(
+            ref_id=ref_id,
+            ref_name=ref_name,
+            content=content,
+            pinned_at=_time.time(),
+        )
+        self._pinned_references[ref_id] = pinned
+
+        # Append to system instruction so the content persists through GC
+        pinned_block = (
+            f"\n\n## Selected Reference: {ref_name}\n"
+            f"<!-- pinned_ref_id={ref_id} -->\n"
+            f"{content}"
+        )
+        self._system_instruction = (self._system_instruction or "") + pinned_block
+
+        # Recreate provider session with updated system instruction
+        # (preserves current conversation history)
+        history = self.get_history()
+        self._create_provider_session(history)
+
+        # Update instruction budget with the new pinned reference
+        self._update_pinned_references_budget()
+
+        self._trace(
+            f"PIN_REF: Pinned reference '{ref_id}' ({ref_name}), "
+            f"content_len={len(content)}"
+        )
+
+    def _update_pinned_references_budget(self) -> None:
+        """Update the instruction budget with pinned reference entries.
+
+        Adds or updates SYSTEM.SELECTED_REFERENCES children in the budget
+        for each pinned reference, using LOCKED GC policy.  Token counts
+        are estimated from content length (accurate counts are obtained
+        in the next budget refresh cycle).
+        """
+        if not self._pinned_references:
+            return
+
+        for ref_id, pinned in self._pinned_references.items():
+            child_key = f"{SystemChildType.SELECTED_REFERENCES.value}:{ref_id}"
+            gc_policy = DEFAULT_SYSTEM_POLICIES[SystemChildType.SELECTED_REFERENCES]
+
+            # Estimate tokens (will be refined in next budget cycle)
+            tokens = estimate_tokens(pinned.content)
+
+            # Check if child already exists
+            parent = self._instruction_budget.get_entry(InstructionSource.SYSTEM)
+            if parent:
+                existing = parent.children.get(child_key)
+                if existing is not None:
+                    existing.tokens = tokens
+                else:
+                    self._instruction_budget.add_child(
+                        InstructionSource.SYSTEM,
+                        child_key,
+                        tokens,
+                        gc_policy,
+                        label=f"ref: {pinned.ref_name}",
+                    )
+
+        self._emit_instruction_budget_update()
+
+    def _remove_pinned_from_system_instruction(self) -> None:
+        """Remove pinned reference blocks from the system instruction.
+
+        Called during a true fresh reset to strip all
+        ``## Selected Reference: ...`` blocks that were appended when
+        references were pinned.  Each block is delimited by a
+        ``<!-- pinned_ref_id=... -->`` comment for reliable matching.
+        """
+        if not self._system_instruction:
+            return
+        import re as _re
+        # Remove blocks starting with "\n\n## Selected Reference: ..."
+        # up to (but not including) the next "\n\n## Selected Reference:" or end.
+        self._system_instruction = _re.sub(
+            r'\n\n## Selected Reference: [^\n]*\n<!-- pinned_ref_id=[^\n]* -->\n'
+            r'(?:(?!\n\n## Selected Reference: )[\s\S])*',
+            '',
+            self._system_instruction,
+        )
 
     def _extract_multimodal_attachments(
         self,
@@ -5190,6 +5379,12 @@ NOTES
         self._turn_accounting = []
         if not history:
             self._msg_token_cache.clear()
+            # On true fresh reset, clear pinned references and remove their
+            # content from the system instruction.  GC resets (history provided)
+            # preserve pinned references — they stay in the system instruction.
+            if self._pinned_references:
+                self._remove_pinned_from_system_instruction()
+                self._pinned_references.clear()
         self._create_provider_session(history)
 
     def get_turn_boundaries(self) -> List[int]:

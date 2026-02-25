@@ -829,7 +829,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
     def enrich_tool_result(
         self,
         tool_name: str,
-        result: str
+        result: str,
+        tool_args: Optional[Dict[str, Any]] = None
     ) -> ToolResultEnrichmentResult:
         """Enrich file-writing tool results with LSP diagnostics.
 
