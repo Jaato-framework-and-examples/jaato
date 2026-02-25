@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from agent_registry import AgentRegistry, AgentInfo
 
 from keybindings import KeyBinding, format_key_for_display
+from ui_utils import ellipsize_name
 
 
 # Spinner frames for processing status (same as output panel)
@@ -179,11 +180,10 @@ class AgentTabBar:
                 name_style = "class:agent-tab.dim"
             symbol_style = self._get_symbol_color_style(agent.status)
 
-            # Use agent_id as the tab label
+            # Use agent_id as the tab label (middle-ellipsize to keep
+            # both the prefix and the distinguishing suffix visible).
             max_name_len = 15
-            label = agent.agent_id
-            if len(label) > max_name_len:
-                label = label[:max_name_len - 1] + "…"
+            label = ellipsize_name(agent.agent_id, max_name_len)
 
             # Build tab parts
             tab_parts.append((symbol_style, symbol))
@@ -390,9 +390,7 @@ class AgentTabBar:
                 max_label = pane_right - cursor - 3  # symbol + space + margin
                 if max_label < 3:
                     break
-                label = agent_id
-                if len(label) > max_label:
-                    label = label[:max_label - 1] + "…"
+                label = ellipsize_name(agent_id, max_label)
 
                 if is_selected:
                     name_style = "class:agent-tab.selected reverse"
@@ -549,9 +547,7 @@ class AgentTabBar:
                 max_label = pane_right - cursor - 3
                 if max_label < 3:
                     break
-                label = agent_id
-                if len(label) > max_label:
-                    label = label[:max_label - 1] + "…"
+                label = ellipsize_name(agent_id, max_label)
 
                 if is_selected:
                     display_label = f" {label} "
