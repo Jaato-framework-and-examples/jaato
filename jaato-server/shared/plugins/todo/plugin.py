@@ -597,7 +597,14 @@ class TodoPlugin:
                     "- See subagent progress after spawning them\n"
                     "- Debug why a dependency hasn't resolved\n"
                     "- Review what happened while you were working\n\n"
-                    "If subscribed to events, you'll see them inline - this is for history review."
+                    "If subscribed to events, you'll see them inline - this is for history review.\n\n"
+                    "LONG-POLL: Set wait_seconds (1-30) to avoid busy-polling. The tool "
+                    "blocks until events matching your filters (agent_id, event_types) "
+                    "appear after the after_event cursor, or the timeout expires. "
+                    "Combine with after_event to only receive events newer than your last read.\n\n"
+                    "IMPORTANT: wait_seconds requires at least one of agent_id, event_types, "
+                    "or after_event. Without narrowing, every event from any agent would "
+                    "satisfy the query and the wait would return immediately, making it useless."
                 ),
                 parameters={
                     "type": "object",
@@ -614,6 +621,25 @@ class TodoPlugin:
                         "limit": {
                             "type": "integer",
                             "description": "Maximum events to return (default: 20)"
+                        },
+                        "wait_seconds": {
+                            "type": "number",
+                            "description": (
+                                "Long-poll timeout in seconds (0-30). When set, the tool "
+                                "blocks until events matching your filters (agent_id, "
+                                "event_types) appear after the after_event cursor, or "
+                                "the timeout expires — whichever comes first. "
+                                "Requires at least one of agent_id, event_types, or "
+                                "after_event to be set. Default: 0 (no wait)."
+                            )
+                        },
+                        "after_event": {
+                            "type": "string",
+                            "description": (
+                                "Only return events published after this event ID. "
+                                "Pass the last event_id you received to incrementally "
+                                "consume new events without re-reading old ones."
+                            )
                         }
                     },
                     "required": []
@@ -1711,12 +1737,24 @@ class TodoPlugin:
         }
 
     def _execute_get_task_events(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the getTaskEvents tool."""
+        """Execute the getTaskEvents tool.
+
+        Supports long-polling via ``wait_seconds``: when set, the tool blocks
+        until matching events arrive or the timeout expires, rather than
+        returning an empty result immediately. Combined with ``after_event``
+        (the last event_id the caller saw), this enables efficient incremental
+        monitoring without rapid polling loops.
+        """
         agent_id = args.get("agent_id")
         event_types_raw = args.get("event_types", [])
         limit = args.get("limit", 20)
+        wait_seconds = args.get("wait_seconds", 0)
+        after_event = args.get("after_event")
 
-        self._trace(f"getTaskEvents: agent={agent_id}, types={event_types_raw}, limit={limit}")
+        self._trace(
+            f"getTaskEvents: agent={agent_id}, types={event_types_raw}, "
+            f"limit={limit}, wait={wait_seconds}, after={after_event}"
+        )
 
         if not self._event_bus:
             return {"error": "Event bus not initialized"}
@@ -1731,16 +1769,56 @@ class TodoPlugin:
                 except ValueError:
                     pass  # Skip invalid
 
-        events = self._event_bus.get_recent_events(
-            agent_id=agent_id,
-            event_types=event_types,
-            limit=limit
-        )
+        # Clamp wait_seconds to [0, 30]
+        try:
+            wait_seconds = float(wait_seconds)
+        except (TypeError, ValueError):
+            wait_seconds = 0
+        wait_seconds = min(max(wait_seconds, 0), 30)
 
-        return {
+        # Guard: wait_seconds without any narrowing is almost always a
+        # mistake — every published event matches, so the wait returns
+        # on the very first event from any agent.  Return an error that
+        # tells the model what to fix instead of silently doing nothing.
+        if wait_seconds > 0 and not agent_id and not event_types and not after_event:
+            return {
+                "error": (
+                    "wait_seconds requires at least one of: agent_id, "
+                    "event_types, or after_event.  Without any narrowing "
+                    "the wait returns on the first event from any agent, "
+                    "making the sleep ineffective."
+                )
+            }
+
+        if wait_seconds > 0:
+            # Long-poll path: block until events arrive or timeout.
+            events = self._event_bus.wait_for_events(
+                timeout=wait_seconds,
+                agent_id=agent_id,
+                event_types=event_types,
+                after_event_id=after_event,
+                limit=limit,
+            )
+        else:
+            # Immediate path (original behavior).
+            events = self._event_bus.get_recent_events(
+                agent_id=agent_id,
+                event_types=event_types,
+                after_event_id=after_event,
+                limit=limit,
+            )
+
+        result: Dict[str, Any] = {
             "events": [e.to_dict() for e in events],
-            "count": len(events)
+            "count": len(events),
         }
+
+        # Include a cursor the model can pass back as after_event
+        # on the next call for incremental consumption.
+        if events:
+            result["last_event_id"] = events[-1].event_id
+
+        return result
 
     def _execute_list_subscriptions(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the listSubscriptions tool."""

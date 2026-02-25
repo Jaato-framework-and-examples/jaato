@@ -101,6 +101,11 @@ class TaskEventBus:
         # Lock for thread-safe access
         self._sub_lock = threading.Lock()
 
+        # Condition variable for long-poll notifications.
+        # Signaled every time a new event is published, allowing
+        # wait_for_events() callers to wake up without busy-polling.
+        self._event_condition = threading.Condition()
+
         # Dependency tracking: maps TaskRef URIs to waiting steps
         # Key: TaskRef.to_uri(), Value: list of (subscriber_agent, plan_id, step_id)
         self._dependency_waiters: Dict[str, List[tuple]] = {}
@@ -267,6 +272,10 @@ class TaskEventBus:
         # Handle dependency resolution for step_completed events
         if event.event_type == TaskEventType.STEP_COMPLETED:
             self._resolve_dependencies(event)
+
+        # Wake up any long-poll waiters so they can check for new events.
+        with self._event_condition:
+            self._event_condition.notify_all()
 
         logger.debug(
             "Published %s from %s: notified %d subscribers",
@@ -468,6 +477,7 @@ class TaskEventBus:
         self,
         agent_id: Optional[str] = None,
         event_types: Optional[List[TaskEventType]] = None,
+        after_event_id: Optional[str] = None,
         limit: int = 50
     ) -> List[TaskEvent]:
         """Get recent events from history, optionally filtered.
@@ -475,6 +485,11 @@ class TaskEventBus:
         Args:
             agent_id: Filter by source agent ID.
             event_types: Filter by event types.
+            after_event_id: Cursor — only return events published after this
+                            event ID.  Pass the last ``event_id`` you received
+                            to consume the stream incrementally.  If the ID has
+                            been evicted from the rolling history window, all
+                            available events are returned.
             limit: Maximum number of events to return.
 
         Returns:
@@ -483,12 +498,84 @@ class TaskEventBus:
         with self._sub_lock:
             events = list(self._event_history)
 
+        # Advance past the cursor
+        if after_event_id:
+            idx = None
+            for i, e in enumerate(events):
+                if e.event_id == after_event_id:
+                    idx = i
+                    break
+            if idx is not None:
+                events = events[idx + 1:]
+            # If the event_id wasn't found the cursor has been evicted
+            # from the rolling window — return everything available.
+
         if agent_id:
             events = [e for e in events if e.source_agent == agent_id]
         if event_types:
             events = [e for e in events if e.event_type in event_types]
 
         return events[-limit:]
+
+    def wait_for_events(
+        self,
+        timeout: float,
+        agent_id: Optional[str] = None,
+        event_types: Optional[List[TaskEventType]] = None,
+        after_event_id: Optional[str] = None,
+        limit: int = 50
+    ) -> List[TaskEvent]:
+        """Wait for events, returning early when they arrive.
+
+        Implements long-polling: if events already exist (given the cursor
+        and filters), returns immediately.  Otherwise blocks up to
+        ``timeout`` seconds for new events to be published.
+
+        Delegates all filtering and cursor logic to
+        :meth:`get_recent_events`; this method only adds the blocking
+        wait on top.
+
+        Args:
+            timeout: Maximum seconds to wait (capped at 30).
+            agent_id: Filter by source agent ID.
+            event_types: Filter by event types.
+            after_event_id: Cursor — only return events after this event ID.
+            limit: Maximum number of events to return.
+
+        Returns:
+            List of matching TaskEvent objects, most recent last.
+        """
+        timeout = min(max(timeout, 0), 30)
+
+        def _poll() -> List[TaskEvent]:
+            return self.get_recent_events(
+                agent_id=agent_id,
+                event_types=event_types,
+                after_event_id=after_event_id,
+                limit=limit,
+            )
+
+        # Fast path: events already exist.
+        result = _poll()
+        if result or timeout <= 0:
+            return result
+
+        # Slow path: wait for the condition to be signaled by publish().
+        import time
+        deadline = time.monotonic() + timeout
+        with self._event_condition:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._event_condition.wait(timeout=remaining)
+                # Re-check after wakeup.
+                result = _poll()
+                if result:
+                    return result
+
+        # Final check after timeout.
+        return _poll()
 
     def clear_history(self) -> int:
         """Clear the event history.

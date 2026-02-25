@@ -3,12 +3,17 @@
 import json
 import os
 import tempfile
+import threading
+import time
 from unittest.mock import Mock, patch
 
 import pytest
 
 from ..plugin import TodoPlugin, create_plugin
-from jaato_sdk.plugins.todo.models import StepStatus, PlanStatus
+from ..event_bus import TaskEventBus, get_event_bus
+from jaato_sdk.plugins.todo.models import (
+    StepStatus, PlanStatus, TaskEvent, TaskEventType, TodoPlan,
+)
 
 
 class TestTodoPluginInitialization:
@@ -777,3 +782,233 @@ class TestPersistence:
 
         # Should have restored the plan mapping
         assert len(plugin._current_plan_ids) > 0
+
+
+class TestGetTaskEventsExecutor:
+    """Tests for getTaskEvents executor with long-poll support."""
+
+    def setup_method(self):
+        """Reset event bus singleton before each test."""
+        TaskEventBus.reset()
+
+    def teardown_method(self):
+        """Clean up after each test."""
+        TaskEventBus.reset()
+
+    def _make_plugin(self) -> TodoPlugin:
+        """Create an initialized plugin with event bus wired up."""
+        plugin = TodoPlugin()
+        plugin.initialize()
+        plugin._event_bus = get_event_bus()
+        return plugin
+
+    def _publish_event(self, agent_id: str = "sub") -> TaskEvent:
+        """Publish a dummy event and return it."""
+        bus = get_event_bus()
+        plan = TodoPlan.create("P", ["S"])
+        event = TaskEvent.create(TaskEventType.PLAN_CREATED, agent_id, plan)
+        bus.publish(event)
+        return event
+
+    def test_basic_get_events(self):
+        """getTaskEvents returns events without wait_seconds."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+        event = self._publish_event()
+
+        result = executors["getTaskEvents"]({})
+
+        assert result["count"] == 1
+        assert result["events"][0]["event_id"] == event.event_id
+
+    def test_after_event_filters_old_events(self):
+        """after_event parameter excludes events up to and including the cursor."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        event1 = self._publish_event("a")
+        event2 = self._publish_event("b")
+
+        result = executors["getTaskEvents"]({"after_event": event1.event_id})
+
+        assert result["count"] == 1
+        assert result["events"][0]["event_id"] == event2.event_id
+
+    def test_last_event_id_in_result(self):
+        """Result includes last_event_id for cursor-based consumption."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        event1 = self._publish_event()
+        event2 = self._publish_event()
+
+        result = executors["getTaskEvents"]({})
+
+        assert result["last_event_id"] == event2.event_id
+
+    def test_no_last_event_id_when_empty(self):
+        """Result has no last_event_id key when there are no events."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        result = executors["getTaskEvents"]({})
+
+        assert result["count"] == 0
+        assert "last_event_id" not in result
+
+    def test_wait_seconds_returns_immediately_with_events(self):
+        """wait_seconds does not delay when events already exist."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+        self._publish_event("sub")
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 5,
+            "agent_id": "sub",
+        })
+        elapsed = time.monotonic() - start
+
+        assert result["count"] == 1
+        assert elapsed < 1.0
+
+    def test_wait_seconds_blocks_until_event(self):
+        """wait_seconds blocks and returns when a new event is published."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        result_holder: list = []
+
+        def call_tool():
+            r = executors["getTaskEvents"]({
+                "wait_seconds": 10,
+                "agent_id": "sub",
+            })
+            result_holder.append(r)
+
+        t = threading.Thread(target=call_tool)
+        t.start()
+
+        # Give the tool time to enter the wait.
+        time.sleep(0.3)
+
+        event = self._publish_event("sub")
+        t.join(timeout=5)
+
+        assert len(result_holder) == 1
+        assert result_holder[0]["count"] == 1
+        assert result_holder[0]["events"][0]["event_id"] == event.event_id
+
+    def test_wait_seconds_timeout_returns_empty(self):
+        """wait_seconds returns empty after timeout with no events."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.3,
+            "agent_id": "nobody",
+        })
+        elapsed = time.monotonic() - start
+
+        assert result["count"] == 0
+        assert elapsed >= 0.25
+
+    def test_wait_seconds_with_after_event(self):
+        """wait_seconds combined with after_event for incremental consumption."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        event1 = self._publish_event()
+
+        result_holder: list = []
+
+        def call_tool():
+            r = executors["getTaskEvents"]({
+                "wait_seconds": 10,
+                "after_event": event1.event_id,
+            })
+            result_holder.append(r)
+
+        t = threading.Thread(target=call_tool)
+        t.start()
+        time.sleep(0.3)
+
+        event2 = self._publish_event()
+        t.join(timeout=5)
+
+        assert len(result_holder) == 1
+        assert result_holder[0]["count"] == 1
+        assert result_holder[0]["events"][0]["event_id"] == event2.event_id
+
+    def test_wait_seconds_clamped(self):
+        """wait_seconds is clamped to [0, 30]."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        # Negative → treated as 0 (immediate return)
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({"wait_seconds": -5})
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.5
+
+        # Invalid type → treated as 0
+        result = executors["getTaskEvents"]({"wait_seconds": "not_a_number"})
+        assert result["count"] == 0
+
+    def test_wait_seconds_requires_narrowing(self):
+        """wait_seconds without any filters or cursor returns an error."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        result = executors["getTaskEvents"]({"wait_seconds": 5})
+        assert "error" in result
+        assert "wait_seconds requires" in result["error"]
+
+    def test_wait_seconds_accepted_with_agent_id(self):
+        """wait_seconds is accepted when agent_id narrows the query."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        # Should not error — agent_id provides narrowing.
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "agent_id": "sub",
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        # Should have waited (no events from "sub").
+        assert elapsed >= 0.15
+
+    def test_wait_seconds_accepted_with_event_types(self):
+        """wait_seconds is accepted when event_types narrows the query."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "event_types": ["step_completed"],
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        assert elapsed >= 0.15
+
+    def test_wait_seconds_accepted_with_after_event(self):
+        """wait_seconds is accepted when after_event provides a cursor."""
+        plugin = self._make_plugin()
+        executors = plugin.get_executors()
+        event = self._publish_event()
+
+        start = time.monotonic()
+        result = executors["getTaskEvents"]({
+            "wait_seconds": 0.2,
+            "after_event": event.event_id,
+        })
+        elapsed = time.monotonic() - start
+
+        assert "error" not in result
+        assert elapsed >= 0.15
