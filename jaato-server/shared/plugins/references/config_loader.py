@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.path_utils import normalize_path
-from .models import ReferenceSource, SourceType, InjectionMode
+from .models import ReferenceSource, SourceType, InjectionMode, VALID_CONTENTS_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,19 @@ def validate_source(source: Dict[str, Any], index: int, errors: List[str]) -> No
     elif not all(isinstance(t, str) for t in tags):
         errors.append(f"{prefix}: 'tags' must contain only strings")
 
+    # Validate contents (typed subfolder declarations)
+    contents = source.get("contents")
+    if contents is not None:
+        if not isinstance(contents, dict):
+            errors.append(f"{prefix}: 'contents' must be an object")
+        else:
+            for key in VALID_CONTENTS_KEYS:
+                val = contents.get(key)
+                if val is not None and not isinstance(val, str):
+                    errors.append(
+                        f"{prefix}: 'contents.{key}' must be a string or null"
+                    )
+
 
 def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
     """Validate a single standalone reference JSON file.
@@ -347,6 +360,25 @@ def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List
             errors.append("'tags' must be an array")
         elif not all(isinstance(t, str) for t in tags):
             errors.append("'tags' must contain only strings")
+
+    # Validate contents (typed subfolder declarations)
+    contents = data.get("contents")
+    if contents is not None:
+        if not isinstance(contents, dict):
+            errors.append("'contents' must be an object")
+        else:
+            unknown_keys = set(contents.keys()) - VALID_CONTENTS_KEYS
+            if unknown_keys:
+                warnings.append(
+                    f"'contents' has unknown keys: {', '.join(sorted(unknown_keys))}. "
+                    f"Valid keys: {', '.join(sorted(VALID_CONTENTS_KEYS))}"
+                )
+            for key in VALID_CONTENTS_KEYS:
+                val = contents.get(key)
+                if val is not None and not isinstance(val, str):
+                    errors.append(
+                        f"'contents.{key}' must be a string (relative subfolder path) or null"
+                    )
 
     return len(errors) == 0, errors, warnings
 

@@ -168,3 +168,103 @@ class TestValidateReferenceFile:
         is_valid, errors, warnings = validate_reference_file(data)
         assert is_valid is False
         assert len(errors) >= 4  # id, name, type, mode, tags
+
+    # ==================== contents validation ====================
+
+    def test_valid_contents_all_set(self):
+        """Valid contents with all subfolder types declared."""
+        data = {
+            "id": "mod-001",
+            "name": "Module 001",
+            "type": "local",
+            "path": "/tmp/mod-001",
+            "contents": {
+                "templates": "templates/",
+                "validation": "validation/",
+                "policies": "policies/",
+                "scripts": "scripts/",
+            },
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is True
+        assert errors == []
+
+    def test_valid_contents_sparse(self):
+        """Valid contents with only some types declared."""
+        data = {
+            "id": "mod-002",
+            "name": "Module 002",
+            "type": "local",
+            "path": "/tmp/mod-002",
+            "contents": {
+                "templates": "templates/",
+                "validation": None,
+                "policies": None,
+                "scripts": None,
+            },
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is True
+        assert errors == []
+
+    def test_contents_not_object(self):
+        """contents must be an object, not a string."""
+        data = {
+            "id": "bad-contents",
+            "name": "Bad Contents",
+            "type": "local",
+            "path": "/tmp",
+            "contents": "templates/",
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is False
+        assert any("'contents' must be an object" in e for e in errors)
+
+    def test_contents_value_not_string(self):
+        """contents values must be strings or null."""
+        data = {
+            "id": "bad-val",
+            "name": "Bad Value",
+            "type": "local",
+            "path": "/tmp",
+            "contents": {
+                "templates": 42,
+                "validation": None,
+                "policies": None,
+                "scripts": None,
+            },
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is False
+        assert any("'contents.templates' must be a string" in e for e in errors)
+
+    def test_contents_unknown_keys_warning(self):
+        """Unknown keys in contents produce a warning, not an error."""
+        data = {
+            "id": "extra-keys",
+            "name": "Extra Keys",
+            "type": "local",
+            "path": "/tmp",
+            "contents": {
+                "templates": "templates/",
+                "validation": None,
+                "policies": None,
+                "scripts": None,
+                "examples": "examples/",
+            },
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is True
+        assert any("unknown keys" in w for w in warnings)
+
+    def test_no_contents_is_valid(self):
+        """Omitting contents entirely is valid."""
+        data = {
+            "id": "no-contents",
+            "name": "No Contents",
+            "type": "local",
+            "path": "/tmp",
+        }
+        is_valid, errors, warnings = validate_reference_file(data)
+        assert is_valid is True
+        assert errors == []

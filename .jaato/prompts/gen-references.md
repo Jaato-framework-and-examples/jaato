@@ -192,7 +192,10 @@ After Phase 0, `repoRoot` always points to a local directory on disk. All subseq
 ### Phase 1 — Inventory (read structure only, not content)
 List the directory tree within the matched directories to build a complete inventory of folders and files. Do **not** read any file content yet. Record:
 - Which folders contain documentation files (MODULE.md, ERI.md, ADR.md, etc.)
-- Which folders are named `validation/`
+- Which folders are named `validation/` (post-implementation validation scripts)
+- Which folders are named `templates/` (standalone template files)
+- Which folders are named `policies/` (implementation constraint documents)
+- Which folders are named `scripts/` (helper scripts for implementation)
 - Which files have `.tpl` or `.tmpl` extensions
 
 ### Phase 1.5 — Evaluate parallelization opportunity
@@ -245,7 +248,7 @@ Before spawning subagents, **inform the user** that subagents will run in parall
 > Process the following directories under `repoRoot` = `<path>`:
 > - `<dir1>`, `<dir2>`, ...
 >
-> For each directory: read the entry-point documentation file (MODULE.md, ERI.md, ADR.md, etc.), extract the first paragraph for the description, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, and fetchHint as described [repeat the relevant rules or reference them].
+> For each directory: read the entry-point documentation file (MODULE.md, ERI.md, ADR.md, etc.), extract the first paragraph for the description, detect typed subfolders (`templates/`, `validation/`, `policies/`, `scripts/`) and populate the `contents` property, and write a reference JSON to `<output>/`. If the source is remote, **copy the folder to `<knowledge_dir>/<repo-relative-path>/` before writing the reference** — the reference `path` must point to this materialized copy. If the folder has a `validation/` subfolder, process and materialize it too. If the folder has `.tpl`/`.tmpl` files, collect template index entries. Validate every JSON with `validateReference`. Follow the extraction rules for id, name, description, tags, path, fetchHint, and contents as described [repeat the relevant rules or reference them].
 >
 > sourceType = `<local|git|archive>`, sourceMetadata = `<metadata dict if remote>`, knowledgeDir = `<.jaato/knowledge/hash>`
 >
@@ -258,10 +261,15 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
 1. Read only the entry-point file (e.g., MODULE.md) — extract just the first paragraph for the description
 2. If the entry-point file has YAML frontmatter with `title`, `description`, or `tags`, use those values. Otherwise fall back to the extraction rules (first paragraph, folder name parsing)
 3. **If source is remote**: Copy the folder from the temp download to a stable workspace location (see "Materializing remote content" below) **before** writing the reference JSON. The reference `path` must point to this permanent copy, not to the temp directory.
-4. Write the reference JSON for that folder immediately
-5. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
-6. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
-7. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+4. **Detect typed subfolders** — check if the folder contains any of these subfolders and record them for the `contents` property:
+   - `templates/` — contains `.tpl`/`.tmpl` files (authoritative standalone templates)
+   - `validation/` — contains shell scripts for post-implementation checks
+   - `policies/` — contains markdown documents with implementation constraints
+   - `scripts/` — contains helper scripts for use during implementation
+5. Write the reference JSON for that folder immediately, including the `contents` property with the relative path for each detected subfolder (or `null` for absent ones)
+6. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
+7. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
+8. **Release the file content from working memory** — once the JSON is written you no longer need the source text
 
 #### Materializing remote content
 
@@ -323,7 +331,13 @@ Use only the inventory and the full list of reference IDs collected during Phase
      "path": "/absolute/path/to/folder",
      "mode": "selectable",
      "tags": ["<tag1>", "<tag2>"],
-     "fetchHint": "<Hint on which file to read first>"
+     "fetchHint": "<Hint on which file to read first>",
+     "contents": {
+       "templates": "templates/",
+       "validation": "validation/",
+       "policies": null,
+       "scripts": null
+     }
    }
    ```
 
@@ -338,6 +352,12 @@ Use only the inventory and the full list of reference IDs collected during Phase
      "mode": "selectable",
      "tags": ["<tag1>", "<tag2>"],
      "fetchHint": "<Hint on which file to read first>",
+     "contents": {
+       "templates": "templates/",
+       "validation": "validation/",
+       "policies": null,
+       "scripts": null
+     },
      "source": {
        "type": "<git|archive>",
        "url": "<original-source-url>",
@@ -366,6 +386,11 @@ Use only the inventory and the full list of reference IDs collected during Phase
    - **mode**: Default `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
    - **tags**: If YAML frontmatter has `tags`, use those first. Then augment with: folder path components (e.g., `modules` → `module`), technology keywords in name (e.g., `java`, `spring`, `resilience4j`), and content-type indicators (e.g., `circuit-breaker`, `persistence`). Deduplicate.
    - **fetchHint**: Main file to read (e.g., `"Read MODULE.md for templates"`, `"Read ERI.md for implementation requirements"`)
+   - **contents**: An object declaring which typed subfolders exist in this reference directory. For each of the four subfolder types, set the value to the relative subfolder path if it exists, or `null` if it does not. Always include all four keys:
+     - `"templates"`: Set to the relative path (e.g., `"templates/"`) if the folder contains a `templates/` subfolder with `.tpl`/`.tmpl` files. These are authoritative templates the model must use via `renderTemplateToFile` — the runtime suppresses extraction of embedded templates from documentation when this is set.
+     - `"validation"`: Set to the relative path (e.g., `"validation/"`) if the folder contains a `validation/` subfolder with shell scripts that must be run as post-implementation checks.
+     - `"policies"`: Set to the relative path (e.g., `"policies/"`) if the folder contains a `policies/` subfolder with markdown documents defining implementation constraints.
+     - `"scripts"`: Set to the relative path (e.g., `"scripts/"`) if the folder contains a `scripts/` subfolder with helper scripts the model can use during implementation.
 
 4. **Save** as `{{output}}/<id>.json` (or add to single catalog if `{{merge_mode}}` is `"single"`).
 
@@ -731,6 +756,10 @@ knowledge/
 │   ├── mod-code-001-circuit-breaker-java-resilience4j/
 │   │   ├── MODULE.md
 │   │   ├── templates/
+│   │   ├── policies/
+│   │   │   └── naming-conventions.md
+│   │   ├── scripts/
+│   │   │   └── generate-config.sh
 │   │   └── validation/
 │   │       ├── README.md
 │   │       └── circuit-breaker-check.sh
@@ -753,12 +782,12 @@ knowledge/
 ```
 
 **Generated reference files** in `{{output}}/`:
-- `mod-code-001-circuit-breaker-java-resilience4j.json` (documentation)
+- `mod-code-001-circuit-breaker-java-resilience4j.json` (documentation, contents: templates + policies + scripts + validation)
 - `mod-code-001-circuit-breaker-java-resilience4j-validation.json` (validation)
-- `mod-code-015-hexagonal-base-java-spring.json` (documentation)
+- `mod-code-015-hexagonal-base-java-spring.json` (documentation, contents: templates + validation)
 - `mod-code-015-hexagonal-base-java-spring-validation.json` (validation)
-- `eri-code-008-circuit-breaker-java-resilience4j.json` (documentation)
-- `adr-004-resilience-patterns.json` (documentation)
+- `eri-code-008-circuit-breaker-java-resilience4j.json` (documentation, no contents)
+- `adr-004-resilience-patterns.json` (documentation, no contents)
 
 **Generated template index** at `{{templates_index}}`:
 ```json
