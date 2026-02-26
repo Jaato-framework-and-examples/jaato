@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from shared.plugins.references.embedding_types import EmbeddingResult, SemanticMatch
@@ -46,45 +47,45 @@ class TestSemanticMatch:
 
 
 class TestLocalEmbeddingProvider:
-    """Tests for LocalEmbeddingProvider with mocked sentence-transformers."""
+    """Tests for LocalEmbeddingProvider."""
 
-    def test_unavailable_without_sentence_transformers(self):
-        """Provider reports unavailable when sentence-transformers is missing."""
+    def test_unavailable_when_model_load_fails(self):
+        """Provider reports unavailable when model fails to load."""
+        from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
         with patch(
-            "shared.plugins.references.embedding_provider._check_sentence_transformers",
-            return_value=False,
+            "shared.plugins.references.embedding_provider.SentenceTransformer",
+            side_effect=RuntimeError("model not found"),
         ):
-            from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
             provider = LocalEmbeddingProvider(eager_load=True)
             assert not provider.available
 
     def test_embed_text_returns_none_when_unavailable(self):
-        """embed_text returns None when provider is not available."""
+        """embed_text returns None when provider model failed to load."""
+        from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
         with patch(
-            "shared.plugins.references.embedding_provider._check_sentence_transformers",
-            return_value=False,
+            "shared.plugins.references.embedding_provider.SentenceTransformer",
+            side_effect=RuntimeError("model not found"),
         ):
-            from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
             provider = LocalEmbeddingProvider(eager_load=False)
             assert provider.embed_text("hello") is None
 
     def test_embed_batch_returns_empty_when_unavailable(self):
-        """embed_batch returns empty list when provider is not available."""
+        """embed_batch returns empty list when provider model failed to load."""
+        from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
         with patch(
-            "shared.plugins.references.embedding_provider._check_sentence_transformers",
-            return_value=False,
+            "shared.plugins.references.embedding_provider.SentenceTransformer",
+            side_effect=RuntimeError("model not found"),
         ):
-            from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
             provider = LocalEmbeddingProvider(eager_load=False)
             assert provider.embed_batch(["hello", "world"]) == []
 
     def test_embed_text_as_array_returns_none_when_unavailable(self):
-        """embed_text_as_array returns None when provider is not available."""
+        """embed_text_as_array returns None when provider model failed to load."""
+        from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
         with patch(
-            "shared.plugins.references.embedding_provider._check_sentence_transformers",
-            return_value=False,
+            "shared.plugins.references.embedding_provider.SentenceTransformer",
+            side_effect=RuntimeError("model not found"),
         ):
-            from shared.plugins.references.embedding_provider import LocalEmbeddingProvider
             provider = LocalEmbeddingProvider(eager_load=False)
             assert provider.embed_text_as_array("hello") is None
 
@@ -97,29 +98,8 @@ class TestSemanticMatcher:
         matcher = SemanticMatcher()
         assert not matcher.available
 
-    def test_load_index_fails_without_numpy(self):
-        """load_index returns False when numpy is not importable."""
-        with patch(
-            "shared.plugins.references.semantic_matching._try_import_numpy",
-            return_value=None,
-        ):
-            from shared.plugins.references.semantic_matching import SemanticMatcher
-            matcher = SemanticMatcher()
-            result = matcher.load_index(
-                sidecar_path="/nonexistent.npy",
-                embedding_model="test",
-                embedding_dimensions=3,
-                index_to_source_id={0: "ref-1"},
-            )
-            assert result is False
-
     def test_load_index_fails_with_missing_file(self):
         """load_index returns False when sidecar file doesn't exist."""
-        try:
-            import numpy  # noqa: F401
-        except ImportError:
-            pytest.skip("numpy not installed")
-
         from shared.plugins.references.semantic_matching import SemanticMatcher
         matcher = SemanticMatcher()
         result = matcher.load_index(
@@ -132,11 +112,6 @@ class TestSemanticMatcher:
 
     def test_load_index_succeeds_with_valid_npy(self):
         """load_index succeeds with a valid .npy file."""
-        try:
-            import numpy as np
-        except ImportError:
-            pytest.skip("numpy not installed")
-
         from shared.plugins.references.semantic_matching import SemanticMatcher
 
         # Create a temporary .npy file with 2 vectors of dimension 3
@@ -161,11 +136,6 @@ class TestSemanticMatcher:
 
     def test_load_index_rejects_dimension_mismatch(self):
         """load_index returns False when matrix dimensions don't match config."""
-        try:
-            import numpy as np
-        except ImportError:
-            pytest.skip("numpy not installed")
-
         from shared.plugins.references.semantic_matching import SemanticMatcher
 
         matrix = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
@@ -187,11 +157,6 @@ class TestSemanticMatcher:
 
     def test_find_matches_with_loaded_index(self):
         """find_matches returns matches above threshold."""
-        try:
-            import numpy as np
-        except ImportError:
-            pytest.skip("numpy not installed")
-
         from shared.plugins.references.semantic_matching import SemanticMatcher
 
         # Two orthogonal unit vectors
@@ -226,11 +191,6 @@ class TestSemanticMatcher:
 
     def test_find_matches_excludes_ids(self):
         """find_matches respects exclude_ids."""
-        try:
-            import numpy as np
-        except ImportError:
-            pytest.skip("numpy not installed")
-
         from shared.plugins.references.semantic_matching import SemanticMatcher
 
         # Two similar vectors

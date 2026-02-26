@@ -14,6 +14,8 @@ import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from .embedding_types import SemanticMatch
 
 logger = logging.getLogger(__name__)
@@ -21,15 +23,6 @@ logger = logging.getLogger(__name__)
 # Max content length (in characters) below which we embed the whole piece.
 # Above this, we use the first/last chunking strategy.
 _SHORT_CONTENT_THRESHOLD = 1500  # ~400 tokens
-
-
-def _try_import_numpy():
-    """Try to import numpy, return module or None."""
-    try:
-        import numpy as np
-        return np
-    except ImportError:
-        return None
 
 
 class SemanticMatcher:
@@ -78,13 +71,6 @@ class SemanticMatcher:
         Returns:
             True if loaded successfully, False otherwise.
         """
-        np = _try_import_numpy()
-        if np is None:
-            logger.warning(
-                "numpy not installed — semantic matching unavailable"
-            )
-            return False
-
         if not os.path.isfile(sidecar_path):
             logger.info(
                 "Embedding sidecar not found at '%s' — semantic matching "
@@ -180,8 +166,7 @@ class SemanticMatcher:
         Returns:
             List of SemanticMatch sorted by descending score.
         """
-        np = _try_import_numpy()
-        if np is None or self._matrix is None:
+        if self._matrix is None:
             return []
 
         exclude_ids = exclude_ids or set()
