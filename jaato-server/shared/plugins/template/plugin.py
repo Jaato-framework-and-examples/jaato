@@ -109,6 +109,16 @@ TEMPLATE_HEADING_PATTERN = re.compile(
 # Frontmatter ID pattern (e.g., "id: mod-code-001")
 FRONTMATTER_ID_PATTERN = re.compile(r'^id:\s*(.+)$', re.MULTILINE)
 
+# Pattern matching @generated annotation lines (Java, YAML, shell comments).
+# These lines contain metadata placeholders (e.g., {{skillId}}, {{skillVersion}})
+# that are NOT template variables and must be excluded from variable extraction
+# and rendering to avoid undefined-variable errors.
+# Matches lines like:
+#   * @generated {{skillId}} v{{skillVersion}}
+#   // @generated {{skillId}} v{{skillVersion}}
+#   # @generated {{skillId}} v{{skillVersion}}
+_GENERATED_ANNOTATION_RE = re.compile(r'^[/*#\s]*@generated\b.*$', re.MULTILINE)
+
 
 class TemplatePlugin:
     """Plugin for template-based file generation.
@@ -1294,6 +1304,25 @@ Template rendering writes files to the workspace."""
             self._trace(f"error extracting template {name}: {e}")
             return None, False
 
+    @staticmethod
+    def _strip_generated_annotations(content: str) -> str:
+        """Remove ``@generated`` annotation lines from template content.
+
+        Imported templates often contain ``@generated {{skillId}} v{{skillVersion}}``
+        in JavaDoc / comment lines. These are metadata annotations — their
+        placeholders are **not** template variables and should be excluded from
+        variable extraction and rendering. Stripping these lines prevents
+        undefined-variable errors when the template is rendered without
+        ``skillId`` / ``skillVersion`` in the variable context.
+
+        Args:
+            content: Raw template content string.
+
+        Returns:
+            Content with ``@generated`` lines removed.
+        """
+        return _GENERATED_ANNOTATION_RE.sub('', content)
+
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content.
 
@@ -1301,12 +1330,20 @@ Template rendering writes files to the workspace."""
         or regex for Mustache templates. This ensures the model knows exactly
         which variables are required before rendering.
 
+        ``@generated`` annotation lines are stripped before extraction so that
+        metadata placeholders (e.g. ``{{skillId}}``) are never reported as
+        required template variables.
+
         Args:
             content: Template content string.
 
         Returns:
             Sorted list of variable names required by the template.
         """
+        # Strip @generated annotation lines so their metadata placeholders
+        # (e.g. {{skillId}}, {{skillVersion}}) are not treated as variables.
+        content = self._strip_generated_annotations(content)
+
         syntax = self._detect_template_syntax(content)
 
         if syntax == "jinja2":
@@ -1347,7 +1384,9 @@ Template rendering writes files to the workspace."""
         """Render template using detected syntax (Jinja2 or Mustache).
 
         Automatically detects which template syntax is used and renders with
-        the appropriate engine.
+        the appropriate engine. ``@generated`` annotation lines are stripped
+        before rendering so that their metadata placeholders do not cause
+        undefined-variable errors.
 
         Args:
             template: Template content string.
@@ -1357,6 +1396,10 @@ Template rendering writes files to the workspace."""
             Tuple of (rendered_content, error_dict).
             If error_dict is not None, rendering failed.
         """
+        # Strip @generated annotation lines before rendering so metadata
+        # placeholders (e.g. {{skillId}}) don't cause undefined-variable errors.
+        template = self._strip_generated_annotations(template)
+
         syntax = self._detect_template_syntax(template)
 
         if syntax == 'mustache':
