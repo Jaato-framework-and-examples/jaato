@@ -758,3 +758,131 @@ class TestMustacheDottedPaths:
         content = output_file.read_text()
         assert "required: email" in content
         assert "required: age" not in content
+
+
+# ==================== @generated Annotation Stripping ====================
+
+class TestGeneratedAnnotationStripping:
+    """Tests for stripping @generated annotations from templates.
+
+    Imported templates often include ``@generated {{skillId}} v{{skillVersion}}``
+    in comment annotations. These are metadata placeholders — not template
+    variables — and must be excluded from variable extraction and rendering.
+    """
+
+    JAVA_TEMPLATE_WITH_GENERATED = textwrap.dedent("""\
+        package {{basePackage}}.domain.model;
+
+        /**
+         * Value object for {{Entity}} identifier.
+         *
+         * @generated {{skillId}} v{{skillVersion}}
+         * @module mod-code-015-hexagonal-base-java-spring
+         */
+        public record {{Entity}}Id(UUID value) {
+        }
+    """)
+
+    YAML_TEMPLATE_WITH_GENERATED = textwrap.dedent("""\
+        # Timeout configuration
+        # @generated {{skillId}} v{{skillVersion}}
+        # @module mod-code-003-timeout-java-resilience4j
+        spring:
+          application:
+            name: {{serviceName}}
+    """)
+
+    JAVA_LINE_COMMENT_GENERATED = textwrap.dedent("""\
+        // @generated {{skillId}} v{{skillVersion}}
+        // @module mod-code-003-timeout-java-resilience4j
+        package {{basePackage}}.config;
+
+        public class {{Entity}}Config {
+        }
+    """)
+
+    def test_extract_variables_excludes_skillId_java_comment(self, plugin):
+        """@generated {{skillId}} in JavaDoc should not be extracted."""
+        variables = plugin._extract_variables(self.JAVA_TEMPLATE_WITH_GENERATED)
+        assert "skillId" not in variables
+        assert "skillVersion" not in variables
+        # Real variables are still extracted
+        assert "basePackage" in variables
+        assert "Entity" in variables
+
+    def test_extract_variables_excludes_skillId_yaml_comment(self, plugin):
+        """@generated {{skillId}} in YAML comment should not be extracted."""
+        variables = plugin._extract_variables(self.YAML_TEMPLATE_WITH_GENERATED)
+        assert "skillId" not in variables
+        assert "skillVersion" not in variables
+        assert "serviceName" in variables
+
+    def test_extract_variables_excludes_skillId_line_comment(self, plugin):
+        """@generated {{skillId}} in // comment should not be extracted."""
+        variables = plugin._extract_variables(self.JAVA_LINE_COMMENT_GENERATED)
+        assert "skillId" not in variables
+        assert "skillVersion" not in variables
+        assert "basePackage" in variables
+        assert "Entity" in variables
+
+    def test_render_template_skips_generated_line(self, plugin):
+        """Rendering should not fail on @generated placeholders."""
+        rendered, error = plugin._render_template(
+            self.JAVA_TEMPLATE_WITH_GENERATED,
+            {"basePackage": "com.bank.customer", "Entity": "Customer"},
+        )
+        assert error is None
+        assert "com.bank.customer.domain.model" in rendered
+        assert "CustomerId" in rendered
+        # @generated line should be removed from output
+        assert "@generated" not in rendered
+        # @module line (no template vars) should survive
+        assert "@module" in rendered
+
+    def test_render_template_yaml_skips_generated_line(self, plugin):
+        """YAML template rendering should skip @generated comment."""
+        rendered, error = plugin._render_template(
+            self.YAML_TEMPLATE_WITH_GENERATED,
+            {"serviceName": "customer-service"},
+        )
+        assert error is None
+        assert "customer-service" in rendered
+        assert "@generated" not in rendered
+
+    def test_strip_generated_annotations_static(self):
+        """_strip_generated_annotations is a static method."""
+        content = " * @generated {{skillId}} v{{skillVersion}}\n * @module mod-015\n"
+        result = TemplatePlugin._strip_generated_annotations(content)
+        assert "@generated" not in result
+        assert "@module mod-015" in result
+
+    def test_strip_preserves_non_generated_comments(self):
+        """Non-@generated comment content is preserved."""
+        content = (
+            "/**\n"
+            " * Value object for {{Entity}} identifier.\n"
+            " * @generated {{skillId}} v{{skillVersion}}\n"
+            " * @module mod-015\n"
+            " */\n"
+        )
+        result = TemplatePlugin._strip_generated_annotations(content)
+        assert "Value object for {{Entity}} identifier." in result
+        assert "@module mod-015" in result
+        assert "@generated" not in result
+
+    def test_writeFileFromTemplate_with_generated_annotation(self, plugin):
+        """End-to-end: writeFileFromTemplate succeeds despite @generated."""
+        output_file = plugin._base_path / "output" / "CustomerId.java"
+        result = plugin._execute_write_file_from_template({
+            "template": self.JAVA_TEMPLATE_WITH_GENERATED,
+            "variables": {
+                "basePackage": "com.bank.customer",
+                "Entity": "Customer",
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, f"Render failed: {result}"
+        content = output_file.read_text()
+        assert "com.bank.customer.domain.model" in content
+        assert "CustomerId" in content
+        assert "skillId" not in content
