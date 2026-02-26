@@ -3757,16 +3757,6 @@ class OutputBuffer:
             # Minimum 3 to show something useful even on tiny terminals
             max_content_lines = max(3, available_space)
 
-            # Log content structure for debugging
-            last_lines_preview = [line[:60] for line in content_lines[-5:]]
-            first_lines_preview = [line[:60] for line in content_lines[:3]]
-            _trace(f"_render_permission_prompt: visible_height={self._visible_height}, "
-                   f"overhead={overhead}, available_space={available_space}, "
-                   f"content_lines={len(content_lines)}, max_content_lines={max_content_lines}, "
-                   f"will_truncate={len(content_lines) > max_content_lines}")
-            _trace(f"  first_3_lines={first_lines_preview}")
-            _trace(f"  last_5_lines={last_lines_preview}")
-
             # Use shared helper for smart truncation (beginning + ellipsis + end)
             self._render_truncated_lines(
                 output=output,
@@ -3970,7 +3960,6 @@ class OutputBuffer:
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
-        _trace(f"_render_tool_block: block.expanded={block.expanded}, tool_count={tool_count}")
 
         # Separator
         output.append("  ───", style=self._style("separator", "dim"))
