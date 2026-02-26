@@ -15,6 +15,7 @@ Enrichment Support:
 - Tool result enrichment: Detects @reference-id mentions in tool outputs
 """
 
+import json
 import os
 import re
 import tempfile
@@ -28,6 +29,8 @@ from ..subagent.config import expand_variables
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths, validate_reference_file
+from .embedding_provider import LocalEmbeddingProvider
+from .semantic_matching import SemanticMatcher
 from jaato_sdk.plugins.base import (
     UserCommand,
     CommandParameter,
@@ -96,6 +99,16 @@ class ReferencesPlugin:
         # preselected reference file. Paths are normalized using
         # normalize_for_comparison() for cross-platform matching.
         self._preselected_paths: Dict[str, Tuple[str, str]] = {}
+        # Semantic matching: embedding provider and matcher.
+        # Initialized during initialize() when embedding config is present
+        # and sentence-transformers is installed.
+        self._embedding_provider: Optional[LocalEmbeddingProvider] = None
+        self._semantic_matcher: Optional[SemanticMatcher] = None
+        # Semantic matching configuration.
+        # lookup_strategy: "hybrid" (tags + semantic), "tags_only", "semantic_only"
+        self._lookup_strategy: str = "hybrid"
+        self._similarity_threshold: float = 0.75
+        self._max_matches_per_piece: int = 3
 
     @property
     def name(self) -> str:
@@ -911,6 +924,120 @@ class ReferencesPlugin:
                     f"initialize: preselected_path '{source.id}': {norm}"
                 )
 
+        # --- Semantic matching initialization ---
+        # Read semantic config from plugin config (passed via initialize(config))
+        self._lookup_strategy = config.get("lookup_strategy", "hybrid")
+        self._similarity_threshold = config.get("similarity_threshold", 0.75)
+        self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
+
+        # Initialize embedding provider and semantic matcher if the catalog
+        # has embedding metadata and the lookup strategy uses semantic matching.
+        if (self._lookup_strategy in ("hybrid", "semantic_only")
+                and self._config
+                and self._config.embedding_model
+                and self._config.embedding_dimensions
+                and self._config.embedding_sidecar):
+            self._init_semantic_matching(config)
+        else:
+            self._trace(
+                f"initialize: semantic matching not configured "
+                f"(strategy={self._lookup_strategy}, "
+                f"embedding_model={getattr(self._config, 'embedding_model', None)})"
+            )
+
+    def _init_semantic_matching(self, config: Dict[str, Any]) -> None:
+        """Initialize the embedding provider and semantic matcher.
+
+        Called from ``initialize()`` when the references catalog has embedding
+        metadata and the lookup strategy includes semantic matching.
+
+        Sets up:
+        1. The ``LocalEmbeddingProvider`` (loads the sentence-transformers model).
+        2. The ``SemanticMatcher`` (loads the sidecar ``.npy`` matrix).
+        3. Validates that the provider's model matches the index's model.
+
+        On any failure, logs a warning and leaves semantic matching disabled
+        (tag-based matching continues to work).
+
+        Args:
+            config: The plugin config dict from ``initialize()``.
+        """
+        embedding_model = self._config.embedding_model
+        embedding_dimensions = self._config.embedding_dimensions
+        sidecar_filename = self._config.embedding_sidecar
+
+        # Resolve sidecar path relative to config directory or workspace
+        sidecar_path = None
+        if self._config.config_base_path:
+            sidecar_path = os.path.join(self._config.config_base_path, sidecar_filename)
+        elif self._project_root:
+            sidecar_path = os.path.join(self._project_root, ".jaato", sidecar_filename)
+
+        if not sidecar_path:
+            self._trace("_init_semantic_matching: cannot resolve sidecar path")
+            return
+
+        # Build index → source_id mapping from sources with embeddings
+        index_to_source_id: Dict[int, str] = {}
+        for source in self._sources:
+            if source.embedding is not None:
+                index_to_source_id[source.embedding.index] = source.id
+
+        if not index_to_source_id:
+            self._trace("_init_semantic_matching: no sources have embeddings")
+            return
+
+        # Initialize provider
+        provider_model = config.get("embedding_model", embedding_model)
+        eager_load = config.get("embedding_eager_load", True)
+        max_input_tokens = config.get("embedding_max_input_tokens", 512)
+
+        self._embedding_provider = LocalEmbeddingProvider(
+            model_name=provider_model,
+            max_input_tokens=max_input_tokens,
+            eager_load=eager_load,
+        )
+
+        if not self._embedding_provider.available:
+            self._trace(
+                "_init_semantic_matching: embedding provider not available "
+                "(sentence-transformers not installed?)"
+            )
+            self._embedding_provider = None
+            return
+
+        # Initialize matcher
+        self._semantic_matcher = SemanticMatcher()
+
+        # Validate model match
+        if not self._semantic_matcher.validate_model(provider_model):
+            self._trace(
+                f"_init_semantic_matching: model mismatch — provider "
+                f"'{provider_model}' vs index '{embedding_model}'"
+            )
+            self._semantic_matcher = None
+            self._embedding_provider = None
+            return
+
+        # Load sidecar
+        if not self._semantic_matcher.load_index(
+            sidecar_path=sidecar_path,
+            embedding_model=embedding_model,
+            embedding_dimensions=embedding_dimensions,
+            index_to_source_id=index_to_source_id,
+        ):
+            self._trace("_init_semantic_matching: failed to load sidecar")
+            self._semantic_matcher = None
+            self._embedding_provider = None
+            return
+
+        self._semantic_matcher.set_provider(self._embedding_provider)
+        self._trace(
+            f"_init_semantic_matching: ready — model='{provider_model}', "
+            f"dimensions={embedding_dimensions}, "
+            f"sources_with_embeddings={len(index_to_source_id)}"
+        )
+
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
@@ -919,6 +1046,8 @@ class ReferencesPlugin:
         self._channel = None
         self._sources = []
         self._selected_source_ids = []
+        self._embedding_provider = None
+        self._semantic_matcher = None
         self._preselected_paths = {}
         self._transitive_parent_map = {}
         self._transitive_notification_pending = False
@@ -1015,6 +1144,37 @@ class ReferencesPlugin:
                 category="knowledge",
                 discoverability="discoverable",
             ),
+            ToolSchema(
+                name="compute_embedding",
+                description=(
+                    "Compute a vector embedding for a text string or file contents. "
+                    "Returns a float array representing the semantic meaning of the "
+                    "input. Use this when building or updating reference indexes that "
+                    "require semantic search capability."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": (
+                                "The text to embed. Mutually exclusive with 'file'."
+                            )
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": (
+                                "Path to a file whose contents should be embedded. "
+                                "Mutually exclusive with 'input'. For large files, "
+                                "content is truncated to the model's max input token limit."
+                            )
+                        }
+                    },
+                    "required": []
+                },
+                category="knowledge",
+                discoverability="discoverable",
+            ),
         ]
 
         # Filter out excluded tools
@@ -1028,6 +1188,7 @@ class ReferencesPlugin:
             "selectReferences": self._execute_select,   # model tool
             "listReferences": self._execute_list,        # model tool
             "validateReference": self._execute_validate_reference,  # model tool
+            "compute_embedding": self._execute_compute_embedding,  # model tool (gen-references agent)
             "references": self._execute_references_cmd,  # user command
         }
 
@@ -1321,6 +1482,54 @@ class ReferencesPlugin:
             "errors": errors,
             "warnings": warnings,
         }
+
+    def _execute_compute_embedding(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute a vector embedding for text or file contents.
+
+        Called by the gen-references indexing agent to embed reference documents
+        and store vectors in the sidecar matrix.  Also usable by any agent that
+        needs to produce embeddings compatible with the reference index.
+
+        Exactly one of ``input`` or ``file`` must be provided.
+
+        Args:
+            args: Tool arguments with ``input`` (str) or ``file`` (str path).
+
+        Returns:
+            Dict with ``embedding`` (list of floats), ``model``, ``dimensions``,
+            and ``input_tokens`` keys.  On error, returns ``error`` key instead.
+        """
+        text_input = args.get("input")
+        file_path = args.get("file")
+
+        if text_input and file_path:
+            return {"error": "'input' and 'file' are mutually exclusive — provide one, not both."}
+        if not text_input and not file_path:
+            return {"error": "Provide either 'input' (text) or 'file' (path)."}
+
+        if not self._embedding_provider:
+            return {
+                "error": (
+                    "Embedding provider not available. Ensure sentence-transformers "
+                    "is installed and embedding config is present in references.json."
+                )
+            }
+
+        # Resolve file contents if file path given
+        if file_path:
+            path_obj = Path(file_path)
+            if not path_obj.is_absolute() and self._project_root:
+                path_obj = Path(self._project_root) / path_obj
+            try:
+                text_input = path_obj.read_text(encoding="utf-8")
+            except (IOError, OSError) as e:
+                return {"error": f"Cannot read file '{path_obj}': {e}"}
+
+        result = self._embedding_provider.embed_text(text_input)
+        if result is None:
+            return {"error": "Embedding computation failed — provider returned None."}
+
+        return result.to_dict()
 
     def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
         """Execute the 'references' user command.
@@ -1722,7 +1931,7 @@ class ReferencesPlugin:
 
     def get_auto_approved_tools(self) -> List[str]:
         """All tools are auto-approved - this is a user-triggered plugin."""
-        return ["selectReferences", "listReferences", "validateReference", "references"]
+        return ["selectReferences", "listReferences", "validateReference", "compute_embedding", "references"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
@@ -2185,11 +2394,16 @@ class ReferencesPlugin:
     def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
         """Common enrichment logic for prompts and tool results.
 
-        Two detection passes:
-        1. @reference-id patterns — expands with full reference instructions.
-        2. Tag word matching — scans content for words matching tags on
-           unselected selectable sources and appends lightweight reference ID
-           hints so the model knows to call selectReferences.
+        Detection passes:
+        1.  @reference-id patterns — expands with full reference instructions.
+        2.  Tag word matching — scans content for words matching tags on
+            unselected selectable sources and appends lightweight reference ID
+            hints so the model knows to call selectReferences.
+        2b. Semantic matching — embeds the content and finds references whose
+            embeddings are similar, excluding those already surfaced by
+            passes 1 and 2. Only active when lookup_strategy is "hybrid"
+            or "semantic_only" and the semantic matcher is available.
+        3.  Transitive selection hint — one-time notification after init.
 
         Args:
             content: The content to enrich.
@@ -2298,6 +2512,71 @@ class ReferencesPlugin:
                     enriched_content = enriched_content + hint_block
                     all_metadata["tag_matched_references"] = {
                         sid: tags for sid, tags in matched_sources.items()
+                    }
+
+        # --- Pass 2b: semantic matching ---
+        # When lookup_strategy includes semantic matching ("hybrid" or
+        # "semantic_only"), embed the content and find references whose
+        # embeddings are similar.  Excludes sources already surfaced by
+        # @reference-id expansion or tag matching to avoid duplicates.
+        if (
+            self._semantic_matcher
+            and self._semantic_matcher.available
+            and self._lookup_strategy in ("hybrid", "semantic_only")
+            and "selectReferences" not in self._exclude_tools
+        ):
+            # IDs already surfaced by earlier passes — no need to re-hint
+            already_surfaced: set = set(mentioned_ids)
+            already_surfaced.update(self._selected_source_ids)
+            if "tag_matched_references" in all_metadata:
+                already_surfaced.update(all_metadata["tag_matched_references"].keys())
+
+            semantic_matches = self._semantic_matcher.embed_and_match(
+                content=content,
+                threshold=self._similarity_threshold,
+                top_k=self._max_matches_per_piece,
+                exclude_ids=already_surfaced,
+            )
+
+            # Only include matches for unselected selectable sources
+            selectable_ids = {
+                s.id for s in self._sources
+                if s.mode == InjectionMode.SELECTABLE
+                and s.id not in self._selected_source_ids
+            }
+            semantic_matches = [
+                m for m in semantic_matches if m.source_id in selectable_ids
+            ]
+
+            if semantic_matches:
+                self._trace(
+                    f"enrich [{source_type}]: semantic matches: "
+                    f"{[(m.source_id, f'{m.score:.3f}') for m in semantic_matches]}"
+                )
+
+                hint_lines = []
+                for match in semantic_matches:
+                    source = next(
+                        (s for s in self._sources if s.id == match.source_id), None
+                    )
+                    if source:
+                        hint_lines.append(
+                            f"- @{match.source_id}: {source.name} "
+                            f"(similarity: {match.score:.2f})"
+                        )
+
+                if hint_lines:
+                    hint_block = (
+                        "\n\n---\n"
+                        "**Semantically related references** — use "
+                        "`selectReferences` with IDs to select:\n\n"
+                        + "\n".join(hint_lines)
+                        + "\n---"
+                    )
+                    enriched_content = enriched_content + hint_block
+                    all_metadata["semantic_matched_references"] = {
+                        m.source_id: round(m.score, 4)
+                        for m in semantic_matches
                     }
 
         # --- Pass 3: one-time transitive selection hint ---

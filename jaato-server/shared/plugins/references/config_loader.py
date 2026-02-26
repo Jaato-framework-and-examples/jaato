@@ -152,6 +152,9 @@ class ReferencesConfig:
         auto_discover_references: Whether to auto-discover references from references_dir.
         references_dir: Directory to scan for reference files (default: .jaato/references).
         config_base_path: Directory where config file was loaded from (for resolving relative paths).
+        embedding_model: Model name used to produce the sidecar embeddings.
+        embedding_dimensions: Dimensionality of the sidecar embeddings.
+        embedding_sidecar: Filename of the ``.npy`` sidecar file (relative to config dir).
     """
 
     version: str = "1.0"
@@ -169,6 +172,11 @@ class ReferencesConfig:
 
     # Path resolution
     config_base_path: Optional[str] = None  # Directory of config file
+
+    # Embedding metadata (from top-level fields in references.json)
+    embedding_model: Optional[str] = None
+    embedding_dimensions: Optional[int] = None
+    embedding_sidecar: Optional[str] = None
 
 
 class ConfigValidationError(Exception):
@@ -535,6 +543,10 @@ def load_config(
             auto_discover_references=raw_config.get("auto_discover_references", auto_discover),
             references_dir=raw_config.get("references_dir", references_dir),
             config_base_path=config_base_path,
+            # Embedding metadata (top-level fields)
+            embedding_model=raw_config.get("embedding_model"),
+            embedding_dimensions=raw_config.get("embedding_dimensions"),
+            embedding_sidecar=raw_config.get("embedding_sidecar"),
         )
 
     # Auto-discover references if enabled
