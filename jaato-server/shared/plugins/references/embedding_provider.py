@@ -4,33 +4,17 @@ Wraps sentence-transformers for local embedding computation. The provider
 loads a model once and reuses it for all embedding calls — both the
 ``compute_embedding`` tool (called by the gen-references agent) and the
 internal API (called by the enrichment pipeline for semantic matching).
-
-Gracefully degrades when sentence-transformers is not installed: the
-provider reports itself as unavailable and all embedding calls return None.
 """
 
 import logging
-import os
+import numpy as np
 from typing import List, Optional
+
+from sentence_transformers import SentenceTransformer
 
 from .embedding_types import EmbeddingResult
 
 logger = logging.getLogger(__name__)
-
-# Lazy-loaded sentinel — set to False after first failed import attempt
-_sentence_transformers_available: Optional[bool] = None
-
-
-def _check_sentence_transformers() -> bool:
-    """Check if sentence-transformers is importable (cached after first check)."""
-    global _sentence_transformers_available
-    if _sentence_transformers_available is None:
-        try:
-            import sentence_transformers  # noqa: F401
-            _sentence_transformers_available = True
-        except ImportError:
-            _sentence_transformers_available = False
-    return _sentence_transformers_available
 
 
 class LocalEmbeddingProvider:
@@ -91,16 +75,7 @@ class LocalEmbeddingProvider:
         if self._model is not None:
             return True
 
-        if not _check_sentence_transformers():
-            logger.warning(
-                "sentence-transformers not installed — embedding provider "
-                "unavailable. Install with: pip install sentence-transformers"
-            )
-            return False
-
         try:
-            from sentence_transformers import SentenceTransformer
-
             # Suppress noisy transformer logs during model load
             logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
@@ -185,7 +160,7 @@ class LocalEmbeddingProvider:
             for vec, text in zip(vecs, texts)
         ]
 
-    def embed_text_as_array(self, text: str):
+    def embed_text_as_array(self, text: str) -> Optional[np.ndarray]:
         """Compute embedding and return as a numpy array (not a list).
 
         Used internally by the semantic matching pipeline where the vector
@@ -202,7 +177,6 @@ class LocalEmbeddingProvider:
             return None
 
         if not text:
-            import numpy as np
             return np.zeros(self.dimensions, dtype="float32")
 
         return self._model.encode(text, normalize_embeddings=True)
