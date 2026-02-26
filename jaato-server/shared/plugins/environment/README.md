@@ -24,7 +24,7 @@ The plugin exposes a single tool:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `terminal`, `context`, or `all` |
+| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `terminal`, `context`, `session`, `datetime`, `network`, or `all` |
 
 ### Response
 
@@ -71,6 +71,25 @@ When `aspect="all"` (default):
       "threshold_percent": 80.0,
       "auto_trigger": true,
       "preserve_recent_turns": 5
+    }
+  },
+  "network": {
+    "proxy": {
+      "http_proxy": "http://proxy.corp.com:8080",
+      "https_proxy": "http://proxy.corp.com:8080",
+      "configured": true
+    },
+    "proxy_auth": {
+      "type": "kerberos",
+      "kerberos_enabled": true
+    },
+    "ssl": {
+      "verify": true,
+      "requests_ca_bundle": "/etc/pki/tls/certs/corp-ca-bundle.crt"
+    },
+    "no_proxy": {
+      "no_proxy": "localhost,127.0.0.1,.corp.com",
+      "jaato_no_proxy": "github.com,api.github.com"
     }
   }
 }
@@ -151,6 +170,9 @@ get_environment(aspect="terminal")
 # Get token usage and GC thresholds
 get_environment(aspect="context")
 
+# Get network connectivity configuration
+get_environment(aspect="network")
+
 # Get everything (default)
 get_environment()
 get_environment(aspect="all")
@@ -227,6 +249,52 @@ Returns token usage and garbage collection settings. Requires session injection 
 | `preserve_recent_turns` | Turns to always keep | `5` |
 | `max_turns` | Maximum turns before GC (if set) | `100` |
 
+### Network (`aspect="network"`)
+
+Reports proxy settings, proxy authentication method, SSL/TLS verification config, and no-proxy rules. Credentials embedded in proxy URLs are automatically masked.
+
+#### Proxy Settings
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `proxy.http_proxy` | HTTP proxy URL (credentials masked) | `"http://proxy.corp.com:8080"`, `null` |
+| `proxy.https_proxy` | HTTPS proxy URL (credentials masked) | `"http://***:***@proxy.corp.com:8080"`, `null` |
+| `proxy.configured` | Whether any proxy is configured | `true`, `false` |
+
+Reads from `HTTPS_PROXY`/`https_proxy` and `HTTP_PROXY`/`http_proxy` environment variables (uppercase takes precedence).
+
+#### Proxy Authentication
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `proxy_auth.type` | Detected authentication method | `"none"`, `"basic"`, `"kerberos"` |
+| `proxy_auth.kerberos_enabled` | Kerberos/SPNEGO enabled (only present when true) | `true` |
+
+- `"kerberos"`: `JAATO_KERBEROS_PROXY=true` is set
+- `"basic"`: Proxy URL contains embedded `user:password@`
+- `"none"`: No proxy authentication detected
+
+#### SSL / TLS
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `ssl.verify` | Whether SSL certificate verification is enabled | `true`, `false` |
+| `ssl.ssl_cert_file` | Custom CA certificate file (if `SSL_CERT_FILE` is set) | `"/etc/ssl/custom-ca.pem"` |
+| `ssl.ssl_cert_dir` | Custom CA certificate directory (if `SSL_CERT_DIR` is set) | `"/etc/ssl/certs"` |
+| `ssl.requests_ca_bundle` | CA bundle for requests library (if `REQUESTS_CA_BUNDLE` is set) | `"/etc/pki/tls/certs/ca.crt"` |
+| `ssl.curl_ca_bundle` | CA bundle for curl (if `CURL_CA_BUNDLE` is set) | `"/etc/pki/tls/certs/ca.crt"` |
+
+`ssl.verify` defaults to `true`; set `JAATO_SSL_VERIFY=false` to disable (escape hatch for SSL-intercepting proxies).
+
+#### No-Proxy Rules
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `no_proxy.no_proxy` | Standard no-proxy hosts (`NO_PROXY`) | `"localhost,127.0.0.1,.internal.corp"` |
+| `no_proxy.jaato_no_proxy` | Exact-match no-proxy hosts (`JAATO_NO_PROXY`) | `"github.com,api.github.com"` |
+
+Returns `null` when no rules are configured.
+
 ## Use Cases
 
 1. **Generating shell commands**: Query shell aspect to determine correct syntax
@@ -249,7 +317,14 @@ Returns token usage and garbage collection settings. Requires session injection 
    - Detect tmux/screen for session awareness
    - Adjust output width based on terminal type
 
-6. **Context management**: Query context aspect to monitor token usage
+6. **Network configuration**: Query network aspect to understand connectivity constraints
+   - Detect whether a proxy is required and which host/port to use
+   - Determine proxy authentication method (Kerberos, basic credentials)
+   - Check if SSL verification is relaxed (corporate SSL-intercepting proxies)
+   - Find custom CA bundle paths for HTTPS connections
+   - Identify no-proxy bypass rules for internal hosts
+
+7. **Context management**: Query context aspect to monitor token usage
    - Proactively summarize or trim context before hitting GC threshold
    - Track cost/usage during long conversations
 
