@@ -388,6 +388,29 @@ def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List
                         f"'contents.{key}' must be a string (relative subfolder path) or null"
                     )
 
+    # Validate embedding metadata
+    embedding = data.get("embedding")
+    if embedding is not None:
+        if not isinstance(embedding, dict):
+            errors.append("'embedding' must be an object")
+        else:
+            emb_index = embedding.get("index")
+            emb_hash = embedding.get("source_hash")
+            if emb_index is None:
+                errors.append("'embedding.index' is required")
+            elif not isinstance(emb_index, int):
+                errors.append("'embedding.index' must be an integer")
+            elif emb_index < 0:
+                errors.append("'embedding.index' must be non-negative")
+            if emb_hash is None:
+                errors.append("'embedding.source_hash' is required")
+            elif not isinstance(emb_hash, str):
+                errors.append("'embedding.source_hash' must be a string")
+            elif not emb_hash.startswith("sha256:"):
+                warnings.append(
+                    "'embedding.source_hash' should start with 'sha256:' prefix"
+                )
+
     return len(errors) == 0, errors, warnings
 
 
