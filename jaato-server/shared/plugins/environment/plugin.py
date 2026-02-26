@@ -29,7 +29,7 @@ class EnvironmentPlugin:
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "network", "all"]
 
     @property
     def name(self) -> str:
@@ -104,10 +104,11 @@ class EnvironmentPlugin:
                                 "'shell' = shell type, "
                                 "'arch' = CPU architecture, "
                                 "'cwd' = current working directory, "
-                                "'terminal' = terminal emulation, capabilities, and TTY detection,"
+                                "'terminal' = terminal emulation, capabilities, and TTY detection, "
                                 "'context' = token usage and GC thresholds, "
                                 "'session' = current session identifier and agent info, "
                                 "'datetime' = current date, time, timezone, and UTC offset, "
+                                "'network' = proxy settings, proxy authentication, SSL/TLS config, and no-proxy rules, "
                                 "'all' = everything (default)"
                             )
                         }
@@ -167,6 +168,9 @@ class EnvironmentPlugin:
 
         if aspect in ("datetime", "all"):
             result["datetime"] = self._get_datetime_info()
+
+        if aspect in ("network", "all"):
+            result["network"] = self._get_network_info()
 
         # For single aspect (not "all"), flatten the response
         if aspect != "all" and len(result) == 1:
@@ -478,6 +482,142 @@ class EnvironmentPlugin:
             "iso_local": now.isoformat(),
             "iso_utc": utc_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+
+    def _get_network_info(self) -> Dict[str, Any]:
+        """Get network connectivity configuration.
+
+        Reports proxy settings, proxy authentication method, SSL/TLS
+        verification config, and no-proxy rules by inspecting environment
+        variables. Sensitive parts of proxy URLs (userinfo) are masked.
+
+        Returns:
+            Dict with 'proxy', 'proxy_auth', 'ssl', and 'no_proxy' sub-dicts.
+        """
+        result: Dict[str, Any] = {}
+
+        # --- Proxy configuration ---
+        proxy_info: Dict[str, Any] = {
+            "http_proxy": self._mask_proxy_url(
+                os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            ),
+            "https_proxy": self._mask_proxy_url(
+                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            ),
+            "configured": False,
+        }
+        proxy_info["configured"] = bool(
+            proxy_info["http_proxy"] or proxy_info["https_proxy"]
+        )
+        result["proxy"] = proxy_info
+
+        # --- Proxy authentication ---
+        auth_info: Dict[str, Any] = {
+            "type": "none",
+        }
+
+        kerberos_enabled = os.environ.get("JAATO_KERBEROS_PROXY", "").lower() in (
+            "true", "1", "yes",
+        )
+        if kerberos_enabled:
+            auth_info["type"] = "kerberos"
+            auth_info["kerberos_enabled"] = True
+        elif proxy_info["configured"]:
+            # Detect auth type from the raw proxy URL (before masking)
+            raw_url = (
+                os.environ.get("HTTPS_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy")
+                or ""
+            )
+            if self._proxy_url_has_userinfo(raw_url):
+                auth_info["type"] = "basic"
+
+        result["proxy_auth"] = auth_info
+
+        # --- SSL / TLS ---
+        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")
+        if ssl_verify_raw is not None:
+            ssl_verify = ssl_verify_raw.lower() not in ("false", "0", "no")
+        else:
+            ssl_verify = True  # default
+
+        ssl_info: Dict[str, Any] = {
+            "verify": ssl_verify,
+        }
+
+        # Custom CA bundle paths recognised by common HTTP libraries
+        for env_var in ("SSL_CERT_FILE", "SSL_CERT_DIR",
+                        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            val = os.environ.get(env_var)
+            if val:
+                ssl_info[env_var.lower()] = val
+
+        result["ssl"] = ssl_info
+
+        # --- No-proxy rules ---
+        no_proxy_info: Dict[str, Any] = {}
+
+        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+        if no_proxy:
+            no_proxy_info["no_proxy"] = no_proxy
+
+        jaato_no_proxy = os.environ.get("JAATO_NO_PROXY")
+        if jaato_no_proxy:
+            no_proxy_info["jaato_no_proxy"] = jaato_no_proxy
+
+        result["no_proxy"] = no_proxy_info if no_proxy_info else None
+
+        return result
+
+    @staticmethod
+    def _mask_proxy_url(url: Optional[str]) -> Optional[str]:
+        """Mask userinfo (credentials) in a proxy URL.
+
+        Replaces ``user:password@`` with ``***:***@`` so that the proxy host
+        and port remain visible without leaking secrets.
+
+        Args:
+            url: Raw proxy URL, or None.
+
+        Returns:
+            Masked URL string, or None if input was None/empty.
+        """
+        if not url:
+            return None
+        try:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            if parsed.username or parsed.password:
+                # Rebuild netloc with masked credentials
+                masked_netloc = "***:***@"
+                if parsed.hostname:
+                    masked_netloc += parsed.hostname
+                if parsed.port:
+                    masked_netloc += f":{parsed.port}"
+                return urlunparse(parsed._replace(netloc=masked_netloc))
+        except Exception:
+            pass
+        return url
+
+    @staticmethod
+    def _proxy_url_has_userinfo(url: str) -> bool:
+        """Check whether a proxy URL contains embedded credentials.
+
+        Args:
+            url: Raw proxy URL string.
+
+        Returns:
+            True if the URL contains a username (and optionally password).
+        """
+        if not url:
+            return False
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return bool(parsed.username)
+        except Exception:
+            return False
 
     # ==================== Required Protocol Methods ====================
 

@@ -657,6 +657,300 @@ class TestEnvironmentPluginDatetimeInfo:
         assert "utc_offset" in result["datetime"]
 
 
+class TestEnvironmentPluginNetworkInfo:
+    """Tests for network connectivity information."""
+
+    def test_network_aspect_no_proxy(self, monkeypatch):
+        """Test network info when no proxy is configured."""
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("JAATO_NO_PROXY", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+        monkeypatch.delenv("JAATO_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is False
+        assert result["proxy"]["http_proxy"] is None
+        assert result["proxy"]["https_proxy"] is None
+        assert result["proxy_auth"]["type"] == "none"
+        assert result["ssl"]["verify"] is True
+        assert result["no_proxy"] is None
+
+    def test_network_aspect_http_proxy(self, monkeypatch):
+        """Test network info with HTTP proxy configured."""
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.com:8080")
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is True
+        assert result["proxy"]["http_proxy"] == "http://proxy.corp.com:8080"
+
+    def test_network_aspect_https_proxy(self, monkeypatch):
+        """Test network info with HTTPS proxy configured."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://secure-proxy.corp.com:3128")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is True
+        assert result["proxy"]["https_proxy"] == "http://secure-proxy.corp.com:3128"
+
+    def test_network_aspect_proxy_credentials_masked(self, monkeypatch):
+        """Test that proxy URLs with credentials are masked."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://user:s3cret@proxy.corp.com:8080")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is True
+        # Credentials must be masked
+        assert "s3cret" not in result["proxy"]["https_proxy"]
+        assert "user" not in result["proxy"]["https_proxy"]
+        assert "***:***@" in result["proxy"]["https_proxy"]
+        # Host and port must remain visible
+        assert "proxy.corp.com" in result["proxy"]["https_proxy"]
+        assert "8080" in result["proxy"]["https_proxy"]
+
+    def test_network_aspect_basic_auth_detected(self, monkeypatch):
+        """Test that basic auth is detected from proxy URL with credentials."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.corp.com:8080")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy_auth"]["type"] == "basic"
+
+    def test_network_aspect_kerberos_auth(self, monkeypatch):
+        """Test Kerberos proxy authentication detection."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.com:8080")
+        monkeypatch.setenv("JAATO_KERBEROS_PROXY", "true")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy_auth"]["type"] == "kerberos"
+        assert result["proxy_auth"]["kerberos_enabled"] is True
+
+    def test_network_aspect_kerberos_overrides_basic(self, monkeypatch):
+        """Test that Kerberos takes precedence over URL-embedded credentials."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.corp.com:8080")
+        monkeypatch.setenv("JAATO_KERBEROS_PROXY", "true")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        # Kerberos takes precedence
+        assert result["proxy_auth"]["type"] == "kerberos"
+
+    def test_network_aspect_ssl_verify_disabled(self, monkeypatch):
+        """Test SSL verification disabled via JAATO_SSL_VERIFY."""
+        monkeypatch.setenv("JAATO_SSL_VERIFY", "false")
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["ssl"]["verify"] is False
+
+    def test_network_aspect_ssl_verify_enabled(self, monkeypatch):
+        """Test SSL verification enabled explicitly via JAATO_SSL_VERIFY."""
+        monkeypatch.setenv("JAATO_SSL_VERIFY", "true")
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["ssl"]["verify"] is True
+
+    def test_network_aspect_ssl_verify_default(self, monkeypatch):
+        """Test SSL verification defaults to True when env var is unset."""
+        monkeypatch.delenv("JAATO_SSL_VERIFY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["ssl"]["verify"] is True
+
+    def test_network_aspect_custom_ca_bundle(self, monkeypatch):
+        """Test custom CA bundle paths are reported."""
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/custom-ca.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/ssl/custom-ca.pem")
+        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("JAATO_SSL_VERIFY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["ssl"]["ssl_cert_file"] == "/etc/ssl/custom-ca.pem"
+        assert result["ssl"]["requests_ca_bundle"] == "/etc/ssl/custom-ca.pem"
+        assert "ssl_cert_dir" not in result["ssl"]
+        assert "curl_ca_bundle" not in result["ssl"]
+
+    def test_network_aspect_no_proxy_rules(self, monkeypatch):
+        """Test no-proxy rules are reported."""
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,.internal.corp")
+        monkeypatch.setenv("JAATO_NO_PROXY", "github.com,api.github.com")
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["no_proxy"]["no_proxy"] == "localhost,127.0.0.1,.internal.corp"
+        assert result["no_proxy"]["jaato_no_proxy"] == "github.com,api.github.com"
+
+    def test_network_aspect_no_proxy_empty(self, monkeypatch):
+        """Test no-proxy is None when no rules are configured."""
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("JAATO_NO_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["no_proxy"] is None
+
+    def test_network_aspect_lowercase_proxy_vars(self, monkeypatch):
+        """Test that lowercase proxy env vars are also detected."""
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.setenv("http_proxy", "http://lower-proxy.com:3128")
+        monkeypatch.setenv("https_proxy", "http://lower-proxy.com:3129")
+        monkeypatch.delenv("JAATO_KERBEROS_PROXY", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is True
+        assert result["proxy"]["http_proxy"] == "http://lower-proxy.com:3128"
+        assert result["proxy"]["https_proxy"] == "http://lower-proxy.com:3129"
+
+    def test_network_aspect_in_all(self, monkeypatch):
+        """Test that 'all' includes the network key."""
+        monkeypatch.delenv("HTTP_PROXY", raising=False)
+        monkeypatch.delenv("HTTPS_PROXY", raising=False)
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+
+        assert "network" in result
+        assert "proxy" in result["network"]
+        assert "ssl" in result["network"]
+
+    def test_network_in_aspect_enum(self):
+        """Test that 'network' is listed in the tool schema enum."""
+        plugin = EnvironmentPlugin()
+        schemas = plugin.get_tool_schemas()
+        aspect_enum = schemas[0].parameters["properties"]["aspect"]["enum"]
+        assert "network" in aspect_enum
+
+    def test_mask_proxy_url_no_credentials(self):
+        """Test masking a proxy URL without credentials (no change)."""
+        result = EnvironmentPlugin._mask_proxy_url("http://proxy.corp.com:8080")
+        assert result == "http://proxy.corp.com:8080"
+
+    def test_mask_proxy_url_with_credentials(self):
+        """Test masking a proxy URL with embedded credentials."""
+        result = EnvironmentPlugin._mask_proxy_url(
+            "http://admin:p%40ssw0rd@proxy.corp.com:8080"
+        )
+        assert "admin" not in result
+        assert "p%40ssw0rd" not in result
+        assert "***:***@" in result
+        assert "proxy.corp.com:8080" in result
+
+    def test_mask_proxy_url_none(self):
+        """Test masking None returns None."""
+        assert EnvironmentPlugin._mask_proxy_url(None) is None
+
+    def test_mask_proxy_url_empty(self):
+        """Test masking empty string returns None."""
+        assert EnvironmentPlugin._mask_proxy_url("") is None
+
+    def test_proxy_url_has_userinfo_true(self):
+        """Test userinfo detection on URL with credentials."""
+        assert EnvironmentPlugin._proxy_url_has_userinfo(
+            "http://user:pass@proxy.corp.com:8080"
+        ) is True
+
+    def test_proxy_url_has_userinfo_false(self):
+        """Test userinfo detection on URL without credentials."""
+        assert EnvironmentPlugin._proxy_url_has_userinfo(
+            "http://proxy.corp.com:8080"
+        ) is False
+
+    def test_proxy_url_has_userinfo_empty(self):
+        """Test userinfo detection on empty string."""
+        assert EnvironmentPlugin._proxy_url_has_userinfo("") is False
+
+    def test_network_aspect_full_corporate_setup(self, monkeypatch):
+        """Test a realistic corporate environment with proxy, Kerberos, and custom CA."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.com:8080")
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.com:8080")
+        monkeypatch.setenv("JAATO_KERBEROS_PROXY", "true")
+        monkeypatch.setenv("JAATO_SSL_VERIFY", "true")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/pki/tls/certs/corp-ca-bundle.crt")
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,.corp.com")
+        monkeypatch.setenv("JAATO_NO_PROXY", "github.com,api.github.com")
+        monkeypatch.delenv("http_proxy", raising=False)
+        monkeypatch.delenv("https_proxy", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "network"}))
+
+        assert result["proxy"]["configured"] is True
+        assert result["proxy"]["https_proxy"] == "http://proxy.corp.com:8080"
+        assert result["proxy"]["http_proxy"] == "http://proxy.corp.com:8080"
+        assert result["proxy_auth"]["type"] == "kerberos"
+        assert result["proxy_auth"]["kerberos_enabled"] is True
+        assert result["ssl"]["verify"] is True
+        assert result["ssl"]["requests_ca_bundle"] == "/etc/pki/tls/certs/corp-ca-bundle.crt"
+        assert result["no_proxy"]["no_proxy"] == "localhost,127.0.0.1,.corp.com"
+        assert result["no_proxy"]["jaato_no_proxy"] == "github.com,api.github.com"
+
+
 class TestEnvironmentPluginProtocol:
     """Tests for required protocol methods."""
 
