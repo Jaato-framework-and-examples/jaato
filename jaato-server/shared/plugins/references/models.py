@@ -85,6 +85,46 @@ class InjectionMode(Enum):
 
 
 @dataclass
+class EmbeddingMetadata:
+    """Embedding metadata for a reference source.
+
+    Links a reference to its row in the sidecar ``.npy`` matrix.
+    Produced by the ``gen-references`` agent when it calls the
+    ``compute_embedding`` tool during indexing.
+
+    Attributes:
+        index: Row position in the sidecar embedding matrix.
+        source_hash: SHA-256 hash of the content that was embedded.
+            Used for staleness detection and incremental re-indexing.
+    """
+    index: int
+    source_hash: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a dict."""
+        return {
+            "index": self.index,
+            "source_hash": self.source_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional['EmbeddingMetadata']:
+        """Create from a dict, or return None if data is absent/invalid.
+
+        Args:
+            data: Raw dict from JSON with ``index`` and ``source_hash`` keys,
+                or None.
+        """
+        if not data or not isinstance(data, dict):
+            return None
+        index = data.get("index")
+        source_hash = data.get("source_hash")
+        if index is None or source_hash is None:
+            return None
+        return cls(index=int(index), source_hash=str(source_hash))
+
+
+@dataclass
 class ReferenceSource:
     """Represents a reference source in the catalog.
 
@@ -117,6 +157,11 @@ class ReferenceSource:
     # Non-None values are relative paths to the subfolder (e.g., "templates/").
     # Only meaningful for LOCAL directory references.
     contents: ReferenceContents = field(default_factory=ReferenceContents)
+
+    # Embedding metadata linking this source to the sidecar matrix.
+    # None when the source has not been embedded (gen-references not run,
+    # or source was added after the last indexing pass).
+    embedding: Optional[EmbeddingMetadata] = None
 
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
@@ -230,6 +275,9 @@ class ReferenceSource:
         if self.contents.has_any():
             result["contents"] = self.contents.to_dict()
 
+        if self.embedding is not None:
+            result["embedding"] = self.embedding.to_dict()
+
         return result
 
     @classmethod
@@ -263,6 +311,7 @@ class ReferenceSource:
             fetch_hint=data.get("fetchHint"),
             tags=data.get("tags", []),
             contents=ReferenceContents.from_dict(data.get("contents")),
+            embedding=EmbeddingMetadata.from_dict(data.get("embedding")),
         )
 
 
