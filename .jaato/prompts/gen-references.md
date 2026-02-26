@@ -96,11 +96,12 @@ Optional parameters with defaults (`subpaths`, `ref`, `output`, etc.) do not nee
 - `selectReferences`, `listReferences` — the reference catalog does not exist yet; you are creating it. These tools query an empty or stale catalog and will return nothing useful. Calling them wastes turns and may confuse your workflow.
 - `listExtractedTemplates` — same reason: the template index is what you are building.
 
-**Tools that ARE useful** (use them for validation):
+**Tools that ARE useful** (use them for validation and embedding):
 - `listTemplateVariables` *(category: `code`, discoverable)* — reads a `.tpl`/`.tmpl` file and returns syntax + variables. Use it in Phase 2 for each template file.
 - `validateReference` *(category: `knowledge`, discoverable)* — validates a reference JSON file you just wrote. Use after every doc-ref and validation-ref write.
 - `validateTemplateIndex` *(category: `code`, discoverable)* — validates the template index JSON. Use in Phase 3.
 - `validateProfile` *(category: `coordination`, discoverable)* — validates a subagent profile JSON. Use in Phase 4.
+- `compute_embedding` *(category: `knowledge`, discoverable)* — computes a vector embedding for text or a file. Use in Phase 2 for each reference's entry-point file to populate the `embedding` property and build the sidecar matrix.
 
 **Tool discovery reminder:** The tools above are **discoverable** — they are not visible in your initial tool list. Before using them, you MUST call `list_tools()` to see available categories, then `get_tool_schemas(tools=["<tool_name>"])` to load each tool's schema. Do this early (e.g., at the start of Phase 2) so tools are available when needed. Do not skip validation steps because a tool "isn't available" — discover it first.
 
@@ -110,12 +111,13 @@ Optional parameters with defaults (`subpaths`, `ref`, `output`, etc.) do not nee
 
 ## Task
 
-Resolve the source (local or remote), then scan and produce five outputs:
+Resolve the source (local or remote), then scan and produce six outputs:
 1. **Reference JSON files** for each documentation folder → `{{output}}/`
 2. **Reference JSON files** for each validation folder → `{{output}}/`
 3. **Unified template index** for standalone template files → `{{templates_index}}`
 4. **Subagent profile JSON files** matching the knowledge base stages and scopes → `{{profiles_dir}}/`
-5. **Machine-readable summary** → `{{output}}/summary.json`
+5. **Embedding sidecar matrix** for semantic matching → `{{output}}/references.embeddings.npy`
+6. **Machine-readable summary** → `{{output}}/summary.json`
 
 If `{{dry_run}}` is true, produce only the summary (with `planned_writes`) and the human-readable report table — do not write any artifact files.
 
@@ -254,9 +256,11 @@ Before spawning subagents, subscribe to task events so you can track their progr
 4. Each subagent returns to the coordinator:
    - The list of reference IDs it generated
    - The template index entries it collected (template name → metadata)
+   - The embedding vectors it computed (list of `{index, source_id, vector}` objects), plus `embedding_model` and `embedding_dimensions`
    - Any warnings or skipped folders
 5. The **coordinator** (this agent) waits for all subagents to complete, then:
    - Merges template index entries from all subagents → proceeds to Phase 3
+   - Merges embedding vectors from all subagents, re-indexes sequentially → proceeds to Phase 3b
    - Merges reference ID lists from all subagents → proceeds to Phase 4
    - Merges warnings and skipped lists → proceeds to the final report
 
@@ -293,9 +297,15 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >     "validation": "validation/",
 >     "policies": null,
 >     "scripts": null
+>   },
+>   "embedding": {
+>     "index": 0,
+>     "source_hash": "sha256:..."
 >   }
 > }
 > ```
+>
+> **Embedding**: For each reference, call `compute_embedding(file=<entry-point-path>)` and compute `sha256sum` of the file. Assign sequential `index` values starting from 0. Accumulate embedding vectors and return them alongside reference IDs so the coordinator can assemble the sidecar matrix.
 >
 > For remote sources, add a `"source"` object:
 > ```json
@@ -366,7 +376,7 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >
 > Validate every reference JSON with `validateReference` *(category: `knowledge`, discoverable)*. Fix and rewrite if validation fails.
 >
-> Return: `{ "reference_ids": [...], "template_entries": {...}, "warnings": [...], "skipped": [...] }`
+> Return: `{ "reference_ids": [...], "template_entries": {...}, "embeddings": [{"index": 0, "source_id": "...", "vector": [...]}], "embedding_model": "...", "embedding_dimensions": 384, "warnings": [...], "skipped": [...] }`
 
 If parallelization is not warranted (even with `{{parallel}}` true), skip this step and proceed with sequential Phase 2.
 
@@ -380,8 +390,8 @@ You **must NOT**:
 - Decide mid-wait that parallelization was a mistake and switch to sequential processing. If subagents are already running, you cannot cancel them — they will keep writing files. Doing the same work yourself creates duplicates and race conditions on the output directory.
 
 You **must**:
-- Wait for every subagent to return its `{ "reference_ids", "template_entries", "warnings", "skipped" }` result.
-- Merge the results and proceed to Phase 3 (template index) → Phase 4 (profiles) → final report.
+- Wait for every subagent to return its `{ "reference_ids", "template_entries", "embeddings", "embedding_model", "embedding_dimensions", "warnings", "skipped" }` result.
+- Merge the results and proceed to Phase 3 (template index) → Phase 3b (embedding sidecar) → Phase 4 (profiles) → final report.
 
 **Skip Phase 2 entirely when subagents were spawned.** Phase 2 is the sequential fallback — it exists for when Phase 1.5 decides not to parallelize. The two paths are mutually exclusive: either subagents do the work (Phase 1.5) or you do it yourself (Phase 2), never both.
 
@@ -403,9 +413,14 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
 
    **Important**: This detection applies only to **immediate children** of the documentation folder being processed. A directory named `validation/` that was itself matched by a subpath pattern (e.g., `model/standards/validation/` matched by `model/standards/*`) is a **documentation folder in its own right**, not a validation subfolder. Only treat `validation/` as a typed subfolder when it appears **inside** another documentation folder (e.g., `modules/mod-code-001-.../validation/`).
 5. Write the reference JSON for that folder immediately. The JSON **must** include the `"contents"` property exactly as built in step 4 (an object with four keys, not an array or renamed field like `"subfolders"`)
-6. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON
-7. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
-8. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+6. **Compute embedding** — call `compute_embedding(file=<absolute-path-to-entry-point-file>)` to produce a vector for this reference. Also compute a SHA-256 hash of the entry-point file content (`sha256sum` or Python `hashlib`). Store the results in memory for the sidecar assembly step later:
+   - Assign the next sequential `embedding_index` (starting from 0)
+   - Record the `source_hash` (hex digest, prefixed with `sha256:`)
+   - Add the `"embedding"` property to the reference JSON: `{"index": <embedding_index>, "source_hash": "<hash>"}`
+   - Accumulate the embedding vector (from the tool response) in an ordered list for later sidecar write
+7. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON. Also compute its embedding (same steps as 6).
+8. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
+9. **Release the file content from working memory** — once the JSON is written you no longer need the source text
 
 #### Materializing remote content
 
@@ -439,6 +454,33 @@ cp -r "$repoRoot/<repo-relative-path>" "$KNOWLEDGE_DIR/<repo-relative-path>"
 
 ### Phase 3 — Write template index
 After all categories are processed (sequentially or via subagents), merge all collected template index entries and write the unified template index to `{{templates_index}}`. If subagents were used, combine the `template_entries` dicts returned by each subagent before writing.
+
+### Phase 3b — Assemble embedding sidecar
+After all references have been written and their embedding vectors collected, assemble the sidecar matrix file:
+
+1. **Collect all vectors** — gather the embedding vectors from Phase 2 processing (or from subagent results if parallel). Each vector is associated with the `embedding.index` assigned to its reference.
+2. **Build the matrix** — create a 2D float32 array of shape `(N, D)` where N is the total number of references with embeddings and D is the embedding dimensionality (returned by the `compute_embedding` tool). Vectors must be placed at the row matching their `embedding.index`.
+3. **Write the sidecar file** — save the matrix as a NumPy `.npy` file at `{{output}}/references.embeddings.npy`:
+   ```bash
+   python3 -c "
+   import numpy as np, json, sys
+   vectors = json.loads(sys.argv[1])  # list of [float, ...] in index order
+   matrix = np.array(vectors, dtype=np.float32)
+   np.save('{{output}}/references.embeddings.npy', matrix)
+   print(f'Wrote sidecar: {matrix.shape[0]} vectors, {matrix.shape[1]} dimensions')
+   " '<json-array-of-vectors>'
+   ```
+4. **Write top-level embedding metadata** — if using `merge_mode=single`, add these top-level fields to `references.json`:
+   ```json
+   {
+     "embedding_model": "<model name from compute_embedding response>",
+     "embedding_dimensions": <dimensions from compute_embedding response>,
+     "embedding_sidecar": "references.embeddings.npy"
+   }
+   ```
+   If using `merge_mode=separate`, write a standalone `{{output}}/embedding_config.json` with these fields, since separate JSON files don't have a shared top-level object.
+
+**Incremental re-indexing**: When updating an existing catalog (`force=true`), check each reference's existing `embedding.source_hash` against the current file hash. If they match, reuse the existing vector from the old sidecar (load it with `np.load()`) instead of calling `compute_embedding` again. Only re-embed references whose content has changed. This avoids redundant computation on large catalogs.
 
 ### Phase 4 — Generate profiles
 Use only the inventory and the full list of reference IDs collected during Phase 2 — either directly or merged from subagent results — to generate subagent profiles. Do not use file contents.
@@ -493,6 +535,10 @@ A folder is a "documentation folder" if it contains at least one of these entry-
        "validation": "validation/",
        "policies": null,
        "scripts": null
+     },
+     "embedding": {
+       "index": 0,
+       "source_hash": "sha256:a1b2c3d4e5f6..."
      }
    }
    ```
@@ -513,6 +559,10 @@ A folder is a "documentation folder" if it contains at least one of these entry-
        "validation": "validation/",
        "policies": null,
        "scripts": null
+     },
+     "embedding": {
+       "index": 0,
+       "source_hash": "sha256:a1b2c3d4e5f6..."
      },
      "source": {
        "type": "<git|archive>",
@@ -551,6 +601,10 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 
      Correct: `"contents": {"templates": "templates/", "validation": "validation/", "policies": null, "scripts": null}`
      Wrong:   `"subfolders": ["templates", "validation"]` — wrong field name, wrong type (array instead of object), missing null keys
+
+   - **embedding** (**required**): Object linking this reference to its row in the sidecar embedding matrix. Produced by calling `compute_embedding` on the entry-point file during Phase 2:
+     - `"index"`: Sequential integer (0-based) — the row position in the `references.embeddings.npy` sidecar matrix. Assign in the order references are processed.
+     - `"source_hash"`: SHA-256 hex digest of the file content that was embedded, prefixed with `sha256:` (e.g., `"sha256:a1b2c3d4..."`). Used for staleness detection and incremental re-indexing — if the hash hasn't changed since the last run, the existing embedding can be reused.
 
 4. **Save** as `{{output}}/<id>.json` (or add to single catalog if `{{merge_mode}}` is `"single"`).
 
@@ -861,7 +915,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
     - `planned` — dry run, would be written
 
     Follow the table with a one-line summary count per type, e.g.:
-    > **Totals**: 10 doc-refs, 6 validation-refs, 19 templates indexed, 9 profiles (5 created, 4 preserved)
+    > **Totals**: 10 doc-refs, 6 validation-refs, 19 templates indexed, 16 embeddings, 9 profiles (5 created, 4 preserved)
 
     **b) Machine-readable summary** (`{{output}}/summary.json` — written unless `{{dry_run}}` is true, in which case it is returned inline):
 
@@ -882,9 +936,16 @@ A folder is a "documentation folder" if it contains at least one of these entry-
         "doc_refs": 0,
         "validation_refs": 0,
         "templates": 0,
+        "embeddings": 0,
         "profiles_created": 0,
         "profiles_preserved": 0,
         "skipped": 0
+      },
+      "embedding": {
+        "model": "<embedding model name>",
+        "dimensions": 384,
+        "sidecar": "references.embeddings.npy",
+        "total_vectors": 0
       },
       "planned_writes": ["<only present when dry_run=true>"],
       "timestamp": "<ISO 8601>"
@@ -1018,6 +1079,9 @@ modules/
 - `mod-code-001-circuit-breaker-java-resilience4j-validation.json` (validation subfolder)
 - `mod-code-015-hexagonal-base-java-spring.json` (documentation, contents: templates + validation)
 - `mod-code-015-hexagonal-base-java-spring-validation.json` (validation subfolder)
+- `references.embeddings.npy` (sidecar matrix: 13 vectors × 384 dimensions)
+
+Each reference JSON includes an `embedding` property, e.g., `{"index": 0, "source_hash": "sha256:a1b2..."}`, linking it to its row in the sidecar matrix.
 
 **Generated template index** at `{{templates_index}}`:
 ```json
@@ -1064,8 +1128,9 @@ Follow the processing strategy strictly:
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
 3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel, then **wait for all to complete** (do NOT start Phase 2). Otherwise skip to Phase 2.
-4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → write doc-ref JSON → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → call `compute_embedding` on it → compute SHA-256 hash → write doc-ref JSON (including `embedding` property) → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → compute embedding for validation ref → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
 5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`** *(category: `code`, discoverable)*. Fix and rewrite if validation fails.
-6. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
-7. **Report**: Produce the final summary table and write `summary.json`.
-8. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
+6. **Phase 3b**: Assemble the embedding sidecar — collect all embedding vectors (from Phase 2 or subagent results), build the float32 matrix in index order, write `{{output}}/references.embeddings.npy`, and write embedding metadata (model name, dimensions, sidecar filename).
+7. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
+8. **Report**: Produce the final summary table and write `summary.json`.
+9. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
