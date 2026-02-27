@@ -13,7 +13,7 @@ Progress is reported through configurable transport protocols
 import os
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.todo.models import (
@@ -919,7 +919,7 @@ class TodoPlugin:
 
             # Mark plan as started (user approved)
             plan.started = True
-            plan.started_at = datetime.utcnow().isoformat() + "Z"
+            plan.started_at = datetime.now(timezone.utc).isoformat() + "Z"
 
             # Save to storage
             if self._storage:

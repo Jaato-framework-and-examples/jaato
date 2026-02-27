@@ -22,7 +22,7 @@ import sys
 import pathlib
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 
 # Add project root to path
@@ -90,7 +90,7 @@ class Session:
     name: str
     server: JaatoServer
     created_at: str
-    last_activity: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    last_activity: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
@@ -474,7 +474,7 @@ class SessionManager:
                         "agent_id": event.agent_id,
                         "pending_tool_calls": [],
                         "user_prompt": "",  # Not available at this point
-                        "started_at": datetime.utcnow().isoformat(),
+                        "started_at": datetime.now(timezone.utc).isoformat(),
                     }
                     session.is_dirty = True
                     logger.debug(f"Started turn tracking for session {session.session_id}")
@@ -1333,7 +1333,7 @@ class SessionManager:
                 session_id=session.session_id,
                 history=history,
                 created_at=datetime.fromisoformat(session.created_at),
-                updated_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
                 description=session.description or session.name,
                 turn_count=len(history) // 2,  # Approximate
                 turn_accounting=turn_accounting,
@@ -1864,7 +1864,7 @@ class SessionManager:
                     "agent_id": agent_id,
                     "pending_tool_calls": [],
                     "user_prompt": user_prompt,
-                    "started_at": datetime.utcnow().isoformat(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
                 }
                 session.is_dirty = True
                 logger.debug(f"Started turn tracking for session {session_id}, agent {agent_id}")
@@ -1943,7 +1943,7 @@ class SessionManager:
             return
 
         # Update activity timestamp
-        session.last_activity = datetime.utcnow().isoformat()
+        session.last_activity = datetime.now(timezone.utc).isoformat()
         session.is_dirty = True
 
         # Route to session's server

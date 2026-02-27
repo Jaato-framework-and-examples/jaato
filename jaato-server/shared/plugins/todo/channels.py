@@ -12,7 +12,7 @@ import os
 import sys
 import traceback
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -431,7 +431,7 @@ class FileReporter(TodoReporter):
         progress_file = plan_dir / "progress.json"
         progress = plan.get_progress()
         progress["status"] = plan.status.value
-        progress["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat() + "Z"
         with open(progress_file, 'w', encoding='utf-8') as f:
             json.dump(progress, f, indent=2)
 

@@ -13,7 +13,7 @@ import json
 import time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -257,7 +257,7 @@ class WebhookSelectionChannel(SelectionChannel):
 
         request = SelectionRequest(
             request_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             available_sources=available_sources,
             context=context,
         )
@@ -383,7 +383,7 @@ class FileSelectionChannel(SelectionChannel):
 
         request = SelectionRequest(
             request_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             available_sources=available_sources,
             context=context,
         )
@@ -434,7 +434,7 @@ class FileSelectionChannel(SelectionChannel):
 
         with open(result_file, 'w', encoding='utf-8') as f:
             json.dump({
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                 "message": message,
             }, f, indent=2)
 

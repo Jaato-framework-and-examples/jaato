@@ -34,7 +34,7 @@ import struct
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
@@ -390,7 +390,7 @@ class JaatoIPCServer:
                 writer=writer,
                 client_id=client_id,
                 session_id=None,
-                connected_at=datetime.utcnow().isoformat(),
+                connected_at=datetime.now(timezone.utc).isoformat(),
             )
             self._clients[client_id] = client
             self._event_queues[client_id] = asyncio.Queue()

@@ -5,7 +5,7 @@ Defines the core data structures for plans, steps, and progress tracking.
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -232,7 +232,7 @@ class Subscription:
     action_target: Optional[str] = None  # step_id to unblock, callback name, etc.
 
     # Lifecycle
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat() + "Z")
     expires_after: Optional[int] = None   # Auto-remove after N matches (None = persistent)
     match_count: int = 0
 
@@ -300,7 +300,7 @@ class TaskEvent:
         return cls(
             event_id=str(uuid.uuid4()),
             event_type=event_type,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             source_agent=agent_id,
             source_plan_id=plan.plan_id,
             source_plan_title=plan.title,
@@ -336,7 +336,7 @@ class TaskEvent:
         return cls(
             event_id=data.get("event_id", str(uuid.uuid4())),
             event_type=event_type,
-            timestamp=data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
             source_agent=data.get("source_agent", ""),
             source_plan_id=data.get("source_plan_id", ""),
             source_plan_title=data.get("source_plan_title", ""),
@@ -487,7 +487,7 @@ class TodoStep:
     def start(self) -> None:
         """Mark step as in progress."""
         self.status = StepStatus.IN_PROGRESS
-        self.started_at = datetime.utcnow().isoformat() + "Z"
+        self.started_at = datetime.now(timezone.utc).isoformat() + "Z"
 
     def complete(
         self,
@@ -501,7 +501,7 @@ class TodoStep:
             output: Optional structured output to pass to dependent steps.
         """
         self.status = StepStatus.COMPLETED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if result:
             self.result = result
         if output is not None:
@@ -510,14 +510,14 @@ class TodoStep:
     def fail(self, error: Optional[str] = None) -> None:
         """Mark step as failed."""
         self.status = StepStatus.FAILED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if error:
             self.error = error
 
     def skip(self, reason: Optional[str] = None) -> None:
         """Mark step as skipped."""
         self.status = StepStatus.SKIPPED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if reason:
             self.result = reason
 
@@ -610,7 +610,7 @@ class TodoPlan:
         ]
         return cls(
             plan_id=str(uuid.uuid4()),
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(timezone.utc).isoformat() + "Z",
             title=title,
             steps=steps,
             context=context or {},
@@ -765,21 +765,21 @@ class TodoPlan:
     def complete_plan(self, summary: Optional[str] = None) -> None:
         """Mark the plan as completed."""
         self.status = PlanStatus.COMPLETED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if summary:
             self.summary = summary
 
     def fail_plan(self, summary: Optional[str] = None) -> None:
         """Mark the plan as failed."""
         self.status = PlanStatus.FAILED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if summary:
             self.summary = summary
 
     def cancel_plan(self, summary: Optional[str] = None) -> None:
         """Mark the plan as cancelled."""
         self.status = PlanStatus.CANCELLED
-        self.completed_at = datetime.utcnow().isoformat() + "Z"
+        self.completed_at = datetime.now(timezone.utc).isoformat() + "Z"
         if summary:
             self.summary = summary
 
@@ -815,7 +815,7 @@ class TodoPlan:
 
         return cls(
             plan_id=data.get("plan_id", str(uuid.uuid4())),
-            created_at=data.get("created_at", datetime.utcnow().isoformat() + "Z"),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat() + "Z"),
             title=data.get("title", ""),
             steps=steps,
             current_step=data.get("current_step"),
@@ -854,7 +854,7 @@ class ProgressEvent:
         """Create a new progress event."""
         return cls(
             event_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             event_type=event_type,
             plan_id=plan.plan_id,
             plan_title=plan.title,

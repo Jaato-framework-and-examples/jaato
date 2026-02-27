@@ -14,18 +14,18 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Set
 import threading
 
 try:
     import websockets
-    from websockets.server import WebSocketServerProtocol
+    from websockets import ServerConnection
     from websockets.exceptions import ConnectionClosed
     HAS_WEBSOCKETS = True
 except ImportError:
     HAS_WEBSOCKETS = False
-    WebSocketServerProtocol = Any
+    ServerConnection = Any
 
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context
@@ -68,7 +68,7 @@ def _get_server_version() -> str:
 @dataclass
 class ClientConnection:
     """Represents a connected client."""
-    websocket: WebSocketServerProtocol
+    websocket: ServerConnection
     client_id: str
     connected_at: str
     subscriptions: Set[str]  # Event types to receive (empty = all)
@@ -268,7 +268,7 @@ class JaatoWSServer:
                 del self._clients[client_id]
                 logger.info(f"Client disconnected: {client_id}")
 
-    async def _handle_client(self, websocket: WebSocketServerProtocol) -> None:
+    async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single client connection."""
         # Assign client ID
         async with self._lock:
@@ -278,7 +278,7 @@ class JaatoWSServer:
             client = ClientConnection(
                 websocket=websocket,
                 client_id=client_id,
-                connected_at=datetime.utcnow().isoformat(),
+                connected_at=datetime.now(timezone.utc).isoformat(),
                 subscriptions=set(),
             )
             self._clients[client_id] = client

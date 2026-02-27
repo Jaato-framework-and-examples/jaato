@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -277,7 +277,7 @@ class WorkspaceManager:
             name=name,
             path=str(path),
             configured=False,
-            last_accessed=datetime.utcnow().isoformat(),
+            last_accessed=datetime.now(timezone.utc).isoformat(),
         )
 
         self._workspaces[name] = ws_info
@@ -305,7 +305,7 @@ class WorkspaceManager:
 
         # Re-analyze to get fresh state
         ws_info = self._analyze_workspace(path)
-        ws_info.last_accessed = datetime.utcnow().isoformat()
+        ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
 
         self._workspaces[name] = ws_info
         self._selected_workspace = name
@@ -462,7 +462,7 @@ class WorkspaceManager:
         # Re-analyze and update cache
         ws_path = self.workspace_root / target
         ws_info = self._analyze_workspace(ws_path)
-        ws_info.last_accessed = datetime.utcnow().isoformat()
+        ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
         self._workspaces[target] = ws_info
         self._save_registry()
 
