@@ -636,6 +636,21 @@ class PluginRegistry:
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' wired with registry")
         elif config and config != self._configs.get(name):
+            # Snapshot authorized/denied paths owned by this plugin so that
+            # shutdown() + initialize() doesn't lose in-memory-only state
+            # (e.g. sandbox paths added by a parent session that aren't in
+            # the subagent's session-tier config file).
+            prev_authorized = {
+                path: (src, access)
+                for path, (src, access) in self._authorized_external_paths.items()
+                if src == name
+            }
+            prev_denied = {
+                path: src
+                for path, src in self._denied_external_paths.items()
+                if src == name
+            }
+
             # Re-initialize with new config
             plugin.shutdown()
             plugin.initialize(config)
@@ -645,6 +660,18 @@ class PluginRegistry:
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' re-wired with registry")
+
+            # Restore any authorized/denied paths that were lost during
+            # re-initialization (the plugin's config reload may not have
+            # all tiers — e.g. subagent has no parent's session config).
+            for path, (src, access) in prev_authorized.items():
+                if path not in self._authorized_external_paths:
+                    self._authorized_external_paths[path] = (src, access)
+                    _trace(f" Restored authorized path after re-init: {path}")
+            for path, src in prev_denied.items():
+                if path not in self._denied_external_paths:
+                    self._denied_external_paths[path] = src
+                    _trace(f" Restored denied path after re-init: {path}")
 
         return True
 
