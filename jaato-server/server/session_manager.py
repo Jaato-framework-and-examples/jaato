@@ -1991,6 +1991,10 @@ class SessionManager:
                     workspace_path=ctx_workspace,
                     session_env=ctx_session_env,
                 )
+                # Ensure provider traces from the main agent go to the
+                # base provider_trace.log (not a subagent-specific file).
+                from jaato_sdk.trace import set_trace_agent_context
+                set_trace_agent_context("main")
                 try:
                     server.send_message(
                         event.text,
