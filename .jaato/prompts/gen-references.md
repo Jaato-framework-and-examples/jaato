@@ -256,11 +256,11 @@ Before spawning subagents, subscribe to task events so you can track their progr
 4. Each subagent returns to the coordinator:
    - The list of reference IDs it generated
    - The template index entries it collected (template name → metadata)
-   - The embedding vectors it computed (list of `{index, source_id, vector}` objects), plus `embedding_model` and `embedding_dimensions`
+   - The path to its **embeddings file on disk** (see below), plus `embedding_model` and `embedding_dimensions`
    - Any warnings or skipped folders
 5. The **coordinator** (this agent) waits for all subagents to complete, then:
    - Merges template index entries from all subagents → proceeds to Phase 3
-   - Merges embedding vectors from all subagents, re-indexes sequentially → proceeds to Phase 3b
+   - Reads embedding files from disk, re-indexes sequentially → proceeds to Phase 3b
    - Merges reference ID lists from all subagents → proceeds to Phase 4
    - Merges warnings and skipped lists → proceeds to the final report
 
@@ -305,7 +305,18 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 > }
 > ```
 >
-> **Embedding**: For each reference, call `compute_embedding(file=<entry-point-path>)` and compute `sha256sum` of the file. Assign sequential `index` values starting from 0. Accumulate embedding vectors and return them alongside reference IDs so the coordinator can assemble the sidecar matrix.
+> **Embedding**: For each reference, call `compute_embedding(file=<entry-point-path>)` and compute `sha256sum` of the file. Assign sequential `index` values starting from 0. **Write each embedding vector to disk immediately** — do NOT accumulate vectors in your context window (they are large and will be lost if GC runs). Write a JSON file at `<output>/.embeddings_<your-agent-id>.json` containing the vectors:
+> ```json
+> {
+>   "embedding_model": "<model name>",
+>   "embedding_dimensions": 384,
+>   "vectors": [
+>     {"index": 0, "source_id": "<ref-id>", "vector": [0.1, 0.2, ...]},
+>     {"index": 1, "source_id": "<ref-id>", "vector": [0.3, 0.4, ...]}
+>   ]
+> }
+> ```
+> Append each vector to this file as you process references (read → append → rewrite, or write once at the end of your batch). The coordinator reads these files to assemble the final sidecar matrix.
 >
 > For remote sources, add a `"source"` object:
 > ```json
@@ -376,7 +387,7 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >
 > Validate every reference JSON with `validateReference` *(category: `knowledge`, discoverable)*. Fix and rewrite if validation fails.
 >
-> Return: `{ "reference_ids": [...], "template_entries": {...}, "embeddings": [{"index": 0, "source_id": "...", "vector": [...]}], "embedding_model": "...", "embedding_dimensions": 384, "warnings": [...], "skipped": [...] }`
+> Return: `{ "reference_ids": [...], "template_entries": {...}, "embeddings_file": "<output>/.embeddings_<agent-id>.json", "embedding_model": "...", "embedding_dimensions": 384, "warnings": [...], "skipped": [...] }`
 
 If parallelization is not warranted (even with `{{parallel}}` true), skip this step and proceed with sequential Phase 2.
 
@@ -390,8 +401,8 @@ You **must NOT**:
 - Decide mid-wait that parallelization was a mistake and switch to sequential processing. If subagents are already running, you cannot cancel them — they will keep writing files. Doing the same work yourself creates duplicates and race conditions on the output directory.
 
 You **must**:
-- Wait for every subagent to return its `{ "reference_ids", "template_entries", "embeddings", "embedding_model", "embedding_dimensions", "warnings", "skipped" }` result.
-- Merge the results and proceed to Phase 3 (template index) → Phase 3b (embedding sidecar) → Phase 4 (profiles) → final report.
+- Wait for every subagent to return its `{ "reference_ids", "template_entries", "embeddings_file", "embedding_model", "embedding_dimensions", "warnings", "skipped" }` result.
+- Merge the results and proceed to Phase 3 (template index) → Phase 3b (embedding sidecar, reading vectors from the `embeddings_file` paths) → Phase 4 (profiles) → final report.
 
 **Skip Phase 2 entirely when subagents were spawned.** Phase 2 is the sequential fallback — it exists for when Phase 1.5 decides not to parallelize. The two paths are mutually exclusive: either subagents do the work (Phase 1.5) or you do it yourself (Phase 2), never both.
 
@@ -413,11 +424,11 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
 
    **Important**: This detection applies only to **immediate children** of the documentation folder being processed. A directory named `validation/` that was itself matched by a subpath pattern (e.g., `model/standards/validation/` matched by `model/standards/*`) is a **documentation folder in its own right**, not a validation subfolder. Only treat `validation/` as a typed subfolder when it appears **inside** another documentation folder (e.g., `modules/mod-code-001-.../validation/`).
 5. Write the reference JSON for that folder immediately. The JSON **must** include the `"contents"` property exactly as built in step 4 (an object with four keys, not an array or renamed field like `"subfolders"`)
-6. **Compute embedding** — call `compute_embedding(file=<absolute-path-to-entry-point-file>)` to produce a vector for this reference. Also compute a SHA-256 hash of the entry-point file content (`sha256sum` or Python `hashlib`). Store the results in memory for the sidecar assembly step later:
+6. **Compute embedding** — call `compute_embedding(file=<absolute-path-to-entry-point-file>)` to produce a vector for this reference. Also compute a SHA-256 hash of the entry-point file content (`sha256sum` or Python `hashlib`):
    - Assign the next sequential `embedding_index` (starting from 0)
    - Record the `source_hash` (hex digest, prefixed with `sha256:`)
    - Add the `"embedding"` property to the reference JSON: `{"index": <embedding_index>, "source_hash": "<hash>"}`
-   - Accumulate the embedding vector (from the tool response) in an ordered list for later sidecar write
+   - **Persist the embedding vector to disk immediately** — do NOT hold vectors in your context window (they are large, ~384 floats each, and will be lost if GC runs). Append each vector to a JSON file at `{{output}}/.embeddings_main.json` with the structure: `{"embedding_model": "...", "embedding_dimensions": N, "vectors": [{"index": 0, "source_id": "...", "vector": [...]}, ...]}`. Phase 3b reads this file to assemble the sidecar matrix.
 7. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON. Also compute its embedding (same steps as 6).
 8. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
 9. **Release the file content from working memory** — once the JSON is written you no longer need the source text
@@ -458,17 +469,26 @@ After all categories are processed (sequentially or via subagents), merge all co
 ### Phase 3b — Assemble embedding sidecar
 After all references have been written and their embedding vectors collected, assemble the sidecar matrix file:
 
-1. **Collect all vectors** — gather the embedding vectors from Phase 2 processing (or from subagent results if parallel). Each vector is associated with the `embedding.index` assigned to its reference.
+1. **Collect all vectors** — read the embedding vectors from the JSON files persisted to disk during Phase 2. In parallel mode, each subagent wrote its vectors to `{{output}}/.embeddings_<agent-id>.json`; in sequential mode, vectors are in `{{output}}/.embeddings_main.json`. Load and merge all files. Each vector is associated with the `embedding.index` assigned to its reference.
 2. **Build the matrix** — create a 2D float32 array of shape `(N, D)` where N is the total number of references with embeddings and D is the embedding dimensionality (returned by the `compute_embedding` tool). Vectors must be placed at the row matching their `embedding.index`.
 3. **Write the sidecar file** — save the matrix as a NumPy `.npy` file at `{{output}}/references.embeddings.npy`:
    ```bash
    python3 -c "
-   import numpy as np, json, sys
-   vectors = json.loads(sys.argv[1])  # list of [float, ...] in index order
-   matrix = np.array(vectors, dtype=np.float32)
-   np.save('{{output}}/references.embeddings.npy', matrix)
+   import numpy as np, json, glob, sys
+   out = sys.argv[1]
+   all_vectors = {}
+   for path in glob.glob(out + '/.embeddings_*.json'):
+       data = json.loads(open(path).read())
+       for entry in data['vectors']:
+           all_vectors[int(entry['index'])] = entry['vector']
+   N = max(all_vectors.keys()) + 1 if all_vectors else 0
+   D = len(next(iter(all_vectors.values()))) if all_vectors else 0
+   matrix = np.zeros((N, D), dtype=np.float32)
+   for idx, vec in all_vectors.items():
+       matrix[idx] = vec
+   np.save(out + '/references.embeddings.npy', matrix)
    print(f'Wrote sidecar: {matrix.shape[0]} vectors, {matrix.shape[1]} dimensions')
-   " '<json-array-of-vectors>'
+   " '{{output}}'
    ```
 4. **Write top-level embedding metadata** — if using `merge_mode=single`, add these top-level fields to `references.json`:
    ```json
