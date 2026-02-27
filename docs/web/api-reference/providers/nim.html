@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NVIDIA NIM Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html" class="active">NVIDIA NIM</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>NVIDIA NIM Provider</h1>
+          <p class="lead">
+            Access AI models through NVIDIA NIM (Inference Microservices), supporting
+            both NVIDIA's hosted API at build.nvidia.com and self-hosted NIM containers.
+            Uses the OpenAI-compatible chat completions API.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>nim</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.nim</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>API key (hosted) or none (self-hosted)</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>NIM Catalog</strong> &mdash; Access Llama, DeepSeek-R1, Nemotron, Mistral, and more</li>
+            <li><strong>Self-hosted support</strong> &mdash; Run NIM containers locally with no API key</li>
+            <li><strong>Reasoning models</strong> &mdash; DeepSeek-R1 with chain-of-thought via <code>reasoning_content</code></li>
+            <li><strong>Function calling</strong> &mdash; Full tool use support via OpenAI-compatible API</li>
+            <li><strong>Streaming</strong> &mdash; Real-time streaming with cancellation support</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">OpenAI Compatibility</div>
+            NIM exposes an OpenAI-compatible chat completions API. The provider
+            uses the <code>openai</code> Python SDK as its transport layer, making
+            it compatible with any model in the NIM catalog.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="nim")
+client.connect(
+    project=None,
+    location=None,
+    model="meta/llama-3.3-70b-instruct"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from NIM!",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Self-hosted NIM container</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("nim")
+provider.initialize(ProviderConfig(
+    extra={
+        'base_url': 'http://localhost:8000/v1',
+    }
+))
+# No API key needed for self-hosted
+provider.connect("meta/llama-3.1-8b-instruct")
+
+response = provider.send_message("Hello!")
+print(response.text)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Available Models</h2>
+          <p>
+            NIM hosts a large catalog of models. Below are some popular options.
+            See <a href="https://build.nvidia.com/explore/discover" target="_blank">build.nvidia.com</a>
+            for the full catalog.
+          </p>
+
+          <h3>Popular Models</h3>
+          <table>
+            <thead>
+              <tr><th>Model</th><th>Reasoning</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>meta/llama-3.3-70b-instruct</strong></td>
+                <td>No</td>
+                <td>Strong general-purpose reasoning</td>
+              </tr>
+              <tr>
+                <td><strong>meta/llama-3.1-405b-instruct</strong></td>
+                <td>No</td>
+                <td>Largest open model</td>
+              </tr>
+              <tr>
+                <td><strong>meta/llama-3.1-70b-instruct</strong></td>
+                <td>No</td>
+                <td>Good balance of speed and quality</td>
+              </tr>
+              <tr>
+                <td><strong>meta/llama-3.1-8b-instruct</strong></td>
+                <td>No</td>
+                <td>Fast, lightweight</td>
+              </tr>
+              <tr>
+                <td><strong>deepseek/deepseek-r1</strong></td>
+                <td>Yes</td>
+                <td>Chain-of-thought reasoning</td>
+              </tr>
+              <tr>
+                <td><strong>nvidia/llama-3.1-nemotron-70b-instruct</strong></td>
+                <td>No</td>
+                <td>NVIDIA-tuned Llama</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Model Naming</div>
+            NIM models use the format <code>org/model-name</code>. When using
+            with jaato, prefix with <code>nim/</code> for provider routing:
+            <code>nim/meta/llama-3.3-70b-instruct</code>.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Connect to a model</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Llama 3.3 70B
+provider.connect("meta/llama-3.3-70b-instruct")
+
+# DeepSeek-R1 (reasoning)
+provider.connect("deepseek/deepseek-r1")
+
+# Nemotron (NVIDIA-tuned)
+provider.connect("nvidia/llama-3.1-nemotron-70b-instruct")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Reasoning model output</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.connect("deepseek/deepseek-r1")
+provider.create_session(
+    system_instruction="You are helpful.",
+    tools=[]
+)
+
+response = provider.send_message(
+    "What is 25 * 37?"
+)
+
+if response.thinking:
+    print("=== Reasoning ===")
+    print(response.thinking)
+    print()
+
+print("=== Answer ===")
+print(response.text)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+          <p>
+            NVIDIA's hosted NIM API requires an API key (<code>nvapi-...</code>).
+            Self-hosted NIM containers run without authentication.
+          </p>
+
+          <h3>Get Your API Key</h3>
+          <ul>
+            <li>Visit <a href="https://build.nvidia.com/" target="_blank">build.nvidia.com</a></li>
+            <li>Sign in &rarr; Settings &rarr; API Keys &rarr; Generate</li>
+          </ul>
+
+          <h3>Credential Priority</h3>
+          <table>
+            <thead>
+              <tr><th>Priority</th><th>Source</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 (highest)</td>
+                <td><code>JAATO_NIM_API_KEY</code> environment variable</td>
+              </tr>
+              <tr>
+                <td>2</td>
+                <td>Stored credentials (<code>.jaato/nim_auth.json</code>)</td>
+              </tr>
+              <tr>
+                <td>3</td>
+                <td><code>api_key</code> in <code>ProviderConfig</code></td>
+              </tr>
+              <tr>
+                <td>&mdash;</td>
+                <td>Self-hosted endpoints need no key</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Credential Storage</h3>
+          <p>
+            Credentials are stored in JSON files with Unix permissions
+            <code>0600</code>:
+          </p>
+          <ul>
+            <li><strong>Project:</strong> <code>.jaato/nim_auth.json</code> (if <code>.jaato/</code> exists)</li>
+            <li><strong>User:</strong> <code>~/.jaato/nim_auth.json</code> (fallback)</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_NIM_API_KEY=nvapi-your-key-here
+JAATO_PROVIDER=nim
+JAATO_NIM_MODEL=meta/llama-3.3-70b-instruct</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Interactive login (TUI)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Login - shows instructions
+nim-auth login
+
+# Store API key directly
+nim-auth key nvapi-your-key-here
+
+# Check status
+nim-auth status
+
+# Logout - clears stored credentials
+nim-auth logout</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Programmatic login</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.nim.auth import (
+    login_with_key,
+    validate_api_key,
+)
+
+# Validate and store
+creds = login_with_key(
+    api_key="nvapi-your-key",
+    on_message=lambda msg: print(msg)
+)
+
+# Or just validate
+valid, detail = validate_api_key("nvapi-your-key")
+print(f"Valid: {valid}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Self-Hosted -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="self-hosted">Self-Hosted NIM</h2>
+          <p>
+            NVIDIA NIM containers can run locally or on your own infrastructure.
+            Self-hosted instances on localhost or private networks don't require
+            an API key.
+          </p>
+
+          <h3>Detected as Self-Hosted</h3>
+          <p>
+            The provider automatically detects self-hosted endpoints by hostname:
+          </p>
+          <ul>
+            <li><code>localhost</code> / <code>127.0.0.1</code></li>
+            <li><code>192.168.*</code> / <code>10.*</code> (private networks)</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Self-hosted configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file for self-hosted
+JAATO_PROVIDER=nim
+JAATO_NIM_BASE_URL=http://localhost:8000/v1
+JAATO_NIM_MODEL=meta/llama-3.1-8b-instruct</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Docker example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Pull and run a NIM container
+docker run --gpus all \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+
+# Connect jaato
+export JAATO_NIM_BASE_URL=http://localhost:8000/v1
+export JAATO_PROVIDER=nim</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_NIM_API_KEY</code></td>
+                <td>&mdash;</td>
+                <td>API key (<code>nvapi-...</code>) for hosted NIM</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_NIM_BASE_URL</code></td>
+                <td><code>https://integrate.api.nvidia.com/v1</code></td>
+                <td>API endpoint URL</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_NIM_MODEL</code></td>
+                <td>&mdash;</td>
+                <td>Default model name</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_NIM_CONTEXT_LENGTH</code></td>
+                <td><code>32768</code></td>
+                <td>Context window size override</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>ProviderConfig.extra Options</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>base_url</code></td>
+                <td>str</td>
+                <td>See env</td>
+                <td>Override API base URL</td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>32768</td>
+                <td>Override context window</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full .env example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env
+JAATO_PROVIDER=nim
+JAATO_NIM_API_KEY=nvapi-your-key-here
+JAATO_NIM_MODEL=meta/llama-3.3-70b-instruct
+JAATO_NIM_CONTEXT_LENGTH=131072</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Full programmatic config</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("nim")
+provider.initialize(ProviderConfig(
+    api_key="nvapi-your-key",
+    extra={
+        'base_url': 'https://integrate.api.nvidia.com/v1',
+        'context_length': 131072,
+    }
+))
+
+provider.connect("meta/llama-3.3-70b-instruct")
+
+provider.create_session(
+    system_instruction="You are a helpful assistant.",
+    tools=[...]
+)
+
+response = provider.send_message("Hello!")
+print(response.text)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+          <p>
+            The provider maps OpenAI SDK exceptions to NIM-specific error types
+            for consistent error handling.
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>APIKeyNotFoundError</code></td>
+                <td>No API key found and endpoint is not self-hosted</td>
+              </tr>
+              <tr>
+                <td><code>AuthenticationError</code></td>
+                <td>API key rejected (401/403)</td>
+              </tr>
+              <tr>
+                <td><code>RateLimitError</code></td>
+                <td>Rate limit exceeded (429)</td>
+              </tr>
+              <tr>
+                <td><code>ModelNotFoundError</code></td>
+                <td>Invalid model name (404)</td>
+              </tr>
+              <tr>
+                <td><code>ContextLimitError</code></td>
+                <td>Input too large for model context</td>
+              </tr>
+              <tr>
+                <td><code>InfrastructureError</code></td>
+                <td>Server error (5xx) or connection failure</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.nim.errors import (
+    APIKeyNotFoundError,
+    AuthenticationError,
+    RateLimitError,
+)
+
+try:
+    provider.initialize(config)
+    provider.send_message("Hello")
+except APIKeyNotFoundError:
+    print("Set JAATO_NIM_API_KEY or run: nim-auth login")
+except AuthenticationError:
+    print("Invalid API key")
+except RateLimitError as e:
+    if e.retry_after:
+        print(f"Rate limited, retry in {e.retry_after}s")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Proxy Support -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="proxy">Corporate Proxy Support</h2>
+          <p>
+            The provider supports corporate proxy environments including:
+          </p>
+          <ul>
+            <li>HTTP/HTTPS proxies via standard environment variables</li>
+            <li>Custom CA certificate bundles</li>
+            <li>Kerberos/SPNEGO proxy authentication</li>
+          </ul>
+          <p>
+            Configuration uses the same proxy settings as other jaato providers.
+            See the <a href="../../enterprise/proxy-kerberos.html">Proxy &amp; Kerberos</a>
+            guide for details.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Proxy configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Standard proxy
+export HTTPS_PROXY=http://proxy.corp.com:8080
+
+# Corporate CA bundle
+export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.crt
+
+# Kerberos proxy auth
+export JAATO_KERBEROS_PROXY=true</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

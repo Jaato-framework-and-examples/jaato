@@ -233,8 +233,9 @@ class NIMProvider:
     ) -> bool:
         """Verify that authentication is configured.
 
-        Must work before ``initialize()`` — only checks for the API key
-        in environment variables. NIM does not support interactive auth.
+        Must work before ``initialize()`` — checks for the API key
+        in environment variables and stored credentials. Does not
+        access ``self._client`` (not yet initialized).
 
         Args:
             allow_interactive: Ignored (NIM uses API keys only).
@@ -246,12 +247,23 @@ class NIMProvider:
         Raises:
             APIKeyNotFoundError: If no key found and not self-hosted.
         """
-        api_key = resolve_api_key()
+        import os
+        from .env import ENV_NIM_API_KEY
+
         base_url = resolve_base_url()
 
-        if api_key:
+        # Check env var first (highest priority)
+        env_key = os.environ.get(ENV_NIM_API_KEY)
+        if env_key:
             if on_message:
                 on_message("Found NIM API key (environment variable)")
+            return True
+
+        # Check stored credentials
+        api_key = resolve_api_key()  # also checks stored credentials
+        if api_key:
+            if on_message:
+                on_message("Found NIM API key (stored credentials)")
             return True
 
         if is_self_hosted(base_url):
@@ -277,12 +289,29 @@ class NIMProvider:
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used.
 
+        Differentiates between env var, stored credentials, and self-hosted.
+
         Returns:
             Human-readable auth description.
         """
+        import os
+        from .env import ENV_NIM_API_KEY
+
         if is_self_hosted(self._base_url):
             return f"Self-hosted NIM ({self._base_url})"
-        return "NIM API key (JAATO_NIM_API_KEY)"
+
+        if os.environ.get(ENV_NIM_API_KEY):
+            return f"NIM API key ({ENV_NIM_API_KEY})"
+
+        try:
+            from .auth import get_credential_file_path
+            cred_path = get_credential_file_path()
+            if cred_path:
+                return f"NIM API key ({cred_path})"
+        except ImportError:
+            pass
+
+        return "NIM API key"
 
     # ==================== Connection ====================
 
