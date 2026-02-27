@@ -1203,7 +1203,7 @@ class ClientConfigRequest(Event):
     type: EventType = field(default=EventType.CLIENT_CONFIG)
     # Environment overrides from client's .env
     trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
-    provider_trace_log: Optional[str] = None  # PROVIDER_TRACE_LOG
+    provider_trace_log: Optional[str] = None  # client: PROVIDER_TRACE_LOG → server: JAATO_PROVIDER_TRACE
     # Client's working directory (for finding config files like .lsp.json)
     working_dir: Optional[str] = None
     # Path to client's .env file - server loads this for session creation
