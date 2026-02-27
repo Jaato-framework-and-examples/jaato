@@ -1455,6 +1455,15 @@ class SubagentPlugin:
             agent_id: The subagent's agent ID.
             message: The message to process.
         """
+        # Route provider trace writes to a per-agent file (mirrors
+        # _run_subagent_async which sets this on initial creation).
+        try:
+            from jaato_sdk.trace import set_trace_agent_context, clear_trace_agent_context
+            set_trace_agent_context(agent_id)
+        except ImportError:
+            set_trace_agent_context = lambda agent_id=None: None
+            clear_trace_agent_context = lambda: None
+
         try:
             # Create output callback for model response
             def output_callback(source: str, text: str, mode: str) -> None:
@@ -1521,6 +1530,8 @@ class SubagentPlugin:
                     percent_used=usage.get('percent_used', 0)
                 )
 
+            clear_trace_agent_context()
+
         except Exception as e:
             logger.exception(f"Error processing send_to_subagent for {agent_id}")
             # Forward error to parent so it can react
@@ -1531,6 +1542,7 @@ class SubagentPlugin:
                     source_id=agent_id,
                     source_type=SourceType.CHILD
                 )
+            clear_trace_agent_context()
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close an active subagent session owned by the current parent.

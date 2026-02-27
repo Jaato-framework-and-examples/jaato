@@ -378,12 +378,15 @@ class JaatoSession:
             return f"session:subagent:{self._agent_id}"
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
-        from shared.trace import resolve_trace_path, trace_write
-        path = resolve_trace_path("JAATO_TRACE_LOG", "JAATO_PROVIDER_TRACE",
-                                  default_filename="provider_trace.log")
+        """Write trace message to the provider trace log.
+
+        Uses ``provider_trace()`` which applies per-agent routing via
+        ContextVar so subagent session traces go to agent-specific files
+        (e.g. ``provider_trace_subagent_1.log``).
+        """
+        from shared.trace import provider_trace
         prefix = self._get_trace_prefix()
-        trace_write(prefix, msg, path)
+        provider_trace(prefix, msg)
 
     @property
     def model_name(self) -> Optional[str]:
