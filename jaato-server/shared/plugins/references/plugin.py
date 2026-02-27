@@ -930,8 +930,13 @@ class ReferencesPlugin:
         self._similarity_threshold = config.get("similarity_threshold", 0.75)
         self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
 
-        # Initialize embedding provider and semantic matcher if the catalog
-        # has embedding metadata and the lookup strategy uses semantic matching.
+        # Always try to create the embedding provider so that the
+        # compute_embedding tool works even when generating embeddings
+        # for the first time (no existing sidecar/config yet).
+        self._init_embedding_provider(config)
+
+        # Initialize the full semantic matcher (provider + sidecar index)
+        # only when the catalog already has embedding metadata.
         if (self._lookup_strategy in ("hybrid", "semantic_only")
                 and self._config
                 and self._config.embedding_model
@@ -945,8 +950,33 @@ class ReferencesPlugin:
                 f"embedding_model={getattr(self._config, 'embedding_model', None)})"
             )
 
+    def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
+        """Initialize the embedding provider for ``compute_embedding`` tool.
+
+        Called unconditionally from ``initialize()`` so that the
+        ``compute_embedding`` tool works even during first-time generation
+        (when no sidecar or embedding config exists yet). Uses lazy loading
+        to avoid the model-load cost when embeddings aren't needed.
+        """
+        if self._embedding_provider is not None:
+            return  # Already initialized (e.g. by _init_semantic_matching)
+
+        model_name = config.get("embedding_model", "all-MiniLM-L6-v2")
+        max_input_tokens = config.get("embedding_max_input_tokens", 512)
+
+        provider = LocalEmbeddingProvider(
+            model_name=model_name,
+            max_input_tokens=max_input_tokens,
+            eager_load=False,  # Lazy — only loads when compute_embedding is called
+        )
+
+        self._embedding_provider = provider
+        self._trace(
+            f"_init_embedding_provider: ready (model='{model_name}', lazy_load)"
+        )
+
     def _init_semantic_matching(self, config: Dict[str, Any]) -> None:
-        """Initialize the embedding provider and semantic matcher.
+        """Initialize the semantic matcher with existing embedding index.
 
         Called from ``initialize()`` when the references catalog has embedding
         metadata and the lookup strategy includes semantic matching.
@@ -987,16 +1017,19 @@ class ReferencesPlugin:
             self._trace("_init_semantic_matching: no sources have embeddings")
             return
 
-        # Initialize provider
+        # Reuse embedding provider from _init_embedding_provider(),
+        # but eagerly load the model now since we need it for matching.
         provider_model = config.get("embedding_model", embedding_model)
-        eager_load = config.get("embedding_eager_load", True)
-        max_input_tokens = config.get("embedding_max_input_tokens", 512)
-
-        self._embedding_provider = LocalEmbeddingProvider(
-            model_name=provider_model,
-            max_input_tokens=max_input_tokens,
-            eager_load=eager_load,
-        )
+        if self._embedding_provider is None:
+            max_input_tokens = config.get("embedding_max_input_tokens", 512)
+            self._embedding_provider = LocalEmbeddingProvider(
+                model_name=provider_model,
+                max_input_tokens=max_input_tokens,
+                eager_load=True,
+            )
+        elif not self._embedding_provider.available:
+            # Lazy provider exists — trigger model load now
+            self._embedding_provider._load_model()
 
         if not self._embedding_provider.available:
             self._trace(
