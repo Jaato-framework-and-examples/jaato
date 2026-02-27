@@ -165,3 +165,172 @@ class TestAuthorizedExternalPaths:
 
         # Check with absolute path
         assert registry.is_path_authorized(str(file_path)) is True
+
+
+class TestExposeToolPreservesAuthorizedPaths:
+    """Test that expose_tool re-init preserves authorized/denied paths.
+
+    When a plugin is re-initialized via expose_tool() with a new config,
+    shutdown() clears the plugin's authorized paths from the registry.
+    The subsequent initialize() may not restore all of them (e.g. a subagent
+    doesn't have the parent session's sandbox config). The registry must
+    preserve paths that were lost during re-initialization.
+    """
+
+    @pytest.fixture
+    def sandbox_dir(self, tmp_path):
+        """Create a temp directory to use as a sandbox path."""
+        d = tmp_path / "sandbox_target"
+        d.mkdir()
+        return str(d)
+
+    def _make_plugin(self, name, registry):
+        """Create a minimal plugin that clears its paths on shutdown.
+
+        Mimics sandbox_manager's behavior: shutdown() calls
+        clear_authorized_paths/clear_denied_paths, and initialize()
+        does NOT re-add them (simulating a subagent that lacks the
+        parent's session config).
+        """
+        class StubPlugin:
+            def __init__(self, plugin_name, reg):
+                self._name = plugin_name
+                self._registry = reg
+
+            @property
+            def name(self):
+                return self._name
+
+            def initialize(self, config=None):
+                pass
+
+            def shutdown(self):
+                self._registry.clear_authorized_paths(self._name)
+                self._registry.clear_denied_paths(self._name)
+
+            def get_tool_schemas(self):
+                return []
+
+            def get_executors(self):
+                return {}
+
+            def get_auto_approved_tools(self):
+                return []
+
+        return StubPlugin(name, registry)
+
+    def test_reinit_preserves_authorized_paths(self, sandbox_dir):
+        """Authorized paths survive a plugin re-init via expose_tool."""
+        registry = PluginRegistry()
+        plugin = self._make_plugin("sandbox_manager", registry)
+        registry.register_plugin(plugin)
+
+        # First expose — plugin gets initialized
+        registry.expose_tool("sandbox_manager", {"session_id": "main"})
+        # Simulate user running 'sandbox add' which authorizes a path
+        registry.authorize_external_path(sandbox_dir, "sandbox_manager", access="readwrite")
+        assert registry.is_path_authorized(sandbox_dir) is True
+
+        # Re-expose with different config (simulates subagent spawn)
+        # shutdown() will clear authorized paths, initialize() won't re-add them
+        registry.expose_tool("sandbox_manager", {"agent_name": "sub1"})
+
+        # Path should still be authorized
+        assert registry.is_path_authorized(sandbox_dir) is True
+
+    def test_reinit_preserves_denied_paths(self, sandbox_dir):
+        """Denied paths survive a plugin re-init via expose_tool."""
+        registry = PluginRegistry()
+        plugin = self._make_plugin("sandbox_manager", registry)
+        registry.register_plugin(plugin)
+
+        registry.expose_tool("sandbox_manager", {"session_id": "main"})
+        registry.deny_external_path(sandbox_dir, "sandbox_manager")
+        assert registry.is_path_denied(sandbox_dir) is True
+
+        # Re-expose with different config
+        registry.expose_tool("sandbox_manager", {"agent_name": "sub1"})
+
+        assert registry.is_path_denied(sandbox_dir) is True
+
+    def test_reinit_does_not_restore_paths_readded_by_plugin(self, tmp_path):
+        """If the plugin re-adds a path during init, the snapshot doesn't duplicate."""
+        new_dir = tmp_path / "new_path"
+        new_dir.mkdir()
+
+        registry = PluginRegistry()
+
+        class ReAddPlugin:
+            """Plugin that re-adds a specific path during initialize."""
+            def __init__(self):
+                self._registry = None
+                self._readd_path = str(new_dir)
+
+            @property
+            def name(self):
+                return "readd_plugin"
+
+            def initialize(self, config=None):
+                # On re-init, the plugin adds a path from its config
+                if config and config.get("readd") and self._registry:
+                    self._registry.authorize_external_path(
+                        self._readd_path, "readd_plugin", access="readonly"
+                    )
+
+            def shutdown(self):
+                if self._registry:
+                    self._registry.clear_authorized_paths("readd_plugin")
+                    self._registry.clear_denied_paths("readd_plugin")
+
+            def set_plugin_registry(self, reg):
+                self._registry = reg
+
+            def get_tool_schemas(self):
+                return []
+
+            def get_executors(self):
+                return {}
+
+            def get_auto_approved_tools(self):
+                return []
+
+        plugin = ReAddPlugin()
+        registry.register_plugin(plugin)
+
+        # First expose
+        registry.expose_tool("readd_plugin", {"initial": True})
+        # Authorize with readwrite
+        registry.authorize_external_path(str(new_dir), "readd_plugin", access="readwrite")
+
+        # Re-expose — plugin re-adds the same path as readonly
+        registry.expose_tool("readd_plugin", {"readd": True})
+
+        # The plugin's re-added version (readonly) should take precedence
+        # since it was added by the current init, not the snapshot restore
+        detailed = registry.list_authorized_paths_detailed()
+        norm = os.path.realpath(str(new_dir))
+        assert norm in detailed
+        assert detailed[norm]["access"] == "readonly"
+
+    def test_other_plugin_paths_unaffected(self, sandbox_dir, tmp_path):
+        """Re-init of one plugin doesn't touch another plugin's paths."""
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+
+        registry = PluginRegistry()
+        plugin = self._make_plugin("sandbox_manager", registry)
+        registry.register_plugin(plugin)
+
+        registry.expose_tool("sandbox_manager", {"session_id": "main"})
+        # One path from sandbox_manager, one from another plugin
+        registry.authorize_external_path(sandbox_dir, "sandbox_manager")
+        registry.authorize_external_path(str(other_dir), "references_plugin")
+
+        # Re-init sandbox_manager
+        registry.expose_tool("sandbox_manager", {"agent_name": "sub1"})
+
+        # Both should survive
+        assert registry.is_path_authorized(sandbox_dir) is True
+        assert registry.is_path_authorized(str(other_dir)) is True
+        # Other plugin's source should be unchanged
+        assert registry.get_path_authorization_source(str(other_dir)) == "references_plugin"
