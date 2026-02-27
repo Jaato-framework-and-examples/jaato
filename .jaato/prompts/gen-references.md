@@ -125,7 +125,7 @@ If `{{dry_run}}` is true, produce only the summary (with `planned_writes`) and t
 
 ## Processing strategy
 
-The source may contain dozens of documentation folders, validation folders, and template files. To avoid exceeding context window limits, process the knowledge base **progressively** — never load all content at once.
+The source may contain dozens of documentation folders, validation folders, and template files. To avoid exceeding context window limits, process the knowledge base **progressively** — never load all content at once. **Process each folder to completion before starting the next**: read entry-point → compute embedding → write reference JSON → persist embedding vector to disk. Do NOT batch reads across multiple folders, then batch embeddings, then batch writes — the GC may reclaim intermediate data before you can write it.
 
 ### Phase 0 — Source resolution (download first, then process locally)
 
@@ -316,7 +316,7 @@ Provide instructions equivalent to the following (substitute the `<placeholders>
 >   ]
 > }
 > ```
-> Append each vector to this file as you process references (read → append → rewrite, or write once at the end of your batch). The coordinator reads these files to assemble the final sidecar matrix.
+> **Persist each vector immediately after computing it** — append to this file as you process each reference (read → embed → append → move on). Do NOT accumulate vectors in context and write them all at the end; the GC may reclaim them before you get the chance. The coordinator reads these files to assemble the final sidecar matrix.
 >
 > For remote sources, add a `"source"` object:
 > ```json
@@ -431,7 +431,7 @@ Work through the knowledge base **one top-level category at a time** (e.g., `ADR
    - **Persist the embedding vector to disk immediately** — do NOT hold vectors in your context window (they are large, ~384 floats each, and will be lost if GC runs). Append each vector to a JSON file at `{{output}}/.embeddings_main.json` with the structure: `{"embedding_model": "...", "embedding_dimensions": N, "vectors": [{"index": 0, "source_id": "...", "vector": [...]}, ...]}`. Phase 3b reads this file to assemble the sidecar matrix.
 7. If the folder has a `validation/` subfolder, read its README.md (first paragraph only), copy the validation folder to the workspace location if remote, write the validation reference JSON. Also compute its embedding (same steps as 6).
 8. If the folder has template files, read each `.tpl`/`.tmpl` to detect syntax and variables, then add entries to the in-memory template index
-9. **Release the file content from working memory** — once the JSON is written you no longer need the source text
+9. **Release the file content from working memory** — once the reference JSON and embedding vector are written to disk, you no longer need the source text, description, or vector data in context. Discard them before reading the next folder. This read→embed→write→discard cycle is critical: accumulating data across folders risks GC purging earlier results before they are persisted.
 
 #### Materializing remote content
 
@@ -506,6 +506,7 @@ After all references have been written and their embedding vectors collected, as
 Use only the inventory and the full list of reference IDs collected during Phase 2 — either directly or merged from subagent results — to generate subagent profiles. Do not use file contents.
 
 ### Key constraints
+- **Complete each folder before starting the next** — the per-folder pipeline is: read entry-point → compute embedding → write reference JSON → persist embedding vector to disk → (if validation subfolder: read → embed → write) → (if templates: read → index). Only after all artifacts for a folder are written to disk should you move on. **Never batch-read multiple folders**, then batch-compute embeddings, then batch-write — this accumulates large amounts of data in context and the GC may purge earlier results before you write them.
 - **Never read more than one documentation file at a time** (per agent). Read a file, extract what you need, write the output, move on.
 - **Extract only what is needed** — for descriptions, read only the first paragraph or Purpose section, not the entire file.
 - **For template files**, reading the content is necessary for syntax detection and variable extraction, but write the index entry immediately and move on.
@@ -1149,7 +1150,7 @@ Follow the processing strategy strictly:
 1. **Phase 0**: Resolve the source — detect type. If remote, **download the full repository zip to an OS temp directory and extract it before doing anything else**. Then resolve subpaths and apply exclusions. After this phase, `repoRoot` is always a local directory on disk.
 2. **Phase 1**: List the directory tree within the resolved directories (structure only, no file reads). Build the full inventory.
 3. **Phase 1.5**: Evaluate parallelization — if 3+ categories or 10+ folders, spawn subagents to process category groups in parallel, then **wait for all to complete** (do NOT start Phase 2). Otherwise skip to Phase 2.
-4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → call `compute_embedding` on it → compute SHA-256 hash → write doc-ref JSON (including `embedding` property) → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → compute embedding for validation ref → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
+4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. **Complete each folder before starting the next** (do not batch reads across folders): read entry-point file → call `compute_embedding` → compute SHA-256 hash → write doc-ref JSON (including `embedding` property) → persist embedding vector to disk → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → compute embedding for validation ref → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries → discard file contents from context. If validation fails, fix the JSON and rewrite before proceeding.
 5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`** *(category: `code`, discoverable)*. Fix and rewrite if validation fails.
 6. **Phase 3b**: Assemble the embedding sidecar — collect all embedding vectors (from Phase 2 or subagent results), build the float32 matrix in index order, write `{{output}}/references.embeddings.npy`, and write embedding metadata (model name, dimensions, sidecar filename).
 7. **Phase 4**: Generate subagent profiles using the merged reference IDs. **Generate one skill profile for every module/skill folder** — do not stop at a subset. Then generate validator, analyst, and investigator profiles as applicable → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
