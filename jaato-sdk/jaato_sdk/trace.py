@@ -8,6 +8,13 @@ Two trace channels:
 - Application trace: JAATO_TRACE_LOG (plugins, client, session)
 - Provider trace: JAATO_PROVIDER_TRACE (model provider SDKs)
 
+Per-agent provider trace:
+    When an agent context is set via ``set_trace_agent_context()``,
+    ``provider_trace()`` writes to a per-agent file derived from the
+    base path (e.g. ``provider_trace_subagent_1.log`` instead of
+    ``provider_trace.log``).  The main agent (agent_id ``"main"`` or
+    ``None``) always writes to the base path.
+
 Usage:
     from jaato_sdk.trace import trace, provider_trace, trace_write, resolve_trace_path
 
@@ -27,6 +34,7 @@ Usage:
 import os
 import tempfile
 import traceback as _traceback_module
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Optional, Set
 
@@ -34,6 +42,57 @@ from typing import Optional, Set
 # Cache of directories we've already ensured exist, to avoid
 # repeated os.makedirs calls on every trace write.
 _ensured_dirs: Set[str] = set()
+
+# ContextVar holding the current agent ID for per-agent provider trace routing.
+# ``None`` or ``"main"`` means use the base provider_trace.log; any other
+# value (e.g. ``"subagent_1"``) produces a sibling file like
+# ``provider_trace_subagent_1.log``.
+_trace_agent_id: ContextVar[Optional[str]] = ContextVar(
+    'trace_agent_id', default=None
+)
+
+
+def set_trace_agent_context(agent_id: Optional[str] = None) -> None:
+    """Set the agent ID for per-agent provider trace routing.
+
+    Call this at the start of a thread or task to direct subsequent
+    ``provider_trace()`` calls to an agent-specific file.
+
+    Args:
+        agent_id: Agent identifier (e.g. ``"main"``, ``"subagent_1"``).
+            ``None`` or ``"main"`` routes to the default provider_trace.log.
+    """
+    _trace_agent_id.set(agent_id)
+
+
+def clear_trace_agent_context() -> None:
+    """Clear the agent trace context, reverting to the default log file."""
+    _trace_agent_id.set(None)
+
+
+def _agent_trace_path(base_path: Optional[str]) -> Optional[str]:
+    """Derive a per-agent trace path from a base path.
+
+    For the main agent (or no context), returns *base_path* unchanged.
+    For subagents, inserts the agent ID before the file extension::
+
+        /tmp/provider_trace.log  →  /tmp/provider_trace_subagent_1.log
+
+    Args:
+        base_path: The resolved base trace path (may be ``None``).
+
+    Returns:
+        Agent-specific path, or ``None`` if *base_path* is ``None``.
+    """
+    if not base_path:
+        return base_path
+
+    agent_id = _trace_agent_id.get()
+    if not agent_id or agent_id == "main":
+        return base_path
+
+    root, ext = os.path.splitext(base_path)
+    return f"{root}_{agent_id}{ext}"
 
 
 def _ensure_parent_dirs(file_path: str) -> None:
@@ -135,14 +194,17 @@ def provider_trace(
 ) -> None:
     """Write a trace message to the provider trace log.
 
-    Resolves path from JAATO_PROVIDER_TRACE env var.
-    Fallback: provider_trace.log in temp directory.
+    Resolves the base path from JAATO_PROVIDER_TRACE env var (fallback:
+    ``provider_trace.log`` in temp directory), then derives a per-agent
+    path when an agent context is active (see
+    :func:`set_trace_agent_context`).
 
     Args:
         component: Component name for the log prefix.
         msg: Message to write.
         include_traceback: If True, append the current exception traceback.
     """
-    path = resolve_trace_path("JAATO_PROVIDER_TRACE",
-                              default_filename="provider_trace.log")
+    base_path = resolve_trace_path("JAATO_PROVIDER_TRACE",
+                                   default_filename="provider_trace.log")
+    path = _agent_trace_path(base_path)
     trace_write(component, msg, path, include_traceback=include_traceback)
