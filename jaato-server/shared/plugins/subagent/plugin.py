@@ -2117,6 +2117,7 @@ class SubagentPlugin:
                     source_id=agent_id,
                     source_type=SourceType.CHILD
                 )
+            clear_trace_agent_context()
             return
 
         try:

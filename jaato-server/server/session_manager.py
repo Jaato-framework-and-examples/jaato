@@ -390,8 +390,8 @@ class SessionManager:
             logger.info(f"Client {client_id} set JAATO_TRACE_LOG={event.trace_log_path}")
 
         if event.provider_trace_log:
-            os.environ['PROVIDER_TRACE_LOG'] = event.provider_trace_log
-            logger.info(f"Client {client_id} set PROVIDER_TRACE_LOG={event.provider_trace_log}")
+            os.environ['JAATO_PROVIDER_TRACE'] = event.provider_trace_log
+            logger.info(f"Client {client_id} set JAATO_PROVIDER_TRACE={event.provider_trace_log}")
 
         # Initialize client config dict if needed
         if client_id not in self._client_config:

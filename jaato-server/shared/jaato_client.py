@@ -123,11 +123,13 @@ class JaatoClient:
         self._agent_id: str = "main"
 
     def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
-        from shared.trace import resolve_trace_path, trace_write
-        path = resolve_trace_path("JAATO_TRACE_LOG", "JAATO_PROVIDER_TRACE",
-                                  default_filename="provider_trace.log")
-        trace_write("jaato_client", msg, path)
+        """Write trace message to the provider trace log.
+
+        Uses ``provider_trace()`` which applies per-agent routing via
+        ContextVar so subagent client traces go to agent-specific files.
+        """
+        from shared.trace import provider_trace
+        provider_trace("jaato_client", msg)
 
     @property
     def is_connected(self) -> bool:
