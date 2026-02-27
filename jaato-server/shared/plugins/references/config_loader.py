@@ -16,6 +16,11 @@ from .models import ReferenceSource, SourceType, InjectionMode, VALID_CONTENTS_K
 
 logger = logging.getLogger(__name__)
 
+# Well-known filename for embedding metadata in separate mode.
+# gen-references writes this alongside individual reference .json files
+# when merge_mode=separate (the default).
+EMBEDDING_CONFIG_FILENAME = "embedding_config.json"
+
 
 def discover_references(
     references_dir: str,
@@ -72,6 +77,10 @@ def discover_references(
             continue
 
         if file_path.suffix != '.json':
+            continue
+
+        # Skip the embedding config file — it's metadata, not a reference
+        if file_path.name == EMBEDDING_CONFIG_FILENAME:
             continue
 
         try:
@@ -474,6 +483,68 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     return len(errors) == 0, errors
 
 
+def _load_embedding_config(config: ReferencesConfig, workspace_path: str) -> None:
+    """Load embedding metadata from a standalone embedding_config.json.
+
+    In separate mode (the default), gen-references writes embedding metadata
+    to ``embedding_config.json`` in the references directory. This function
+    discovers that file and populates the config's embedding fields.
+
+    Also sets ``config.config_base_path`` to the references directory so the
+    plugin can resolve the sidecar ``.npy`` path relative to it.
+
+    Args:
+        config: ReferencesConfig to populate (modified in-place).
+        workspace_path: Workspace root for resolving the references directory.
+    """
+    refs_dir = Path(config.references_dir)
+    if not refs_dir.is_absolute():
+        refs_dir = Path(workspace_path) / refs_dir
+
+    emb_config_path = refs_dir / EMBEDDING_CONFIG_FILENAME
+    if not emb_config_path.is_file():
+        return
+
+    try:
+        raw = json.loads(emb_config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(
+            "Failed to read embedding config '%s': %s", emb_config_path, e
+        )
+        return
+
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Embedding config must be a JSON object: %s", emb_config_path
+        )
+        return
+
+    model = raw.get("embedding_model")
+    dimensions = raw.get("embedding_dimensions")
+    sidecar = raw.get("embedding_sidecar")
+
+    if not model or not dimensions or not sidecar:
+        logger.warning(
+            "Embedding config missing required fields "
+            "(embedding_model, embedding_dimensions, embedding_sidecar): %s",
+            emb_config_path,
+        )
+        return
+
+    config.embedding_model = model
+    config.embedding_dimensions = dimensions
+    config.embedding_sidecar = sidecar
+    # Set config_base_path so the plugin can resolve the sidecar path
+    if config.config_base_path is None:
+        config.config_base_path = str(refs_dir.resolve())
+
+    logger.info(
+        "Loaded embedding config from '%s': model='%s', dimensions=%d, "
+        "sidecar='%s'",
+        emb_config_path, model, dimensions, sidecar,
+    )
+
+
 def load_config(
     path: Optional[str] = None,
     env_var: str = "REFERENCES_CONFIG_PATH",
@@ -587,6 +658,16 @@ def load_config(
                         "Skipping discovered reference '%s' - explicit source exists",
                         source.id
                     )
+
+    # Load embedding config from separate-mode sidecar file.
+    # In separate mode (the default), gen-references writes embedding metadata
+    # to a standalone embedding_config.json since individual reference files
+    # don't have a shared top-level object. Only load if the config file
+    # didn't already provide embedding fields (merged mode takes precedence).
+    if (config.embedding_model is None
+            and config.auto_discover_references
+            and workspace_path):
+        _load_embedding_config(config, workspace_path)
 
     return config
 
