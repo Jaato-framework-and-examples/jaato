@@ -121,6 +121,7 @@ Three plugin types:
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
 - `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
+- `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
 
 ### Tool Execution Flow
 
@@ -412,6 +413,21 @@ Benefits:
 - Privacy - data never leaves your machine
 - Use any model Ollama supports (Qwen, Llama, Mistral, etc.)
 
+### NVIDIA NIM
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_NIM_API_KEY` | API key for hosted NIM (`nvapi-...` from build.nvidia.com) |
+| `JAATO_NIM_BASE_URL` | Endpoint (default: `https://integrate.api.nvidia.com/v1`) |
+| `JAATO_NIM_MODEL` | Default model name |
+| `JAATO_NIM_CONTEXT_LENGTH` | Override context window size |
+
+**Authentication Options (in priority order):**
+1. **Environment variable**: Set `JAATO_NIM_API_KEY`
+2. **Stored credentials**: `nim-auth key <api_key>` — validates and stores securely
+3. **Self-hosted**: Set `JAATO_NIM_BASE_URL` to a local endpoint (no key needed)
+
+Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM catalog models.
+
 ### Claude CLI Provider
 | Variable | Purpose |
 |----------|---------|
@@ -485,6 +501,7 @@ Requires `pyspnego` package (`pip install pyspnego`) on Linux/macOS. On Windows,
 anthropic-auth login/logout/status     # Anthropic OAuth (PKCE flow)
 antigravity-auth login/logout/status   # Google OAuth (PKCE flow)
 github-auth login/poll/logout/status   # GitHub OAuth (device code flow)
+nim-auth login/key/logout/status       # NVIDIA NIM API key
 ```
 
 ### Session Commands

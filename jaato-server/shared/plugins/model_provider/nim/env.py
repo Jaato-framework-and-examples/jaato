@@ -32,12 +32,23 @@ DEFAULT_CONTEXT_LENGTH = 32768
 
 
 def resolve_api_key() -> Optional[str]:
-    """Resolve NIM API key from environment.
+    """Resolve NIM API key from environment or stored credentials.
+
+    Resolution priority:
+    1. JAATO_NIM_API_KEY environment variable
+    2. Stored credentials from nim-auth plugin
 
     Returns:
         API key if found, None otherwise.
     """
-    return os.environ.get(ENV_NIM_API_KEY)
+    env_key = os.environ.get(ENV_NIM_API_KEY)
+    if env_key:
+        return env_key
+    try:
+        from .auth import get_stored_api_key
+        return get_stored_api_key()
+    except ImportError:
+        return None
 
 
 def resolve_base_url() -> str:
@@ -107,6 +118,19 @@ def get_checked_credential_locations() -> List[str]:
         locations.append(f"{ENV_NIM_API_KEY}: set ({masked})")
     else:
         locations.append(f"{ENV_NIM_API_KEY}: not set")
+
+    # Check stored credentials
+    try:
+        from .auth import get_stored_api_key, get_credential_file_path
+        stored_key = get_stored_api_key()
+        if stored_key:
+            cred_path = get_credential_file_path() or "nim_auth.json"
+            masked = f"{stored_key[:8]}...{stored_key[-4:]}" if len(stored_key) > 12 else "***"
+            locations.append(f"Stored credentials ({cred_path}): set ({masked})")
+        else:
+            locations.append("Stored credentials: not configured (use 'nim-auth login')")
+    except ImportError:
+        locations.append("Stored credentials: auth module not available")
 
     base_url = os.environ.get(ENV_NIM_BASE_URL)
     if base_url:

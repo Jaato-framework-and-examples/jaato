@@ -29,7 +29,7 @@ jaato is a framework for building agentic AI applications with LLM function call
 
 **Core capabilities:**
 
-- **7 Model Providers** - Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, Ollama, and ZhipuAI through a unified provider abstraction
+- **8 Model Providers** - Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, Ollama, ZhipuAI, and NVIDIA NIM through a unified provider abstraction
 - **55+ Plugins** - File editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, and more
 - **Server-First Architecture** - Daemon mode with IPC (Unix socket) and WebSocket transports, multi-session orchestration, and disk persistence
 - **Parallel Tool Execution** - Concurrent tool calls with thread-safe callbacks (up to 8 tools per turn)
@@ -90,6 +90,7 @@ jaato abstracts model providers behind a unified interface. Switch providers by 
 | **Google Antigravity** | Gemini 3, Claude (via Google OAuth) | PKCE OAuth flow |
 | **Ollama** | Any Ollama-supported model (Qwen, Llama, Mistral, etc.) | Local — no auth required |
 | **ZhipuAI** | ZhipuAI models | API key |
+| **NVIDIA NIM** | Llama, DeepSeek-R1, Nemotron (hosted + self-hosted) | API key or self-hosted (no auth) |
 
 ## Plugin Ecosystem
 
