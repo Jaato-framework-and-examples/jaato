@@ -2080,9 +2080,15 @@ class SubagentPlugin:
         if trace_log and not os.path.isabs(trace_log):
             os.environ["JAATO_TRACE_LOG"] = os.path.abspath(trace_log)
 
-        provider_trace = os.environ.get("JAATO_PROVIDER_TRACE")
-        if provider_trace and not os.path.isabs(provider_trace):
-            os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace)
+        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")
+        if provider_trace_env and not os.path.isabs(provider_trace_env):
+            os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace_env)
+
+        # Route provider trace writes from this thread to a per-agent file
+        # (e.g. provider_trace_subagent_1.log instead of provider_trace.log).
+        # Uses ContextVar so concurrent subagent threads don't interfere.
+        from jaato_sdk.trace import set_trace_agent_context, clear_trace_agent_context
+        set_trace_agent_context(agent_id)
 
         if not self._runtime:
             # No runtime - can't run async subagent
@@ -2363,6 +2369,8 @@ class SubagentPlugin:
                 # running-state callback wired in set_running_state_callback
                 # when send_message() returns and the session phase goes IDLE.
 
+            clear_trace_agent_context()
+
         except Exception as e:
             logger.exception(f"Error in async subagent {agent_id}")
             # Forward error to parent (CHILD source - status update)
@@ -2383,6 +2391,8 @@ class SubagentPlugin:
                     agent_id=agent_id,
                     status="error"
                 )
+
+            clear_trace_agent_context()
 
 
 def create_plugin() -> SubagentPlugin:
