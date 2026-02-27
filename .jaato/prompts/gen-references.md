@@ -809,7 +809,7 @@ A folder is a "documentation folder" if it contains at least one of these entry-
 14. **Generate profiles for these categories**:
 
     ### a) Skill profiles (one per skill/module that represents an actionable flow)
-    - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice")
+    - **When**: A module or skill folder describes a concrete code-generation or code-modification flow (e.g., "add circuit breaker", "generate microservice"). **Generate one skill profile for EVERY module/skill folder discovered in Phase 2 — do not skip any.** If 16 modules were discovered, 16 skill profiles must be generated.
     - **Name**: Match the knowledge folder id (e.g., `skill-code-001-add-circuit-breaker-java-resilience4j`)
     - **Description**: Start with `[ADD Flow]` or `[GENERATE Flow]` tag, describe when to use, triggers, and scope. End with interaction hint (see item 13).
     - **Plugins**: `["artifact_tracker", "background", "cli", "environment", "references", "template(preload)", "file_edit", "filesystem_query", "lsp", "mcp", "todo", "waypoint", "memory"]` — Note: `template(preload)` is placed before `file_edit` so `writeFileFromTemplate` appears before `writeNewFile` in tool declarations, steering the model toward template-based file creation when templates are available.
@@ -1134,8 +1134,9 @@ Each reference JSON includes an `embedding` property, e.g., `{"index": 0, "sourc
 }
 ```
 
-**Generated profiles** in `{{profiles_dir}}/`:
+**Generated profiles** in `{{profiles_dir}}/` — note that **every module gets its own skill profile**:
 - `skill-code-001-add-circuit-breaker-java-resilience4j.json` (skill, preselects eri-008 + mod-001)
+- `skill-code-015-generate-hexagonal-base-java-spring.json` (skill, preselects mod-015)
 - `validator-tier1-universal.json` (basic quality gates)
 - `validator-tier2-java-spring.json` (Java/Spring checks, preselects ADR-004)
 - `validator-tier3-pattern-compliance.json` (template compliance, preselects skills + validation refs)
@@ -1151,6 +1152,6 @@ Follow the processing strategy strictly:
 4. **Phase 2** *(skip if subagents were spawned in 1.5)*: Process categories sequentially. Each category/folder: read entry-point file → call `compute_embedding` on it → compute SHA-256 hash → write doc-ref JSON (including `embedding` property) → **validate with `validateReference`** *(category: `knowledge`, discoverable)* → read validation README if present → compute embedding for validation ref → write validation-ref JSON → **validate with `validateReference`** → read template files if present → accumulate index entries. If validation fails, fix the JSON and rewrite before proceeding.
 5. **Phase 3**: Merge template entries (from subagents if parallel, or from Phase 2 if sequential), write the template index JSON → **validate with `validateTemplateIndex`** *(category: `code`, discoverable)*. Fix and rewrite if validation fails.
 6. **Phase 3b**: Assemble the embedding sidecar — collect all embedding vectors (from Phase 2 or subagent results), build the float32 matrix in index order, write `{{output}}/references.embeddings.npy`, and write embedding metadata (model name, dimensions, sidecar filename).
-7. **Phase 4**: Generate subagent profiles using the merged reference IDs → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
+7. **Phase 4**: Generate subagent profiles using the merged reference IDs. **Generate one skill profile for every module/skill folder** — do not stop at a subset. Then generate validator, analyst, and investigator profiles as applicable → **validate each with `validateProfile`** *(category: `coordination`, discoverable)*. Fix and rewrite any profile that fails validation.
 8. **Report**: Produce the final summary table and write `summary.json`.
 9. **Cleanup**: Remove temporary download directories (`$WORK_DIR`) if source was remote and cache is disabled.
