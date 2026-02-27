@@ -15,7 +15,7 @@ import sys
 import pathlib
 import queue
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ class AgentState:
         self.profile_name = profile_name
         self.parent_agent_id = parent_agent_id
         self.status = "idle"  # idle, active, done, error
-        self.created_at = datetime.utcnow().isoformat()
+        self.created_at = datetime.now(timezone.utc).isoformat()
         self.completed_at: Optional[str] = None
         self.history: List[Any] = []
         self.turn_accounting: List[Dict] = []
@@ -518,7 +518,7 @@ class JaatoServer:
         if not subagent_plugin or not hasattr(subagent_plugin, '_active_sessions'):
             return
 
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         for agent_id, info in subagent_plugin._active_sessions.items():
             # Skip if already emitted via _agents dict
@@ -1733,7 +1733,7 @@ class JaatoServer:
         server = self
 
         def on_clarification_requested(tool_name: str, prompt_lines: list):
-            request_id = f"clarify_{datetime.utcnow().timestamp()}"
+            request_id = f"clarify_{datetime.now(timezone.utc).timestamp()}"
             server._pending_clarification_request_id = request_id
             server._waiting_for_channel_input = True
 
@@ -1804,7 +1804,7 @@ class JaatoServer:
         server = self
 
         def on_selection_requested(tool_name: str, prompt_lines: list):
-            request_id = f"ref_selection_{datetime.utcnow().timestamp()}"
+            request_id = f"ref_selection_{datetime.now(timezone.utc).timestamp()}"
             server._pending_reference_selection_request_id = request_id
             server._waiting_for_channel_input = True
             server.emit(ReferenceSelectionRequestedEvent(

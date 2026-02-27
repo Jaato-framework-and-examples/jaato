@@ -11,7 +11,7 @@ Protocol Version: 1.0
 """
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 import json
@@ -155,7 +155,7 @@ class EventType(str, Enum):
 class Event:
     """Base class for all events."""
     type: EventType
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

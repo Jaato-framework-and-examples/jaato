@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -530,7 +530,7 @@ def _save_edit_history(
     history_dir = session_dir / "edit_history"
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     history_file = history_dir / f"edit_{timestamp}.json"
 
     # Extract only the edited parameters for diff
@@ -538,7 +538,7 @@ def _save_edit_history(
     edited_subset = {k: edited_args.get(k) for k in parameters}
 
     entry = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "parameters": parameters,
         "original": original_subset,
         "edited": edited_subset,

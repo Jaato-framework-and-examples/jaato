@@ -19,12 +19,12 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
     import websockets
-    from websockets.client import WebSocketClientProtocol
+    from websockets import ClientConnection
 except ImportError:
     print("Error: websockets package required. Install with: pip install websockets")
     sys.exit(1)
@@ -148,7 +148,7 @@ def format_event(event: dict) -> str:
         return f"{colorize(f'[{time_str}]', Colors.DIM)} {colorize(event_type, Colors.BLUE)}: {json.dumps(event, default=str)[:100]}"
 
 
-async def receive_events(websocket: WebSocketClientProtocol) -> None:
+async def receive_events(websocket: ClientConnection) -> None:
     """Receive and display events from the server."""
     try:
         async for message in websocket:
@@ -162,7 +162,7 @@ async def receive_events(websocket: WebSocketClientProtocol) -> None:
         print(colorize("\n[Disconnected from server]", Colors.YELLOW))
 
 
-async def send_messages(websocket: WebSocketClientProtocol) -> None:
+async def send_messages(websocket: ClientConnection) -> None:
     """Read user input and send messages to the server."""
     print(colorize("\nType a message and press Enter. Type 'quit' to exit.\n", Colors.DIM))
 
@@ -188,7 +188,7 @@ async def send_messages(websocket: WebSocketClientProtocol) -> None:
                 if cmd == "stop":
                     request = {
                         "type": "session.stop",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 elif cmd == "perm":
                     # Quick permission response: /perm request_id y
@@ -197,7 +197,7 @@ async def send_messages(websocket: WebSocketClientProtocol) -> None:
                             "type": "permission.response",
                             "request_id": args[0],
                             "response": args[1],
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     else:
                         print(colorize("Usage: /perm <request_id> <response>", Colors.YELLOW))
@@ -207,7 +207,7 @@ async def send_messages(websocket: WebSocketClientProtocol) -> None:
                         "type": "command.execute",
                         "command": cmd,
                         "args": args,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
             else:
                 # Regular message
@@ -215,7 +215,7 @@ async def send_messages(websocket: WebSocketClientProtocol) -> None:
                     "type": "message.send",
                     "text": user_input,
                     "attachments": [],
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
             await websocket.send(json.dumps(request))
@@ -251,7 +251,7 @@ async def run_client(
                     "type": "message.send",
                     "text": message,
                     "attachments": [],
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 await websocket.send(json.dumps(request))
 

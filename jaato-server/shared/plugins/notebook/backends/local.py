@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from contextlib import redirect_stdout, redirect_stderr
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .base import NotebookBackend
@@ -91,7 +91,7 @@ class LocalJupyterBackend(NotebookBackend):
             name=name,
             backend="local",
             gpu_enabled=False,  # Local doesn't support GPU
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             execution_count=0,
             variables={},
         )
@@ -185,7 +185,7 @@ class LocalJupyterBackend(NotebookBackend):
             # Update notebook info
             info = self._notebook_info[notebook_id]
             info.execution_count = exec_count
-            info.last_executed_at = datetime.utcnow().isoformat()
+            info.last_executed_at = datetime.now(timezone.utc).isoformat()
             info.variables = self._get_variables_internal(namespace)
 
             return ExecutionResult(

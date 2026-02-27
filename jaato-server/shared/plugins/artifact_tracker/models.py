@@ -6,7 +6,7 @@ configs, etc.) that the model creates or modifies during a session.
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
@@ -72,7 +72,7 @@ class ArtifactRecord:
         notes: Optional[str] = None
     ) -> 'ArtifactRecord':
         """Create a new artifact record with auto-generated ID."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).isoformat() + "Z"
         return cls(
             artifact_id=str(uuid.uuid4()),
             path=path,
@@ -87,7 +87,7 @@ class ArtifactRecord:
 
     def mark_updated(self) -> None:
         """Mark the artifact as recently updated."""
-        self.updated_at = datetime.utcnow().isoformat() + "Z"
+        self.updated_at = datetime.now(timezone.utc).isoformat() + "Z"
         self.review_status = ReviewStatus.CURRENT
         self.review_reason = None
 
@@ -164,8 +164,8 @@ class ArtifactRecord:
             path=data.get("path", ""),
             artifact_type=artifact_type,
             description=data.get("description", ""),
-            created_at=data.get("created_at", datetime.utcnow().isoformat() + "Z"),
-            updated_at=data.get("updated_at", datetime.utcnow().isoformat() + "Z"),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat() + "Z"),
+            updated_at=data.get("updated_at", datetime.now(timezone.utc).isoformat() + "Z"),
             review_status=review_status,
             review_reason=data.get("review_reason"),
             tags=data.get("tags", []),

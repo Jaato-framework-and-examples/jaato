@@ -35,7 +35,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -348,7 +348,7 @@ class KaggleBackend(NotebookBackend):
             name=name,
             backend="kaggle",
             gpu_enabled=gpu_enabled,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             execution_count=0,
             variables={},
         )
@@ -774,7 +774,7 @@ print("__JAATO_VARS__:" + json.dumps(__vars__))
         if notebook_id in self._notebooks:
             info = self._notebooks[notebook_id]
             info.execution_count += 1
-            info.last_executed_at = datetime.utcnow().isoformat()
+            info.last_executed_at = datetime.now(timezone.utc).isoformat()
             info.variables = variables
 
         return ExecutionResult(
@@ -898,7 +898,7 @@ print("__JAATO_VARS__:" + json.dumps(__vars__))
             # Update notebook info
             info = self._notebooks[notebook_id]
             info.execution_count += 1
-            info.last_executed_at = datetime.utcnow().isoformat()
+            info.last_executed_at = datetime.now(timezone.utc).isoformat()
             info.variables = variables
 
             return ExecutionResult(

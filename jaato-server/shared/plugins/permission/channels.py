@@ -15,7 +15,7 @@ import traceback
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -214,7 +214,7 @@ class PermissionRequest:
         """Create a new permission request with auto-generated ID and timestamp."""
         return cls(
             request_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             tool_name=tool_name,
             arguments=arguments,
             timeout_seconds=timeout,
