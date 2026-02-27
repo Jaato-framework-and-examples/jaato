@@ -2087,8 +2087,14 @@ class SubagentPlugin:
         # Route provider trace writes from this thread to a per-agent file
         # (e.g. provider_trace_subagent_1.log instead of provider_trace.log).
         # Uses ContextVar so concurrent subagent threads don't interfere.
-        from jaato_sdk.trace import set_trace_agent_context, clear_trace_agent_context
-        set_trace_agent_context(agent_id)
+        try:
+            from jaato_sdk.trace import set_trace_agent_context, clear_trace_agent_context
+            set_trace_agent_context(agent_id)
+        except ImportError:
+            # Older jaato_sdk without per-agent trace routing — define no-ops
+            # so the clear calls later in this method don't raise NameError.
+            set_trace_agent_context = lambda agent_id=None: None
+            clear_trace_agent_context = lambda: None
 
         if not self._runtime:
             # No runtime - can't run async subagent
