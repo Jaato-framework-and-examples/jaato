@@ -58,6 +58,7 @@ dependencies = [
     "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
     "sentence-transformers>=2.2.0",  # Local embedding provider for semantic reference matching
     "numpy>=1.24.0",  # Embedding sidecar matrix operations
+    "openai>=1.0",  # NVIDIA NIM provider (OpenAI-compatible API)
 ]
 
 [project.urls]
