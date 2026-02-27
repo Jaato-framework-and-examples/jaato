@@ -477,6 +477,12 @@ class GitHubModelsProvider:
         self._model_name = None
         self._history = []
 
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used."""
+        if self._use_copilot_api:
+            return "Device Code OAuth (Copilot API)"
+        return "PAT (GITHUB_TOKEN)"
+
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:

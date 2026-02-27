@@ -213,12 +213,23 @@ class ZhipuAIProvider(AnthropicProvider):
         if config is None:
             config = ProviderConfig()
 
-        # Resolve API key from config, environment, or stored credentials
-        self._api_key = (
-            config.api_key
-            or resolve_api_key()
-            or get_stored_api_key()
-        )
+        # Resolve API key from config, environment, or stored credentials.
+        # Track which source was used for the "Connected to" message.
+        self._auth_info: str = ""
+        if config.api_key:
+            self._api_key = config.api_key
+            self._auth_info = "API key (config)"
+        elif resolve_api_key():
+            self._api_key = resolve_api_key()
+            self._auth_info = "API key (env ZHIPUAI_API_KEY)"
+        elif get_stored_api_key():
+            self._api_key = get_stored_api_key()
+            from .auth import get_credential_file_path
+            cred_path = get_credential_file_path()
+            self._auth_info = f"API key from {cred_path}" if cred_path else "API key (stored)"
+        else:
+            self._api_key = None
+
         if not self._api_key:
             self._trace("[INIT] No API key found")
             raise ZhipuAIAPIKeyNotFoundError()

@@ -266,6 +266,10 @@ class ClaudeCLIProvider:
         self._history.clear()
         self._session_id = None
 
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used."""
+        return "CLI subscription"
+
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:

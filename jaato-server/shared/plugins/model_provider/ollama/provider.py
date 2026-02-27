@@ -143,6 +143,7 @@ class OllamaProvider(AnthropicProvider):
         self._pkce_access_token = None
         self._oauth_token = None
         self._api_key = "ollama"  # Dummy value, Ollama ignores it
+        self._auth_info = f"local ({self._host})"
 
         # Create the client
         self._client = self._create_client()

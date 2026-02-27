@@ -1025,8 +1025,10 @@ class JaatoServer:
 
         self._emit_init_progress("Setting up session", "done", 6, total_steps)
 
+        auth_info = self._jaato.auth_info if self._jaato else ""
+        auth_suffix = f" ({auth_info})" if auth_info else ""
         self.emit(SystemMessageEvent(
-            message=f"Connected to {self._model_provider}/{self._model_name}",
+            message=f"Connected to {self._model_provider}/{self._model_name}{auth_suffix}",
             style="info",
         ))
 
@@ -2760,8 +2762,10 @@ class JaatoServer:
                     message="Authentication successful. Session is now ready.",
                     style="success",
                 ))
+                auth_info = self._jaato.auth_info if self._jaato else ""
+                auth_suffix = f" ({auth_info})" if auth_info else ""
                 self.emit(SystemMessageEvent(
-                    message=f"Connected to {self._model_provider}/{self._model_name}",
+                    message=f"Connected to {self._model_provider}/{self._model_name}{auth_suffix}",
                     style="info",
                 ))
 

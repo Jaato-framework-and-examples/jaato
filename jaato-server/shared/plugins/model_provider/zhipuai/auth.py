@@ -130,6 +130,26 @@ def get_stored_api_key() -> Optional[str]:
     return None
 
 
+def get_credential_file_path() -> Optional[str]:
+    """Return the path of the credential file that would be loaded.
+
+    Used by the provider to report which credential source was used
+    in the "Connected to" message. Returns the resolved path of the
+    first existing credential file, or None if no file exists.
+
+    Returns:
+        String path like ``"~/.jaato/zhipuai_auth.json"`` or
+        ``".jaato/zhipuai_auth.json"``, or None.
+    """
+    path = _get_token_storage_path()
+    if not path.exists():
+        return None
+    home = Path.home()
+    if path.is_relative_to(home):
+        return "~/" + str(path.relative_to(home))
+    return str(path)
+
+
 def get_stored_base_url() -> Optional[str]:
     """Get stored custom base URL if available.
 

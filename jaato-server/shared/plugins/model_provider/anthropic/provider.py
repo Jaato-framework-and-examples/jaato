@@ -214,15 +214,30 @@ class AnthropicProvider:
         self._oauth_token = config.extra.get("oauth_token") or resolve_oauth_token()
         self._pkce_access_token: Optional[str] = None
         self._use_pkce = False
+        self._auth_info: str = ""
 
         # Try PKCE OAuth first (interactive login tokens)
         try:
             self._pkce_access_token = get_valid_access_token()
             if self._pkce_access_token:
                 self._use_pkce = True
+                self._auth_info = "PKCE OAuth"
         except Exception:
             # PKCE token refresh failed, will try other methods
             self._pkce_access_token = None
+
+        # Track which credential source was resolved
+        if not self._auth_info:
+            if self._oauth_token:
+                if config.extra.get("oauth_token"):
+                    self._auth_info = "OAuth token (config)"
+                else:
+                    self._auth_info = "OAuth token (ANTHROPIC_AUTH_TOKEN)"
+            elif self._api_key:
+                if config.api_key:
+                    self._auth_info = "API key (config)"
+                else:
+                    self._auth_info = "API key (ANTHROPIC_API_KEY)"
 
         if not self._pkce_access_token and not self._oauth_token and not self._api_key:
             raise APIKeyNotFoundError(
@@ -435,6 +450,10 @@ class AnthropicProvider:
             self._client = None
         self._model_name = None
         self._history = []
+
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used."""
+        return self._auth_info
 
     # ==================== Connection ====================
 
