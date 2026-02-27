@@ -1333,7 +1333,7 @@ class SessionManager:
                 session_id=session.session_id,
                 history=history,
                 created_at=datetime.fromisoformat(session.created_at),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(),
                 description=session.description or session.name,
                 turn_count=len(history) // 2,  # Approximate
                 turn_accounting=turn_accounting,

@@ -18,6 +18,11 @@ from jaato_sdk.plugins.model_provider.types import (
 from .base import SessionState, SessionInfo
 
 
+def _naive(dt: datetime) -> datetime:
+    """Strip timezone info to ensure naive datetime for consistent comparison."""
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
 def serialize_part(part: Part) -> Dict[str, Any]:
     """Serialize a Part object to a dictionary.
 
@@ -227,8 +232,8 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
     return SessionState(
         session_id=data['session_id'],
         history=deserialize_history(data.get('history', [])),
-        created_at=datetime.fromisoformat(data['created_at']),
-        updated_at=datetime.fromisoformat(data['updated_at']),
+        created_at=_naive(datetime.fromisoformat(data['created_at'])),
+        updated_at=_naive(datetime.fromisoformat(data['updated_at'])),
         description=data.get('description'),
         turn_count=data.get('turn_count', 0),
         turn_accounting=data.get('turn_accounting', []),
@@ -277,8 +282,8 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
     return SessionInfo(
         session_id=data['session_id'],
         description=data.get('description'),
-        created_at=datetime.fromisoformat(data['created_at']),
-        updated_at=datetime.fromisoformat(data['updated_at']),
+        created_at=_naive(datetime.fromisoformat(data['created_at'])),
+        updated_at=_naive(datetime.fromisoformat(data['updated_at'])),
         turn_count=data.get('turn_count', 0),
         model=data.get('model'),
         workspace_path=data.get('workspace_path'),
