@@ -130,7 +130,6 @@ class TestProviderTracePerAgent:
     def test_concurrent_agents_write_to_separate_files(self, tmp_path):
         """Multiple concurrent agents write to their own files without mixing."""
         base = str(tmp_path / "provider_trace.log")
-        results = {}
         barrier = threading.Barrier(3)
 
         def agent_work(agent_id, message):
@@ -138,20 +137,22 @@ class TestProviderTracePerAgent:
             try:
                 # Synchronize to maximize overlap
                 barrier.wait(timeout=5)
-                with patch.dict(os.environ, {"JAATO_PROVIDER_TRACE": base}):
-                    for i in range(10):
-                        provider_trace("test", f"{message}_{i}")
+                for i in range(10):
+                    provider_trace("test", f"{message}_{i}")
             finally:
                 clear_trace_agent_context()
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {
-                pool.submit(agent_work, "main", "main_msg"): "main",
-                pool.submit(agent_work, "subagent_1", "sub1_msg"): "subagent_1",
-                pool.submit(agent_work, "subagent_2", "sub2_msg"): "subagent_2",
-            }
-            for f in as_completed(futures):
-                f.result()  # Raise any exceptions
+        # Set env var once before spawning threads — patch.dict is not
+        # thread-safe (one thread exiting restores the var for all).
+        with patch.dict(os.environ, {"JAATO_PROVIDER_TRACE": base}):
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {
+                    pool.submit(agent_work, "main", "main_msg"): "main",
+                    pool.submit(agent_work, "subagent_1", "sub1_msg"): "subagent_1",
+                    pool.submit(agent_work, "subagent_2", "sub2_msg"): "subagent_2",
+                }
+                for f in as_completed(futures):
+                    f.result()  # Raise any exceptions
 
         # Main writes to base file
         main_content = open(base).read()

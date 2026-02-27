@@ -1993,8 +1993,11 @@ class SessionManager:
                 )
                 # Ensure provider traces from the main agent go to the
                 # base provider_trace.log (not a subagent-specific file).
-                from jaato_sdk.trace import set_trace_agent_context
-                set_trace_agent_context("main")
+                try:
+                    from jaato_sdk.trace import set_trace_agent_context
+                    set_trace_agent_context("main")
+                except ImportError:
+                    pass  # Older jaato_sdk without per-agent trace routing
                 try:
                     server.send_message(
                         event.text,
