@@ -49,7 +49,7 @@ class BudgetGCPlugin:
 
     This policy-aware strategy removes content in priority order:
     1a. ENRICHMENT (bulk clear - regenerated each turn)
-    1b. Other EPHEMERAL entries (oldest first)
+    1b. Other EPHEMERAL entries (oldest first, largest tiebreaker)
     2.  PARTIAL conversation turns (oldest first, respecting preserve_recent_turns)
     3.  PRESERVABLE entries (only under extreme pressure > pressure_percent)
     4.  LOCKED entries (never removed)
@@ -203,7 +203,7 @@ class BudgetGCPlugin:
 
         Uses the budget's GC policies to prioritize what to remove:
         1a. ENRICHMENT (bulk clear)
-        1b. Other EPHEMERAL entries (oldest first)
+        1b. Other EPHEMERAL entries (oldest first, largest tiebreaker)
         2.  PARTIAL conversation turns (oldest first)
         3.  PRESERVABLE (only if usage > pressure_percent)
 
@@ -262,13 +262,20 @@ class BudgetGCPlugin:
             tokens_freed += enrichment_tokens
             self._trace(f"collect: phase 1a - cleared enrichment ({enrichment_tokens} tokens)")
 
-        # Phase 1b: Remove other EPHEMERAL entries (oldest first)
+        # Phase 1b: Remove other EPHEMERAL entries (oldest first, largest tiebreaker).
+        # Age is the primary sort factor because recent ephemeral results are
+        # typically what the agent is actively working with and shouldn't be
+        # purged prematurely. Within the same age bracket (entries created in
+        # quick succession during a single tool-calling round), the largest
+        # entries are removed first for maximum efficiency — this prevents
+        # wasting removal budget on small entries when a 70K+ tool result
+        # from the same round would free far more context.
         if tokens_freed < tokens_to_free:
             ephemeral_candidates = self._get_ephemeral_candidates(budget)
-            # Sort by created_at (oldest first)
+            # Sort by created_at ASC (oldest first), then total_tokens DESC (largest first)
             sorted_candidates = sorted(
                 ephemeral_candidates,
-                key=lambda e: e[1].created_at or 0
+                key=lambda e: (e[1].created_at or 0, -e[1].total_tokens()),
             )
 
             for child_key, entry in sorted_candidates:

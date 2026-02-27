@@ -2242,7 +2242,11 @@ class SubagentPlugin:
 
                 session.set_running_state_callback(_on_running_state_changed)
 
-            # Configure GC for subagent if profile specifies it
+            # Configure GC for subagent.
+            # If profile specifies GC, use that. Otherwise, inherit from
+            # the parent session so subagents always have context management.
+            # Without GC, a subagent accumulating large ephemeral tool results
+            # will hit ContextLimitError with no recovery path.
             if profile.gc:
                 try:
                     # Use profile name for traces (more meaningful than agent_id)
@@ -2265,6 +2269,30 @@ class SubagentPlugin:
                 except ValueError as e:
                     logger.warning(
                         "Failed to configure GC for subagent %s: %s",
+                        agent_id, e
+                    )
+            elif parent_session and hasattr(parent_session, '_gc_plugin') and parent_session._gc_plugin:
+                # Inherit GC from parent session: create a fresh plugin instance
+                # of the same type so the subagent gets its own GC state while
+                # using the same strategy and thresholds as the parent.
+                try:
+                    parent_gc_name = getattr(parent_session._gc_plugin, 'name', None)
+                    parent_gc_config = parent_session._gc_config
+                    if parent_gc_name and parent_gc_config:
+                        from ..gc import load_gc_plugin
+                        inherited_init_config = {
+                            'preserve_recent_turns': parent_gc_config.preserve_recent_turns,
+                            'agent_name': profile.name,
+                        }
+                        inherited_plugin = load_gc_plugin(parent_gc_name, inherited_init_config)
+                        session.set_gc_plugin(inherited_plugin, parent_gc_config)
+                        logger.info(
+                            "Inherited GC from parent for subagent %s: type=%s, threshold=%.1f%%",
+                            agent_id, parent_gc_name, parent_gc_config.threshold_percent
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to inherit GC from parent for subagent %s: %s",
                         agent_id, e
                     )
 
