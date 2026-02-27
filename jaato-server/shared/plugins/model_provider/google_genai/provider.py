@@ -573,6 +573,19 @@ class GoogleGenAIProvider:
         self._client = None
         self._model_name = None
 
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used."""
+        method = self._auth_method
+        if method == "api_key":
+            return "API key"
+        elif method == "adc":
+            return "ADC"
+        elif method == "service_account_file":
+            return "service account"
+        elif method == "impersonation":
+            return "impersonation"
+        return method or ""
+
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:

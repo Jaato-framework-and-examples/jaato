@@ -144,6 +144,20 @@ class JaatoClient:
         """Get the model provider name."""
         return self._provider_name
 
+    @property
+    def auth_info(self) -> str:
+        """Get a description of the credential source used by the provider.
+
+        Returns a human-readable string like ``"API key from ~/.jaato/zhipuai_auth.json"``
+        or ``"PKCE OAuth"``. Empty string if provider doesn't implement it or
+        client is not connected.
+        """
+        if self._session and hasattr(self._session, '_provider'):
+            provider = self._session._provider
+            if provider and hasattr(provider, 'get_auth_info'):
+                return provider.get_auth_info()
+        return ""
+
     def get_runtime(self) -> JaatoRuntime:
         """Get the underlying JaatoRuntime.
 

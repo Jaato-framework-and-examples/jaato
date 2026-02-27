@@ -263,6 +263,12 @@ class AntigravityProvider:
         if self._account_manager:
             save_accounts(self._account_manager)
 
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used."""
+        if self._current_account:
+            return f"OAuth ({self._current_account.email})"
+        return ""
+
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:

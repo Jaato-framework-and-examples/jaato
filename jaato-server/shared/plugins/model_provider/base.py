@@ -180,6 +180,20 @@ class ModelProviderPlugin(Protocol):
         """Clean up any resources held by the provider."""
         ...
 
+    def get_auth_info(self) -> str:
+        """Return a short description of the credential source used.
+
+        Called after ``initialize()`` to describe which auth method or
+        credential file was resolved. Displayed in the "Connected to"
+        message so users can see where credentials came from — critical
+        for diagnosing fallback credential issues across workspaces.
+
+        Returns:
+            Human-readable string, e.g. ``"API key from ~/.jaato/zhipuai_auth.json"``,
+            ``"PKCE OAuth"``, ``"ADC"``. Empty string if unknown.
+        """
+        ...
+
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:
