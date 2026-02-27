@@ -195,6 +195,41 @@ class SemanticMatcher:
         candidates.sort(key=lambda m: m.score, reverse=True)
         return candidates[:top_k]
 
+    def score_sources(
+        self,
+        query_vec,
+        source_ids: set,
+    ) -> Dict[str, float]:
+        """Compute cosine similarity for specific source IDs.
+
+        Used by the tag veto logic in hybrid mode: after tag matching
+        finds candidate sources, this method scores each one so that
+        low-similarity tag matches can be dropped as false positives.
+
+        Args:
+            query_vec: numpy array of shape (D,), normalized.
+            source_ids: Source IDs to score.
+
+        Returns:
+            Dict mapping source_id → cosine similarity score.
+            Sources not found in the index are omitted.
+        """
+        if self._matrix is None:
+            return {}
+
+        # Build reverse mapping: source_id → row index
+        source_to_idx: Dict[str, int] = {
+            sid: idx for idx, sid in self._index_to_source_id.items()
+            if sid in source_ids
+        }
+
+        scores = self._matrix @ query_vec  # shape (N,)
+
+        return {
+            sid: float(scores[idx])
+            for sid, idx in source_to_idx.items()
+        }
+
     def embed_and_match(
         self,
         content: str,

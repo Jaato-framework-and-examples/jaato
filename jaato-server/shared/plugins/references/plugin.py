@@ -108,6 +108,7 @@ class ReferencesPlugin:
         # lookup_strategy: "hybrid" (tags + semantic), "tags_only", "semantic_only"
         self._lookup_strategy: str = "hybrid"
         self._similarity_threshold: float = 0.75
+        self._tag_similarity_threshold: float = 0.4
         self._max_matches_per_piece: int = 3
 
     @property
@@ -928,6 +929,7 @@ class ReferencesPlugin:
         # Read semantic config from plugin config (passed via initialize(config))
         self._lookup_strategy = config.get("lookup_strategy", "hybrid")
         self._similarity_threshold = config.get("similarity_threshold", 0.75)
+        self._tag_similarity_threshold = config.get("tag_similarity_threshold", 0.4)
         self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
 
         # Always try to create the embedding provider so that the
@@ -2520,6 +2522,35 @@ class ReferencesPlugin:
                 # Exclude sources already handled by @reference-id expansion
                 for mid in mentioned_ids:
                     matched_sources.pop(mid, None)
+
+                # --- Semantic veto on tag matches ---
+                # In hybrid mode, use embedding similarity to filter out
+                # tag matches that are likely false positives (e.g., the
+                # word "java" matching a Java reference when the content
+                # is about the island of Java).
+                vetoed_sources: Dict[str, float] = {}
+                if (
+                    matched_sources
+                    and self._semantic_matcher
+                    and self._semantic_matcher.available
+                    and self._lookup_strategy == "hybrid"
+                ):
+                    query_vec = self._embedding_provider.embed_text_as_array(content)
+                    if query_vec is not None:
+                        scores = self._semantic_matcher.score_sources(
+                            query_vec, set(matched_sources.keys())
+                        )
+                        for sid, score in scores.items():
+                            if score < self._tag_similarity_threshold:
+                                vetoed_sources[sid] = score
+                        for sid in vetoed_sources:
+                            matched_sources.pop(sid)
+                        if vetoed_sources:
+                            self._trace(
+                                f"enrich [{source_type}]: tag matches vetoed by "
+                                f"semantic similarity (threshold={self._tag_similarity_threshold}): "
+                                f"{{{', '.join(f'{sid}: {score:.3f}' for sid, score in vetoed_sources.items())}}}"
+                            )
 
                 if matched_sources:
                     self._trace(
