@@ -352,6 +352,24 @@ class TodoStep:
     """A single step within a plan.
 
     Extended with cross-agent collaboration fields for task dependencies.
+
+    Validation enforcement:
+        Steps with ``validation_required=True`` cannot be marked as completed
+        via ``setStepStatus`` unless the step has ``received_outputs`` from a
+        subagent (proving a validator actually ran and returned results). This
+        prevents the model from bypassing delegated validation by manually
+        marking validation steps as completed.
+
+        The flag is set automatically by ``createPlan`` when step descriptions
+        match validation-related patterns (e.g., "validate", "verify",
+        "tier-N validation"), or explicitly via the ``validation_required``
+        parameter in ``createPlan`` step objects.
+
+        To complete a validation step, the model must:
+        1. Spawn a validator subagent
+        2. Use ``addDependentStep`` to link the validation step to the subagent
+        3. Wait for the subagent to call ``completeStepWithOutput``
+        4. The step auto-unblocks with ``received_outputs`` as evidence
     """
 
     step_id: str
@@ -362,6 +380,13 @@ class TodoStep:
     completed_at: Optional[str] = None  # ISO8601
     result: Optional[str] = None  # Outcome or notes
     error: Optional[str] = None  # Error message if failed
+
+    # === Validation enforcement ===
+
+    # When True, setStepStatus(status='completed') is rejected unless the step
+    # has received_outputs from a subagent (proving a validator actually ran).
+    # Set automatically from description patterns or explicitly by the caller.
+    validation_required: bool = False
 
     # === Cross-agent collaboration fields ===
 
@@ -533,6 +558,9 @@ class TodoStep:
             "result": self.result,
             "error": self.error,
         }
+        # Include validation_required if set
+        if self.validation_required:
+            result["validation_required"] = True
         # Include collaboration fields if present
         if self.depends_on:
             result["depends_on"] = [ref.to_dict() for ref in self.depends_on]
@@ -572,6 +600,7 @@ class TodoStep:
             completed_at=data.get("completed_at"),
             result=data.get("result"),
             error=data.get("error"),
+            validation_required=data.get("validation_required", False),
             depends_on=depends_on,
             provides=data.get("provides"),
             output=data.get("output"),

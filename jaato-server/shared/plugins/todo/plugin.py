@@ -11,6 +11,7 @@ Progress is reported through configurable transport protocols
 """
 
 import os
+import re
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -32,6 +33,40 @@ from jaato_sdk.plugins.base import UserCommand
 # Thread-local storage for per-agent context
 # This allows each agent (running in its own thread) to have its own agent_name
 _thread_local = threading.local()
+
+# Pattern for auto-detecting validation steps from their description.
+# Matches descriptions like:
+#   "Execute Tier 2 validation", "Run tier-1 checks", "Tier 3: pattern compliance",
+#   "Validate output against standards", "Verify schema correctness",
+#   "Run validation checks", "Execute validation suite"
+# Does NOT match general usage of "valid" in non-validation contexts
+# (e.g., "Create a valid configuration" — note the word boundary after "valid").
+_VALIDATION_STEP_PATTERN = re.compile(
+    r'(?i)'
+    r'(?:'
+    r'tier[\s-]*\d'           # "tier 1", "tier-2", "Tier 3"
+    r'|validate\b'            # "validate output", "validate schema"
+    r'|verification\b'        # "verification step"
+    r'|run\s+validation\b'    # "run validation checks"
+    r'|execute\s+validation\b'  # "execute validation suite"
+    r')'
+)
+
+
+def _is_validation_step(description: str) -> bool:
+    """Determine if a step description indicates a validation step.
+
+    Validation steps require subagent evidence (received_outputs) before
+    they can be marked as completed.  This prevents the model from
+    bypassing delegated validation by marking the step completed manually.
+
+    Args:
+        description: The step description text.
+
+    Returns:
+        True if the description matches validation patterns.
+    """
+    return bool(_VALIDATION_STEP_PATTERN.search(description))
 
 
 class TodoPlugin:
@@ -301,7 +336,12 @@ class TodoPlugin:
             ToolSchema(
                 name="setStepStatus",
                 description="Step 3: Update the status of a step. Can only be called AFTER "
-                           "startPlan has been called. Use this to report progress as you work.",
+                           "startPlan has been called. Use this to report progress as you work.\n\n"
+                           "VALIDATION ENFORCEMENT: Steps with validation_required=true cannot "
+                           "be marked 'completed' via this tool unless they have received_outputs "
+                           "from a subagent. Use addDependentStep + completeStepWithOutput pattern "
+                           "to provide validator evidence. Use status='skipped' if validation is "
+                           "not needed.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -790,6 +830,18 @@ class TodoPlugin:
             "If a tool call was supposed to execute but wasn't called, the step is FAILED. "
             "Marking a step 'completed' without evidence is the single worst thing you can do — "
             "it gives the user false confidence and hides real problems.\n\n"
+            "# VALIDATION ENFORCEMENT\n\n"
+            "Steps with `validation_required=true` (auto-detected from descriptions containing "
+            "'validate', 'verify', 'tier-N', etc.) are **enforced by the system**:\n"
+            "- `setStepStatus(status='completed')` is **rejected** unless the step has "
+            "`received_outputs` from a subagent\n"
+            "- You MUST delegate validation to a subagent using:\n"
+            "  1. Spawn a validator subagent\n"
+            "  2. `addDependentStep` to link the validation step to the subagent\n"
+            "  3. The subagent calls `completeStepWithOutput` with its results\n"
+            "  4. Your step auto-unblocks with evidence in `received_outputs`\n"
+            "- If validation is genuinely not needed, use `setStepStatus(status='skipped')`\n"
+            "- This enforcement is a hard gate — it cannot be bypassed by rewording\n\n"
             "# RULES\n\n"
             "- MUST call startPlan after createPlan\n"
             "- CANNOT setStepStatus until startPlan has been called\n"
@@ -861,6 +913,11 @@ class TodoPlugin:
         # Create plan
         plan = TodoPlan.create(title=title, step_descriptions=steps)
 
+        # Auto-detect validation steps from description patterns
+        for step in plan.steps:
+            if _is_validation_step(step.description):
+                step.validation_required = True
+
         # Save to storage
         if self._storage:
             self._storage.save_plan(plan)
@@ -888,19 +945,23 @@ class TodoPlugin:
             }
         )
 
+        step_dicts = []
+        for s in plan.steps:
+            d = {
+                "step_id": s.step_id,
+                "sequence": s.sequence,
+                "description": s.description,
+                "status": s.status.value,
+            }
+            if s.validation_required:
+                d["validation_required"] = True
+            step_dicts.append(d)
+
         return {
             "plan_id": plan.plan_id,
             "title": plan.title,
             "status": plan.status.value,
-            "steps": [
-                {
-                    "step_id": s.step_id,
-                    "sequence": s.sequence,
-                    "description": s.description,
-                    "status": s.status.value,
-                }
-                for s in plan.steps
-            ],
+            "steps": step_dicts,
             "progress": plan.get_progress(),
         }
 
@@ -993,6 +1054,36 @@ class TodoPlugin:
                 existing_step_ids = [s.step_id for s in plan.steps]
                 self._trace(f"setStepStatus ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
                 return {"error": f"Step not found: {step_id}"}
+
+            # Enforce validation gate: validation steps cannot be marked
+            # completed via setStepStatus unless the step has received
+            # outputs from a subagent (proving a validator actually ran).
+            # The model must use addDependentStep + completeStepWithOutput
+            # to provide evidence.  completeStepWithOutput bypasses this
+            # gate because it *is* the subagent evidence mechanism.
+            if (new_status == StepStatus.COMPLETED
+                    and step.validation_required
+                    and not step.received_outputs):
+                self._trace(
+                    f"setStepStatus BLOCKED: step {step_id} is validation_required "
+                    f"but has no received_outputs"
+                )
+                return {
+                    "error": (
+                        "This is a validation step (validation_required=true). "
+                        "It cannot be marked completed without subagent evidence.\n\n"
+                        "To complete this step:\n"
+                        "1. Spawn a validator subagent\n"
+                        "2. Use addDependentStep to link this step to the subagent's output\n"
+                        "3. The subagent calls completeStepWithOutput with its results\n"
+                        "4. This step auto-unblocks and can then be completed\n\n"
+                        "If validation is genuinely not needed, use "
+                        "setStepStatus(status='skipped') instead."
+                    ),
+                    "step_id": step_id,
+                    "validation_required": True,
+                    "has_received_outputs": False,
+                }
 
             # Update step status
             if new_status == StepStatus.IN_PROGRESS:
