@@ -4001,6 +4001,19 @@ NOTES
             else:
                 tool_span.set_status_ok()
 
+            # Convention-based telemetry enrichment: if the executor result
+            # dict contains a '_telemetry' key mapping to a dict of
+            # {attr_name: value}, forward them as span attributes.  This
+            # lets plugins emit domain-specific telemetry without coupling
+            # to the telemetry plugin directly.
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                result_dict = executor_result[1]
+                if isinstance(result_dict, dict):
+                    telem = result_dict.get('_telemetry')
+                    if isinstance(telem, dict):
+                        for attr_key, attr_val in telem.items():
+                            tool_span.set_attribute(attr_key, attr_val)
+
         # Emit hook: tool ended
         if self._ui_hooks:
             self._ui_hooks.on_tool_call_end(
@@ -4210,6 +4223,15 @@ NOTES
                 tool_span.set_status_error(fc_error_message)
             else:
                 tool_span.set_status_ok()
+
+            # Convention-based telemetry enrichment (parallel path)
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                result_dict = executor_result[1]
+                if isinstance(result_dict, dict):
+                    telem = result_dict.get('_telemetry')
+                    if isinstance(telem, dict):
+                        for attr_key, attr_val in telem.items():
+                            tool_span.set_attribute(attr_key, attr_val)
 
         return _ToolExecutionResult(
             fc=fc,
