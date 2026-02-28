@@ -1150,9 +1150,9 @@ class JaatoSession:
         # Register built-in telepathy tool (share_context)
         self._register_telepathy_tool()
 
-        # Create provider session (skip if in auth-pending mode)
+        # Initialize empty session history (skip if in auth-pending mode)
         if not skip_provider:
-            self._create_provider_session()
+            self._history.clear()
 
         # Populate instruction budget after all configuration is complete
         self._populate_instruction_budget(session_instructions=system_instructions)
@@ -1210,29 +1210,6 @@ class JaatoSession:
                 f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
                 f"{provider_name}"
             )
-
-    def _create_provider_session(
-        self,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Initialize session history for a new or restored conversation.
-
-        The session is the sole history owner. The provider receives messages
-        as parameters to ``complete()`` on each call and holds no conversation
-        state itself.
-
-        Args:
-            history: Optional initial conversation history to restore.
-        """
-        if not self._provider:
-            return
-
-        if history:
-            logger.debug(f"[session:{self._agent_id}] _create_provider_session: restoring {len(history)} messages")
-            self._history.replace(list(history))
-        else:
-            logger.debug(f"[session:{self._agent_id}] _create_provider_session: no history to restore")
-            self._history.clear()
 
     def _add_model_response_to_history(self, response: 'ProviderResponse') -> None:
         """Add the model's response to session history.
@@ -1938,10 +1915,6 @@ class JaatoSession:
                 self._tools = list(self._tools) if self._tools else []
                 self._tools.extend(session_schemas)
 
-        # Recreate provider session with updated tools (preserve history)
-        history = self.get_history()
-        self._create_provider_session(history)
-
     def activate_discovered_tools(self, tool_names: List[str]) -> List[str]:
         """Activate discovered tools so the model can call them.
 
@@ -1989,12 +1962,8 @@ class JaatoSession:
         if activated and self._runtime.registry:
             self._track_activated_tools_in_budget(activated, schema_map)
 
-        # If we activated any tools, recreate the provider session
         if activated:
             self._trace(f"Activating discovered tools: {activated}")
-            history = self.get_history()
-            self._create_provider_session(history)
-            # Emit budget update to reflect newly tracked tool schemas
             self._emit_instruction_budget_update()
 
         return activated
@@ -2246,9 +2215,6 @@ NOTES
                     agent_name=self._agent_name,
                     agent_id=self._agent_id
                 )
-
-            # Recreate session with existing history
-            self._create_provider_session(history=history)
 
             # Update reliability plugin with new model context
             if self._runtime.reliability_plugin:
@@ -2696,7 +2662,7 @@ NOTES
             new_history = ensure_tool_call_integrity(
                 new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
             )
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -4500,7 +4466,7 @@ NOTES
                     "with pending tool calls after GC"
                 )
 
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -5218,8 +5184,6 @@ NOTES
             )
             self._system_instruction = (self._system_instruction or "") + pinned_block
 
-            history = self.get_history()
-            self._create_provider_session(history)
             self._update_pinned_references_budget()
 
             self._trace(
@@ -5244,11 +5208,6 @@ NOTES
             f"{content}"
         )
         self._system_instruction = (self._system_instruction or "") + pinned_block
-
-        # Recreate provider session with updated system instruction
-        # (preserves current conversation history)
-        history = self.get_history()
-        self._create_provider_session(history)
 
         # Update instruction budget with the new pinned reference
         self._update_pinned_references_budget()
@@ -5461,15 +5420,12 @@ NOTES
         }
 
     def reset_session(self, history: Optional[List[Message]] = None) -> None:
-        """Reset the chat session.
+        """Reset the chat session, clearing turn accounting and optionally restoring history.
 
         When history is provided (e.g. after GC), the token count cache is
         preserved because restored Message objects keep their original
         message_id, so cached counts remain valid.  The cache is only
         cleared on a true fresh reset (no history).
-
-        Updates both the session's canonical ``SessionHistory`` and the
-        provider's internal state (via ``_create_provider_session``).
 
         Args:
             history: Optional initial history for the new session.
@@ -5489,7 +5445,6 @@ NOTES
             if self._pinned_references:
                 self._remove_pinned_from_system_instruction()
                 self._pinned_references.clear()
-        self._create_provider_session(history)
 
     def get_turn_boundaries(self) -> List[int]:
         """Get indices where each turn starts in the history."""
@@ -5534,7 +5489,7 @@ NOTES
         if turn_id <= len(self._turn_accounting):
             self._turn_accounting = self._turn_accounting[:turn_id]
 
-        self._create_provider_session(truncated_history)
+        self._history.replace(truncated_history)
 
         if self._session_plugin and hasattr(self._session_plugin, 'set_turn_count'):
             self._session_plugin.set_turn_count(turn_id)
@@ -5583,8 +5538,6 @@ NOTES
         if isinstance(result, HelpLines):
             return
 
-        current_history = self.get_history()
-
         user_message = Message(
             role=Role.USER,
             parts=[Part.from_text(f"[User executed command: {command_name}]")]
@@ -5600,8 +5553,8 @@ NOTES
             ))]
         )
 
-        new_history = list(current_history) + [user_message, model_message]
-        self._create_provider_session(new_history)
+        self._history.append(user_message)
+        self._history.append(model_message)
 
     def _notify_model_of_cancellation(self, cancel_msg: str, partial_text: str = '') -> None:
         """Inject cancellation notice into history so model has context.
@@ -5625,8 +5578,6 @@ NOTES
         if not self._provider:
             return
 
-        current_history = self.get_history()
-
         # Create a note for the model about what happened
         if partial_text:
             note = f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]"
@@ -5638,8 +5589,7 @@ NOTES
             parts=[Part.from_text(note)]
         )
 
-        new_history = list(current_history) + [user_message]
-        self._create_provider_session(new_history)
+        self._history.append(user_message)
 
     def generate(self, prompt: str) -> str:
         """Simple one-shot generation without tools or history.
@@ -5965,7 +5915,7 @@ NOTES
             new_history = ensure_tool_call_integrity(
                 new_history, trace_fn=lambda m: self._trace(f"MANUAL_GC: {m}"),
             )
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -6013,7 +5963,7 @@ NOTES
                 new_history = ensure_tool_call_integrity(
                     new_history, trace_fn=lambda m: self._trace(f"GC_BEFORE_SEND: {m}"),
                 )
-                self.reset_session(new_history)
+                self._history.replace(new_history)
                 self._gc_history.append(result)
 
                 # Sync budget with GC changes
@@ -6149,8 +6099,6 @@ NOTES
                 current_tools = list(self._tools) if self._tools else []
                 current_tools.extend(session_schemas)
                 self._tools = current_tools
-                history = self.get_history() if self._provider else None
-                self._create_provider_session(history)
 
         if self._session_config.auto_resume_last:
             state = self._session_plugin.on_session_start(self._session_config)

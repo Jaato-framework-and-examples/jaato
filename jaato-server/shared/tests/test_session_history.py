@@ -3,7 +3,7 @@
 Tests cover:
 1. SessionHistory class behavior (append, replace, clear, dirty tracking)
 2. Integration with JaatoSession (get_history returns from SessionHistory,
-   reset_session updates history, _create_provider_session sets history)
+   reset_session updates history, _history.replace/clear set history)
 """
 
 import pytest
@@ -255,8 +255,8 @@ class TestSessionHistoryInSession:
         assert len(session._history) == 0
         assert not session._history.dirty
 
-    def test_create_provider_session_sets_history(self):
-        """_create_provider_session() sets history directly on SessionHistory."""
+    def test_history_replace_sets_history(self):
+        """_history.replace() sets history directly on SessionHistory."""
         session, mock_provider = _make_configured_session()
 
         new_msgs = [
@@ -264,14 +264,13 @@ class TestSessionHistoryInSession:
             Message(role=Role.MODEL, parts=[Part.from_text("world")]),
         ]
 
-        session._create_provider_session(new_msgs)
+        session._history.replace(new_msgs)
 
-        # SessionHistory should have the messages
         assert len(session._history) == 2
         assert session._history.messages[0].parts[0].text == "hello"
 
-    def test_create_provider_session_clears_without_history(self):
-        """_create_provider_session() without history clears SessionHistory."""
+    def test_history_clear_removes_all(self):
+        """_history.clear() removes all messages from SessionHistory."""
         session, mock_provider = _make_configured_session()
 
         # Add some existing history
@@ -279,7 +278,7 @@ class TestSessionHistoryInSession:
             Message(role=Role.USER, parts=[Part.from_text("old")])
         )
 
-        session._create_provider_session()
+        session._history.clear()
 
         assert len(session._history) == 0
 
