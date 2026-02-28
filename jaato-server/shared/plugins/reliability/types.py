@@ -601,6 +601,9 @@ class BehavioralPatternType(Enum):
     TOOL_AVOIDANCE = "tool_avoidance"           # Model avoids a specific tool repeatedly
     ERROR_RETRY_LOOP = "error_retry_loop"       # Retrying same failing operation unchanged
 
+    # Validation bypass
+    VALIDATION_BYPASS = "validation_bypass"              # Completing validation step without subagent evidence
+
     # Prerequisite violations
     PREREQUISITE_VIOLATED = "prerequisite_violated"      # Any prerequisite policy violated
 
