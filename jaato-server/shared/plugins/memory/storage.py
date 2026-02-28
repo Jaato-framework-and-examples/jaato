@@ -1,11 +1,40 @@
-"""Storage backend for memory plugin."""
+"""Storage backend for memory plugin.
+
+Handles JSONL persistence with backward compatibility for memories created
+before the knowledge-curation lifecycle fields (maturity, confidence, scope,
+evidence, source_agent, source_session) were added.  Old records missing
+these fields are loaded with sensible defaults.
+"""
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields as dc_fields
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional, Set
 
-from .models import Memory
+from .models import (
+    ACTIVE_MATURITIES,
+    MATURITY_RAW,
+    Memory,
+)
+
+
+# Fields that exist on the Memory dataclass.  Used to silently drop unknown
+# keys from old or hand-edited JSONL lines rather than crashing on
+# ``TypeError: __init__() got an unexpected keyword argument``.
+_MEMORY_FIELD_NAMES: Set[str] = {f.name for f in dc_fields(Memory)}
+
+
+def _memory_from_dict(data: dict) -> Memory:
+    """Construct a ``Memory`` from a raw JSON dict.
+
+    Provides backward compatibility by:
+    - Dropping unknown keys that may exist in hand-edited files.
+    - Letting dataclass defaults fill in any missing new fields so that
+      memories created before the knowledge-curation fields were added
+      load without error.
+    """
+    filtered = {k: v for k, v in data.items() if k in _MEMORY_FIELD_NAMES}
+    return Memory(**filtered)
 
 
 class MemoryStorage:
@@ -13,6 +42,9 @@ class MemoryStorage:
 
     Each memory is stored as a JSON line in the file.
     This format allows for easy appending and sequential reading.
+
+    Supports the knowledge-curation lifecycle by providing maturity-based
+    query methods used by the advisor agent during curation.
     """
 
     def __init__(self, path: str):
@@ -45,6 +77,10 @@ class MemoryStorage:
     def load_all(self) -> List[Memory]:
         """Load all memories from file.
 
+        Backward-compatible: old JSONL lines missing the new lifecycle
+        fields are loaded with their dataclass defaults (``maturity="raw"``,
+        ``confidence=0.5``, ``scope="project"``, etc.).
+
         Returns:
             List of Memory objects, or empty list if file doesn't exist
         """
@@ -57,14 +93,24 @@ class MemoryStorage:
                 line = line.strip()
                 if line:  # Skip empty lines
                     try:
-                        memories.append(Memory(**json.loads(line)))
+                        memories.append(_memory_from_dict(json.loads(line)))
                     except (json.JSONDecodeError, TypeError) as e:
                         # Log but continue - don't let one bad line break everything
                         print(f"[MemoryStorage] Warning: Skipping invalid line: {e}")
                         continue
         return memories
 
-    def search_by_tags(self, tags: List[str], limit: int = 3) -> List[Memory]:
+    # ------------------------------------------------------------------
+    # Tag-based search
+    # ------------------------------------------------------------------
+
+    def search_by_tags(
+        self,
+        tags: List[str],
+        limit: int = 3,
+        *,
+        active_only: bool = True,
+    ) -> List[Memory]:
         """Find memories matching any of the provided tags.
 
         Memories are scored by tag overlap and sorted by:
@@ -72,8 +118,11 @@ class MemoryStorage:
         2. Recency (most recent first)
 
         Args:
-            tags: List of tags to search for
-            limit: Maximum number of memories to return
+            tags: List of tags to search for.
+            limit: Maximum number of memories to return.
+            active_only: When True (default), only return memories whose
+                maturity is in ``ACTIVE_MATURITIES`` (raw, validated).
+                Set to False to search across all maturity states.
 
         Returns:
             List of Memory objects matching the tags, sorted by relevance
@@ -83,6 +132,8 @@ class MemoryStorage:
         # Score by tag overlap
         scored = []
         for mem in all_memories:
+            if active_only and mem.maturity not in ACTIVE_MATURITIES:
+                continue
             overlap = len(set(mem.tags) & set(tags))
             if overlap > 0:
                 scored.append((overlap, mem))
@@ -91,6 +142,57 @@ class MemoryStorage:
         scored.sort(key=lambda x: (x[0], x[1].timestamp), reverse=True)
 
         return [mem for _, mem in scored[:limit]]
+
+    # ------------------------------------------------------------------
+    # Maturity-based queries (used by advisor / curation workflow)
+    # ------------------------------------------------------------------
+
+    def search_by_maturity(
+        self,
+        maturities: Iterable[str],
+        limit: int = 50,
+    ) -> List[Memory]:
+        """Return memories whose maturity is in the given set.
+
+        Args:
+            maturities: Maturity values to include (e.g. ``{"raw"}``).
+            limit: Maximum number of memories to return.
+
+        Returns:
+            Matching memories sorted by recency (newest first).
+        """
+        target = set(maturities)
+        matches = [m for m in self.load_all() if m.maturity in target]
+        matches.sort(key=lambda m: m.timestamp, reverse=True)
+        return matches[:limit]
+
+    def get_pending_curation(self, limit: int = 50) -> List[Memory]:
+        """Return raw memories awaiting advisor review.
+
+        Convenience wrapper over ``search_by_maturity`` for the most
+        common curation query.
+
+        Args:
+            limit: Maximum number of memories to return.
+
+        Returns:
+            Raw memories sorted by recency (newest first).
+        """
+        return self.search_by_maturity({MATURITY_RAW}, limit=limit)
+
+    def count_by_maturity(self) -> dict:
+        """Return a dict of ``{maturity: count}`` for all stored memories.
+
+        Useful for curation dashboards and threshold-based triggers.
+        """
+        counts: dict = {}
+        for mem in self.load_all():
+            counts[mem.maturity] = counts.get(mem.maturity, 0) + 1
+        return counts
+
+    # ------------------------------------------------------------------
+    # CRUD (single-record)
+    # ------------------------------------------------------------------
 
     def update(self, memory: Memory) -> None:
         """Update an existing memory.

@@ -1,9 +1,16 @@
-"""Indexer for memory plugin keyword extraction and matching."""
+"""Indexer for memory plugin keyword extraction and matching.
+
+The indexer maintains lightweight in-memory data structures for fast
+tag-based lookup.  It is maturity-aware: ``find_matches`` defaults to
+returning only *active* memories (``raw`` and ``validated``), filtering
+out ``escalated`` and ``dismissed`` entries so that prompt enrichment
+never surfaces memories that have graduated to references or been rejected.
+"""
 
 import re
 from typing import Dict, List, Set
 
-from .models import Memory, MemoryMetadata
+from .models import ACTIVE_MATURITIES, Memory, MemoryMetadata
 
 
 # Common English stopwords to filter out
@@ -23,6 +30,10 @@ class MemoryIndexer:
     The indexer maintains in-memory data structures for fast matching:
     - tag_index: Maps tags to memory IDs
     - memories: Maps memory IDs to metadata (lightweight, no full content)
+
+    Maturity filtering is applied at query time (``find_matches``) rather
+    than at indexing time so that the full index is always available for
+    administrative queries (e.g. listing all tags including escalated ones).
     """
 
     def __init__(self):
@@ -42,15 +53,22 @@ class MemoryIndexer:
     def index_memory(self, memory: Memory) -> None:
         """Add a single memory to the index.
 
+        All memories are indexed regardless of maturity so that
+        administrative tools (``list_memory_tags``, ``memory list``) see
+        the complete picture.  Maturity filtering happens at query time.
+
         Args:
             memory: Memory object to index
         """
-        # Store lightweight metadata
+        # Store lightweight metadata (now includes maturity, confidence, scope)
         metadata = MemoryMetadata(
             id=memory.id,
             description=memory.description,
             tags=memory.tags,
-            timestamp=memory.timestamp
+            timestamp=memory.timestamp,
+            maturity=memory.maturity,
+            confidence=memory.confidence,
+            scope=memory.scope,
         )
         self._memories[memory.id] = metadata
 
@@ -88,7 +106,13 @@ class MemoryIndexer:
 
         return keywords
 
-    def find_matches(self, keywords: List[str], limit: int = 5) -> List[MemoryMetadata]:
+    def find_matches(
+        self,
+        keywords: List[str],
+        limit: int = 5,
+        *,
+        active_only: bool = True,
+    ) -> List[MemoryMetadata]:
         """Find memories with tags matching the provided keywords.
 
         Matching strategy:
@@ -98,8 +122,11 @@ class MemoryIndexer:
         Results are sorted by recency (most recent first).
 
         Args:
-            keywords: List of keywords to match against tags
-            limit: Maximum number of matches to return
+            keywords: List of keywords to match against tags.
+            limit: Maximum number of matches to return.
+            active_only: When True (default), only return memories whose
+                maturity is in ``ACTIVE_MATURITIES`` (raw, validated).
+                Set to False to include all maturity states.
 
         Returns:
             List of MemoryMetadata objects (lightweight, no full content)
@@ -122,31 +149,59 @@ class MemoryIndexer:
                     matched_ids.update(self._tag_index[tag])
                     break  # Don't need to check other keywords for this tag
 
-        # Get metadata and sort by recency (newest first)
-        matches = [
-            self._memories[mid]
-            for mid in matched_ids
-            if mid in self._memories
-        ]
+        # Get metadata, apply maturity filter, and sort by recency
+        matches = []
+        for mid in matched_ids:
+            meta = self._memories.get(mid)
+            if meta is None:
+                continue
+            if active_only and meta.maturity not in ACTIVE_MATURITIES:
+                continue
+            matches.append(meta)
+
         matches.sort(key=lambda m: m.timestamp, reverse=True)
 
         return matches[:limit]
 
-    def get_all_tags(self) -> List[str]:
+    def get_all_tags(self, *, active_only: bool = False) -> List[str]:
         """Return all unique tags in the index.
+
+        Args:
+            active_only: When True, only include tags from memories with
+                active maturity states.  Defaults to False (all tags).
 
         Returns:
             List of all tags (lowercase)
         """
-        return list(self._tag_index.keys())
+        if not active_only:
+            return list(self._tag_index.keys())
 
-    def get_memory_count(self) -> int:
+        # Collect tags only from active memories
+        active_tags: Set[str] = set()
+        for tag, mem_ids in self._tag_index.items():
+            for mid in mem_ids:
+                meta = self._memories.get(mid)
+                if meta and meta.maturity in ACTIVE_MATURITIES:
+                    active_tags.add(tag)
+                    break
+        return list(active_tags)
+
+    def get_memory_count(self, *, active_only: bool = False) -> int:
         """Return total number of indexed memories.
+
+        Args:
+            active_only: When True, only count memories with active
+                maturity states.
 
         Returns:
             Number of memories in index
         """
-        return len(self._memories)
+        if not active_only:
+            return len(self._memories)
+        return sum(
+            1 for m in self._memories.values()
+            if m.maturity in ACTIVE_MATURITIES
+        )
 
     def clear(self) -> None:
         """Clear all index data."""

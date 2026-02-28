@@ -1,4 +1,9 @@
-"""Memory plugin for model self-curated persistent memory across sessions."""
+"""Memory plugin for model self-curated persistent memory across sessions.
+
+Supports the knowledge-curation lifecycle ("The School") where agents store
+raw memories during sessions, and an advisor agent later curates them into
+validated knowledge or promotes them to reference entries.
+"""
 
 import json
 import os
@@ -17,7 +22,18 @@ from jaato_sdk.plugins.base import (
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from .indexer import MemoryIndexer
-from .models import Memory
+from .models import (
+    ACTIVE_MATURITIES,
+    MATURITY_DISMISSED,
+    MATURITY_ESCALATED,
+    MATURITY_RAW,
+    MATURITY_VALIDATED,
+    SCOPE_PROJECT,
+    SCOPE_UNIVERSAL,
+    VALID_MATURITIES,
+    VALID_SCOPES,
+    Memory,
+)
 from .storage import MemoryStorage
 from shared.trace import trace as _trace_write
 
@@ -30,8 +46,14 @@ class MemoryPlugin:
     2. Retrieve stored memories when relevant
     3. Build a persistent knowledge base over time
 
+    The plugin participates in the knowledge-curation lifecycle:
+    - Working agents store memories with ``maturity="raw"``
+    - Prompt enrichment only surfaces *active* memories (raw, validated)
+    - The advisor agent uses ``get_pending_curation`` (via storage) to
+      review raw memories and transition them to validated/escalated/dismissed
+
     The plugin uses a two-phase retrieval system:
-    - Phase 1: Prompt enrichment adds lightweight hints about available memories
+    - Phase 1: Prompt enrichment adds lightweight hints about active memories
     - Phase 2: Model decides whether to retrieve full content via function calling
     """
 
@@ -113,7 +135,9 @@ class MemoryPlugin:
                     'Store information from this conversation for retrieval in future sessions. '
                     'Use this when you provide a comprehensive explanation, architecture overview, '
                     'or useful insight that would help in future conversations about this topic. '
-                    'Only store substantial, reusable information - not ephemeral responses.'
+                    'Only store substantial, reusable information - not ephemeral responses. '
+                    'Memories are created as "raw" and will later be reviewed by the advisor '
+                    'agent for potential promotion to permanent knowledge.'
                 ),
                 parameters={
                     "type": "object",
@@ -142,6 +166,33 @@ class MemoryPlugin:
                                 "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'react_hooks'. "
                                 "Bad: generic words like 'code', 'error', 'fix', 'config', "
                                 "or single letters."
+                            )
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": (
+                                "Your confidence in the accuracy of this memory (0.0-1.0). "
+                                "Use 0.8-1.0 for well-tested facts, 0.5-0.7 for reasonable "
+                                "beliefs, 0.1-0.4 for uncertain observations. Default: 0.5"
+                            )
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["project", "universal"],
+                            "description": (
+                                "How broadly this memory applies. 'project' for codebase-specific "
+                                "knowledge, 'universal' for generally applicable insights. "
+                                "Default: 'project'"
+                            )
+                        },
+                        "evidence": {
+                            "type": "string",
+                            "description": (
+                                "What triggered this learning — error messages, tool results, "
+                                "observations, or other evidence that substantiates this memory. "
+                                "Helps the advisor agent assess validity during curation."
                             )
                         }
                     },
@@ -208,6 +259,10 @@ class MemoryPlugin:
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing memory capabilities.
 
+        Includes guidance on the knowledge-curation lifecycle so that
+        agents understand their memories will be reviewed and potentially
+        promoted to permanent knowledge.
+
         Returns:
             Instructions for the model about memory usage
         """
@@ -217,12 +272,24 @@ class MemoryPlugin:
             "**When to store memories:**\n"
             "- After providing comprehensive explanations of architecture, patterns, or concepts\n"
             "- When documenting project-specific conventions or decisions\n"
-            "- After analyzing complex code structures or workflows\n\n"
+            "- After analyzing complex code structures or workflows\n"
+            "- After discovering non-obvious behaviors, gotchas, or workarounds\n"
+            "- After a significant debugging session with a hard-to-find root cause\n\n"
             "**How to use:**\n"
             "- Use `store_memory` to save valuable insights for future sessions\n"
             "- When you see memory hints in prompts (💡 **Available Memories**), "
             "use `retrieve_memories` to access stored context\n"
             "- Use `list_memory_tags` to discover what topics have been stored\n\n"
+            "**Knowledge curation lifecycle:**\n"
+            "Your memories are part of a learning pipeline. When you store a memory:\n"
+            "1. It is created as **raw** — awaiting review by the advisor agent\n"
+            "2. The advisor may **validate** it (confirmed valuable, kept as memory)\n"
+            "3. The advisor may **escalate** it to a permanent reference (becomes knowledge)\n"
+            "4. The advisor may **dismiss** it (incorrect, trivial, or superseded)\n\n"
+            "To help the advisor assess your memories effectively:\n"
+            "- Set `confidence` honestly — how sure are you this is correct?\n"
+            "- Set `scope` — is this specific to this project or universally applicable?\n"
+            "- Provide `evidence` — what happened that led to this learning?\n\n"
             "**Best practices:**\n"
             "- Only store substantial, reusable information (not ephemeral responses)\n"
             "- Use **specific, distinctive** tags that uniquely identify the topic. "
@@ -231,6 +298,7 @@ class MemoryPlugin:
             "Bad: generic tags like 'code', 'error', 'fix', 'bug', 'config', 'api' — "
             "these match too many unrelated memories\n"
             "- Write clear descriptions to help future retrieval\n"
+            "- Include evidence: error messages, command outputs, or observations\n"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -301,12 +369,20 @@ class MemoryPlugin:
         """Return lightweight memory metadata for completion caches.
 
         Returns:
-            List of dicts with id, description, and tags for each memory.
+            List of dicts with id, description, tags, and lifecycle fields
+            for each memory.
         """
         if not self._storage:
             return []
         return [
-            {"id": m.id, "description": m.description, "tags": m.tags}
+            {
+                "id": m.id,
+                "description": m.description,
+                "tags": m.tags,
+                "maturity": m.maturity,
+                "confidence": m.confidence,
+                "scope": m.scope,
+            }
             for m in self._storage.load_all()
         ]
 
@@ -417,8 +493,13 @@ class MemoryPlugin:
     def _execute_store(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute store_memory tool.
 
+        Creates a new memory with ``maturity="raw"``.  The optional
+        ``confidence``, ``scope``, and ``evidence`` fields help the
+        advisor agent during later curation.
+
         Args:
-            args: Tool arguments (content, description, tags)
+            args: Tool arguments (content, description, tags, and optional
+                confidence, scope, evidence)
 
         Returns:
             Result dict with status and memory_id
@@ -448,14 +529,31 @@ class MemoryPlugin:
                 )
             }
 
-        # Create memory object
+        # Validate confidence (clamp to 0.0-1.0)
+        confidence = args.get("confidence", 0.5)
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        # Validate scope
+        scope = args.get("scope", SCOPE_PROJECT)
+        if scope not in VALID_SCOPES:
+            scope = SCOPE_PROJECT
+
+        # Create memory object — always starts as raw
         memory = Memory(
             id=f"mem_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:20]}",
             content=args["content"],
             description=args["description"],
             tags=valid_tags,
             timestamp=datetime.now().isoformat(),
-            usage_count=0
+            usage_count=0,
+            maturity=MATURITY_RAW,
+            confidence=confidence,
+            scope=scope,
+            evidence=args.get("evidence"),
+            source_agent=self._agent_name,
         )
 
         # Save to storage
@@ -468,17 +566,22 @@ class MemoryPlugin:
             "status": "success",
             "memory_id": memory.id,
             "message": f"Stored memory: {memory.description}",
-            "tags": memory.tags
+            "tags": memory.tags,
+            "maturity": memory.maturity,
+            "confidence": memory.confidence,
+            "scope": memory.scope,
         }
 
     def _execute_retrieve(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute retrieve_memories tool.
 
+        Only returns active memories (raw, validated) by default.
+
         Args:
             args: Tool arguments (tags, limit)
 
         Returns:
-            Result dict with memories list
+            Result dict with memories list including lifecycle metadata
         """
         tags = args.get("tags", [])
         limit = args.get("limit", 3)
@@ -492,7 +595,7 @@ class MemoryPlugin:
         tags = args["tags"]
         limit = args.get("limit", 3)
 
-        # Search storage by tags
+        # Search storage by tags (active_only=True by default)
         memories = self._storage.search_by_tags(tags, limit=limit)
 
         if not memories:
@@ -517,7 +620,10 @@ class MemoryPlugin:
                     "content": m.content,
                     "tags": m.tags,
                     "stored": m.timestamp,
-                    "usage_count": m.usage_count
+                    "usage_count": m.usage_count,
+                    "maturity": m.maturity,
+                    "confidence": m.confidence,
+                    "scope": m.scope,
                 }
                 for m in memories
             ]
@@ -599,9 +705,10 @@ class MemoryPlugin:
             )
 
     def _memory_list(self) -> HelpLines:
-        """List all stored memories.
+        """List all stored memories with lifecycle metadata.
 
         Returns HelpLines for pager display (same pattern as session list).
+        Shows maturity, confidence, and scope alongside existing metadata.
         """
         if not self._storage:
             return HelpLines(lines=[("Error: Memory plugin not initialized.", "error")])
@@ -611,9 +718,21 @@ class MemoryPlugin:
         if not memories:
             return HelpLines(lines=[("No memories stored yet.", "dim")])
 
+        # Group by maturity for summary
+        maturity_counts = self._storage.count_by_maturity()
+
         lines = []
         lines.append(("Stored Memories", "bold"))
         lines.append(("═" * 15, "bold"))
+
+        # Show maturity summary
+        summary_parts = []
+        for mat in (MATURITY_RAW, MATURITY_VALIDATED, MATURITY_ESCALATED, MATURITY_DISMISSED):
+            count = maturity_counts.get(mat, 0)
+            if count > 0:
+                summary_parts.append(f"{mat}: {count}")
+        if summary_parts:
+            lines.append((f"  ({', '.join(summary_parts)})", "dim"))
         lines.append(("", ""))
 
         for mem in memories:
@@ -621,11 +740,21 @@ class MemoryPlugin:
             if len(mem.tags) > 3:
                 tags_str += f" +{len(mem.tags) - 3} more"
 
-            lines.append((f"ID: {mem.id}", ""))
+            # Maturity indicator
+            maturity_icon = {
+                MATURITY_RAW: "○",
+                MATURITY_VALIDATED: "◑",
+                MATURITY_ESCALATED: "●",
+                MATURITY_DISMISSED: "✗",
+            }.get(mem.maturity, "?")
+
+            lines.append((f"{maturity_icon} ID: {mem.id}", ""))
             lines.append((f"  Description: {mem.description}", "dim"))
             lines.append((f"  Tags: {tags_str}", "dim"))
-            lines.append((f"  Created: {mem.timestamp[:10]}", "dim"))
+            lines.append((f"  Created: {mem.timestamp[:10]}  |  Maturity: {mem.maturity}  |  Confidence: {mem.confidence:.0%}  |  Scope: {mem.scope}", "dim"))
             lines.append((f"  Used: {mem.usage_count} times", "dim"))
+            if mem.source_agent:
+                lines.append((f"  Source: {mem.source_agent}", "dim"))
             lines.append(("", ""))
 
         lines.append((f"Total: {len(memories)} memories", "bold"))
@@ -666,11 +795,15 @@ class MemoryPlugin:
         # Get editor
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
 
-        # Prepare memory as YAML for editing
+        # Prepare memory as YAML for editing (including lifecycle fields)
         memory_dict = {
             "description": memory.description,
             "content": memory.content,
             "tags": memory.tags,
+            "maturity": memory.maturity,
+            "confidence": memory.confidence,
+            "scope": memory.scope,
+            "evidence": memory.evidence,
         }
 
         # Create temp file with memory content
@@ -692,6 +825,10 @@ class MemoryPlugin:
                     f"#   description: Brief summary (1-2 sentences)\n"
                     f"#   content: Full content/explanation\n"
                     f"#   tags: List of keywords for retrieval\n"
+                    f"#   maturity: raw | validated | escalated | dismissed\n"
+                    f"#   confidence: 0.0 to 1.0\n"
+                    f"#   scope: project | universal\n"
+                    f"#   evidence: What triggered this learning (optional)\n"
                     f"\n"
                 )
                 import yaml
@@ -763,10 +900,18 @@ class MemoryPlugin:
             if validation_error:
                 return f"Validation error: {validation_error}\nEdit cancelled."
 
-            # Update memory
+            # Update memory (core + lifecycle fields)
             memory.description = parsed["description"]
             memory.content = parsed["content"]
             memory.tags = parsed["tags"]
+            if "maturity" in parsed:
+                memory.maturity = parsed["maturity"]
+            if "confidence" in parsed:
+                memory.confidence = float(parsed["confidence"])
+            if "scope" in parsed:
+                memory.scope = parsed["scope"]
+            if "evidence" in parsed:
+                memory.evidence = parsed["evidence"]
 
             # Save updated memory
             self._storage.update(memory)
@@ -790,6 +935,9 @@ class MemoryPlugin:
     def _validate_memory_schema(self, data: Dict[str, Any]) -> Optional[str]:
         """Validate that edited memory data conforms to schema.
 
+        Validates both the original core fields and the lifecycle fields
+        added for the knowledge-curation system.
+
         Args:
             data: Parsed memory data dict
 
@@ -798,11 +946,11 @@ class MemoryPlugin:
         """
         # Required fields
         required_fields = ["description", "content", "tags"]
-        for field in required_fields:
-            if field not in data:
-                return f"Missing required field: {field}"
+        for fld in required_fields:
+            if fld not in data:
+                return f"Missing required field: {fld}"
 
-        # Type validation
+        # Type validation — core fields
         if not isinstance(data["description"], str):
             return "description must be a string"
         if not isinstance(data["content"], str):
@@ -828,6 +976,33 @@ class MemoryPlugin:
                 f"got: {short_tags!r}"
             )
 
+        # Lifecycle field validation (optional in schema, validated when present)
+        if "maturity" in data:
+            if data["maturity"] not in VALID_MATURITIES:
+                return (
+                    f"maturity must be one of {sorted(VALID_MATURITIES)}, "
+                    f"got: {data['maturity']!r}"
+                )
+
+        if "confidence" in data:
+            try:
+                conf = float(data["confidence"])
+                if not (0.0 <= conf <= 1.0):
+                    return "confidence must be between 0.0 and 1.0"
+            except (TypeError, ValueError):
+                return f"confidence must be a number, got: {data['confidence']!r}"
+
+        if "scope" in data:
+            if data["scope"] not in VALID_SCOPES:
+                return (
+                    f"scope must be one of {sorted(VALID_SCOPES)}, "
+                    f"got: {data['scope']!r}"
+                )
+
+        if "evidence" in data:
+            if data["evidence"] is not None and not isinstance(data["evidence"], str):
+                return "evidence must be a string or null"
+
         return None
 
     def _memory_help(self) -> HelpLines:
@@ -838,12 +1013,16 @@ class MemoryPlugin:
             ("Manage persistent memories stored by the AI. Memories persist across", ""),
             ("sessions and help the AI recall context, patterns, and lessons learned.", ""),
             ("", ""),
+            ("Memories go through a knowledge-curation lifecycle:", ""),
+            ("  raw -> validated -> escalated (promoted to reference)", "dim"),
+            ("               \\-> dismissed (rejected by advisor)", "dim"),
+            ("", ""),
             ("USAGE", "bold"),
             ("    memory [subcommand] [args]", ""),
             ("", ""),
             ("SUBCOMMANDS", "bold"),
             ("    list              List all stored memories with metadata", "dim"),
-            ("                      Shows ID, description, tags, creation date, usage count", "dim"),
+            ("                      Shows ID, description, tags, maturity, confidence", "dim"),
             ("", ""),
             ("    remove <id>       Remove a memory by its ID", "dim"),
             ("                      The memory will be permanently deleted", "dim"),
@@ -865,13 +1044,24 @@ class MemoryPlugin:
             ("      description: Brief summary of the memory", "dim"),
             ("      content: Full content/explanation", "dim"),
             ("      tags: List of keywords for retrieval", "dim"),
+            ("      maturity: raw | validated | escalated | dismissed", "dim"),
+            ("      confidence: 0.0 to 1.0 (accuracy self-assessment)", "dim"),
+            ("      scope: project | universal", "dim"),
+            ("      evidence: What triggered this learning (optional)", "dim"),
             ("", ""),
             ("    Lines starting with # are comments and will be ignored.", ""),
+            ("", ""),
+            ("MATURITY LIFECYCLE", "bold"),
+            ("    ○ raw          Fresh from agent, awaiting advisor review", "dim"),
+            ("    ◑ validated    Advisor confirmed valuable, kept as memory", "dim"),
+            ("    ● escalated    Promoted to permanent reference (knowledge)", "dim"),
+            ("    ✗ dismissed    Rejected by advisor (incorrect/trivial)", "dim"),
             ("", ""),
             ("NOTES", "bold"),
             ("    - Memories are stored in .jaato/memories.jsonl", "dim"),
             ("    - Each memory has a unique ID starting with 'mem_'", "dim"),
             ("    - Use Tab completion for memory IDs in remove/edit", "dim"),
+            ("    - Only active memories (raw, validated) appear in prompt hints", "dim"),
         ])
 
 
