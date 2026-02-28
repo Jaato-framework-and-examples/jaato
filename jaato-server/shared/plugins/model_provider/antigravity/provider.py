@@ -39,6 +39,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     ToolSchema,
     TokenUsage,
+    TurnResult,
 )
 from .constants import (
     ANTIGRAVITY_API_CLIENT,
@@ -739,7 +740,7 @@ class AntigravityProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: convert messages to API format, call API, return response.
 
         The caller (session) is responsible for maintaining the message
@@ -748,6 +749,9 @@ class AntigravityProvider:
 
         When ``on_chunk`` is provided, the response is streamed via SSE.
         When ``on_chunk`` is None, the response is returned in batch mode.
+
+        Returns ``TurnResult.from_provider_response(r)`` on success and
+        **raises** transient errors for ``with_retry``.
 
         Args:
             messages: Full conversation history in provider-agnostic Message
@@ -763,7 +767,7 @@ class AntigravityProvider:
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
+            A ``TurnResult`` classifying the outcome.
 
         Raises:
             RuntimeError: If provider is not initialized/connected.
@@ -812,7 +816,7 @@ class AntigravityProvider:
                     except json.JSONDecodeError:
                         pass
 
-            return provider_response
+            return TurnResult.from_provider_response(provider_response)
         except Exception as e:
             self._handle_api_error(e)
             raise

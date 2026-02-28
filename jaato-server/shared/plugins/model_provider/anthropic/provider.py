@@ -38,6 +38,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     ToolSchema,
     TokenUsage,
+    TurnResult,
 )
 from .converters import (
     deserialize_history,
@@ -888,7 +889,7 @@ class AnthropicProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: convert messages to provider format, call API, return response.
 
         The caller (session) is responsible for maintaining the message list
@@ -898,6 +899,10 @@ class AnthropicProvider:
         When ``on_chunk`` is provided, the response is streamed token-by-token
         via ``_stream_response()``. When ``on_chunk`` is None, the response
         is returned in batch mode via ``messages.create()``.
+
+        Returns ``TurnResult.from_provider_response(r)`` on success,
+        ``TurnResult.from_exception(exc)`` for non-transient errors, and
+        **raises** transient errors (rate limits, overload) for ``with_retry``.
 
         Args:
             messages: Full conversation history in provider-agnostic Message
@@ -913,10 +918,7 @@ class AnthropicProvider:
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
-
-        Raises:
-            RuntimeError: If provider is not initialized/connected.
+            A ``TurnResult`` classifying the outcome.
         """
         if not self._client or not self._model_name:
             raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
@@ -1002,10 +1004,15 @@ class AnthropicProvider:
                 except json.JSONDecodeError:
                     pass
 
-            return provider_response
+            return TurnResult.from_provider_response(provider_response)
         except Exception as e:
             self._handle_api_error(e)
-            raise
+            # _handle_api_error converts to domain errors. Transient ones
+            # (RateLimitError, OverloadedError) must propagate for with_retry.
+            from .errors import RateLimitError as _RL, OverloadedError as _OL
+            if isinstance(e, (_RL, _OL)):
+                raise
+            return TurnResult.from_exception(e)
 
     # ==================== Streaming ====================
 

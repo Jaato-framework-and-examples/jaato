@@ -123,7 +123,7 @@ class TestJaatoSessionSendMessage:
 
     def test_send_message_returns_response(self):
         """Test that send_message returns response text via provider.complete()."""
-        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        from jaato_sdk.plugins.model_provider.types import TokenUsage, TurnResult
 
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
@@ -133,10 +133,11 @@ class TestJaatoSessionSendMessage:
         mock_response.parts = [Part.from_text("Hello back!")]
         mock_response.finish_reason = FinishReason.STOP
         mock_response.usage = TokenUsage(prompt_tokens=10, output_tokens=5, total_tokens=15)
+        mock_response.get_text.return_value = "Hello back!"
 
         # Mock streaming support (enabled by default)
         mock_provider.supports_streaming.return_value = True
-        mock_provider.complete.return_value = mock_response
+        mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -331,13 +332,16 @@ class TestJaatoSessionGenerate:
 
     def test_generate_returns_text(self):
         """Test that generate returns response text via complete()."""
+        from jaato_sdk.plugins.model_provider.types import TurnResult
+
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
 
         mock_response = MagicMock()
         mock_response.parts = [Part.from_text("Generated text")]
-        mock_response.get_text = lambda: "Generated text"
-        mock_provider.complete.return_value = mock_response
+        mock_response.get_text.return_value = "Generated text"
+        mock_response.finish_reason = FinishReason.STOP
+        mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []

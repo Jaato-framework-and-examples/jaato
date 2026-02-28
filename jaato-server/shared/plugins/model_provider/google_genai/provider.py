@@ -47,6 +47,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     ToolSchema,
     TokenUsage,
+    TurnResult,
     Part,
 )
 from .converters import (
@@ -814,7 +815,7 @@ class GoogleGenAIProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: convert messages to SDK format, call API, return response.
 
         This is the sole entry point for model inference.  The caller
@@ -825,8 +826,8 @@ class GoogleGenAIProvider:
         Uses ``client.models.generate_content()`` (batch) or
         ``client.models.generate_content_stream()`` (streaming) directly.
 
-        When ``on_chunk`` is provided, the response is streamed token-by-token.
-        When ``on_chunk`` is None, the response is returned in batch mode.
+        Returns ``TurnResult.from_provider_response(r)`` on success and
+        **raises** transient errors for ``with_retry``.
 
         Args:
             messages: Full conversation history in provider-agnostic Message
@@ -842,7 +843,7 @@ class GoogleGenAIProvider:
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
+            A ``TurnResult`` classifying the outcome.
 
         Raises:
             RuntimeError: If provider is not initialized/connected.
@@ -893,7 +894,7 @@ class GoogleGenAIProvider:
 
         if on_chunk:
             # Streaming mode — use generate_content_stream (bypasses chat session)
-            return self._complete_streaming(
+            provider_response = self._complete_streaming(
                 sdk_contents, config,
                 on_chunk=on_chunk,
                 cancel_token=cancel_token,
@@ -902,6 +903,7 @@ class GoogleGenAIProvider:
                 on_function_call=on_function_call,
                 on_thinking=on_thinking,
             )
+            return TurnResult.from_provider_response(provider_response)
         else:
             # Batch mode
             response = self._client.models.generate_content(
@@ -921,7 +923,7 @@ class GoogleGenAIProvider:
                     except json.JSONDecodeError:
                         pass
 
-            return provider_response
+            return TurnResult.from_provider_response(provider_response)
 
     def _complete_streaming(
         self,

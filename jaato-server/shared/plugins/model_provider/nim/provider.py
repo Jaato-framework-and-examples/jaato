@@ -53,6 +53,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     ThinkingConfig,
+    TurnResult,
 )
 from .converters import (
     clear_tool_name_mapping,
@@ -60,11 +61,7 @@ from .converters import (
     history_to_openai,
     map_finish_reason,
     response_from_openai,
-    sanitize_tool_name,
-    serialize_history,
-    deserialize_history,
     tool_schemas_to_openai,
-    extract_reasoning_from_response,
 )
 from .env import (
     DEFAULT_BASE_URL,
@@ -95,23 +92,26 @@ class NIMProvider:
     """NVIDIA NIM model provider.
 
     Provides access to NIM's model catalog via the OpenAI-compatible
-    chat completions API. Supports both NVIDIA's hosted API and
+    chat completions API.  Supports both NVIDIA's hosted API and
     self-hosted NIM containers.
+
+    Providers are stateless with respect to conversation history. The
+    session owns the canonical message list and passes it to
+    ``complete()`` on each call.  Providers hold only connection/auth
+    state set by ``initialize()`` and ``connect()``.
 
     Lifecycle:
         1. ``__init__()`` — create instance (no connections yet)
         2. ``initialize(config)`` — resolve credentials, create OpenAI client
         3. ``connect(model)`` — set the active model
-        4. ``create_session(...)`` — set up conversation state
-        5. ``send_message()`` / ``send_message_streaming()`` — converse
-        6. ``shutdown()`` — release resources
+        4. ``complete(messages, ...)`` — stateless completion
+        5. ``shutdown()`` — release resources
 
     Usage:
         provider = NIMProvider()
         provider.initialize(ProviderConfig(api_key='nvapi-...'))
         provider.connect('meta/llama-3.1-70b-instruct')
-        provider.create_session(system_instruction="You are helpful.", tools=[])
-        response = provider.send_message("Hello!")
+        result = provider.complete(messages, system_instruction="You are helpful.")
     """
 
     def __init__(self):
@@ -123,10 +123,7 @@ class NIMProvider:
         self._api_key: Optional[str] = None
         self._base_url: str = DEFAULT_BASE_URL
 
-        # Session state
-        self._system_instruction: Optional[str] = None
-        self._tools: Optional[List[ToolSchema]] = None
-        self._history: List[Message] = []
+        # Per-call accounting (NOT conversation state)
         self._last_usage: TokenUsage = TokenUsage()
         self._context_length: int = 0
 
@@ -284,7 +281,6 @@ class NIMProvider:
             self._client.close()
         self._client = None
         self._model_name = None
-        self._history = []
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used.
@@ -350,377 +346,104 @@ class NIMProvider:
         """
         return []
 
-    # ==================== Session ====================
+    # ==================== Stateless Completion ====================
 
-    def create_session(
+    def complete(
         self,
+        messages: List[Message],
         system_instruction: Optional[str] = None,
         tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or reset the chat session.
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+    ) -> TurnResult:
+        """Stateless completion: convert messages to OpenAI format, call API, return response.
+
+        The caller (session) is responsible for maintaining the message
+        list and passing it in full each call.  This method does not hold
+        any conversation state.
+
+        Returns ``TurnResult.from_provider_response(r)`` on success and
+        **raises** transient errors for ``with_retry``.
 
         Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools.
-            history: Previous conversation history to restore.
+            messages: Full conversation history in provider-agnostic Message
+                format.  Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
+
+        Returns:
+            A ``TurnResult`` classifying the outcome.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
         """
         if not self._client or not self._model_name:
-            raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
 
-        self._system_instruction = system_instruction
-        self._tools = tools
-        self._history = list(history) if history else []
-
-        # Clear tool name mapping when tools change
+        # Clear tool name mapping (sanitized ↔ original) on each call
         clear_tool_name_mapping()
 
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
+        # Build OpenAI-format messages from explicit parameters
+        openai_messages: List[Dict[str, Any]] = []
+        if system_instruction:
+            openai_messages.append({"role": "system", "content": system_instruction})
+        openai_messages.extend(history_to_openai(list(messages)))
 
-        Returns:
-            Copy of the message history list.
-        """
-        return list(self._history)
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not connected. Call connect() first.")
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model_name,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            provider_response = response_from_openai(response)
-            self._last_usage = provider_response.usage
-            return provider_response
-        except Exception as e:
-            self._handle_api_error(e)
-            raise
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a user message and get a response.
-
-        Args:
-            message: The user's message text.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
-
-        messages = self._build_messages()
-        kwargs = self._build_completion_kwargs(response_schema)
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_openai(response)
-            self._last_usage = provider_response.usage
-
-            self._add_response_to_history(provider_response)
-
-            # Parse structured output if schema was requested
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-
-            return provider_response
-        except Exception as e:
-            # Rollback the user message we added
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a message with multiple parts.
-
-        Note: Multimodal support depends on the underlying model.
-
-        Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        text_parts = [p.text for p in parts if p.text]
-        combined_text = "".join(text_parts)
-        return self.send_message(combined_text, response_schema)
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history
-        for result in results:
-            self._history.append(Message(
-                role=Role.TOOL,
-                parts=[Part(function_response=result)],
-            ))
-
-        messages = self._build_messages()
-        kwargs = self._build_completion_kwargs(response_schema)
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_openai(response)
-            self._last_usage = provider_response.usage
-
-            self._add_response_to_history(provider_response)
-
-            # Parse structured output if schema was requested
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-
-            return provider_response
-        except Exception as e:
-            self._rollback_tool_results(len(results))
-            self._handle_api_error(e)
-            raise
-
-    # ==================== Message Building ====================
-
-    def _build_messages(self) -> List[Dict[str, Any]]:
-        """Build the messages list for the API call.
-
-        Returns:
-            List of OpenAI-format message dicts including system instruction
-            and conversation history.
-        """
-        messages: List[Dict[str, Any]] = []
-
-        if self._system_instruction:
-            messages.append({"role": "system", "content": self._system_instruction})
-
-        messages.extend(history_to_openai(self._history))
-        return messages
-
-    def _build_completion_kwargs(
-        self, response_schema: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Build kwargs for the chat.completions.create() call.
-
-        Args:
-            response_schema: Optional JSON schema for structured output.
-
-        Returns:
-            Dict of additional keyword arguments.
-        """
+        # Build kwargs
         kwargs: Dict[str, Any] = {}
-
-        if self._tools:
-            openai_tools = tool_schemas_to_openai(self._tools)
+        if tools:
+            openai_tools = tool_schemas_to_openai(tools)
             if openai_tools:
                 kwargs["tools"] = openai_tools
-
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
 
-        return kwargs
-
-    def _add_response_to_history(self, response: ProviderResponse) -> None:
-        """Add the model's response to history.
-
-        Args:
-            response: The provider response to record.
-        """
-        if response.parts:
-            self._history.append(Message(role=Role.MODEL, parts=response.parts))
-
-    def _rollback_tool_results(self, count: int) -> None:
-        """Remove the last ``count`` tool result messages from history.
-
-        Called on API failure to prevent duplicate tool messages on retry.
-        NIM appends one history message per tool result (OpenAI format),
-        so we need to pop multiple entries.
-
-        Args:
-            count: Number of tool result messages to remove.
-        """
-        for _ in range(count):
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-
-    # ==================== Streaming ====================
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send a message with streaming response and optional cancellation.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback when function calls are detected.
-            on_thinking: Optional callback for reasoning/thinking chunks.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
-
-        messages = self._build_messages()
-        kwargs = self._build_completion_kwargs(response_schema)
-
         try:
-            provider_response = self._stream_response(
-                messages=messages,
-                kwargs=kwargs,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_thinking=on_thinking,
-                trace_prefix="STREAM",
-            )
+            if on_chunk:
+                # Streaming mode
+                provider_response = self._stream_response(
+                    messages=openai_messages,
+                    kwargs=kwargs,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
+                    trace_prefix="COMPLETE_STREAM",
+                )
+            else:
+                # Batch mode
+                response = self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=openai_messages,
+                    **kwargs,
+                )
+                provider_response = response_from_openai(response)
 
+            # Per-call accounting (NOT conversation state)
             self._last_usage = provider_response.usage
-            self._add_response_to_history(provider_response)
 
             # Parse structured output if schema was requested
-            final_text = provider_response.get_text()
-            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
+            text = provider_response.get_text()
+            if response_schema and text:
                 try:
-                    provider_response.structured_output = json.loads(final_text)
+                    provider_response.structured_output = json.loads(text)
                 except json.JSONDecodeError:
                     pass
 
-            return provider_response
+            return TurnResult.from_provider_response(provider_response)
         except Exception as e:
-            # Rollback the user message we added
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send tool results with streaming response and optional cancellation.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback when function calls are detected.
-            on_thinking: Optional callback for reasoning/thinking chunks.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history
-        for result in results:
-            self._history.append(Message(
-                role=Role.TOOL,
-                parts=[Part(function_response=result)],
-            ))
-
-        messages = self._build_messages()
-        kwargs = self._build_completion_kwargs(response_schema)
-
-        try:
-            provider_response = self._stream_response(
-                messages=messages,
-                kwargs=kwargs,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_thinking=on_thinking,
-                trace_prefix="STREAM_TOOL_RESULTS",
-            )
-
-            self._last_usage = provider_response.usage
-            self._add_response_to_history(provider_response)
-
-            # Parse structured output if schema was requested
-            final_text = provider_response.get_text()
-            if response_schema and final_text and provider_response.finish_reason != FinishReason.CANCELLED:
-                try:
-                    provider_response.structured_output = json.loads(final_text)
-                except json.JSONDecodeError:
-                    pass
-
-            return provider_response
-        except Exception as e:
-            self._rollback_tool_results(len(results))
             self._handle_api_error(e)
             raise
 
@@ -1080,30 +803,6 @@ class NIMProvider:
             if name_lower.startswith(prefix) or name_lower.endswith(prefix):
                 return True
         return False
-
-    # ==================== Serialization ====================
-
-    def serialize_history(self, history: List[Message]) -> str:
-        """Serialize conversation history to a JSON string.
-
-        Args:
-            history: List of messages to serialize.
-
-        Returns:
-            JSON string representation.
-        """
-        return serialize_history(history)
-
-    def deserialize_history(self, data: str) -> List[Message]:
-        """Deserialize conversation history from a JSON string.
-
-        Args:
-            data: Previously serialized history string.
-
-        Returns:
-            List of Message objects.
-        """
-        return deserialize_history(data)
 
     # ==================== Error Classification for Retry ====================
 

@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolResult,
     ToolSchema,
     TokenUsage,
+    TurnResult,
 )
 
 
@@ -131,7 +132,7 @@ class ModelProviderPlugin(Protocol):
 
             def complete(self, messages, system_instruction=None, tools=None, **kw):
                 response = self._client.chat(messages=messages, model=self._model_name)
-                return convert_response(response)
+                return TurnResult.from_provider_response(convert_response(response))
     """
 
     @property
@@ -242,7 +243,7 @@ class ModelProviderPlugin(Protocol):
         on_usage_update: Optional['UsageUpdateCallback'] = None,
         on_function_call: Optional['FunctionCallDetectedCallback'] = None,
         on_thinking: Optional['ThinkingCallback'] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: convert messages to provider format, call API, return response.
 
         This method does NOT modify any internal state. The caller (session)
@@ -250,6 +251,14 @@ class ModelProviderPlugin(Protocol):
 
         When on_chunk is provided, the response is streamed token-by-token.
         When on_chunk is None, the response is returned in batch mode.
+
+        Providers MUST:
+
+        * Return ``TurnResult.from_provider_response(r)`` on success.
+        * Return ``TurnResult.from_exception(exc)`` for **non-transient**
+          errors (auth failures, context limits, safety blocks).
+        * **Raise** transient errors (rate limits, overload) so the
+          ``with_retry`` layer can retry transparently.
 
         Args:
             messages: Full conversation history in provider-agnostic Message format.
@@ -263,7 +272,7 @@ class ModelProviderPlugin(Protocol):
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
+            A ``TurnResult`` classifying the outcome.
         """
         ...
 
