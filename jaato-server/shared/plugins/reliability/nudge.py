@@ -114,6 +114,21 @@ class NudgeStrategy:
                 "BLOCKED: Stuck in planning loop. System pausing - user needs to confirm direction."
             ),
         },
+        BehavioralPatternType.VALIDATION_BYPASS: {
+            PatternSeverity.MINOR: (
+                NudgeType.DIRECT_INSTRUCTION,
+                "Validation steps require subagent evidence. Use addDependentStep + completeStepWithOutput pattern."
+            ),
+            PatternSeverity.MODERATE: (
+                NudgeType.DIRECT_INSTRUCTION,
+                "NOTICE: You have attempted to complete a validation step without delegating to a validator subagent {count} times. "
+                "Spawn a validator subagent and use addDependentStep NOW."
+            ),
+            PatternSeverity.SEVERE: (
+                NudgeType.INTERRUPT,
+                "BLOCKED: Repeated validation bypass attempts. System pausing for user intervention."
+            ),
+        },
     }
 
     # Default template for unknown patterns
