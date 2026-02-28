@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
+from .session_history import SessionHistory
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,15 @@ class JaatoSession:
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
+
+        # Canonical conversation history owned by the session.
+        # Phase 1: synced from provider after each provider operation.
+        # Phase 2+: session is sole owner; provider receives messages
+        # as parameters to stateless complete().
+        self._history = SessionHistory()
+
+        # Session always owns history and uses stateless provider.complete().
+        # Legacy send_message()/send_tool_results() path removed in Phase 4.
 
         # Tool configuration
         self._executor: Optional[ToolExecutor] = None
@@ -1140,9 +1150,9 @@ class JaatoSession:
         # Register built-in telepathy tool (share_context)
         self._register_telepathy_tool()
 
-        # Create provider session (skip if in auth-pending mode)
+        # Initialize empty session history (skip if in auth-pending mode)
         if not skip_provider:
-            self._create_provider_session()
+            self._history.clear()
 
         # Populate instruction budget after all configuration is complete
         self._populate_instruction_budget(session_instructions=system_instructions)
@@ -1201,33 +1211,34 @@ class JaatoSession:
                 f"{provider_name}"
             )
 
-    def _create_provider_session(
-        self,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or recreate the provider session.
+    def _add_model_response_to_history(self, response: 'ProviderResponse') -> None:
+        """Add the model's response to session history.
+
+        Called after ``provider.complete()`` returns successfully. Filters
+        response parts to only text and function_call (excludes
+        function_response parts which belong to user/tool messages).
 
         Args:
-            history: Optional initial conversation history.
+            response: The ProviderResponse from the provider.
         """
-        if not self._provider:
-            return
+        history_parts = [
+            p for p in response.parts
+            if p.text is not None or p.function_call is not None
+        ]
+        if history_parts:
+            self._history.append(Message(role=Role.MODEL, parts=history_parts))
 
-        # Check if provider uses external tools (backwards compatible - default True)
-        # Providers like claude_cli in delegated mode manage their own tools
+    def _get_tools_for_provider(self) -> Optional[List['ToolSchema']]:
+        """Get the tool list to pass to the provider.
+
+        Checks whether the provider manages its own tools (e.g. Claude CLI
+        in delegated mode). If so, returns an empty list.
+
+        Returns:
+            Tools to pass, or empty list if provider manages its own.
+        """
         uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
-        tools_to_pass = self._tools if uses_external else []
-
-        if history:
-            logger.debug(f"[session:{self._agent_id}] _create_provider_session: restoring {len(history)} messages")
-        else:
-            logger.debug(f"[session:{self._agent_id}] _create_provider_session: no history to restore")
-
-        self._provider.create_session(
-            system_instruction=self._system_instruction,
-            tools=tools_to_pass,
-            history=history
-        )
+        return self._tools if uses_external else []
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -1904,10 +1915,6 @@ class JaatoSession:
                 self._tools = list(self._tools) if self._tools else []
                 self._tools.extend(session_schemas)
 
-        # Recreate provider session with updated tools (preserve history)
-        history = self.get_history()
-        self._create_provider_session(history)
-
     def activate_discovered_tools(self, tool_names: List[str]) -> List[str]:
         """Activate discovered tools so the model can call them.
 
@@ -1955,12 +1962,8 @@ class JaatoSession:
         if activated and self._runtime.registry:
             self._track_activated_tools_in_budget(activated, schema_map)
 
-        # If we activated any tools, recreate the provider session
         if activated:
             self._trace(f"Activating discovered tools: {activated}")
-            history = self.get_history()
-            self._create_provider_session(history)
-            # Emit budget update to reflect newly tracked tool schemas
             self._emit_instruction_budget_update()
 
         return activated
@@ -2212,9 +2215,6 @@ NOTES
                     agent_name=self._agent_name,
                     agent_id=self._agent_id
                 )
-
-            # Recreate session with existing history
-            self._create_provider_session(history=history)
 
             # Update reliability plugin with new model context
             if self._runtime.reliability_plugin:
@@ -2662,7 +2662,7 @@ NOTES
             new_history = ensure_tool_call_integrity(
                 new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
             )
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -2827,6 +2827,11 @@ NOTES
             # Set activity phase: we're about to wait for LLM response
             self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
 
+            # Append user message to session history before provider call.
+            # The message stays in history across retries (correct: the user DID send it).
+            # Rolled back in the outer except block if all retries fail.
+            self._history.append(Message.from_text(Role.USER, message))
+
             # Send message (streaming or batched) with telemetry
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
@@ -2879,30 +2884,39 @@ NOTES
                             on_output("thinking", thinking, "write")
 
                     response, _retry_stats = with_retry(
-                        lambda: self._provider.send_message_streaming(
-                            message,
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
                             on_usage_update=wrapped_usage_callback,
-                            on_thinking=thinking_callback
+                            on_thinking=thinking_callback,
                             # Note: on_function_call is intentionally NOT used here.
                             # The SDK may deliver function calls before preceding text,
                             # which would cause tool trees to appear in wrong positions.
                             # Tool trees are displayed during parts processing instead.
                         ),
-                        context="send_message_streaming",
+                        context="complete_streaming",
                         on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
                         provider=self._provider
                     )
                 else:
                     response, _retry_stats = with_retry(
-                        lambda: self._provider.send_message(message),
-                        context="send_message",
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete",
                         on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
                         provider=self._provider
                     )
+
+                # Record model response in session history
+                self._add_model_response_to_history(response)
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 # Track model response count for turn complexity
@@ -4452,7 +4466,7 @@ NOTES
                     "with pending tool calls after GC"
                 )
 
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -4474,31 +4488,23 @@ NOTES
             return False
 
     def _remove_tool_results_from_history(self, count: int) -> None:
-        """Remove the last N tool result messages from provider history.
+        """Remove the last N tool result messages from session history.
 
         Called during context limit recovery to remove the original (too-large)
         tool results before retrying with truncated versions.
         """
-        if not self._provider:
-            return
-
-        # Access provider's internal history directly (get_history() returns a copy)
-        history = getattr(self._provider, '_history', None)
-        if history is None:
-            self._trace("CONTEXT_LIMIT_RECOVERY: Cannot access provider history for cleanup")
-            return
-
-        # Remove the last `count` messages that are tool results
+        # Operate on session's canonical history directly
+        messages = self._history.messages_ref
         removed = 0
-        while removed < count and history:
-            last_msg = history[-1]
+        while removed < count and messages:
+            last_msg = messages[-1]
             # Check if it's a tool result message
             is_tool_result = (
                 last_msg.role == Role.TOOL or
                 any(p.function_response is not None for p in last_msg.parts)
             )
             if is_tool_result:
-                history.pop()
+                self._history.pop_last()
                 removed += 1
                 self._trace(f"CONTEXT_LIMIT_RECOVERY: Removed tool result from history ({removed}/{count})")
             else:
@@ -4707,7 +4713,15 @@ NOTES
         wrapped_usage_callback: Optional[UsageUpdateCallback],
         turn_data: Dict[str, Any]
     ) -> ProviderResponse:
-        """Actually send tool results to the provider."""
+        """Send tool results to the provider via ``complete()``.
+
+        Appends tool results to session history as a TOOL message, then
+        calls ``provider.complete()`` with the full history.
+        """
+        # Append tool results to session history
+        tool_result_parts = [Part(function_response=r) for r in tool_results]
+        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
             provider=self._provider.name if self._provider else "unknown",
@@ -4740,28 +4754,35 @@ NOTES
                         on_output("thinking", thinking, "write")
 
                 response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results_streaming(
-                        tool_results,
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._system_instruction,
+                        tools=self._get_tools_for_provider(),
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
                         on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback
-                        # Note: on_function_call is intentionally NOT used here.
-                        # See comment in send_message for explanation.
+                        on_thinking=thinking_callback,
                     ),
-                    context="send_tool_results_streaming",
+                    context="complete_tool_results_streaming",
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
             else:
                 response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results",
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._system_instruction,
+                        tools=self._get_tools_for_provider(),
+                    ),
+                    context="complete_tool_results",
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+
+            # Record model response in session history
+            self._add_model_response_to_history(response)
 
             # Emit thinking content if present (non-streaming only).
             # For streaming, the provider emits thinking via on_thinking callback
@@ -4856,6 +4877,9 @@ NOTES
 
         self._trace(f"MID_TURN_PROMPT: About to call provider, cancel_token.is_cancelled={self._cancel_token.is_cancelled if self._cancel_token else 'None'}")
 
+        # Append user message to session history
+        self._history.append(Message.from_text(Role.USER, prompt))
+
         # Send the prompt to the model with telemetry
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
@@ -4880,14 +4904,16 @@ NOTES
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message_streaming(
-                        prompt,
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._system_instruction,
+                        tools=self._get_tools_for_provider(),
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
                         on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback
+                        on_thinking=thinking_callback,
                     ),
-                    context="mid_turn_prompt_streaming",
+                    context="complete_mid_turn_streaming",
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token,
                     provider=self._provider
@@ -4895,8 +4921,12 @@ NOTES
                 self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
                 response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message(prompt),
-                    context="mid_turn_prompt",
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._system_instruction,
+                        tools=self._get_tools_for_provider(),
+                    ),
+                    context="complete_mid_turn",
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token,
                     provider=self._provider
@@ -4909,6 +4939,9 @@ NOTES
                 # Emit response text if not streaming
                 if on_output and response.get_text():
                     on_output("model", response.get_text(), "write")
+
+            # Record model response in session history
+            self._add_model_response_to_history(response)
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -5151,8 +5184,6 @@ NOTES
             )
             self._system_instruction = (self._system_instruction or "") + pinned_block
 
-            history = self.get_history()
-            self._create_provider_session(history)
             self._update_pinned_references_budget()
 
             self._trace(
@@ -5177,11 +5208,6 @@ NOTES
             f"{content}"
         )
         self._system_instruction = (self._system_instruction or "") + pinned_block
-
-        # Recreate provider session with updated system instruction
-        # (preserves current conversation history)
-        history = self.get_history()
-        self._create_provider_session(history)
 
         # Update instruction budget with the new pinned reference
         self._update_pinned_references_budget()
@@ -5341,10 +5367,13 @@ NOTES
         })
 
     def get_history(self) -> List[Message]:
-        """Get current conversation history."""
-        if not self._provider:
-            return []
-        return self._provider.get_history()
+        """Get current conversation history.
+
+        Returns the session's canonical copy of the history. The session
+        is the sole owner of conversation state; providers receive messages
+        as parameters to ``complete()``.
+        """
+        return self._history.messages
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
@@ -5391,7 +5420,7 @@ NOTES
         }
 
     def reset_session(self, history: Optional[List[Message]] = None) -> None:
-        """Reset the chat session.
+        """Reset the chat session, clearing turn accounting and optionally restoring history.
 
         When history is provided (e.g. after GC), the token count cache is
         preserved because restored Message objects keep their original
@@ -5403,8 +5432,10 @@ NOTES
         """
         if history:
             logger.info(f"[session:{self._agent_id}] reset_session: restoring {len(history)} messages")
+            self._history.replace(history)
         else:
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
+            self._history.clear()
         self._turn_accounting = []
         if not history:
             self._msg_token_cache.clear()
@@ -5414,7 +5445,6 @@ NOTES
             if self._pinned_references:
                 self._remove_pinned_from_system_instruction()
                 self._pinned_references.clear()
-        self._create_provider_session(history)
 
     def get_turn_boundaries(self) -> List[int]:
         """Get indices where each turn starts in the history."""
@@ -5459,7 +5489,7 @@ NOTES
         if turn_id <= len(self._turn_accounting):
             self._turn_accounting = self._turn_accounting[:turn_id]
 
-        self._create_provider_session(truncated_history)
+        self._history.replace(truncated_history)
 
         if self._session_plugin and hasattr(self._session_plugin, 'set_turn_count'):
             self._session_plugin.set_turn_count(turn_id)
@@ -5508,8 +5538,6 @@ NOTES
         if isinstance(result, HelpLines):
             return
 
-        current_history = self.get_history()
-
         user_message = Message(
             role=Role.USER,
             parts=[Part.from_text(f"[User executed command: {command_name}]")]
@@ -5525,8 +5553,8 @@ NOTES
             ))]
         )
 
-        new_history = list(current_history) + [user_message, model_message]
-        self._create_provider_session(new_history)
+        self._history.append(user_message)
+        self._history.append(model_message)
 
     def _notify_model_of_cancellation(self, cancel_msg: str, partial_text: str = '') -> None:
         """Inject cancellation notice into history so model has context.
@@ -5550,8 +5578,6 @@ NOTES
         if not self._provider:
             return
 
-        current_history = self.get_history()
-
         # Create a note for the model about what happened
         if partial_text:
             note = f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]"
@@ -5563,15 +5589,19 @@ NOTES
             parts=[Part.from_text(note)]
         )
 
-        new_history = list(current_history) + [user_message]
-        self._create_provider_session(new_history)
+        self._history.append(user_message)
 
     def generate(self, prompt: str) -> str:
-        """Simple generation without tools."""
+        """Simple one-shot generation without tools or history.
+
+        Uses ``provider.complete()`` with a single user message and no tools.
+        Does not modify or use session history.
+        """
         if not self._provider:
             raise RuntimeError("Session not configured.")
 
-        response = self._provider.generate(prompt)
+        messages = [Message.from_text(Role.USER, prompt)]
+        response = self._provider.complete(messages)
         return response.get_text() or ''
 
     def send_message_with_parts(
@@ -5610,17 +5640,28 @@ NOTES
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
+            # Append user message to session history
+            self._history.append(Message(role=Role.USER, parts=list(parts)))
+
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=False,
             ) as llm_telemetry:
                 response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message_with_parts(parts),
-                    context="send_message_with_parts",
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._system_instruction,
+                        tools=self._get_tools_for_provider(),
+                    ),
+                    context="complete_with_parts",
                     on_retry=self._on_retry,
                     provider=self._provider
                 )
+
+                # Record model response in session history
+                self._add_model_response_to_history(response)
+
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 # Record token usage to telemetry span
@@ -5749,17 +5790,30 @@ NOTES
 
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
+
+                # Append tool results to session history
+                tool_result_parts = [Part(function_response=r) for r in tool_results]
+                self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
                 with self._telemetry.llm_span(
                     model=self._model_name or "unknown",
                     provider=self._provider.name if self._provider else "unknown",
                     streaming=False,
                 ) as llm_telemetry:
                     response, _retry_stats = with_retry(
-                        lambda: self._provider.send_tool_results(tool_results),
-                        context="send_tool_results",
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_tool_results_parts",
                         on_retry=self._on_retry,
                         provider=self._provider
                     )
+
+                    # Record model response in session history
+                    self._add_model_response_to_history(response)
+
                     self._record_token_usage(response)
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
@@ -5861,7 +5915,7 @@ NOTES
             new_history = ensure_tool_call_integrity(
                 new_history, trace_fn=lambda m: self._trace(f"MANUAL_GC: {m}"),
             )
-            self.reset_session(new_history)
+            self._history.replace(new_history)
             self._gc_history.append(result)
 
             # Sync budget with GC changes
@@ -5909,7 +5963,7 @@ NOTES
                 new_history = ensure_tool_call_integrity(
                     new_history, trace_fn=lambda m: self._trace(f"GC_BEFORE_SEND: {m}"),
                 )
-                self.reset_session(new_history)
+                self._history.replace(new_history)
                 self._gc_history.append(result)
 
                 # Sync budget with GC changes
@@ -6045,8 +6099,6 @@ NOTES
                 current_tools = list(self._tools) if self._tools else []
                 current_tools.extend(session_schemas)
                 self._tools = current_tools
-                history = self.get_history() if self._provider else None
-                self._create_provider_session(history)
 
         if self._session_config.auto_resume_last:
             state = self._session_plugin.on_session_start(self._session_config)

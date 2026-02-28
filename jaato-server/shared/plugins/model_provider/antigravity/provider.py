@@ -16,7 +16,6 @@ Reference: https://github.com/NoeFabris/opencode-antigravity-auth
 
 import json
 import os
-import time
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -37,9 +36,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Message,
     Part,
     ProviderResponse,
-    Role,
     ThinkingConfig,
-    ToolResult,
     ToolSchema,
     TokenUsage,
 )
@@ -120,11 +117,15 @@ class AntigravityProvider:
     - Streaming responses with SSE
     - Extended thinking for compatible models
 
+    The provider is **stateless** with respect to conversation history.
+    All conversation state is managed by the session layer which calls
+    ``complete()`` with the full message list on every turn.
+
     Usage:
         provider = AntigravityProvider()
         provider.initialize()  # Uses stored OAuth tokens
         provider.connect('antigravity-gemini-3-flash')
-        response = provider.send_message("Hello!")
+        response = provider.complete(messages, system_instruction="...")
 
     To authenticate:
         from shared.plugins.model_provider.antigravity import oauth_login
@@ -150,10 +151,7 @@ class AntigravityProvider:
         self._thinking_level: Optional[str] = None  # For Gemini 3
         self._thinking_budget: int = 8192  # For Claude thinking models
 
-        # Session state
-        self._system_instruction: Optional[str] = None
-        self._tools: Optional[List[ToolSchema]] = None
-        self._history: List[Message] = []
+        # Per-call accounting (updated by complete())
         self._last_usage: TokenUsage = TokenUsage()
 
         # Agent context for tracing
@@ -321,36 +319,6 @@ class AntigravityProvider:
             models = [m for m in models if m.startswith(prefix)]
 
         return sorted(models)
-
-    # ==================== Session Management ====================
-
-    def create_session(
-        self,
-        system_instruction: Optional[str] = None,
-        tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None,
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools.
-            history: Previous conversation history to restore.
-        """
-        if not self.is_connected:
-            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
-
-        self._system_instruction = system_instruction
-        self._tools = tools
-        self._history = list(history) if history else []
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
-
-        Returns:
-            List of messages in internal format.
-        """
-        return list(self._history)
 
     # ==================== Token Management ====================
 
@@ -757,69 +725,83 @@ class AntigravityProvider:
 
         raise EndpointError("All endpoints failed", tried_endpoints=endpoints_to_try)
 
-    # ==================== Messaging ====================
+    # ==================== Stateless Completion ====================
 
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        if not self.is_connected:
-            raise RuntimeError("Provider not connected. Call connect() first.")
-
-        contents = [{"role": "user", "parts": [{"text": prompt}]}]
-        request_body = build_generate_request(
-            contents=contents,
-            generation_config=self._build_generation_config(),
-        )
-
-        response = self._make_request(request_body)
-        provider_response = response_from_api(response.json())
-        self._last_usage = provider_response.usage
-        return provider_response
-
-    def send_message(
+    def complete(
         self,
-        message: str,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
         response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
-        """Send a user message and get a response.
+        """Stateless completion: convert messages to API format, call API, return response.
+
+        The caller (session) is responsible for maintaining the message
+        list and passing it in full each call.  This method does not
+        hold or modify any conversation state.
+
+        When ``on_chunk`` is provided, the response is streamed via SSE.
+        When ``on_chunk`` is None, the response is returned in batch mode.
 
         Args:
-            message: The user's message text.
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
             response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text and/or function calls.
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
         """
         if not self.is_connected:
-            raise RuntimeError("No chat session. Call create_session() first.")
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
 
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
-
-        # Build request
-        contents = messages_to_api(self._history)
-        tools = tool_schemas_to_api(self._tools) if self._tools else None
+        # Build request from explicit parameters (NOT instance state)
+        contents = messages_to_api(list(messages))
+        api_tools = tool_schemas_to_api(tools) if tools else None
 
         request_body = build_generate_request(
             contents=contents,
-            system_instruction=self._system_instruction,
-            tools=tools,
+            system_instruction=system_instruction,
+            tools=api_tools,
             generation_config=self._build_generation_config(response_schema),
         )
 
         try:
-            response = self._make_request(request_body)
-            provider_response = response_from_api(response.json())
-            self._last_usage = provider_response.usage
+            if on_chunk:
+                # Streaming mode
+                response = self._make_request(
+                    request_body, streaming=True, cancel_token=cancel_token
+                )
+                provider_response = self._process_stream(
+                    response,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_function_call=on_function_call,
+                )
+            else:
+                # Batch mode
+                response = self._make_request(request_body)
+                provider_response = response_from_api(response.json())
 
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
+            # Update per-call accounting (NOT conversation state)
+            self._last_usage = provider_response.usage
 
             # Handle structured output
             if response_schema:
@@ -831,247 +813,8 @@ class AntigravityProvider:
                         pass
 
             return provider_response
-
         except Exception as e:
-            # Remove user message on failure
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            raise
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> ProviderResponse:
-        """Send a message with multiple parts (text, images, etc.).
-
-        Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema for structured output.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self.is_connected:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add multipart message to history
-        self._history.append(Message(role=Role.USER, parts=parts))
-
-        # Build request
-        contents = messages_to_api(self._history)
-        tools = tool_schemas_to_api(self._tools) if self._tools else None
-
-        request_body = build_generate_request(
-            contents=contents,
-            system_instruction=self._system_instruction,
-            tools=tools,
-            generation_config=self._build_generation_config(response_schema),
-        )
-
-        try:
-            response = self._make_request(request_body)
-            provider_response = response_from_api(response.json())
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            return provider_response
-
-        except Exception as e:
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            raise
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None,
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema for structured output.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        if not self.is_connected:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history
-        tool_result_parts = [Part(function_response=r) for r in results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
-
-        # Build request
-        contents = messages_to_api(self._history)
-        tools = tool_schemas_to_api(self._tools) if self._tools else None
-
-        request_body = build_generate_request(
-            contents=contents,
-            system_instruction=self._system_instruction,
-            tools=tools,
-            generation_config=self._build_generation_config(response_schema),
-        )
-
-        try:
-            response = self._make_request(request_body)
-            provider_response = response_from_api(response.json())
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            return provider_response
-
-        except Exception as e:
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-            raise
-
-    # ==================== Streaming ====================
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
-        """Send a message with streaming response.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback for each text chunk.
-            cancel_token: Optional cancellation token.
-            response_schema: Optional JSON Schema for structured output.
-            on_usage_update: Callback for usage updates.
-            on_function_call: Callback when function call is detected.
-
-        Returns:
-            ProviderResponse with complete response.
-        """
-        if not self.is_connected:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
-
-        # Build request
-        contents = messages_to_api(self._history)
-        tools = tool_schemas_to_api(self._tools) if self._tools else None
-
-        request_body = build_generate_request(
-            contents=contents,
-            system_instruction=self._system_instruction,
-            tools=tools,
-            generation_config=self._build_generation_config(response_schema),
-        )
-
-        try:
-            response = self._make_request(request_body, streaming=True, cancel_token=cancel_token)
-            provider_response = self._process_stream(
-                response,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-            )
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            # Handle structured output
-            if response_schema:
-                text = provider_response.get_text()
-                if text:
-                    try:
-                        provider_response.structured_output = json.loads(text)
-                    except json.JSONDecodeError:
-                        pass
-
-            return provider_response
-
-        except CancelledException:
-            # Remove user message on cancellation
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            raise
-        except Exception as e:
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            raise
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
-        """Send tool results with streaming response.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback for each text chunk.
-            cancel_token: Optional cancellation token.
-            response_schema: Optional JSON Schema for structured output.
-            on_usage_update: Callback for usage updates.
-            on_function_call: Callback when function call is detected.
-
-        Returns:
-            ProviderResponse with complete response.
-        """
-        if not self.is_connected:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history
-        tool_result_parts = [Part(function_response=r) for r in results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
-
-        # Build request
-        contents = messages_to_api(self._history)
-        tools = tool_schemas_to_api(self._tools) if self._tools else None
-
-        request_body = build_generate_request(
-            contents=contents,
-            system_instruction=self._system_instruction,
-            tools=tools,
-            generation_config=self._build_generation_config(response_schema),
-        )
-
-        try:
-            response = self._make_request(request_body, streaming=True, cancel_token=cancel_token)
-            provider_response = self._process_stream(
-                response,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-            )
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            return provider_response
-
-        except CancelledException:
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-            raise
-        except Exception as e:
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
+            self._handle_api_error(e)
             raise
 
     def _process_stream(
@@ -1183,24 +926,6 @@ class AntigravityProvider:
             finish_reason=finish_reason,
             thinking=thinking,
         )
-
-    # ==================== Helper Methods ====================
-
-    def _add_response_to_history(self, response: ProviderResponse) -> None:
-        """Add assistant response to history.
-
-        Args:
-            response: The provider response.
-        """
-        # Filter out function_response parts (those are from tool results)
-        history_parts = [
-            p for p in response.parts
-            if p.text is not None or p.function_call is not None
-        ]
-
-        if history_parts:
-            self._history.append(Message(role=Role.MODEL, parts=history_parts))
-
 
 def create_provider() -> AntigravityProvider:
     """Factory function for plugin discovery.

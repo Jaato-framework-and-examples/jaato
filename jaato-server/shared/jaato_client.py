@@ -518,13 +518,6 @@ class JaatoClient:
             executor.register(name, fn)
         self._session._executor = executor
 
-        # Create provider session
-        provider.create_session(
-            system_instruction=system_instruction,
-            tools=tools,
-            history=None
-        )
-
     def send_message(
         self,
         message: str,

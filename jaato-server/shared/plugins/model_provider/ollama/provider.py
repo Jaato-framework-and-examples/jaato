@@ -10,7 +10,7 @@ Usage:
     provider = OllamaProvider()
     provider.initialize()  # No API key needed
     provider.connect('qwen3:32b')
-    response = provider.send_message("Hello!")
+    response = provider.complete(messages=[...])
 
 Environment variables:
     OLLAMA_HOST: Ollama server URL (default: http://localhost:11434)
@@ -86,7 +86,8 @@ class OllamaProvider(AnthropicProvider):
     - Thinking disabled (not supported by local models)
     - No cache plugin matches 'ollama', so no cache annotations are applied
 
-    All message handling, streaming, and converters are inherited from
+    The session calls ``complete()`` for all API interactions; stateless
+    completion, streaming, and converters are inherited from
     AnthropicProvider since Ollama uses the same API format.
     """
 

@@ -1,12 +1,26 @@
-"""Tests for GitHubModelsProvider."""
+"""Tests for GitHubModelsProvider.
 
-import json
+Tests cover initialization, connection, lifecycle, complete(), token management,
+serialization, capabilities, and error handling.  All conversation state (history,
+tools, system instruction) is managed by the caller and passed into complete().
+"""
+
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from ..provider import GitHubModelsProvider, MODEL_CONTEXT_LIMITS
 from shared.plugins.model_provider.base import ProviderConfig
-from jaato_sdk.plugins.model_provider.types import ProviderResponse, TokenUsage, FinishReason, FunctionCall, ToolResult
+from jaato_sdk.plugins.model_provider.types import (
+    FinishReason,
+    FunctionCall,
+    Message,
+    Part,
+    ProviderResponse,
+    Role,
+    TokenUsage,
+    ToolResult,
+    ToolSchema,
+)
 from ..errors import (
     TokenNotFoundError,
     TokenInvalidError,
@@ -164,12 +178,12 @@ class TestConnection:
         assert all(m.startswith('anthropic/') for m in anthropic_models)
 
 
-class TestMessaging:
-    """Tests for sending messages."""
+class TestComplete:
+    """Tests for the stateless complete() API."""
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_message_returns_response(self, mock_client_class):
-        """send_message() should return ProviderResponse."""
+    def test_complete_returns_response(self, mock_client_class):
+        """complete() should return ProviderResponse."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(text="Hello!")
         mock_client_class.return_value = mock_client
@@ -177,17 +191,18 @@ class TestMessaging:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
-        response = provider.send_message("Hi")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Hi")],
+        )
 
-        assert response.text == "Hello!"
+        assert response.get_text() == "Hello!"
         assert response.usage.prompt_tokens == 10
         assert response.usage.output_tokens == 20
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_message_adds_to_history(self, mock_client_class):
-        """send_message() should add messages to history."""
+    def test_complete_is_stateless(self, mock_client_class):
+        """complete() should not maintain internal conversation history."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(text="Response")
         mock_client_class.return_value = mock_client
@@ -195,18 +210,17 @@ class TestMessaging:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
-        provider.send_message("Question")
-        history = provider.get_history()
+        provider.complete(
+            messages=[Message.from_text(Role.USER, "Question")],
+        )
 
-        assert len(history) == 2  # User message + assistant response
-        assert history[0].role.value == "user"
-        assert history[1].role.value == "model"
+        # Provider should not accumulate history; caller manages it
+        assert not hasattr(provider, '_history')
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_message_with_system_instruction(self, mock_client_class):
-        """send_message() should include system instruction."""
+    def test_complete_with_system_instruction(self, mock_client_class):
+        """complete() should include system instruction."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
@@ -214,9 +228,11 @@ class TestMessaging:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session(system_instruction="You are helpful.")
 
-        provider.send_message("Hi")
+        provider.complete(
+            messages=[Message.from_text(Role.USER, "Hi")],
+            system_instruction="You are helpful.",
+        )
 
         # Verify system message was included
         call_args = mock_client.complete.call_args
@@ -227,8 +243,8 @@ class TestMessaging:
         assert any(isinstance(m, SystemMessage) for m in messages)
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_generate_one_shot(self, mock_client_class):
-        """generate() should work without session."""
+    def test_complete_one_shot(self, mock_client_class):
+        """complete() should work for a single user message."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(text="Generated")
         mock_client_class.return_value = mock_client
@@ -237,22 +253,22 @@ class TestMessaging:
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
 
-        response = provider.generate("One-shot prompt")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "One-shot prompt")],
+        )
 
-        assert response.text == "Generated"
+        assert response.get_text() == "Generated"
 
 
 class TestFunctionCalling:
     """Tests for function calling support."""
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_message_with_tools(self, mock_client_class):
-        """send_message() should pass tools to API."""
+    def test_complete_with_tools(self, mock_client_class):
+        """complete() should pass tools to API."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
-
-        from jaato_sdk.plugins.model_provider.types import ToolSchema
 
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
@@ -267,9 +283,11 @@ class TestFunctionCalling:
                 "required": ["location"]
             }
         )]
-        provider.create_session(tools=tools)
 
-        provider.send_message("What's the weather?")
+        provider.complete(
+            messages=[Message.from_text(Role.USER, "What's the weather?")],
+            tools=tools,
+        )
 
         # Verify tools were passed
         call_args = mock_client.complete.call_args
@@ -296,18 +314,20 @@ class TestFunctionCalling:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
-        response = provider.send_message("Get weather")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Get weather")],
+        )
 
-        assert len(response.function_calls) == 1
-        assert response.function_calls[0].name == "get_weather"
-        assert response.function_calls[0].args == {"location": "NYC"}
+        fc_list = response.get_function_calls()
+        assert len(fc_list) == 1
+        assert fc_list[0].name == "get_weather"
+        assert fc_list[0].args == {"location": "NYC"}
         assert response.finish_reason == FinishReason.TOOL_USE
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_tool_results(self, mock_client_class):
-        """send_tool_results() should send results back to model."""
+    def test_complete_with_tool_results(self, mock_client_class):
+        """complete() should handle tool results in message history."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(
             text="The weather is sunny."
@@ -317,55 +337,85 @@ class TestFunctionCalling:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
-        results = [ToolResult(
+        tool_result = ToolResult(
             call_id="call_123",
             name="get_weather",
-            result={"temp": 72, "condition": "sunny"}
-        )]
+            result={"temp": 72, "condition": "sunny"},
+        )
+        messages = [
+            Message.from_text(Role.USER, "What is the weather?"),
+            Message(role=Role.MODEL, parts=[
+                Part.from_function_call(FunctionCall(
+                    id="call_123",
+                    name="get_weather",
+                    args={"location": "NYC"},
+                ))
+            ]),
+            Message(role=Role.TOOL, parts=[Part(function_response=tool_result)]),
+        ]
 
-        response = provider.send_tool_results(results)
+        response = provider.complete(messages=messages)
 
-        assert response.text == "The weather is sunny."
+        assert response.get_text() == "The weather is sunny."
 
 
 class TestErrorHandling:
-    """Tests for error handling."""
+    """Tests for _handle_api_error() error classification.
 
-    @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_handles_401_unauthorized(self, mock_client_class):
+    The stateless complete() API (batch mode) lets exceptions propagate
+    to the caller.  The streaming path and the session layer call
+    _handle_api_error() to convert raw API exceptions into typed errors.
+    These tests verify that classification directly.
+    """
+
+    def test_handles_401_unauthorized(self):
         """Should raise TokenInvalidError on 401."""
-        mock_client = MagicMock()
-        mock_client.complete.side_effect = Exception("401 Unauthorized")
-        mock_client_class.return_value = mock_client
-
         provider = GitHubModelsProvider()
-        provider.initialize(ProviderConfig(api_key="ghp_bad"))
-        provider.connect('openai/gpt-4o')
-        provider.create_session()
+        provider._token = "ghp_bad"
 
         with pytest.raises(TokenInvalidError):
-            provider.send_message("Test")
+            provider._handle_api_error(Exception("401 Unauthorized"))
 
-    @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_handles_403_forbidden(self, mock_client_class):
+    def test_handles_403_forbidden(self):
         """Should raise TokenPermissionError on 403."""
-        mock_client = MagicMock()
-        mock_client.complete.side_effect = Exception("403 Forbidden")
-        mock_client_class.return_value = mock_client
-
         provider = GitHubModelsProvider()
-        provider.initialize(ProviderConfig(api_key="ghp_test"))
-        provider.connect('openai/gpt-4o')
-        provider.create_session()
 
         with pytest.raises(TokenPermissionError):
-            provider.send_message("Test")
+            provider._handle_api_error(Exception("403 Forbidden"))
+
+    def test_handles_429_rate_limit(self):
+        """Should raise RateLimitError on 429."""
+        provider = GitHubModelsProvider()
+
+        with pytest.raises(RateLimitError):
+            provider._handle_api_error(Exception("429 Rate limit exceeded"))
+
+    def test_handles_404_model_not_found(self):
+        """Should raise ModelNotFoundError on 404."""
+        provider = GitHubModelsProvider()
+        provider._model_name = 'invalid/model'
+
+        with pytest.raises(ModelNotFoundError) as exc_info:
+            provider._handle_api_error(Exception("404 Not found"))
+
+        assert "invalid/model" in str(exc_info.value)
+
+    def test_handles_models_disabled(self):
+        """Should raise ModelsDisabledError when GitHub Models disabled."""
+        provider = GitHubModelsProvider()
+        provider._organization = 'my-org'
+
+        with pytest.raises(ModelsDisabledError) as exc_info:
+            provider._handle_api_error(
+                Exception("401 GitHub Models is disabled")
+            )
+
+        assert "my-org" in str(exc_info.value)
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_handles_429_rate_limit(self, mock_client_class):
-        """Should raise RateLimitError on 429."""
+    def test_streaming_complete_handles_errors(self, mock_client_class):
+        """Streaming complete() should convert API errors via _handle_api_error."""
         mock_client = MagicMock()
         mock_client.complete.side_effect = Exception("429 Rate limit exceeded")
         mock_client_class.return_value = mock_client
@@ -373,49 +423,12 @@ class TestErrorHandling:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
         with pytest.raises(RateLimitError):
-            provider.send_message("Test")
-
-    @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_handles_404_model_not_found(self, mock_client_class):
-        """Should raise ModelNotFoundError on 404."""
-        mock_client = MagicMock()
-        mock_client.complete.side_effect = Exception("404 Not found")
-        mock_client_class.return_value = mock_client
-
-        provider = GitHubModelsProvider()
-        provider.initialize(ProviderConfig(api_key="ghp_test"))
-        provider.connect('invalid/model')
-        provider.create_session()
-
-        with pytest.raises(ModelNotFoundError) as exc_info:
-            provider.send_message("Test")
-
-        assert "invalid/model" in str(exc_info.value)
-
-    @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_handles_models_disabled(self, mock_client_class):
-        """Should raise ModelsDisabledError when GitHub Models disabled."""
-        mock_client = MagicMock()
-        mock_client.complete.side_effect = Exception(
-            "401 GitHub Models is disabled"
-        )
-        mock_client_class.return_value = mock_client
-
-        provider = GitHubModelsProvider()
-        provider.initialize(ProviderConfig(
-            api_key="ghp_test",
-            extra={'organization': 'my-org'}
-        ))
-        provider.connect('openai/gpt-4o')
-        provider.create_session()
-
-        with pytest.raises(ModelsDisabledError) as exc_info:
-            provider.send_message("Test")
-
-        assert "my-org" in str(exc_info.value)
+            provider.complete(
+                messages=[Message.from_text(Role.USER, "Test")],
+                on_chunk=lambda c: None,  # Force streaming path
+            )
 
 
     @patch('azure.ai.inference.ChatCompletionsClient')
@@ -516,8 +529,8 @@ class TestStructuredOutput:
         assert provider.supports_structured_output() is False
 
     @patch('azure.ai.inference.ChatCompletionsClient')
-    def test_send_message_with_response_schema(self, mock_client_class):
-        """send_message() should handle response_schema."""
+    def test_complete_with_response_schema(self, mock_client_class):
+        """complete() should handle response_schema."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(
             text='{"name": "Alice", "age": 30}'
@@ -527,7 +540,6 @@ class TestStructuredOutput:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
         schema = {
             "type": "object",
@@ -537,7 +549,10 @@ class TestStructuredOutput:
             }
         }
 
-        response = provider.send_message("Tell me about Alice", response_schema=schema)
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Tell me about Alice")],
+            response_schema=schema,
+        )
 
         assert response.structured_output == {"name": "Alice", "age": 30}
 
@@ -547,8 +562,6 @@ class TestSerialization:
 
     def test_serialize_deserialize_history(self):
         """Should round-trip history through serialization."""
-        from jaato_sdk.plugins.model_provider.types import Message, Part, Role
-
         provider = GitHubModelsProvider()
 
         history = [
@@ -583,7 +596,6 @@ class TestProviderProperties:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
 
         provider.shutdown()
 
@@ -642,9 +654,9 @@ class TestThinkingReasoning:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('deepseek/deepseek-r1')
-        provider.create_session()
-
-        response = provider.send_message("What is the meaning of life?")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "What is the meaning of life?")],
+        )
 
         assert response.get_text() == "The answer is 42."
         assert response.thinking == "Let me think step by step..."
@@ -665,9 +677,9 @@ class TestThinkingReasoning:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('openai/gpt-4o')
-        provider.create_session()
-
-        response = provider.send_message("Hi")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Hi")],
+        )
 
         assert response.get_text() == "Hello!"
         assert response.thinking is None
@@ -690,10 +702,10 @@ class TestThinkingReasoning:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('deepseek/deepseek-r1')
-        provider.create_session()
         provider.set_thinking_config(ThinkingConfig(enabled=False))
-
-        response = provider.send_message("What is the meaning of life?")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "What is the meaning of life?")],
+        )
 
         assert response.get_text() == "The answer is 42."
         # The Azure SDK path uses response_from_sdk which always extracts
@@ -747,12 +759,11 @@ class TestThinkingReasoning:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('deepseek/deepseek-r1')
-        provider.create_session()
 
         text_chunks = []
         thinking_chunks = []
-        response = provider.send_message_streaming(
-            "Question?",
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Question?")],
             on_chunk=lambda c: text_chunks.append(c),
             on_thinking=lambda t: thinking_chunks.append(t),
         )
@@ -784,12 +795,11 @@ class TestThinkingReasoning:
         provider = GitHubModelsProvider()
         provider.initialize(ProviderConfig(api_key="ghp_test"))
         provider.connect('deepseek/deepseek-r1')
-        provider.create_session()
         provider.set_thinking_config(ThinkingConfig(enabled=False))
 
         thinking_chunks = []
-        response = provider.send_message_streaming(
-            "Question?",
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Question?")],
             on_chunk=lambda c: None,
             on_thinking=lambda t: thinking_chunks.append(t),
         )

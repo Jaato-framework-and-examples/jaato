@@ -36,12 +36,10 @@ Example:
     ))
     provider.connect("sonnet")  # or "opus", or full model name
 
-    provider.create_session(
-        system_instruction="You are a helpful assistant.",
-        tools=[],  # In delegated mode, CLI provides tools
-    )
-
-    response = provider.send_message("Hello!")
+    # Use complete() for all interactions
+    from jaato_sdk.plugins.model_provider.types import Message, Part, Role
+    messages = [Message(role=Role.USER, parts=[Part.from_text("Hello!")])]
+    response = provider.complete(messages)
 """
 
 from .provider import ClaudeCLIProvider

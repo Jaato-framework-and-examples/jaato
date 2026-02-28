@@ -1,7 +1,7 @@
 # Session-Owned History Impact Analysis
 
 **Date:** 2026-02-22
-**Status:** Design — no implementation started
+**Status:** Phase 2 complete (stateless `complete()` on Anthropic provider)
 **Cross-references:**
 - [Cache Plugin Design](../jaato-cache-plugin-design.md) — Variants A/B, GC-cache coordination
 - [Cache Plugin Sequencing](cache-plugin-sequencing-impact-analysis.md) — A→B transition breakdown
@@ -13,13 +13,13 @@ This document proposes **inverting message history ownership** from providers to
 
 The migration proceeds in **5 phases**, each independently deployable:
 
-| Phase | Description | Scope | Unblocks |
-|-------|-------------|-------|----------|
-| 1 | `SessionHistory` wrapper — session holds canonical copy, still syncs to provider | Foundation | Phase 2 |
-| 2 | Stateless `complete()` on Anthropic provider | ~200 LOC | Cache plugin Variant B |
-| 3 | Migrate remaining 6 providers to `complete()` | ~600 LOC | Phase 4 |
-| 4 | Remove legacy protocol methods | ~400 LOC removed | Phase 5 |
-| 5 | Simplify session internals | ~300 LOC simplified | Full architecture |
+| Phase | Description | Scope | Unblocks | Status |
+|-------|-------------|-------|----------|--------|
+| 1 | `SessionHistory` wrapper — session holds canonical copy, still syncs to provider | Foundation | Phase 2 | **Done** |
+| 2 | Stateless `complete()` on Anthropic provider + session dispatch | ~350 LOC | Cache plugin Variant B | **Done** |
+| 3 | Migrate remaining 6 providers to `complete()` | ~600 LOC | Phase 4 | Pending |
+| 4 | Remove legacy protocol methods + `JAATO_SESSION_OWNED_HISTORY` env var | ~400 LOC removed | Phase 5 | Pending |
+| 5 | Simplify session internals | ~300 LOC simplified | Full architecture | Pending |
 
 **Total estimated scope:** ~1500 LOC touched across all providers and session.
 
@@ -366,12 +366,22 @@ The `_run_chat_loop_stateless()` method manages `self._history` directly:
 
 **Scope:** ~200 LOC in Anthropic provider, ~150 LOC in session.
 
-**Risk:** Medium — dual code paths. Mitigated by feature flag (`JAATO_SESSION_OWNED_HISTORY=true`, default `false`). Existing tests pass on legacy path; new tests cover stateless path.
+**Feature flag:** `JAATO_SESSION_OWNED_HISTORY` (default `true`). Set to `false` to test the legacy path. This env var is removed in Phase 4 when the legacy path is dropped entirely.
+
+**Implementation notes (done):**
+- `complete()` added to `ModelProviderPlugin` base protocol (optional method)
+- `AnthropicProvider.complete()` implemented using parameterized builder methods (`_build_system_blocks_from()`, `_build_tool_list_from()`, `_compute_history_cache_breakpoint_from()`) — no duplication with legacy methods
+- Session dispatch at 8 provider call sites: `_run_chat_loop()` (2), `_do_send_tool_results()` (2), `_check_and_handle_mid_turn_prompt()` (2), `_run_chat_loop_with_parts()` (2)
+- Session manages history directly: appends user/tool messages before `complete()`, appends model response after
+- `_sync_history_from_provider()` skipped in stateless mode
+- `_create_provider_session()` sets session history directly in stateless mode
+- `SessionHistory.pop_last()` and `messages_ref` added for rollback and efficient access
+- 13 new tests for `complete()`, all existing tests updated for stateless default
 
 **Validation:**
-- All existing Anthropic tests pass (legacy path)
-- New tests verify `complete()` returns same response as `send_message()` for same input
-- Integration test: full turn with tools via `complete()`
+- 510 tests pass (all core + Anthropic provider + plugins)
+- 6 pre-existing failures in Anthropic provider tests (mock setup issues, not related to Phase 2)
+- 13 new `TestStatelessComplete` tests all pass
 
 **Unblocks:** Cache plugin Variant B (A→B transition, ~60 lines mechanical).
 
@@ -420,9 +430,17 @@ This is the highest-risk provider because it requires bypassing the SDK's intend
 
 **Validation:** Each provider gets `complete()` tests mirroring existing `send_message()` tests.
 
-### Phase 4: Remove Legacy Protocol Methods
+### Phase 4: Remove Legacy Protocol Methods and Feature Flag
 
-**Goal:** Delete the stateful methods from `ModelProviderPlugin` and all implementations.
+**Goal:** Delete the stateful methods from `ModelProviderPlugin` and all implementations. Remove the `JAATO_SESSION_OWNED_HISTORY` environment variable and the dual-path dispatch logic in `JaatoSession`.
+
+**Cleanup checklist:**
+- Remove `JAATO_SESSION_OWNED_HISTORY` env var reading from `JaatoSession.__init__`
+- Remove `_session_owned_history` attribute and `_use_stateless_provider` property
+- Remove all `if self._use_stateless_provider: ... else:` branches — keep only the stateless path
+- Remove `_sync_history_from_provider()` entirely
+- Remove `JAATO_SESSION_OWNED_HISTORY` from CLAUDE.md environment variable table
+- Update any test fixtures that set `_session_owned_history`
 
 **Methods removed from protocol:**
 

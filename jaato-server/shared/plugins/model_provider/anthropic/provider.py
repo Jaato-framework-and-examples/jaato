@@ -22,14 +22,12 @@ from typing import Any, Dict, List, Optional
 
 from ..base import (
     FunctionCallDetectedCallback,
-    ModelProviderPlugin,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
 )
 from jaato_sdk.plugins.model_provider.types import (
-    CancelledException,
     CancelToken,
     FinishReason,
     FunctionCall,
@@ -38,7 +36,6 @@ from jaato_sdk.plugins.model_provider.types import (
     ProviderResponse,
     Role,
     ThinkingConfig,
-    ToolResult,
     ToolSchema,
     TokenUsage,
 )
@@ -116,14 +113,19 @@ CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude
 
 
 class AnthropicProvider:
-    """Anthropic Claude provider.
+    """Stateless Anthropic Claude provider.
 
-    This provider supports:
+    This provider uses a stateless design: the caller (session) owns the
+    conversation history and passes it to ``complete()`` on every call.
+    The provider does not maintain internal message state.
+
+    Features:
     - Multiple Claude model families
     - Function calling with manual control
     - Extended thinking (reasoning traces)
     - Prompt caching via ``cache_anthropic`` plugin (up to 90% cost reduction)
     - Real token counting via API
+    - Streaming with cancellation support
 
     Usage:
         provider = AnthropicProvider()
@@ -135,7 +137,10 @@ class AnthropicProvider:
             }
         ))
         provider.connect('claude-sonnet-4-20250514')
-        response = provider.send_message("Hello!")
+        response = provider.complete(
+            messages=[Message.from_text(Role.USER, "Hello!")],
+            system_instruction="You are helpful.",
+        )
 
     Environment variables:
         ANTHROPIC_API_KEY: API key for authentication
@@ -151,10 +156,7 @@ class AnthropicProvider:
         self._enable_thinking: bool = False
         self._thinking_budget: int = 10000
 
-        # Session state
-        self._system_instruction: Optional[str] = None
-        self._tools: Optional[List[ToolSchema]] = None
-        self._history: List[Message] = []
+        # Per-call accounting (updated after each complete() call)
         self._last_usage: TokenUsage = TokenUsage()
 
         # Cache plugin (optional, for delegated cache control)
@@ -449,7 +451,6 @@ class AnthropicProvider:
             # Anthropic client doesn't need explicit cleanup
             self._client = None
         self._model_name = None
-        self._history = []
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used."""
@@ -538,313 +539,56 @@ class AnthropicProvider:
 
         return sorted(models)
 
-    # ==================== Session Management ====================
-
-    def create_session(
-        self,
-        system_instruction: Optional[str] = None,
-        tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools.
-            history: Previous conversation history to restore.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not initialized. Call initialize() and connect() first.")
-
-        self._system_instruction = system_instruction
-        self._tools = tools
-        self._history = list(history) if history else []
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
-
-        Returns:
-            List of messages in internal format.
-        """
-        return list(self._history)
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("Provider not connected. Call connect() first.")
-
-        try:
-            response = self._client.messages.create(
-                model=self._model_name,
-                max_tokens=DEFAULT_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            provider_response = response_from_anthropic(response)
-            self._last_usage = provider_response.usage
-            return provider_response
-        except Exception as e:
-            self._handle_api_error(e)
-            raise
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a user message and get a response.
-
-        Args:
-            message: The user's message text.
-            response_schema: Optional JSON Schema to constrain the response.
-                Note: Anthropic doesn't have native structured output,
-                so this is implemented via tool forcing.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
-
-        # Validate and repair history (in case of prior cancellation/errors)
-        self._history = validate_tool_use_pairing(self._history)
-
-        # Compute history cache breakpoint (Cache breakpoint #3)
-        history_breakpoint = self._compute_history_cache_breakpoint()
-
-        # Build messages for API with optional cache breakpoint
-        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
-
-        # Build API kwargs
-        kwargs = self._build_api_kwargs(response_schema)
-
-        try:
-            response = self._client.messages.create(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_anthropic(response)
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            # Handle structured output via response parsing
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-
-            return provider_response
-        except Exception as e:
-            # Remove the user message we added if the call failed
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a message with multiple parts (text, images, etc.).
-
-        Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add multipart message to history
-        self._history.append(Message(role=Role.USER, parts=parts))
-
-        # Validate and repair history (in case of prior cancellation/errors)
-        self._history = validate_tool_use_pairing(self._history)
-
-        # Compute history cache breakpoint (Cache breakpoint #3)
-        history_breakpoint = self._compute_history_cache_breakpoint()
-
-        # Build messages for API with optional cache breakpoint
-        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
-
-        # Build API kwargs
-        kwargs = self._build_api_kwargs(response_schema)
-
-        try:
-            response = self._client.messages.create(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_anthropic(response)
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            return provider_response
-        except Exception as e:
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema to constrain the response.
-
-        Returns:
-            ProviderResponse with the model's next response.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history as a user message with tool_result blocks
-        tool_result_parts = [Part(function_response=r) for r in results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
-
-        # Validate and repair history (in case of prior cancellation/errors)
-        self._history = validate_tool_use_pairing(self._history)
-
-        # Compute history cache breakpoint (Cache breakpoint #3)
-        history_breakpoint = self._compute_history_cache_breakpoint()
-
-        # Build messages for API with optional cache breakpoint
-        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
-
-        # Build API kwargs
-        kwargs = self._build_api_kwargs(response_schema)
-
-        try:
-            response = self._client.messages.create(
-                model=self._model_name,
-                messages=messages,
-                **kwargs,
-            )
-            provider_response = response_from_anthropic(response)
-            self._last_usage = provider_response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(provider_response)
-
-            return provider_response
-        except Exception as e:
-            # Rollback the tool results message we added
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
-
     def _is_using_oauth(self) -> bool:
         """Check if OAuth authentication is being used."""
         return self._use_pkce or bool(self._oauth_token)
 
-    def _build_api_kwargs(self, response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Build kwargs for the messages.create() call.
-
-        When a ``CachePlugin`` is attached (via ``set_cache_plugin()``),
-        cache annotations are delegated to it.  Without a plugin, no cache
-        annotations are applied.
-
-        Note: History cache breakpoint (BP3) is applied in send_message()
-        via messages_to_anthropic(cache_breakpoint_index=...) since it
-        needs access to the converted message list.
-        """
-        kwargs: Dict[str, Any] = {}
-
-        # Max tokens (higher if thinking is enabled)
-        if self._enable_thinking and self._is_thinking_capable():
-            kwargs["max_tokens"] = EXTENDED_MAX_TOKENS
-        else:
-            kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
-
-        # Build system instruction in API format
-        system_blocks = self._build_system_blocks()
-        if system_blocks:
-            kwargs["system"] = system_blocks
-
-        # Build tools in API format
-        anthropic_tools = self._build_tool_list()
-        if anthropic_tools is not None:
-            kwargs["tools"] = anthropic_tools
-
-        # Delegate cache annotations to plugin if attached
-        if self._cache_plugin:
-            cache_result = self._cache_plugin.prepare_request(
-                system=kwargs.get("system"),
-                tools=kwargs.get("tools", []),
-                messages=[],  # Messages are handled separately via cache_breakpoint_index
-            )
-            if cache_result.get("system") is not None:
-                kwargs["system"] = cache_result["system"]
-            if cache_result.get("tools"):
-                kwargs["tools"] = cache_result["tools"]
-
-        # Extended thinking
-        if self._enable_thinking and self._is_thinking_capable():
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self._thinking_budget,
-            }
-
-        return kwargs
-
-    def _build_system_blocks(self) -> Optional[List[Dict[str, Any]]]:
+    def _build_system_blocks_from(
+        self, system_instruction: Optional[str]
+    ) -> Optional[List[Dict[str, Any]]]:
         """Build system instruction content blocks in Anthropic API format.
 
+        Used by ``complete()`` to convert the system prompt into the
+        Anthropic API's content-block list format.
+
         Handles OAuth identity prepending.  Does NOT apply cache_control --
-        that is handled by the cache plugin or legacy annotation path.
+        that is handled by the cache plugin.
+
+        Args:
+            system_instruction: The system prompt text, or None.
 
         Returns:
             List of system content blocks, or None if no system instruction.
         """
         if self._is_using_oauth():
             combined_system = CLAUDE_CODE_IDENTITY
-            if self._system_instruction:
-                combined_system = f"{CLAUDE_CODE_IDENTITY}\n\n{self._system_instruction}"
+            if system_instruction:
+                combined_system = f"{CLAUDE_CODE_IDENTITY}\n\n{system_instruction}"
             return [{"type": "text", "text": combined_system}]
-        elif self._system_instruction:
-            return [{"type": "text", "text": self._system_instruction}]
+        elif system_instruction:
+            return [{"type": "text", "text": system_instruction}]
         return None
 
-    def _build_tool_list(self) -> Optional[List[Dict[str, Any]]]:
+    def _build_tool_list_from(
+        self, tools: Optional[List[ToolSchema]]
+    ) -> Optional[List[Dict[str, Any]]]:
         """Build tool definitions in Anthropic API format.
 
+        Used by ``complete()`` to convert tool schemas into the
+        Anthropic API's tool definition format.
+
         Sorts by name for cache stability.  Does NOT apply cache_control --
-        that is handled by the cache plugin or legacy annotation path.
+        that is handled by the cache plugin.
+
+        Args:
+            tools: List of tool schemas, or None.
 
         Returns:
             Sorted list of tool dicts, or None if no tools.
         """
-        if not self._tools:
+        if not tools:
             return None
-        anthropic_tools = tool_schemas_to_anthropic(self._tools)
+        anthropic_tools = tool_schemas_to_anthropic(tools)
         if not anthropic_tools:
             return None
         # Sort by name for consistent ordering (improves cache hits)
@@ -859,11 +603,20 @@ class AnthropicProvider:
                 return True
         return False
 
-    def _compute_history_cache_breakpoint(self) -> int:
+    def _compute_history_cache_breakpoint_from(
+        self, messages: List[Message]
+    ) -> int:
         """Compute the optimal history index for cache breakpoint BP3.
+
+        Operates on the given message list. Used by ``complete()`` to
+        determine where to place cache_control annotations in the
+        conversation history.
 
         Delegates to the attached ``CachePlugin`` for budget-aware placement.
         Without a plugin, returns -1 (no history caching).
+
+        Args:
+            messages: The conversation history to search for breakpoint.
 
         Returns:
             Message index for cache_control, or -1 to skip history caching.
@@ -875,44 +628,32 @@ class AnthropicProvider:
         # Use its internal result if available (-2 = budget-based).
         bp = getattr(self._cache_plugin, '_budget_bp3_message_id', None)
         if bp is not None:
-            idx = self._resolve_message_id_to_index(bp)
+            idx = self._resolve_message_id_to_index_in(messages, message_id=bp)
             if idx >= 0:
                 return idx
 
         return -1
 
-    def _resolve_message_id_to_index(self, message_id: str) -> int:
-        """Find the index of a message by its ID in the history.
+    @staticmethod
+    def _resolve_message_id_to_index_in(
+        messages: List[Message], message_id: str
+    ) -> int:
+        """Find the index of a message by its ID in the given list.
 
         Searches backward since the target is typically near the end
         of the stable prefix (before recent ephemeral turns).
 
         Args:
+            messages: The message list to search.
             message_id: The message ID to find.
 
         Returns:
-            Index in self._history, or -1 if not found.
+            Index in the list, or -1 if not found.
         """
-        for i in range(len(self._history) - 1, -1, -1):
-            if getattr(self._history[i], 'id', None) == message_id:
+        for i in range(len(messages) - 1, -1, -1):
+            if getattr(messages[i], 'id', None) == message_id:
                 return i
         return -1
-
-    def _add_response_to_history(self, response: ProviderResponse) -> None:
-        """Add the model's response to history.
-
-        Uses the parts-based response format which preserves
-        text/function_call interleaving.
-        """
-        # Filter to only text and function_call parts for history
-        # (excludes function_response parts which belong to user messages)
-        history_parts = [
-            p for p in response.parts
-            if p.text is not None or p.function_call is not None
-        ]
-
-        if history_parts:
-            self._history.append(Message(role=Role.MODEL, parts=history_parts))
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions.
@@ -1133,146 +874,140 @@ class AnthropicProvider:
         """
         self._cache_plugin = plugin
 
-    # ==================== Streaming ====================
+    # ==================== Stateless Completion ====================
 
-    def send_message_streaming(
+    def complete(
         self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
         response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
-        """Send a message with streaming response and optional cancellation.
+        """Stateless completion: convert messages to provider format, call API, return response.
+
+        The caller (session) is responsible for maintaining the message list
+        and passing it in full each call. This method does not maintain any
+        internal conversation state.
+
+        When ``on_chunk`` is provided, the response is streamed token-by-token
+        via ``_stream_response()``. When ``on_chunk`` is None, the response
+        is returned in batch mode via ``messages.create()``.
 
         Args:
-            message: The user's message text.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback for function call detection during streaming.
+            messages: Full conversation history in provider-agnostic Message
+                format. Must already include the latest user message or tool
+                results — the provider does not append anything.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with accumulated text and/or function calls.
+            ProviderResponse with text, function calls, and usage.
+
+        Raises:
+            RuntimeError: If provider is not initialized/connected.
         """
         if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
+            raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
 
-        # Add user message to history
-        self._history.append(Message.from_text(Role.USER, message))
+        # Validate and repair message history (defensive against cancellation artifacts)
+        validated = validate_tool_use_pairing(list(messages))
 
-        # Validate and repair history (in case of prior cancellation/errors)
-        self._history = validate_tool_use_pairing(self._history)
+        # Build API kwargs from explicit parameters (NOT instance state)
+        kwargs: Dict[str, Any] = {}
 
-        # Compute history cache breakpoint (Cache breakpoint #3)
-        history_breakpoint = self._compute_history_cache_breakpoint()
+        # Max tokens (higher if thinking is enabled)
+        if self._enable_thinking and self._is_thinking_capable():
+            kwargs["max_tokens"] = EXTENDED_MAX_TOKENS
+        else:
+            kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
 
-        # Build messages for API with optional cache breakpoint
-        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
+        # System instruction (parameterized)
+        system_blocks = self._build_system_blocks_from(system_instruction)
+        if system_blocks:
+            kwargs["system"] = system_blocks
 
-        # Build API kwargs
-        kwargs = self._build_api_kwargs(response_schema)
+        # Tools (parameterized)
+        tool_list = self._build_tool_list_from(tools)
+        if tool_list is not None:
+            kwargs["tools"] = tool_list
+
+        # Delegate cache annotations to plugin if attached
+        if self._cache_plugin:
+            cache_result = self._cache_plugin.prepare_request(
+                system=kwargs.get("system"),
+                tools=kwargs.get("tools", []),
+                messages=[],  # Messages are handled separately via cache_breakpoint_index
+            )
+            if cache_result.get("system") is not None:
+                kwargs["system"] = cache_result["system"]
+            if cache_result.get("tools"):
+                kwargs["tools"] = cache_result["tools"]
+
+        # Extended thinking
+        if self._enable_thinking and self._is_thinking_capable():
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self._thinking_budget,
+            }
+
+        # Compute history cache breakpoint from the passed messages
+        history_breakpoint = self._compute_history_cache_breakpoint_from(validated)
+
+        # Convert to Anthropic API format
+        api_messages = messages_to_anthropic(
+            validated, cache_breakpoint_index=history_breakpoint
+        )
 
         try:
-            response = self._stream_response(
-                messages=messages,
-                kwargs=kwargs,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-                on_thinking=on_thinking,
-            )
+            if on_chunk:
+                # Streaming mode
+                provider_response = self._stream_response(
+                    messages=api_messages,
+                    kwargs=kwargs,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_function_call=on_function_call,
+                    on_thinking=on_thinking,
+                )
+            else:
+                # Batch mode
+                response = self._client.messages.create(
+                    model=self._model_name,
+                    messages=api_messages,
+                    **kwargs,
+                )
+                provider_response = response_from_anthropic(response)
 
-            self._last_usage = response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(response)
+            # Update last_usage (this is per-call accounting, not conversation state)
+            self._last_usage = provider_response.usage
 
             # Handle structured output via response parsing
-            text = response.get_text()
+            text = provider_response.get_text()
             if response_schema and text:
                 try:
-                    response.structured_output = json.loads(text)
+                    provider_response.structured_output = json.loads(text)
                 except json.JSONDecodeError:
                     pass
 
-            return response
+            return provider_response
         except Exception as e:
-            # Remove the user message we added if the call failed
-            if self._history and self._history[-1].role == Role.USER:
-                self._history.pop()
             self._handle_api_error(e)
             raise
 
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None,
-        on_thinking: Optional[ThinkingCallback] = None
-    ) -> ProviderResponse:
-        """Send tool results with streaming response and optional cancellation.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback for real-time token usage updates.
-            on_function_call: Optional callback for function call detection during streaming.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-        """
-        if not self._client or not self._model_name:
-            raise RuntimeError("No chat session. Call create_session() first.")
-
-        # Add tool results to history as a user message with tool_result blocks
-        tool_result_parts = [Part(function_response=r) for r in results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
-
-        # Validate and repair history (in case of prior cancellation/errors)
-        self._history = validate_tool_use_pairing(self._history)
-
-        # Compute history cache breakpoint (Cache breakpoint #3)
-        history_breakpoint = self._compute_history_cache_breakpoint()
-
-        # Build messages for API with optional cache breakpoint
-        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
-
-        # Build API kwargs
-        kwargs = self._build_api_kwargs(response_schema)
-
-        try:
-            response = self._stream_response(
-                messages=messages,
-                kwargs=kwargs,
-                on_chunk=on_chunk,
-                cancel_token=cancel_token,
-                on_usage_update=on_usage_update,
-                on_function_call=on_function_call,
-                on_thinking=on_thinking,
-            )
-
-            self._last_usage = response.usage
-
-            # Add assistant response to history
-            self._add_response_to_history(response)
-
-            return response
-        except Exception as e:
-            # Rollback the tool results message we added
-            if self._history and self._history[-1].role == Role.TOOL:
-                self._history.pop()
-            self._handle_api_error(e)
-            raise
+    # ==================== Streaming ====================
 
     def _stream_response(
         self,
@@ -1286,8 +1021,9 @@ class AnthropicProvider:
     ) -> ProviderResponse:
         """Stream a response from the Anthropic API.
 
-        Internal method used by both send_message_streaming and
-        send_tool_results_streaming.
+        Internal method used by ``complete()`` when ``on_chunk`` is provided.
+        Accumulates text, thinking, and function call parts from the stream
+        events, invoking callbacks as chunks arrive.
         """
         # State for accumulating response
         accumulated_text: List[str] = []  # Text chunks for current text block
