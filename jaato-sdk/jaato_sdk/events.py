@@ -146,6 +146,16 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
 
+    # Peer channel events (server-to-server gossip)
+    PEER_HEARTBEAT = "peer.heartbeat"
+    PEER_SPAWN_REQUEST = "peer.spawn_request"
+    PEER_SPAWN_ACCEPTED = "peer.spawn_accepted"
+    PEER_SPAWN_REJECTED = "peer.spawn_rejected"
+    PEER_AGENT_OUTPUT = "peer.agent_output"
+    PEER_AGENT_COMPLETED = "peer.agent_completed"
+    PEER_STOP_REQUEST = "peer.stop_request"
+    PEER_STOP_ACKNOWLEDGED = "peer.stop_acknowledged"
+
 
 # =============================================================================
 # Base Event
@@ -1274,6 +1284,32 @@ class InterruptedTurnRecoveredEvent(Event):
 
 
 # =============================================================================
+# Peer Channel Events (Server-to-Server Gossip)
+# =============================================================================
+
+@dataclass
+class PeerHeartbeatEvent(Event):
+    """Heartbeat sent between peer servers at a configurable interval.
+
+    Contains server identity, workload metrics, and health data used by the
+    PeerRegistry to track peer liveness and by the environment aspect (Phase 2)
+    to expose cluster state to the model.
+    """
+    type: EventType = field(default=EventType.PEER_HEARTBEAT)
+    server_id: str = ""
+    server_name: str = ""
+    server_version: str = ""
+    active_sessions: int = 0
+    active_agents: int = 0
+    available_providers: List[str] = field(default_factory=list)
+    available_models: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    uptime_seconds: float = 0.0
+
+
+# =============================================================================
 # Serialization Helpers
 # =============================================================================
 
@@ -1350,6 +1386,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file monitoring
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
+    # Peer channel
+    EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
 }
 
 

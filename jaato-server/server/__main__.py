@@ -163,6 +163,10 @@ class JaatoDaemon:
         self._ipc_server = None
         self._ws_server = None
 
+        # Peer gossip (populated if servers.json exists)
+        self._peer_registry = None   # Optional[PeerRegistry]
+        self._health_collector = None  # Optional[ServerHealthCollector]
+
         # Session-independent plugins (auth plugins loaded at daemon startup)
         # These provide user commands that work without an active session/provider.
         self._daemon_plugins: dict = {}  # name -> plugin instance
@@ -195,6 +199,9 @@ class JaatoDaemon:
         # These are loaded at daemon startup so their commands are available
         # before any session/provider connection exists.
         self._discover_daemon_plugins()
+
+        # Initialize peer gossip if servers.json is configured
+        self._init_gossip()
 
         tasks = []
 
@@ -232,6 +239,7 @@ class JaatoDaemon:
             self._ws_server = JaatoWSServer(
                 host=host,
                 port=port,
+                peer_registry=self._peer_registry,
             )
             tasks.append(asyncio.create_task(self._ws_server.start()))
             logger.info(f"WebSocket server will listen on ws://{host}:{port}")
@@ -249,6 +257,10 @@ class JaatoDaemon:
             loop = asyncio.get_event_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+
+        # Start gossip after transport servers are up
+        if self._peer_registry and self._health_collector:
+            await self._peer_registry.start(self._health_collector)
 
         logger.info("Jaato server started")
 
@@ -276,6 +288,8 @@ class JaatoDaemon:
         logger.info("Shutdown requested...")
         self._shutdown_event.set()
 
+        if self._peer_registry:
+            await self._peer_registry.shutdown()
         if self._ipc_server:
             await self._ipc_server.stop()
         if self._ws_server:
@@ -774,6 +788,153 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server.queue_event(client_id, event)
         # WebSocket routing would be added here
+
+    # ------------------------------------------------------------------
+    # Gossip / Peer Infrastructure
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_servers_config() -> Optional[dict]:
+        """Load ``~/.jaato/servers.json`` if it exists.
+
+        Returns the parsed dict or ``None`` when the file is absent.
+        The daemon is workspace-agnostic, so only the user-level path is
+        checked. Workspace-level servers.json is a future extension.
+        """
+        servers_file = Path.home() / ".jaato" / "servers.json"
+        if not servers_file.exists():
+            return None
+        try:
+            with open(servers_file) as f:
+                return json.load(f)
+        except Exception as exc:
+            logger.warning("Failed to load %s: %s", servers_file, exc)
+            return None
+
+    @staticmethod
+    def _get_or_create_server_id() -> str:
+        """Return a stable UUID for this server, creating one on first run.
+
+        Persisted to ``~/.jaato/server_id``.
+        """
+        import uuid
+        id_file = Path.home() / ".jaato" / "server_id"
+        if id_file.exists():
+            return id_file.read_text().strip()
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        server_id = str(uuid.uuid4())
+        id_file.write_text(server_id)
+        logger.info("Generated server_id: %s", server_id)
+        return server_id
+
+    def _init_gossip(self) -> None:
+        """Initialize peer gossip infrastructure if ``servers.json`` is present.
+
+        Parses the config, identifies which entries are remote peers (WS
+        entries whose address does not match this server's WS address), and
+        creates a ``PeerRegistry`` + ``ServerHealthCollector``.
+
+        The registry is *created* here but not yet *started* — that happens
+        after transport servers are up (in ``start()``).
+        """
+        import time as _time
+        config = self._load_servers_config()
+        if not config or not config.get("servers"):
+            return
+
+        from server.peers import PeerRegistry, GossipConfig, ServerConfig
+        from server.health import ServerHealthCollector
+
+        server_id = self._get_or_create_server_id()
+
+        # Parse gossip tuning
+        gossip_raw = config.get("gossip", {})
+        gossip_config = GossipConfig(
+            heartbeat_interval_seconds=gossip_raw.get(
+                "heartbeat_interval_seconds",
+                GossipConfig.heartbeat_interval_seconds,
+            ),
+            degraded_after_missed=gossip_raw.get(
+                "degraded_after_missed",
+                GossipConfig.degraded_after_missed,
+            ),
+            unreachable_after_missed=gossip_raw.get(
+                "unreachable_after_missed",
+                GossipConfig.unreachable_after_missed,
+            ),
+        )
+
+        # Determine this server's WS address (if any) for self-identification
+        own_ws_address = None
+        if self.web_socket:
+            # Normalize to match servers.json format: ws://host:port
+            if ':' in self.web_socket:
+                if self.web_socket.startswith(':'):
+                    own_ws_address = f"ws://0.0.0.0{self.web_socket}"
+                else:
+                    own_ws_address = f"ws://{self.web_socket}"
+            else:
+                own_ws_address = f"ws://0.0.0.0:{self.web_socket}"
+
+        # Identify self and collect peers
+        self_name = None
+        self_tags: list = []
+        peer_configs: list = []
+        for entry in config["servers"]:
+            name = entry.get("name", "")
+            transport = entry.get("transport", "")
+            address = entry.get("address", "")
+            tags = entry.get("tags", [])
+
+            # Self-identification: match by WS address
+            if transport == "ws" and own_ws_address and address == own_ws_address:
+                self_name = name
+                self_tags = tags
+                continue
+            # IPC self-identification: match by socket path
+            if transport == "ipc" and self.ipc_socket and address == self.ipc_socket:
+                self_name = name
+                self_tags = tags
+                continue
+
+            # Only WS peers are connectable in Phase 1
+            if transport == "ws":
+                peer_configs.append(ServerConfig(
+                    name=name,
+                    transport=transport,
+                    address=address,
+                    tags=tags,
+                ))
+
+        if not peer_configs:
+            logger.info("servers.json loaded but no remote peers found")
+            return
+
+        server_name = self_name or f"server-{server_id[:8]}"
+
+        self._peer_registry = PeerRegistry(
+            server_id=server_id,
+            server_name=server_name,
+            gossip_config=gossip_config,
+            peer_configs=peer_configs,
+        )
+
+        # Health collector — providers/models are empty at startup; they get
+        # populated as sessions connect. Phase 2 will update them dynamically.
+        self._health_collector = ServerHealthCollector(
+            session_manager=self._session_manager,
+            server_id=server_id,
+            server_name=server_name,
+            tags=self_tags,
+            start_time=_time.monotonic(),
+            available_providers=[],
+            available_models=[],
+        )
+
+        logger.info(
+            "Gossip configured: server_name=%s, %d peer(s)",
+            server_name, len(peer_configs),
+        )
 
     def _discover_daemon_plugins(self) -> None:
         """Discover session-independent plugins at daemon startup.
