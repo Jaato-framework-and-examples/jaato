@@ -1215,6 +1215,33 @@ class JaatoSession:
                 f"{provider_name}"
             )
 
+    def _unwrap_turn_result(self, turn_result: 'TurnResult') -> 'ProviderResponse':
+        """Extract the ``ProviderResponse`` from a ``TurnResult``.
+
+        ``provider.complete()`` now returns ``TurnResult``.  Call sites that
+        previously received a raw ``ProviderResponse`` use this helper to
+        unwrap the result, raising on fatal errors that the provider could
+        not recover from.
+
+        Args:
+            turn_result: Result returned by ``provider.complete()`` (via
+                ``with_retry``).
+
+        Returns:
+            The inner ``ProviderResponse``.
+
+        Raises:
+            RuntimeError: If the outcome is ``ERROR`` and no response is
+                available (the exception stored in the ``TurnResult`` is
+                re-raised).
+        """
+        if turn_result.outcome == TurnOutcome.ERROR:
+            if turn_result.error:
+                raise turn_result.error
+            raise RuntimeError(turn_result.error_message or "Provider returned an error")
+        # SUCCESS, TOOL_USE, CANCELLED, MAX_TOKENS — all have a response
+        return turn_result.response
+
     def _add_model_response_to_history(self, response: 'ProviderResponse') -> None:
         """Add the model's response to session history.
 
@@ -3225,7 +3252,7 @@ NOTES
                             self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
                             on_output("thinking", thinking, "write")
 
-                    response, _retry_stats = with_retry(
+                    turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
                             system_instruction=self._system_instruction,
@@ -3245,7 +3272,7 @@ NOTES
                         provider=self._provider
                     )
                 else:
-                    response, _retry_stats = with_retry(
+                    turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
                             system_instruction=self._system_instruction,
@@ -3256,6 +3283,7 @@ NOTES
                         cancel_token=self._cancel_token,
                         provider=self._provider
                     )
+                response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
                 self._add_model_response_to_history(response)
@@ -5117,7 +5145,7 @@ NOTES
                         self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
-                response, _retry_stats = with_retry(
+                turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
                         system_instruction=self._system_instruction,
@@ -5133,7 +5161,7 @@ NOTES
                     provider=self._provider
                 )
             else:
-                response, _retry_stats = with_retry(
+                turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
                         system_instruction=self._system_instruction,
@@ -5144,6 +5172,7 @@ NOTES
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+            response = self._unwrap_turn_result(turn_result)
 
             # Record model response in session history
             self._add_model_response_to_history(response)
@@ -5267,7 +5296,7 @@ NOTES
                         on_output("thinking", thinking, "write")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
-                response, _retry_stats = with_retry(
+                turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
                         system_instruction=self._system_instruction,
@@ -5282,9 +5311,10 @@ NOTES
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+                response = self._unwrap_turn_result(turn_result)
                 self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
-                response, _retry_stats = with_retry(
+                turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
                         system_instruction=self._system_instruction,
@@ -5295,6 +5325,7 @@ NOTES
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+                response = self._unwrap_turn_result(turn_result)
 
                 # Emit thinking content if present
                 if on_output and response.thinking:
@@ -5965,7 +5996,8 @@ NOTES
             raise RuntimeError("Session not configured.")
 
         messages = [Message.from_text(Role.USER, prompt)]
-        response = self._provider.complete(messages)
+        turn_result = self._provider.complete(messages)
+        response = self._unwrap_turn_result(turn_result)
         return response.get_text() or ''
 
     def send_message_with_parts(
@@ -6012,7 +6044,7 @@ NOTES
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=False,
             ) as llm_telemetry:
-                response, _retry_stats = with_retry(
+                turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
                         system_instruction=self._system_instruction,
@@ -6022,6 +6054,7 @@ NOTES
                     on_retry=self._on_retry,
                     provider=self._provider
                 )
+                response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
                 self._add_model_response_to_history(response)
@@ -6164,7 +6197,7 @@ NOTES
                     provider=self._provider.name if self._provider else "unknown",
                     streaming=False,
                 ) as llm_telemetry:
-                    response, _retry_stats = with_retry(
+                    turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
                             system_instruction=self._system_instruction,
@@ -6174,6 +6207,7 @@ NOTES
                         on_retry=self._on_retry,
                         provider=self._provider
                     )
+                    response = self._unwrap_turn_result(turn_result)
 
                     # Record model response in session history
                     self._add_model_response_to_history(response)
