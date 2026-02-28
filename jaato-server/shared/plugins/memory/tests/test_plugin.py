@@ -430,6 +430,77 @@ class TestMemoryPlugin(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn("scope", error)
 
+    def test_store_result_includes_telemetry_dict(self):
+        """Test that store_memory result includes _telemetry for span enrichment."""
+        executors = self.plugin.get_executors()
+
+        result = executors["store_memory"]({
+            "content": "Test telemetry emission",
+            "description": "Telemetry test",
+            "tags": ["telemetry_test"],
+            "confidence": 0.8,
+            "scope": "universal",
+            "evidence": "Observed during testing",
+        })
+
+        self.assertIn("_telemetry", result)
+        telem = result["_telemetry"]
+        self.assertEqual(telem["jaato.memory.operation"], "store")
+        self.assertEqual(telem["jaato.memory.maturity"], "raw")
+        self.assertEqual(telem["jaato.memory.confidence"], 0.8)
+        self.assertEqual(telem["jaato.memory.scope"], "universal")
+        self.assertTrue(telem["jaato.memory.has_evidence"])
+        self.assertEqual(telem["jaato.memory.tag_count"], 1)
+
+    def test_retrieve_result_includes_telemetry_dict(self):
+        """Test that retrieve_memories result includes _telemetry for span enrichment."""
+        executors = self.plugin.get_executors()
+
+        executors["store_memory"]({
+            "content": "Insight A",
+            "description": "First insight",
+            "tags": ["telem_retrieve_test"],
+            "confidence": 0.7,
+            "scope": "project",
+        })
+        executors["store_memory"]({
+            "content": "Insight B",
+            "description": "Second insight",
+            "tags": ["telem_retrieve_test"],
+            "confidence": 0.9,
+            "scope": "universal",
+        })
+
+        result = executors["retrieve_memories"]({"tags": ["telem_retrieve_test"]})
+
+        self.assertIn("_telemetry", result)
+        telem = result["_telemetry"]
+        self.assertEqual(telem["jaato.memory.operation"], "retrieve")
+        self.assertEqual(telem["jaato.memory.count_retrieved"], 2)
+        self.assertIn("raw", telem["jaato.memory.maturities_retrieved"])
+        self.assertIn("project", telem["jaato.memory.scopes_retrieved"])
+        self.assertIn("universal", telem["jaato.memory.scopes_retrieved"])
+        self.assertAlmostEqual(telem["jaato.memory.avg_confidence"], 0.8, places=2)
+
+    def test_list_tags_result_includes_telemetry_dict(self):
+        """Test that list_memory_tags result includes _telemetry for span enrichment."""
+        executors = self.plugin.get_executors()
+
+        executors["store_memory"]({
+            "content": "Test",
+            "description": "Test",
+            "tags": ["telem_list_test"],
+        })
+
+        result = executors["list_memory_tags"]({})
+
+        self.assertIn("_telemetry", result)
+        telem = result["_telemetry"]
+        self.assertEqual(telem["jaato.memory.operation"], "list_tags")
+        self.assertEqual(telem["jaato.memory.total_count"], 1)
+        self.assertGreaterEqual(telem["jaato.memory.tag_count"], 1)
+        self.assertEqual(telem["jaato.memory.count_raw"], 1)
+
     def test_source_agent_captured(self):
         """Test that source_agent is captured from plugin config."""
         plugin = MemoryPlugin()

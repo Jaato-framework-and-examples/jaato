@@ -570,6 +570,17 @@ class MemoryPlugin:
             "maturity": memory.maturity,
             "confidence": memory.confidence,
             "scope": memory.scope,
+            # Convention-based telemetry: jaato_session forwards these
+            # as span attributes on the enclosing tool_span.
+            "_telemetry": {
+                "jaato.memory.operation": "store",
+                "jaato.memory.maturity": memory.maturity,
+                "jaato.memory.confidence": memory.confidence,
+                "jaato.memory.scope": memory.scope,
+                "jaato.memory.has_evidence": memory.evidence is not None,
+                "jaato.memory.source_agent": memory.source_agent or "",
+                "jaato.memory.tag_count": len(memory.tags),
+            },
         }
 
     def _execute_retrieve(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -610,6 +621,11 @@ class MemoryPlugin:
             mem.last_accessed = datetime.now().isoformat()
             self._storage.update(mem)
 
+        # Compute summary stats for telemetry
+        maturities_retrieved = list({m.maturity for m in memories})
+        scopes_retrieved = list({m.scope for m in memories})
+        avg_confidence = sum(m.confidence for m in memories) / len(memories)
+
         return {
             "status": "success",
             "count": len(memories),
@@ -626,7 +642,14 @@ class MemoryPlugin:
                     "scope": m.scope,
                 }
                 for m in memories
-            ]
+            ],
+            "_telemetry": {
+                "jaato.memory.operation": "retrieve",
+                "jaato.memory.count_retrieved": len(memories),
+                "jaato.memory.maturities_retrieved": maturities_retrieved,
+                "jaato.memory.scopes_retrieved": scopes_retrieved,
+                "jaato.memory.avg_confidence": round(avg_confidence, 3),
+            },
         }
 
     def _execute_list_tags(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -648,12 +671,26 @@ class MemoryPlugin:
         tags = self._indexer.get_all_tags()
         memory_count = self._indexer.get_memory_count()
 
+        # Maturity breakdown for telemetry
+        maturity_counts = {}
+        if self._storage:
+            maturity_counts = self._storage.count_by_maturity()
+
         return {
             "status": "success",
             "tags": sorted(tags),
             "count": len(tags),
             "memory_count": memory_count,
-            "message": f"Found {memory_count} memories with {len(tags)} unique tags"
+            "message": f"Found {memory_count} memories with {len(tags)} unique tags",
+            "_telemetry": {
+                "jaato.memory.operation": "list_tags",
+                "jaato.memory.total_count": memory_count,
+                "jaato.memory.tag_count": len(tags),
+                "jaato.memory.count_raw": maturity_counts.get(MATURITY_RAW, 0),
+                "jaato.memory.count_validated": maturity_counts.get(MATURITY_VALIDATED, 0),
+                "jaato.memory.count_escalated": maturity_counts.get(MATURITY_ESCALATED, 0),
+                "jaato.memory.count_dismissed": maturity_counts.get(MATURITY_DISMISSED, 0),
+            },
         }
 
     # ===== User Command Executor =====
