@@ -1,0 +1,45 @@
+name: E2E Gossip Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: "Test flavor"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+      sdk_version:
+        description: "jaato-sdk version (required for prod)"
+        required: false
+        type: string
+      server_version:
+        description: "jaato-server version (required for prod)"
+        required: false
+        type: string
+
+jobs:
+  gossip-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate prod inputs
+        if: inputs.flavor == 'prod'
+        run: |
+          if [ -z "${{ inputs.sdk_version }}" ] || [ -z "${{ inputs.server_version }}" ]; then
+            echo "::error::sdk_version and server_version are required for prod flavor"
+            exit 1
+          fi
+
+      - name: Run E2E gossip test
+        working-directory: tests/e2e/gossip
+        env:
+          JAATO_SDK_VERSION: ${{ inputs.sdk_version }}
+          JAATO_SERVER_VERSION: ${{ inputs.server_version }}
+        run: ./run.sh ${{ inputs.flavor }}

@@ -1,0 +1,111 @@
+services:
+  server-a:
+    profiles: ["dev"]
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/gossip/Dockerfile.dev
+    command: >-
+      --web-socket :8080
+      --health-port 9090
+      --server-name server-a
+    volumes:
+      - ./servers-a.json:/root/.jaato/servers.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 15
+
+  server-a-prod:
+    profiles: ["prod"]
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/gossip/Dockerfile.prod
+      args:
+        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:?Set JAATO_SDK_VERSION}
+        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:?Set JAATO_SERVER_VERSION}
+    # Use the same network alias so test script addresses work uniformly
+    networks:
+      default:
+        aliases:
+          - server-a
+    command: >-
+      --web-socket :8080
+      --health-port 9090
+      --server-name server-a
+    volumes:
+      - ./servers-a.json:/root/.jaato/servers.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 15
+
+  server-b:
+    profiles: ["dev"]
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/gossip/Dockerfile.dev
+    command: >-
+      --web-socket :8080
+      --health-port 9090
+      --server-name server-b
+    volumes:
+      - ./servers-b.json:/root/.jaato/servers.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 15
+
+  server-b-prod:
+    profiles: ["prod"]
+    build:
+      context: ../../..
+      dockerfile: tests/e2e/gossip/Dockerfile.prod
+      args:
+        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:?Set JAATO_SDK_VERSION}
+        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:?Set JAATO_SERVER_VERSION}
+    networks:
+      default:
+        aliases:
+          - server-b
+    command: >-
+      --web-socket :8080
+      --health-port 9090
+      --server-name server-b
+    volumes:
+      - ./servers-b.json:/root/.jaato/servers.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 15
+
+  test-runner:
+    profiles: ["dev"]
+    image: python:3.12-slim
+    depends_on:
+      server-a:
+        condition: service_healthy
+      server-b:
+        condition: service_healthy
+    volumes:
+      - ./test_gossip_e2e.py:/tests/test_gossip_e2e.py:ro
+    command: ["python", "/tests/test_gossip_e2e.py"]
+
+  test-runner-prod:
+    profiles: ["prod"]
+    image: python:3.12-slim
+    depends_on:
+      server-a-prod:
+        condition: service_healthy
+      server-b-prod:
+        condition: service_healthy
+    volumes:
+      - ./test_gossip_e2e.py:/tests/test_gossip_e2e.py:ro
+    command: ["python", "/tests/test_gossip_e2e.py"]

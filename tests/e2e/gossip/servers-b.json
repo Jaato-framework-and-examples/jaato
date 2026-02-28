@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {"name": "server-a", "transport": "ws", "address": "ws://server-a:8080", "tags": ["e2e"]},
+    {"name": "server-b", "transport": "ws", "address": "ws://server-b:8080", "tags": ["e2e"]}
+  ],
+  "gossip": {
+    "heartbeat_interval_seconds": 1,
+    "degraded_after_missed": 3,
+    "unreachable_after_missed": 5
+  }
+}

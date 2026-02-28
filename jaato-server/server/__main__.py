@@ -140,6 +140,8 @@ class JaatoDaemon:
         config_file: str = DEFAULT_CONFIG_FILE,
         log_file: str = DEFAULT_LOG_FILE,
         socket_mode: int = 0o666,
+        health_port: Optional[int] = None,
+        server_name: Optional[str] = None,
     ):
         """Initialize the daemon.
 
@@ -150,6 +152,9 @@ class JaatoDaemon:
             config_file: Path to config file for restart support.
             log_file: Path to log file for daemon mode.
             socket_mode: Unix file permissions for the IPC socket (default: 0o666).
+            health_port: TCP port for the health HTTP endpoint (None to disable).
+            server_name: Explicit server name for gossip self-identification.
+                When set, ``_init_gossip()`` matches by name instead of address.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -157,6 +162,8 @@ class JaatoDaemon:
         self.pid_file = pid_file
         self.config_file = config_file
         self.log_file = log_file
+        self._health_port = health_port
+        self._server_name = server_name
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -166,6 +173,9 @@ class JaatoDaemon:
         # Peer gossip (populated if servers.json exists)
         self._peer_registry = None   # Optional[PeerRegistry]
         self._health_collector = None  # Optional[ServerHealthCollector]
+
+        # Health HTTP endpoint (populated if --health-port is set)
+        self._health_http_server = None  # Optional[HealthHTTPServer]
 
         # Session-independent plugins (auth plugins loaded at daemon startup)
         # These provide user commands that work without an active session/provider.
@@ -262,6 +272,16 @@ class JaatoDaemon:
         if self._peer_registry and self._health_collector:
             await self._peer_registry.start(self._health_collector)
 
+        # Start health HTTP endpoint if configured
+        if self._health_port is not None:
+            from server.health_http import HealthHTTPServer
+
+            self._health_http_server = HealthHTTPServer(
+                peer_registry=self._peer_registry,
+                health_collector=self._health_collector,
+            )
+            await self._health_http_server.start("0.0.0.0", self._health_port)
+
         logger.info("Jaato server started")
 
         # Wait for shutdown
@@ -288,6 +308,8 @@ class JaatoDaemon:
         logger.info("Shutdown requested...")
         self._shutdown_event.set()
 
+        if self._health_http_server:
+            await self._health_http_server.stop()
         if self._peer_registry:
             await self._peer_registry.shutdown()
         if self._ipc_server:
@@ -319,6 +341,8 @@ class JaatoDaemon:
             "pid_file": self.pid_file,
             "log_file": self.log_file,
             "socket_mode": self.socket_mode,
+            "health_port": self._health_port,
+            "server_name": self._server_name,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -886,13 +910,19 @@ class JaatoDaemon:
             address = entry.get("address", "")
             tags = entry.get("tags", [])
 
-            # Self-identification: match by WS address
-            if transport == "ws" and own_ws_address and address == own_ws_address:
-                self_name = name
-                self_tags = tags
-                continue
-            # IPC self-identification: match by socket path
-            if transport == "ipc" and self.ipc_socket and address == self.ipc_socket:
+            # Self-identification: match by explicit --server-name first,
+            # then fall back to address matching.
+            is_self = False
+            if self._server_name and name == self._server_name:
+                is_self = True
+            elif not self._server_name:
+                # Legacy address-based self-identification
+                if transport == "ws" and own_ws_address and address == own_ws_address:
+                    is_self = True
+                elif transport == "ipc" and self.ipc_socket and address == self.ipc_socket:
+                    is_self = True
+
+            if is_self:
                 self_name = name
                 self_tags = tags
                 continue
@@ -1761,6 +1791,22 @@ Examples:
         help="Unix file permissions for the IPC socket in octal (default: 666). "
              "Use 660 to restrict to owner and group only.",
     )
+    parser.add_argument(
+        "--health-port",
+        metavar="PORT",
+        type=int,
+        default=None,
+        help="TCP port for the health HTTP endpoint (GET /health). "
+             "Disabled by default.",
+    )
+    parser.add_argument(
+        "--server-name",
+        metavar="NAME",
+        default=None,
+        help="Explicit server name for gossip self-identification. "
+             "When set, the server matches itself by name in servers.json "
+             "instead of by address.",
+    )
 
     # Daemon control
     parser.add_argument(
@@ -1852,6 +1898,8 @@ Examples:
         args.web_socket = config.get("web_socket")
         args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
         args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "666"
+        args.health_port = config.get("health_port")
+        args.server_name = config.get("server_name")
 
         # Always restart as daemon
         args.daemon = True
@@ -1902,6 +1950,8 @@ Examples:
         pid_file=args.pid_file,
         log_file=args.log_file,
         socket_mode=socket_mode,
+        health_port=args.health_port,
+        server_name=args.server_name,
     )
 
     try:

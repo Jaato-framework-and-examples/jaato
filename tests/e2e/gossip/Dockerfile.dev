@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+# Install curl for Docker healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy source packages
+COPY jaato-sdk/ jaato-sdk/
+COPY jaato-server/ jaato-server/
+
+# Install in editable mode (dev extras for test deps)
+RUN pip install --no-cache-dir -e jaato-sdk/. -e "jaato-server/.[dev]"
+
+ENTRYPOINT ["python", "-m", "server"]

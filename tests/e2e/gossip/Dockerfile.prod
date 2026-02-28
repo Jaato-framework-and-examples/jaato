@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+# Install curl for Docker healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
+ARG JAATO_SDK_VERSION
+ARG JAATO_SERVER_VERSION
+
+# Install from TestPyPI with PyPI fallback for transitive deps
+RUN pip install --no-cache-dir \
+    --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "jaato-sdk==${JAATO_SDK_VERSION}" \
+    "jaato-server==${JAATO_SERVER_VERSION}"
+
+ENTRYPOINT ["python", "-m", "server"]
