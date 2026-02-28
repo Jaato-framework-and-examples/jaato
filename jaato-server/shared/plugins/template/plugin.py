@@ -1499,6 +1499,66 @@ Template rendering writes files to the workspace."""
         result.append(template[last_end:])
         return ''.join(result)
 
+    @staticmethod
+    def _inject_list_metadata(variables: Dict[str, Any]) -> Dict[str, Any]:
+        """Inject ``first``, ``last``, and ``@index`` metadata into list items.
+
+        Mustache templates commonly use ``{{^last}}, {{/last}}`` to produce
+        comma-separated lists without a trailing comma.  This pattern requires
+        each list item to carry a boolean ``last`` property — but callers
+        rarely provide it, causing ``{{^last}}`` (inverted section) to render
+        for *every* item (undefined is falsy) and produce trailing commas.
+
+        This method walks the variables dict recursively and, for every list
+        of dicts, injects:
+
+        * ``first`` — ``True`` on the first item, ``False`` on the rest.
+        * ``last``  — ``True`` on the last item, ``False`` on the rest.
+        * ``@index`` — 0-based position within the list.
+
+        Existing keys are **never** overwritten, so callers can still supply
+        their own values when needed.
+
+        The method returns a shallow copy of the top-level dict; nested dicts
+        inside list items are copied only when metadata is actually injected.
+
+        Args:
+            variables: Original template variables dict.
+
+        Returns:
+            A (possibly copied) variables dict with metadata injected.
+        """
+
+        def _process_value(value: Any) -> Any:
+            """Recursively process a value, injecting metadata into lists of dicts."""
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                last_idx = len(value) - 1
+                new_list = []
+                for idx, item in enumerate(value):
+                    # Recurse into nested dicts first
+                    new_item = _process_dict(item)
+                    # Inject metadata only when the key is absent
+                    if 'first' not in new_item:
+                        new_item['first'] = (idx == 0)
+                    if 'last' not in new_item:
+                        new_item['last'] = (idx == last_idx)
+                    if '@index' not in new_item:
+                        new_item['@index'] = idx
+                    new_list.append(new_item)
+                return new_list
+            if isinstance(value, dict):
+                return _process_dict(value)
+            return value
+
+        def _process_dict(d: dict) -> dict:
+            """Shallow-copy a dict and recurse into its values."""
+            result = {}
+            for k, v in d.items():
+                result[k] = _process_value(v)
+            return result
+
+        return _process_dict(variables)
+
     def _render_mustache(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
         """Render template using Handlebars syntax.
 
@@ -1509,6 +1569,12 @@ Template rendering writes files to the workspace."""
         - Each loops: ``{{#each items}}``, ``{{#each a.b}}``
         - Inverted sections: ``{{^isEmpty}}…{{/isEmpty}}``, ``{{^a.b}}…{{/a.b}}``
         - Current item: ``{{.}}``, ``{{this}}``
+
+        Before rendering, ``first``, ``last``, and ``@index`` metadata are
+        automatically injected into list-of-dict items so that templates can
+        use ``{{^last}}, {{/last}}`` for comma-separated lists without the
+        caller having to provide those flags manually (see
+        ``_inject_list_metadata``).
 
         Dotted paths in section/inverted tags are preprocessed into
         equivalent pybars3-compatible constructs before compilation
@@ -1531,6 +1597,7 @@ Template rendering writes files to the workspace."""
             }
 
         try:
+            variables = self._inject_list_metadata(variables)
             preprocessed = self._preprocess_mustache_dotted_paths(template)
             compiler = Compiler()
             compiled_template = compiler.compile(preprocessed)
