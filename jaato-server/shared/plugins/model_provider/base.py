@@ -3,6 +3,11 @@
 This module defines the interface that all model provider plugins must implement.
 Model providers encapsulate all SDK-specific logic for interacting with AI models
 (Google GenAI, Anthropic, OpenAI, etc.).
+
+Providers are stateless with respect to conversation history. The session owns
+the canonical message list and passes it to ``complete()`` on each call.
+Providers hold only connection/auth state set by ``initialize()`` and
+``connect()``.
 """
 
 from dataclasses import dataclass, field
@@ -103,32 +108,30 @@ class ModelProviderPlugin(Protocol):
 
     Model providers encapsulate all interactions with a specific AI SDK:
     - Connection and authentication
-    - Chat session management
-    - Message sending and function calling
+    - Stateless completion via ``complete()``
     - Token counting and context management
     - History serialization for persistence
 
-    This follows the same pattern as GCPlugin and SessionPlugin.
+    Providers are stateless with respect to conversation history. The session
+    owns the canonical message list and passes it to ``complete()`` on each
+    call. Providers hold only connection/auth state set during lifecycle
+    methods.
 
     Example implementation:
-        class GoogleGenAIProvider:
+        class MyProvider:
             @property
             def name(self) -> str:
-                return "google_genai"
+                return "my_provider"
 
             def initialize(self, config: ProviderConfig) -> None:
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=config.project,
-                    location=config.location
-                )
+                self._client = SomeSDK(api_key=config.api_key)
 
             def connect(self, model: str) -> None:
                 self._model_name = model
 
-            def send_message(self, message: str) -> ProviderResponse:
-                response = self._chat.send_message(message)
-                return self._convert_response(response)
+            def complete(self, messages, system_instruction=None, tools=None, **kw):
+                response = self._client.chat(messages=messages, model=self._model_name)
+                return convert_response(response)
     """
 
     @property
@@ -156,7 +159,7 @@ class ModelProviderPlugin(Protocol):
     ) -> bool:
         """Verify that authentication is configured and optionally trigger interactive login.
 
-        This should be called BEFORE configure_tools/create_session to ensure
+        This should be called BEFORE sending messages to ensure
         credentials are available. For providers that support interactive login
         (like Anthropic OAuth), this can trigger the login flow.
 
@@ -225,105 +228,42 @@ class ModelProviderPlugin(Protocol):
         """
         ...
 
-    # ==================== Session Management ====================
+    # ==================== Stateless Completion ====================
 
-    def create_session(
+    def complete(
         self,
+        messages: List[Message],
         system_instruction: Optional[str] = None,
         tools: Optional[List[ToolSchema]] = None,
-        history: Optional[List[Message]] = None
-    ) -> None:
-        """Create or reset the chat session.
-
-        Args:
-            system_instruction: System prompt for the model.
-            tools: List of available tools/functions.
-            history: Previous conversation history to restore.
-        """
-        ...
-
-    def get_history(self) -> List[Message]:
-        """Get the current conversation history.
-
-        Returns:
-            List of messages in provider-agnostic format.
-        """
-        ...
-
-    # ==================== Messaging ====================
-
-    def generate(self, prompt: str) -> ProviderResponse:
-        """Simple one-shot generation without session context.
-
-        Use this for basic prompts that don't need conversation history
-        or function calling.
-
-        Args:
-            prompt: The prompt text.
-
-        Returns:
-            ProviderResponse with the model's response.
-        """
-        ...
-
-    def send_message(
-        self,
-        message: str,
-        response_schema: Optional[Dict[str, Any]] = None
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None,
     ) -> ProviderResponse:
-        """Send a user message and get a response.
+        """Stateless completion: convert messages to provider format, call API, return response.
 
-        Does NOT automatically execute function calls - that's the
-        responsibility of JaatoClient's orchestration loop.
+        This method does NOT modify any internal state. The caller (session)
+        is responsible for maintaining the message list.
 
-        Args:
-            message: The user's message text.
-            response_schema: Optional JSON Schema to constrain the model's
-                response format. When provided, the model will return JSON
-                conforming to this schema, and the response's structured_output
-                field will contain the parsed result. Not all providers support
-                this - check supports_structured_output() first.
-
-        Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        ...
-
-    def send_message_with_parts(
-        self,
-        parts: List[Part],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send a message with multiple parts (text, images, etc.).
-
-        Use this for multimodal input where the user message contains
-        more than just text.
+        When on_chunk is provided, the response is streamed token-by-token.
+        When on_chunk is None, the response is returned in batch mode.
 
         Args:
-            parts: List of Part objects forming the message.
-            response_schema: Optional JSON Schema to constrain the response.
+            messages: Full conversation history in provider-agnostic Message format.
+            system_instruction: System prompt text.
+            tools: Available tool schemas.
+            response_schema: Optional JSON Schema for structured output.
+            cancel_token: Optional cancellation signal.
+            on_chunk: If provided, enables streaming mode.
+            on_usage_update: Real-time token usage callback (streaming).
+            on_function_call: Callback when function call detected mid-stream.
+            on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text and/or function calls.
-        """
-        ...
-
-    def send_tool_results(
-        self,
-        results: List[ToolResult],
-        response_schema: Optional[Dict[str, Any]] = None
-    ) -> ProviderResponse:
-        """Send tool execution results back to the model.
-
-        Called after executing function calls to continue the conversation.
-
-        Args:
-            results: List of tool execution results.
-            response_schema: Optional JSON Schema to constrain the model's
-                response format. See send_message() for details.
-
-        Returns:
-            ProviderResponse with the model's next response.
+            ProviderResponse with text, function calls, and usage.
         """
         ...
 
@@ -389,114 +329,23 @@ class ModelProviderPlugin(Protocol):
     def supports_structured_output(self) -> bool:
         """Check if this provider supports structured output (response_schema).
 
-        When True, the provider can accept response_schema in send_message()
-        and send_tool_results() to constrain the model's output to valid JSON
-        matching the provided schema.
+        When True, the provider can accept response_schema in complete()
+        to constrain the model's output to valid JSON matching the provided
+        schema.
 
         Returns:
             True if structured output is supported.
         """
         ...
 
-    # ==================== Streaming & Cancellation ====================
-    # Optional streaming and cancellation support
-
     def supports_streaming(self) -> bool:
         """Check if this provider supports streaming responses.
 
-        When True, the provider can use send_message_streaming() for
-        real-time token delivery with optional cancellation support.
+        When True, the provider supports the ``on_chunk`` callback in
+        ``complete()`` for real-time token delivery.
 
         Returns:
             True if streaming is supported, False otherwise.
-        """
-        ...
-
-    def send_message_streaming(
-        self,
-        message: str,
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional['UsageUpdateCallback'] = None,
-        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
-        on_thinking: Optional['ThinkingCallback'] = None
-    ) -> ProviderResponse:
-        """Send a message with streaming response and optional cancellation.
-
-        Streams the response token-by-token, calling on_chunk for each
-        piece of text as it arrives. Supports cancellation via CancelToken.
-
-        Args:
-            message: The user's message text.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-                If cancelled, streaming stops and partial response is returned.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback invoked when token usage is
-                updated during streaming (for real-time accounting).
-            on_function_call: Optional callback invoked when a function call
-                is detected mid-stream. Called BEFORE any subsequent text
-                chunks are emitted, allowing the caller to insert tool tree
-                markers at the correct position between text blocks.
-            on_thinking: Optional callback invoked when extended thinking
-                content is available. Called BEFORE text streaming begins,
-                when the model's thinking phase is complete.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
-            If cancelled mid-stream, contains partial text accumulated so far.
-
-        Raises:
-            CancelledException: If cancel_token was triggered (optional -
-                implementations may also return partial response instead).
-            RuntimeError: If no chat session exists.
-
-        Example:
-            token = CancelToken()
-            chunks = []
-
-            def on_chunk(text):
-                chunks.append(text)
-                print(text, end='', flush=True)
-
-            # In another thread, can call token.cancel() to stop
-            response = provider.send_message_streaming(
-                "Tell me a story",
-                on_chunk=on_chunk,
-                cancel_token=token
-            )
-        """
-        ...
-
-    def send_tool_results_streaming(
-        self,
-        results: List[ToolResult],
-        on_chunk: StreamingCallback,
-        cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional['UsageUpdateCallback'] = None,
-        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
-        on_thinking: Optional['ThinkingCallback'] = None
-    ) -> ProviderResponse:
-        """Send tool results with streaming response and optional cancellation.
-
-        Like send_tool_results() but with streaming output.
-
-        Args:
-            results: List of tool execution results.
-            on_chunk: Callback invoked for each text chunk as it streams.
-            cancel_token: Optional token to request cancellation mid-stream.
-            response_schema: Optional JSON Schema to constrain the response.
-            on_usage_update: Optional callback invoked when token usage is
-                updated during streaming (for real-time accounting).
-            on_function_call: Optional callback invoked when a function call
-                is detected mid-stream. See send_message_streaming() for details.
-            on_thinking: Optional callback invoked when extended thinking
-                content is available. See send_message_streaming() for details.
-
-        Returns:
-            ProviderResponse with accumulated text and/or function calls.
         """
         ...
 
@@ -551,7 +400,7 @@ class ModelProviderPlugin(Protocol):
         """Set the thinking/reasoning mode configuration.
 
         Dynamically enables or disables extended thinking for subsequent
-        API calls. Takes effect immediately for the next send_message().
+        API calls. Takes effect immediately for the next complete() call.
 
         Args:
             config: ThinkingConfig with enabled flag and budget.
@@ -613,4 +462,3 @@ class ModelProviderPlugin(Protocol):
                 return None
         """
         ...
-

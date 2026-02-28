@@ -84,6 +84,10 @@ def _make_session(
     session._gc_config = None
     session._preloaded_plugins = set()
 
+    # SessionHistory wrapper
+    from ..session_history import SessionHistory
+    session._history = SessionHistory()
+
     return session
 
 

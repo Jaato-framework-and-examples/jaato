@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from ..jaato_session import JaatoSession
-from jaato_sdk.plugins.model_provider.types import Part, FunctionCall, FinishReason
+from jaato_sdk.plugins.model_provider.types import Part, FunctionCall, FinishReason, Role
 
 
 class TestJaatoSessionInitialization:
@@ -122,7 +122,7 @@ class TestJaatoSessionSendMessage:
             session.send_message("Hello")
 
     def test_send_message_returns_response(self):
-        """Test that send_message returns response text."""
+        """Test that send_message returns response text via provider.complete()."""
         from jaato_sdk.plugins.model_provider.types import TokenUsage
 
         mock_runtime = MagicMock()
@@ -136,7 +136,7 @@ class TestJaatoSessionSendMessage:
 
         # Mock streaming support (enabled by default)
         mock_provider.supports_streaming.return_value = True
-        mock_provider.send_message_streaming.return_value = mock_response
+        mock_provider.complete.return_value = mock_response
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -165,11 +165,17 @@ class TestJaatoSessionGetHistory:
 
         assert session.get_history() == []
 
-    def test_get_history_delegates_to_provider(self):
-        """Test that get_history delegates to provider."""
+    def test_get_history_returns_session_owned_history(self):
+        """Test that get_history returns from session-owned history."""
+        from jaato_sdk.plugins.model_provider.types import Message, Role
+
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
-        mock_provider.get_history.return_value = ["msg1", "msg2"]
+        msgs = [
+            Message.from_text(Role.USER, "msg1"),
+            Message(role=Role.MODEL, parts=[Part.from_text("msg2")]),
+        ]
+        mock_provider.get_history.return_value = msgs
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -181,8 +187,14 @@ class TestJaatoSessionGetHistory:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
         session.configure()
 
+        # In stateless mode, history is session-owned and starts empty
+        # (provider sync is skipped). Populate it directly.
+        session._history.replace(list(msgs))
+
         history = session.get_history()
-        assert history == ["msg1", "msg2"]
+        assert len(history) == 2
+        assert history[0].parts[0].text == "msg1"
+        assert history[1].parts[0].text == "msg2"
 
 
 class TestJaatoSessionGetTurnAccounting:
@@ -318,14 +330,14 @@ class TestJaatoSessionGenerate:
             session.generate("Hello")
 
     def test_generate_returns_text(self):
-        """Test that generate returns response text."""
+        """Test that generate returns response text via complete()."""
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
 
         mock_response = MagicMock()
         mock_response.parts = [Part.from_text("Generated text")]
         mock_response.get_text = lambda: "Generated text"
-        mock_provider.generate.return_value = mock_response
+        mock_provider.complete.return_value = mock_response
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -340,6 +352,12 @@ class TestJaatoSessionGenerate:
         result = session.generate("Hello")
 
         assert result == "Generated text"
+        # Verify complete() was called with a single user message
+        mock_provider.complete.assert_called_once()
+        call_args = mock_provider.complete.call_args
+        messages = call_args[0][0]  # First positional arg
+        assert len(messages) == 1
+        assert messages[0].role == Role.USER
 
 
 class TestJaatoSessionTurnProgress:

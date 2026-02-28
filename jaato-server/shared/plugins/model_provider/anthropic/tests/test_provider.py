@@ -1,17 +1,13 @@
 """Tests for AnthropicProvider."""
 
-import json
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-from ..provider import AnthropicProvider, MODEL_CONTEXT_LIMITS
+from ..provider import AnthropicProvider
 from shared.plugins.model_provider.base import ProviderConfig
 from jaato_sdk.plugins.model_provider.types import (
-    ProviderResponse,
-    TokenUsage,
     FinishReason,
     FunctionCall,
-    ToolResult,
     ToolSchema,
     Message,
     Part,
@@ -22,7 +18,6 @@ from ..errors import (
     APIKeyInvalidError,
     RateLimitError,
     ContextLimitError,
-    ModelNotFoundError,
     OverloadedError,
 )
 
@@ -35,7 +30,13 @@ def create_mock_response(
     input_tokens: int = 10,
     output_tokens: int = 20,
 ):
-    """Create a mock Anthropic response."""
+    """Create a mock Anthropic response.
+
+    Uses ``spec=[]`` for the usage object to prevent MagicMock from
+    auto-creating attributes like ``cache_creation_input_tokens`` which
+    would be MagicMock instances instead of None (breaking ``> 0`` checks
+    in ``extract_usage_from_response``).
+    """
     mock_response = MagicMock()
     mock_response.stop_reason = stop_reason
 
@@ -64,8 +65,9 @@ def create_mock_response(
 
     mock_response.content = content
 
-    # Create usage
-    mock_response.usage = MagicMock()
+    # Create usage with explicit attributes (spec=[] prevents auto-creation
+    # of cache/thinking attributes that would be MagicMock instead of None)
+    mock_response.usage = MagicMock(spec=[])
     mock_response.usage.input_tokens = input_tokens
     mock_response.usage.output_tokens = output_tokens
 
@@ -170,283 +172,77 @@ class TestConnection:
         assert all(m.startswith('claude-3-5') for m in claude_3_5_models)
 
 
-class TestMessaging:
-    """Tests for sending messages."""
-
-    @patch('anthropic.Anthropic')
-    def test_send_message_returns_response(self, mock_client_class):
-        """send_message() should return ProviderResponse."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(text="Hello!")
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        response = provider.send_message("Hi")
-
-        assert response.get_text() == "Hello!"
-        assert response.usage.prompt_tokens == 10
-        assert response.usage.output_tokens == 20
-
-    @patch('anthropic.Anthropic')
-    def test_send_message_adds_to_history(self, mock_client_class):
-        """send_message() should add messages to history."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(text="Response")
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        provider.send_message("Question")
-        history = provider.get_history()
-
-        assert len(history) == 2  # User message + assistant response
-        assert history[0].role == Role.USER
-        assert history[1].role == Role.MODEL
-
-    @patch('anthropic.Anthropic')
-    def test_send_message_with_system_instruction(self, mock_client_class):
-        """send_message() should include system instruction."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response()
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session(system_instruction="You are helpful.")
-
-        provider.send_message("Hi")
-
-        # Verify system was included in call
-        call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert 'system' in call_kwargs
-        assert call_kwargs['system'] == "You are helpful."
-
-    @patch('anthropic.Anthropic')
-    def test_generate_one_shot(self, mock_client_class):
-        """generate() should work without session."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(text="Generated")
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-
-        response = provider.generate("One-shot prompt")
-
-        assert response.get_text() == "Generated"
-
-
-class TestExtendedThinking:
-    """Tests for extended thinking feature."""
-
-    @patch('anthropic.Anthropic')
-    def test_response_includes_thinking(self, mock_client_class):
-        """Response should include thinking when present."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(
-            text="Final answer",
-            thinking="Let me think about this step by step..."
-        )
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(
-            api_key="sk-ant-test",
-            extra={'enable_thinking': True}
-        ))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        response = provider.send_message("Complex question")
-
-        assert response.get_text() == "Final answer"
-        assert response.thinking == "Let me think about this step by step..."
-        assert response.has_thinking is True
-
-    @patch('anthropic.Anthropic')
-    def test_thinking_config_passed_to_api(self, mock_client_class):
-        """Thinking config should be passed to API when enabled."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response()
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(
-            api_key="sk-ant-test",
-            extra={
-                'enable_thinking': True,
-                'thinking_budget': 8000
-            }
-        ))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        provider.send_message("Think about this")
-
-        call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert 'thinking' in call_kwargs
-        assert call_kwargs['thinking']['type'] == 'enabled'
-        assert call_kwargs['thinking']['budget_tokens'] == 8000
-
-
-class TestFunctionCalling:
-    """Tests for function calling support."""
-
-    @patch('anthropic.Anthropic')
-    def test_send_message_with_tools(self, mock_client_class):
-        """send_message() should pass tools to API."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response()
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-
-        tools = [ToolSchema(
-            name='get_weather',
-            description='Get weather for a location',
-            parameters={
-                "type": "object",
-                "properties": {"location": {"type": "string"}},
-                "required": ["location"]
-            }
-        )]
-        provider.create_session(tools=tools)
-
-        provider.send_message("What's the weather?")
-
-        # Verify tools were passed with input_schema
-        call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert 'tools' in call_kwargs
-        assert call_kwargs['tools'][0]['name'] == 'get_weather'
-        assert 'input_schema' in call_kwargs['tools'][0]
-
-    @patch('anthropic.Anthropic')
-    def test_extracts_function_calls_from_response(self, mock_client_class):
-        """Should extract function calls from response."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(
-            text=None,
-            tool_use=[{
-                "id": "toolu_abc123",
-                "name": "get_weather",
-                "input": {"location": "NYC"}
-            }],
-            stop_reason="tool_use"
-        )
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        response = provider.send_message("Get weather")
-
-        function_calls = response.get_function_calls()
-        assert len(function_calls) == 1
-        assert function_calls[0].name == "get_weather"
-        assert function_calls[0].args == {"location": "NYC"}
-        assert function_calls[0].id == "toolu_abc123"
-        assert response.finish_reason == FinishReason.TOOL_USE
-
-    @patch('anthropic.Anthropic')
-    def test_send_tool_results(self, mock_client_class):
-        """send_tool_results() should send results back to model."""
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = create_mock_response(
-            text="The weather is sunny."
-        )
-        mock_client_class.return_value = mock_client
-
-        provider = AnthropicProvider()
-        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
-        provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
-
-        results = [ToolResult(
-            call_id="toolu_abc123",
-            name="get_weather",
-            result={"temp": 72, "condition": "sunny"}
-        )]
-
-        response = provider.send_tool_results(results)
-
-        assert response.get_text() == "The weather is sunny."
-
-
 class TestErrorHandling:
-    """Tests for error handling."""
+    """Tests for error handling via complete().
+
+    connect() calls _verify_model_responds() which hits the API, so the mock
+    must return a valid response for connect() before being switched to an
+    error for the complete() call.
+    """
 
     @patch('anthropic.Anthropic')
     def test_handles_401_unauthorized(self, mock_client_class):
         """Should raise APIKeyInvalidError on 401."""
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("401 Unauthorized")
+        mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-bad"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
 
+        mock_client.messages.create.side_effect = Exception("401 Unauthorized")
+        messages = [Message.from_text(Role.USER, "Test")]
         with pytest.raises(APIKeyInvalidError):
-            provider.send_message("Test")
+            provider.complete(messages)
 
     @patch('anthropic.Anthropic')
     def test_handles_429_rate_limit(self, mock_client_class):
         """Should raise RateLimitError on 429."""
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("429 Rate limit exceeded")
+        mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
 
+        mock_client.messages.create.side_effect = Exception("429 Rate limit exceeded")
+        messages = [Message.from_text(Role.USER, "Test")]
         with pytest.raises(RateLimitError):
-            provider.send_message("Test")
+            provider.complete(messages)
 
     @patch('anthropic.Anthropic')
     def test_handles_529_overloaded(self, mock_client_class):
         """Should raise OverloadedError on 529."""
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("529 Overloaded")
+        mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
 
+        mock_client.messages.create.side_effect = Exception("529 Overloaded")
+        messages = [Message.from_text(Role.USER, "Test")]
         with pytest.raises(OverloadedError):
-            provider.send_message("Test")
+            provider.complete(messages)
 
     @patch('anthropic.Anthropic')
     def test_handles_context_length_error(self, mock_client_class):
         """Should raise ContextLimitError on context overflow."""
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = Exception("context_length_exceeded")
+        mock_client.messages.create.return_value = create_mock_response()
         mock_client_class.return_value = mock_client
 
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
 
+        mock_client.messages.create.side_effect = Exception("context_length_exceeded")
+        messages = [Message.from_text(Role.USER, "Test")]
         with pytest.raises(ContextLimitError):
-            provider.send_message("Test")
+            provider.complete(messages)
 
 
 class TestTokenManagement:
@@ -546,7 +342,6 @@ class TestProviderProperties:
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session()
 
         provider.shutdown()
 
@@ -555,10 +350,10 @@ class TestProviderProperties:
 
 
 class TestPromptCaching:
-    """Tests for cache plugin delegation.
+    """Tests for cache plugin delegation via complete().
 
     Cache annotation logic now lives in the ``cache_anthropic`` plugin.
-    These tests verify the provider's delegation behavior — the plugin's
+    These tests verify the provider's delegation behavior -- the plugin's
     own test suite (``cache_anthropic/tests/test_plugin.py``) covers the
     annotation logic in detail.
     """
@@ -573,9 +368,9 @@ class TestPromptCaching:
         provider = AnthropicProvider()
         provider.initialize(ProviderConfig(api_key="sk-ant-test"))
         provider.connect('claude-sonnet-4-20250514')
-        provider.create_session(system_instruction="You are helpful.")
 
-        provider.send_message("Hi")
+        messages = [Message.from_text(Role.USER, "Hi")]
+        provider.complete(messages, system_instruction="You are helpful.")
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
         system = call_kwargs['system']
@@ -599,10 +394,6 @@ class TestPromptCaching:
             ToolSchema(name='tool1', description='First tool', parameters={}),
             ToolSchema(name='tool2', description='Second tool', parameters={}),
         ]
-        provider.create_session(
-            system_instruction="You are helpful.",
-            tools=tools,
-        )
 
         # Attach a mock cache plugin
         mock_plugin = MagicMock()
@@ -614,7 +405,12 @@ class TestPromptCaching:
         }
         provider.set_cache_plugin(mock_plugin)
 
-        provider.send_message("Hi")
+        messages = [Message.from_text(Role.USER, "Hi")]
+        provider.complete(
+            messages,
+            system_instruction="You are helpful.",
+            tools=tools,
+        )
 
         # Plugin's prepare_request should have been called
         mock_plugin.prepare_request.assert_called_once()
@@ -690,7 +486,9 @@ class TestStreamingConverters:
         event = MagicMock()
         event.type = "message_start"
         event.message = MagicMock()
-        event.message.usage = MagicMock()
+        event.message.usage = MagicMock(spec=[
+            "input_tokens", "output_tokens",
+        ])
         event.message.usage.input_tokens = 100
         event.message.usage.output_tokens = 10
 
@@ -698,3 +496,283 @@ class TestStreamingConverters:
         assert result.prompt_tokens == 100
         assert result.output_tokens == 10
         assert result.total_tokens == 110
+
+
+class TestComplete:
+    """Tests for the stateless complete() method.
+
+    complete() is the provider's sole API method. The caller passes the full
+    message list (and optional system instruction, tools, cancel token) and
+    receives a ProviderResponse. The provider holds no conversation history.
+    """
+
+    @patch('anthropic.Anthropic')
+    def test_complete_returns_response(self, mock_client_class):
+        """complete() should return a ProviderResponse with text and usage."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(text="Batch response")
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Hello")]
+
+        response = provider.complete(messages)
+
+        assert response.get_text() == "Batch response"
+        assert response.usage.prompt_tokens == 10
+        assert response.usage.output_tokens == 20
+
+    @patch('anthropic.Anthropic')
+    def test_complete_with_system_instruction(self, mock_client_class):
+        """complete() should pass system instruction to API."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Hi")]
+        provider.complete(
+            messages,
+            system_instruction="You are a helpful assistant.",
+        )
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert 'system' in call_kwargs
+        # System blocks are wrapped in list format
+        assert isinstance(call_kwargs['system'], list)
+        assert "helpful assistant" in call_kwargs['system'][0]['text']
+
+    @patch('anthropic.Anthropic')
+    def test_complete_with_tools(self, mock_client_class):
+        """complete() should pass tools to API."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        tools = [ToolSchema(
+            name='get_weather',
+            description='Get weather',
+            parameters={"type": "object", "properties": {}, "required": []}
+        )]
+        messages = [Message.from_text(Role.USER, "Weather?")]
+
+        provider.complete(messages, tools=tools)
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert 'tools' in call_kwargs
+        assert call_kwargs['tools'][0]['name'] == 'get_weather'
+
+    @patch('anthropic.Anthropic')
+    def test_complete_extracts_function_calls(self, mock_client_class):
+        """complete() should extract function calls from response."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(
+            text=None,
+            tool_use=[{
+                "id": "toolu_xyz",
+                "name": "search",
+                "input": {"query": "hello"}
+            }],
+            stop_reason="tool_use",
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Search for hello")]
+        response = provider.complete(messages)
+
+        fcs = response.get_function_calls()
+        assert len(fcs) == 1
+        assert fcs[0].name == "search"
+        assert fcs[0].args == {"query": "hello"}
+        assert response.finish_reason == FinishReason.TOOL_USE
+
+    @patch('anthropic.Anthropic')
+    def test_complete_multi_turn_conversation(self, mock_client_class):
+        """complete() should handle multi-turn conversations."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(
+            text="I remember your name"
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Build a multi-turn conversation
+        messages = [
+            Message.from_text(Role.USER, "My name is Alice"),
+            Message(role=Role.MODEL, parts=[Part(text="Nice to meet you, Alice!")]),
+            Message.from_text(Role.USER, "What's my name?"),
+        ]
+
+        response = provider.complete(messages)
+        assert response.get_text() == "I remember your name"
+
+        # Verify all messages were sent to the API
+        call_args = mock_client.messages.create.call_args
+        api_messages = call_args.kwargs['messages']
+        assert len(api_messages) == 3  # user, assistant, user
+
+    @patch('anthropic.Anthropic')
+    def test_complete_updates_last_usage(self, mock_client_class):
+        """complete() should update get_token_usage() for accounting."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(
+            input_tokens=50, output_tokens=30,
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Hi")]
+        provider.complete(messages)
+
+        usage = provider.get_token_usage()
+        assert usage.prompt_tokens == 50
+        assert usage.output_tokens == 30
+
+    @patch('anthropic.Anthropic')
+    def test_complete_works_after_initialize_and_connect(self, mock_client_class):
+        """complete() should work with just initialize() and connect()."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(text="OK")
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Hi")]
+        response = provider.complete(messages)
+        assert response.get_text() == "OK"
+
+    @patch('anthropic.Anthropic')
+    def test_complete_validates_tool_use_pairing(self, mock_client_class):
+        """complete() should validate/repair history with unpaired tool_use."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(text="Fixed")
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Create history with an unpaired tool_use followed by a user message
+        # validate_tool_use_pairing should strip the unpaired tool_use
+        messages = [
+            Message.from_text(Role.USER, "Do something"),
+            Message(role=Role.MODEL, parts=[
+                Part.from_function_call(FunctionCall(id="t1", name="tool", args={}))
+            ]),
+            # Missing TOOL message with tool_result — cancelled before results sent
+            Message.from_text(Role.USER, "Actually, stop"),
+        ]
+
+        # Should not raise
+        response = provider.complete(messages)
+        assert response.get_text() == "Fixed"
+
+    @patch('anthropic.Anthropic')
+    def test_complete_error_handling(self, mock_client_class):
+        """complete() should route API errors through _handle_api_error."""
+        mock_client = MagicMock()
+        # Return valid response for connect()'s verify call
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Now set the error for the actual complete() call
+        mock_client.messages.create.side_effect = Exception("429 Rate limit exceeded")
+
+        messages = [Message.from_text(Role.USER, "Hi")]
+
+        with pytest.raises(RateLimitError):
+            provider.complete(messages)
+
+    @patch('anthropic.Anthropic')
+    def test_complete_with_thinking(self, mock_client_class):
+        """complete() should include thinking in response."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(
+            text="Answer", thinking="Let me think...",
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-ant-test",
+            extra={'enable_thinking': True},
+        ))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Complex question")]
+        response = provider.complete(messages)
+
+        assert response.get_text() == "Answer"
+        assert response.thinking == "Let me think..."
+
+    @patch('anthropic.Anthropic')
+    def test_complete_with_cache_plugin(self, mock_client_class):
+        """complete() should delegate to cache plugin when attached."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Attach cache plugin
+        mock_plugin = MagicMock()
+        mock_plugin.prepare_request.return_value = {
+            "system": [{"type": "text", "text": "Cached system"}],
+            "tools": [],
+            "messages": [],
+        }
+        mock_plugin._budget_bp3_message_id = None
+        provider.set_cache_plugin(mock_plugin)
+
+        messages = [Message.from_text(Role.USER, "Hi")]
+        provider.complete(messages, system_instruction="System")
+
+        # Plugin's prepare_request should have been called
+        mock_plugin.prepare_request.assert_called_once()
+
+    @patch('anthropic.Anthropic')
+    def test_complete_does_not_mutate_input_messages(self, mock_client_class):
+        """complete() must not mutate the caller's message list."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response(text="OK")
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        messages = [Message.from_text(Role.USER, "Hello")]
+        original_len = len(messages)
+
+        provider.complete(messages)
+
+        # The caller's list must not have been modified
+        assert len(messages) == original_len
