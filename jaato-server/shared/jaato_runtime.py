@@ -25,7 +25,10 @@ if TYPE_CHECKING:
 # Framework-level instruction appended to all system prompts and tool results
 _TASK_COMPLETION_INSTRUCTION = (
     "After each action, continue working until the request is truly fulfilled. "
-    "Pause only for permissions or clarifications—never from uncertainty."
+    "Pause only for permissions or clarifications—never from uncertainty. "
+    "CRITICAL: Never fabricate results. Every completion claim must be backed by "
+    "an actual tool call result or subagent output in this conversation. If a step "
+    "cannot be verified, mark it failed honestly—do not invent success."
 )
 
 # Parallel tool execution guidance - encourages model to batch independent operations
