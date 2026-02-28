@@ -886,3 +886,225 @@ class TestGeneratedAnnotationStripping:
         assert "com.bank.customer.domain.model" in content
         assert "CustomerId" in content
         assert "skillId" not in content
+
+
+# ==================== List Metadata Injection ====================
+
+class TestListMetadataInjection:
+    """Tests for automatic ``first``/``last``/``@index`` injection into list items.
+
+    Mustache templates use ``{{^last}}, {{/last}}`` to suppress trailing commas
+    in parameter lists.  This pattern requires each list item to carry a boolean
+    ``last`` property, but callers rarely provide it.  Without injection, ``last``
+    is undefined (falsy in Mustache) for every item, so ``{{^last}}`` always
+    renders — producing trailing commas.
+
+    ``_inject_list_metadata`` recursively walks the variables dict and adds
+    ``first``, ``last``, and ``@index`` to each item in every list of dicts,
+    without overwriting existing keys.
+    """
+
+    # -- Unit tests for _inject_list_metadata --
+
+    def test_inject_basic_list(self):
+        """first/last/index injected correctly for a simple list."""
+        variables = {
+            "items": [
+                {"name": "a"},
+                {"name": "b"},
+                {"name": "c"},
+            ]
+        }
+        result = TemplatePlugin._inject_list_metadata(variables)
+        items = result["items"]
+        assert items[0]["first"] is True
+        assert items[0]["last"] is False
+        assert items[0]["@index"] == 0
+        assert items[1]["first"] is False
+        assert items[1]["last"] is False
+        assert items[1]["@index"] == 1
+        assert items[2]["first"] is False
+        assert items[2]["last"] is True
+        assert items[2]["@index"] == 2
+
+    def test_inject_single_item_list(self):
+        """Single-item list: first AND last are both True."""
+        variables = {"items": [{"name": "only"}]}
+        result = TemplatePlugin._inject_list_metadata(variables)
+        item = result["items"][0]
+        assert item["first"] is True
+        assert item["last"] is True
+        assert item["@index"] == 0
+
+    def test_inject_preserves_existing_keys(self):
+        """User-provided first/last/@index are never overwritten."""
+        variables = {
+            "items": [
+                {"name": "a", "first": "custom", "last": "custom", "@index": 99},
+                {"name": "b"},
+            ]
+        }
+        result = TemplatePlugin._inject_list_metadata(variables)
+        assert result["items"][0]["first"] == "custom"
+        assert result["items"][0]["last"] == "custom"
+        assert result["items"][0]["@index"] == 99
+        # Second item gets injected normally
+        assert result["items"][1]["first"] is False
+        assert result["items"][1]["last"] is True
+
+    def test_inject_nested_lists(self):
+        """Metadata injection recurses into nested dicts and lists."""
+        variables = {
+            "outer": [
+                {
+                    "name": "parent",
+                    "children": [
+                        {"name": "child1"},
+                        {"name": "child2"},
+                    ]
+                }
+            ]
+        }
+        result = TemplatePlugin._inject_list_metadata(variables)
+        # Outer list
+        assert result["outer"][0]["first"] is True
+        assert result["outer"][0]["last"] is True
+        # Nested list
+        children = result["outer"][0]["children"]
+        assert children[0]["first"] is True
+        assert children[0]["last"] is False
+        assert children[1]["first"] is False
+        assert children[1]["last"] is True
+
+    def test_inject_skips_non_dict_lists(self):
+        """Lists of non-dicts (strings, ints) are left untouched."""
+        variables = {
+            "tags": ["alpha", "beta"],
+            "counts": [1, 2, 3],
+        }
+        result = TemplatePlugin._inject_list_metadata(variables)
+        assert result["tags"] == ["alpha", "beta"]
+        assert result["counts"] == [1, 2, 3]
+
+    def test_inject_empty_list(self):
+        """Empty lists are left untouched."""
+        variables = {"items": []}
+        result = TemplatePlugin._inject_list_metadata(variables)
+        assert result["items"] == []
+
+    def test_inject_does_not_mutate_original(self):
+        """The original variables dict is not modified."""
+        original_item = {"name": "a"}
+        variables = {"items": [original_item]}
+        result = TemplatePlugin._inject_list_metadata(variables)
+        assert "last" not in original_item
+        assert "last" in result["items"][0]
+
+    def test_inject_nested_dict_without_list(self):
+        """Plain nested dicts (not in lists) are recursed but no metadata added."""
+        variables = {
+            "config": {
+                "items": [{"name": "x"}, {"name": "y"}]
+            }
+        }
+        result = TemplatePlugin._inject_list_metadata(variables)
+        assert result["config"]["items"][0]["first"] is True
+        assert result["config"]["items"][1]["last"] is True
+
+    # -- End-to-end rendering tests (trailing comma fix) --
+
+    def test_render_no_trailing_comma_without_last_flag(self, plugin):
+        """Core bug fix: {{^last}} no longer produces trailing commas."""
+        template = "{{#items}}{{name}}{{^last}}, {{/last}}{{/items}}"
+        variables = {
+            "items": [
+                {"name": "a"},
+                {"name": "b"},
+                {"name": "c"},
+            ]
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert rendered == "a, b, c"
+
+    def test_render_single_item_no_comma(self, plugin):
+        """Single item: no comma at all."""
+        template = "{{#items}}{{name}}{{^last}}, {{/last}}{{/items}}"
+        variables = {"items": [{"name": "only"}]}
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert rendered == "only"
+
+    def test_render_entity_create_method_no_trailing_comma(self, plugin):
+        """Realistic Java method signature — no trailing comma in parameter list."""
+        template = (
+            "public static Entity create("
+            "{{#entityFields}}{{fieldType}} {{fieldName}}{{^last}}, {{/last}}{{/entityFields}}"
+            ") {"
+        )
+        variables = {
+            "entityFields": [
+                {"fieldType": "String", "fieldName": "name"},
+                {"fieldType": "int", "fieldName": "age"},
+                {"fieldType": "BigDecimal", "fieldName": "balance"},
+            ]
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert rendered == "public static Entity create(String name, int age, BigDecimal balance) {"
+        # No trailing comma before the closing paren
+        assert ", )" not in rendered
+
+    def test_render_caller_provided_last_flag_respected(self, plugin):
+        """When the caller provides their own ``last`` flags, they are respected."""
+        template = "{{#items}}{{name}}{{^last}}, {{/last}}{{/items}}"
+        variables = {
+            "items": [
+                {"name": "a", "last": False},
+                {"name": "b", "last": True},  # Caller marks 'b' as last
+                {"name": "c", "last": False},  # 'c' is NOT treated as last
+            ]
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        # Caller's flags are respected: comma after 'a' and 'c', none after 'b'
+        assert rendered == "a, bc, "
+
+    def test_render_first_flag_works(self, plugin):
+        """The injected ``first`` flag can be used in templates."""
+        template = "{{#items}}{{#first}}[{{/first}}{{name}}{{^last}}, {{/last}}{{#last}}]{{/last}}{{/items}}"
+        variables = {
+            "items": [
+                {"name": "a"},
+                {"name": "b"},
+                {"name": "c"},
+            ]
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert rendered == "[a, b, c]"
+
+    def test_writeFileFromTemplate_entity_no_trailing_comma(self, plugin):
+        """End-to-end: writeFileFromTemplate renders Entity.java.tpl pattern correctly."""
+        template = textwrap.dedent("""\
+            public class Order {
+                public static Order create({{#entityFields}}{{fieldType}} {{fieldName}}{{^last}}, {{/last}}{{/entityFields}}) {
+                    return new Order();
+                }
+            }
+        """)
+        output_file = plugin._base_path / "output" / "Order.java"
+        result = plugin._execute_write_file_from_template({
+            "template": template,
+            "variables": {
+                "entityFields": [
+                    {"fieldType": "String", "fieldName": "customerName"},
+                    {"fieldType": "BigDecimal", "fieldName": "amount"},
+                ]
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, f"Render failed: {result}"
+        content = output_file.read_text()
+        assert "String customerName, BigDecimal amount)" in content
+        assert ", )" not in content
