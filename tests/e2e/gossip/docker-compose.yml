@@ -23,8 +23,8 @@ services:
       context: ../../..
       dockerfile: tests/e2e/gossip/Dockerfile.prod
       args:
-        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:?Set JAATO_SDK_VERSION}
-        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:?Set JAATO_SERVER_VERSION}
+        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:-latest}
+        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:-latest}
     # Use the same network alias so test script addresses work uniformly
     networks:
       default:
@@ -67,8 +67,8 @@ services:
       context: ../../..
       dockerfile: tests/e2e/gossip/Dockerfile.prod
       args:
-        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:?Set JAATO_SDK_VERSION}
-        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:?Set JAATO_SERVER_VERSION}
+        JAATO_SDK_VERSION: ${JAATO_SDK_VERSION:-latest}
+        JAATO_SERVER_VERSION: ${JAATO_SERVER_VERSION:-latest}
     networks:
       default:
         aliases:
