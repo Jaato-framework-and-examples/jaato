@@ -1186,6 +1186,21 @@ class AnthropicProvider:
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
                 finish_reason = FinishReason.CANCELLED
+            elif isinstance(e, ValueError):
+                # Malformed SSE/JSON from the provider (e.g. Anthropic-
+                # compatible APIs returning broken streaming chunks).
+                # Recover gracefully: discard incomplete tool calls and
+                # inject an error message so the model can self-correct.
+                self._trace("STREAM_MALFORMED_RECOVERY discarding incomplete tool calls")
+                current_tool_calls.clear()
+                error_notice = (
+                    "\n\n[Model returned malformed streaming data. "
+                    "Your last response was cut short — the tool calls "
+                    "you attempted were lost. Please try again.]"
+                )
+                accumulated_text.append(error_notice)
+                on_chunk(error_notice)
+                finish_reason = FinishReason.STOP
             else:
                 raise
 
