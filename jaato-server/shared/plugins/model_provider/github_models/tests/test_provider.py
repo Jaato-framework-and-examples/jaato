@@ -183,7 +183,7 @@ class TestComplete:
 
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_complete_returns_response(self, mock_client_class):
-        """complete() should return ProviderResponse."""
+        """complete() should return TurnResult wrapping ProviderResponse."""
         mock_client = MagicMock()
         mock_client.complete.return_value = create_mock_response(text="Hello!")
         mock_client_class.return_value = mock_client
@@ -196,9 +196,9 @@ class TestComplete:
             messages=[Message.from_text(Role.USER, "Hi")],
         )
 
-        assert response.get_text() == "Hello!"
-        assert response.usage.prompt_tokens == 10
-        assert response.usage.output_tokens == 20
+        assert response.text == "Hello!"
+        assert response.response.usage.prompt_tokens == 10
+        assert response.response.usage.output_tokens == 20
 
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_complete_is_stateless(self, mock_client_class):
@@ -257,7 +257,7 @@ class TestComplete:
             messages=[Message.from_text(Role.USER, "One-shot prompt")],
         )
 
-        assert response.get_text() == "Generated"
+        assert response.text == "Generated"
 
 
 class TestFunctionCalling:
@@ -319,7 +319,7 @@ class TestFunctionCalling:
             messages=[Message.from_text(Role.USER, "Get weather")],
         )
 
-        fc_list = response.get_function_calls()
+        fc_list = response.response.get_function_calls()
         assert len(fc_list) == 1
         assert fc_list[0].name == "get_weather"
         assert fc_list[0].args == {"location": "NYC"}
@@ -357,7 +357,7 @@ class TestFunctionCalling:
 
         response = provider.complete(messages=messages)
 
-        assert response.get_text() == "The weather is sunny."
+        assert response.text == "The weather is sunny."
 
 
 class TestErrorHandling:
@@ -554,7 +554,7 @@ class TestStructuredOutput:
             response_schema=schema,
         )
 
-        assert response.structured_output == {"name": "Alice", "age": 30}
+        assert response.response.structured_output == {"name": "Alice", "age": 30}
 
 
 class TestSerialization:
@@ -658,9 +658,9 @@ class TestThinkingReasoning:
             messages=[Message.from_text(Role.USER, "What is the meaning of life?")],
         )
 
-        assert response.get_text() == "The answer is 42."
-        assert response.thinking == "Let me think step by step..."
-        assert response.has_thinking is True
+        assert response.text == "The answer is 42."
+        assert response.response.thinking == "Let me think step by step..."
+        assert response.response.has_thinking is True
 
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_non_streaming_no_reasoning_when_absent(self, mock_client_class):
@@ -681,9 +681,9 @@ class TestThinkingReasoning:
             messages=[Message.from_text(Role.USER, "Hi")],
         )
 
-        assert response.get_text() == "Hello!"
-        assert response.thinking is None
-        assert response.has_thinking is False
+        assert response.text == "Hello!"
+        assert response.response.thinking is None
+        assert response.response.has_thinking is False
 
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_non_streaming_reasoning_disabled(self, mock_client_class):
@@ -707,11 +707,11 @@ class TestThinkingReasoning:
             messages=[Message.from_text(Role.USER, "What is the meaning of life?")],
         )
 
-        assert response.get_text() == "The answer is 42."
+        assert response.text == "The answer is 42."
         # The Azure SDK path uses response_from_sdk which always extracts
         # reasoning_content (it doesn't check _enable_thinking since the
         # converter is stateless). The flag controls streaming extraction.
-        assert response.thinking == "Let me think step by step..."
+        assert response.response.thinking == "Let me think step by step..."
 
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_streaming_extracts_reasoning(self, mock_client_class):
@@ -768,8 +768,8 @@ class TestThinkingReasoning:
             on_thinking=lambda t: thinking_chunks.append(t),
         )
 
-        assert response.get_text() == "The answer."
-        assert response.thinking == "Thinking about it... Still thinking."
+        assert response.text == "The answer."
+        assert response.response.thinking == "Thinking about it... Still thinking."
         assert thinking_chunks == ["Thinking about it...", " Still thinking."]
         assert text_chunks == ["The answer."]
 
@@ -804,6 +804,6 @@ class TestThinkingReasoning:
             on_thinking=lambda t: thinking_chunks.append(t),
         )
 
-        assert response.get_text() == "Visible answer"
-        assert response.thinking is None
+        assert response.text == "Visible answer"
+        assert response.response.thinking is None
         assert thinking_chunks == []

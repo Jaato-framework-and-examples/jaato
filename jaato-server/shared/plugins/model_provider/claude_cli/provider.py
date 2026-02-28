@@ -30,6 +30,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    TurnResult,
 )
 from .env import (
     resolve_cli_mode,
@@ -313,7 +314,7 @@ class ClaudeCLIProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: extract last message, call CLI, return response.
 
         The caller (session) is responsible for maintaining the message list.
@@ -322,6 +323,8 @@ class ClaudeCLIProvider:
         The CLI manages its own conversation state via ``--resume``, so only
         the latest user message or tool results need to be sent as a prompt.
         Prior messages in the list are already known to the CLI session.
+
+        Returns ``TurnResult.from_provider_response(r)`` on success.
 
         Args:
             messages: Full conversation history in provider-agnostic Message
@@ -338,7 +341,7 @@ class ClaudeCLIProvider:
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
+            A ``TurnResult`` classifying the outcome.
 
         Raises:
             RuntimeError: If provider is not initialized.
@@ -358,7 +361,7 @@ class ClaudeCLIProvider:
             prompt = last.text or ""
 
         if on_chunk:
-            return self._execute_query_streaming(
+            provider_response = self._execute_query_streaming(
                 prompt,
                 on_chunk=on_chunk,
                 cancel_token=cancel_token,
@@ -367,7 +370,8 @@ class ClaudeCLIProvider:
                 on_thinking=on_thinking,
             )
         else:
-            return self._execute_query(prompt)
+            provider_response = self._execute_query(prompt)
+        return TurnResult.from_provider_response(provider_response)
 
     # ==================== Streaming ====================
 

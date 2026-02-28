@@ -411,6 +411,11 @@ class TurnResult:
         outcome: How the turn ended (see ``TurnOutcome``).
         text: The model's response text.  May be partial for non-success
             outcomes (e.g. cancelled mid-stream, safety filter).
+        response: The full ``ProviderResponse``, when the provider was
+            able to produce one.  Present for ``RESPONSE``, ``TOOL_USE``,
+            ``CANCELLED`` (partial), ``MAX_TOKENS``, and ``SAFETY``.
+            ``None`` only for ``ERROR`` when the call never reached the
+            response stage.
         error: The original exception, if ``outcome`` is ``ERROR``.
         error_message: Human-readable error description.
         finish_reason: The raw ``FinishReason`` from the provider
@@ -418,6 +423,7 @@ class TurnResult:
     """
     outcome: TurnOutcome
     text: str = ""
+    response: Optional['ProviderResponse'] = None
     error: Optional[Exception] = None
     error_message: str = ""
     finish_reason: FinishReason = FinishReason.UNKNOWN
@@ -514,6 +520,47 @@ class TurnResult:
             error=exc,
             error_message=error_message or str(exc),
             finish_reason=FinishReason.ERROR,
+        )
+
+    @classmethod
+    def from_provider_response(cls, provider_response: 'ProviderResponse') -> 'TurnResult':
+        """Create a TurnResult from a successful ``ProviderResponse``.
+
+        Maps the provider's ``finish_reason`` to the appropriate
+        ``TurnOutcome``:
+
+        * ``STOP``, ``UNKNOWN`` → ``RESPONSE``
+        * ``TOOL_USE`` → ``TOOL_USE``
+        * ``CANCELLED`` → ``CANCELLED``
+        * ``MAX_TOKENS`` → ``MAX_TOKENS``
+        * ``SAFETY`` → ``SAFETY``
+        * ``ERROR`` → ``ERROR``
+
+        Args:
+            provider_response: The ProviderResponse from the provider.
+
+        Returns:
+            A ``TurnResult`` with the ``response`` field set.
+        """
+        fr = provider_response.finish_reason
+        text = provider_response.get_text() or ""
+
+        outcome_map = {
+            FinishReason.STOP: TurnOutcome.RESPONSE,
+            FinishReason.UNKNOWN: TurnOutcome.RESPONSE,
+            FinishReason.TOOL_USE: TurnOutcome.TOOL_USE,
+            FinishReason.CANCELLED: TurnOutcome.CANCELLED,
+            FinishReason.MAX_TOKENS: TurnOutcome.MAX_TOKENS,
+            FinishReason.SAFETY: TurnOutcome.SAFETY,
+            FinishReason.ERROR: TurnOutcome.ERROR,
+        }
+        outcome = outcome_map.get(fr, TurnOutcome.RESPONSE)
+
+        return cls(
+            outcome=outcome,
+            text=text,
+            response=provider_response,
+            finish_reason=fr,
         )
 
     def __str__(self) -> str:
