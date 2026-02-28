@@ -9,6 +9,7 @@ from jaato_sdk.plugins.model_provider.types import (
     FinishReason,
     FunctionCall,
     ToolSchema,
+    TurnResult,
     Message,
     Part,
     Role,
@@ -503,12 +504,12 @@ class TestComplete:
 
     complete() is the provider's sole API method. The caller passes the full
     message list (and optional system instruction, tools, cancel token) and
-    receives a ProviderResponse. The provider holds no conversation history.
+    receives a TurnResult. The provider holds no conversation history.
     """
 
     @patch('anthropic.Anthropic')
     def test_complete_returns_response(self, mock_client_class):
-        """complete() should return a ProviderResponse with text and usage."""
+        """complete() should return a TurnResult with text and usage."""
         mock_client = MagicMock()
         mock_client.messages.create.return_value = create_mock_response(text="Batch response")
         mock_client_class.return_value = mock_client
@@ -519,11 +520,11 @@ class TestComplete:
 
         messages = [Message.from_text(Role.USER, "Hello")]
 
-        response = provider.complete(messages)
+        result = provider.complete(messages)
 
-        assert response.get_text() == "Batch response"
-        assert response.usage.prompt_tokens == 10
-        assert response.usage.output_tokens == 20
+        assert result.text == "Batch response"
+        assert result.response.usage.prompt_tokens == 10
+        assert result.response.usage.output_tokens == 20
 
     @patch('anthropic.Anthropic')
     def test_complete_with_system_instruction(self, mock_client_class):
@@ -592,13 +593,13 @@ class TestComplete:
         provider.connect('claude-sonnet-4-20250514')
 
         messages = [Message.from_text(Role.USER, "Search for hello")]
-        response = provider.complete(messages)
+        result = provider.complete(messages)
 
-        fcs = response.get_function_calls()
+        fcs = result.response.get_function_calls()
         assert len(fcs) == 1
         assert fcs[0].name == "search"
         assert fcs[0].args == {"query": "hello"}
-        assert response.finish_reason == FinishReason.TOOL_USE
+        assert result.finish_reason == FinishReason.TOOL_USE
 
     @patch('anthropic.Anthropic')
     def test_complete_multi_turn_conversation(self, mock_client_class):
@@ -620,8 +621,8 @@ class TestComplete:
             Message.from_text(Role.USER, "What's my name?"),
         ]
 
-        response = provider.complete(messages)
-        assert response.get_text() == "I remember your name"
+        result = provider.complete(messages)
+        assert result.text == "I remember your name"
 
         # Verify all messages were sent to the API
         call_args = mock_client.messages.create.call_args
@@ -660,8 +661,8 @@ class TestComplete:
         provider.connect('claude-sonnet-4-20250514')
 
         messages = [Message.from_text(Role.USER, "Hi")]
-        response = provider.complete(messages)
-        assert response.get_text() == "OK"
+        result = provider.complete(messages)
+        assert result.text == "OK"
 
     @patch('anthropic.Anthropic')
     def test_complete_validates_tool_use_pairing(self, mock_client_class):
@@ -686,8 +687,8 @@ class TestComplete:
         ]
 
         # Should not raise
-        response = provider.complete(messages)
-        assert response.get_text() == "Fixed"
+        result = provider.complete(messages)
+        assert result.text == "Fixed"
 
     @patch('anthropic.Anthropic')
     def test_complete_error_handling(self, mock_client_class):
@@ -726,10 +727,10 @@ class TestComplete:
         provider.connect('claude-sonnet-4-20250514')
 
         messages = [Message.from_text(Role.USER, "Complex question")]
-        response = provider.complete(messages)
+        result = provider.complete(messages)
 
-        assert response.get_text() == "Answer"
-        assert response.thinking == "Let me think..."
+        assert result.text == "Answer"
+        assert result.response.thinking == "Let me think..."
 
     @patch('anthropic.Anthropic')
     def test_complete_with_cache_plugin(self, mock_client_class):

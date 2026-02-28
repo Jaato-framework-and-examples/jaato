@@ -17,6 +17,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    TurnResult,
 )
 from ..errors import (
     CredentialsNotFoundError,
@@ -370,7 +371,7 @@ class TestComplete:
         messages = [Message(role=Role.USER, parts=[Part.from_text("Hello")])]
         result = provider.complete(messages=messages, system_instruction="Be helpful")
 
-        assert isinstance(result, ProviderResponse)
+        assert isinstance(result, TurnResult)
         mock_client.models.generate_content.assert_called_once()
         # Verify usage was tracked
         assert provider.get_token_usage().total_tokens == 15
@@ -422,7 +423,7 @@ class TestComplete:
             on_chunk=lambda text: chunks_received.append(text),
         )
 
-        assert isinstance(result, ProviderResponse)
+        assert isinstance(result, TurnResult)
         assert chunks_received == ["Hello", " world"]
         assert provider.get_token_usage().total_tokens == 8
 
@@ -506,7 +507,7 @@ class TestComplete:
         messages = [Message(role=Role.USER, parts=[Part.from_text("Read foo.txt")])]
         result = provider.complete(messages=messages, tools=tools)
 
-        assert isinstance(result, ProviderResponse)
+        assert isinstance(result, TurnResult)
         # Verify generate_content was called (tools converted internally)
         mock_client.models.generate_content.assert_called_once()
 
@@ -587,8 +588,8 @@ class TestComplete:
             response_schema=schema,
         )
 
-        assert result.has_structured_output() is True
-        assert result.structured_output == {"name": "Alice", "age": 30}
+        assert result.response.has_structured_output() is True
+        assert result.response.structured_output == {"name": "Alice", "age": 30}
 
 
 class TestTokenManagement:

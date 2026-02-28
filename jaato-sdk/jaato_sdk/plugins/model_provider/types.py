@@ -356,6 +356,222 @@ class ProviderResponse:
         return self.thinking is not None
 
 
+class TurnOutcome(str, Enum):
+    """Discriminated outcome of a chat turn.
+
+    Used by ``TurnResult`` to indicate how a turn ended. Consumers
+    pattern-match on this tag instead of mixing exception handling,
+    boolean tuples, and finish-reason checks.
+
+    Values:
+
+    * ``RESPONSE`` — The model produced a normal text response (possibly
+      after executing tools).  This is the success case.
+    * ``TOOL_USE`` — *Internal only.*  The model requested tool execution
+      and the chat loop should continue.  Never appears in the final
+      ``TurnResult`` returned from ``send_message``; the loop processes
+      tool calls before returning.
+    * ``CANCELLED`` — The turn was cancelled by the user, parent agent,
+      or a ``CancelToken``.  ``text`` may contain a partial response.
+    * ``ERROR`` — A provider or system error occurred.  ``error`` holds
+      the original exception (if any) and ``error_message`` a
+      human-readable summary.
+    * ``SAFETY`` — The model's safety filter triggered.  ``text`` may
+      contain partial output emitted before the filter fired.
+    * ``MAX_TOKENS`` — The model hit its output token limit.  ``text``
+      contains whatever was generated before the limit.
+    """
+    RESPONSE = "response"
+    TOOL_USE = "tool_use"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+    SAFETY = "safety"
+    MAX_TOKENS = "max_tokens"
+
+
+@dataclass
+class TurnResult:
+    """Unified result type for all chat turn outcomes.
+
+    Replaces the three separate error mechanisms that previously coexisted
+    in the chat loop:
+
+    1. **Tool execution tuples** ``(bool, Any)`` — now internal to the
+       tool executor; callers see ``ToolResult.is_error`` instead.
+    2. **Provider exceptions** — caught and wrapped as
+       ``TurnResult(outcome=ERROR, error=exc)``.
+    3. **FinishReason checks** (``SAFETY``, ``MAX_TOKENS``, ``ERROR``) —
+       mapped to the corresponding ``TurnOutcome`` variant.
+
+    The chat loop builds a ``TurnResult`` once per provider response and
+    pattern-matches on ``outcome`` instead of mixing ``try/except``,
+    ``if finish_reason`` branches, and tuple unpacking.
+
+    Attributes:
+        outcome: How the turn ended (see ``TurnOutcome``).
+        text: The model's response text.  May be partial for non-success
+            outcomes (e.g. cancelled mid-stream, safety filter).
+        response: The full ``ProviderResponse``, when the provider was
+            able to produce one.  Present for ``RESPONSE``, ``TOOL_USE``,
+            ``CANCELLED`` (partial), ``MAX_TOKENS``, and ``SAFETY``.
+            ``None`` only for ``ERROR`` when the call never reached the
+            response stage.
+        error: The original exception, if ``outcome`` is ``ERROR``.
+        error_message: Human-readable error description.
+        finish_reason: The raw ``FinishReason`` from the provider
+            response that led to this result.
+    """
+    outcome: TurnOutcome
+    text: str = ""
+    response: Optional['ProviderResponse'] = None
+    error: Optional[Exception] = None
+    error_message: str = ""
+    finish_reason: FinishReason = FinishReason.UNKNOWN
+
+    # -- convenience predicates -------------------------------------------
+
+    @property
+    def is_success(self) -> bool:
+        """Whether the turn completed with a normal response."""
+        return self.outcome == TurnOutcome.RESPONSE
+
+    @property
+    def is_error(self) -> bool:
+        """Whether the turn ended due to an error (provider, safety, or token limit)."""
+        return self.outcome in (TurnOutcome.ERROR, TurnOutcome.SAFETY, TurnOutcome.MAX_TOKENS)
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Whether the turn was cancelled."""
+        return self.outcome == TurnOutcome.CANCELLED
+
+    # -- factories --------------------------------------------------------
+
+    @classmethod
+    def success(cls, text: str, finish_reason: FinishReason = FinishReason.STOP) -> 'TurnResult':
+        """Create a successful response result."""
+        return cls(outcome=TurnOutcome.RESPONSE, text=text, finish_reason=finish_reason)
+
+    @classmethod
+    def cancelled(cls, text: str = "", context: str = "") -> 'TurnResult':
+        """Create a cancellation result.
+
+        Args:
+            text: Any partial text produced before cancellation.
+            context: Where in the loop cancellation was detected
+                (e.g. ``"before start"``, ``"during tool execution"``).
+                Used for tracing, not shown to the user.
+        """
+        cancel_msg = "[Generation cancelled]"
+        if text:
+            combined = f"{text}\n\n{cancel_msg}"
+        else:
+            combined = cancel_msg
+        return cls(
+            outcome=TurnOutcome.CANCELLED,
+            text=combined,
+            finish_reason=FinishReason.CANCELLED,
+            error_message=context,
+        )
+
+    @classmethod
+    def from_finish_reason(cls, finish_reason: FinishReason, text: str = "") -> 'TurnResult':
+        """Create a TurnResult from an abnormal FinishReason.
+
+        Maps ``SAFETY`` → ``TurnOutcome.SAFETY``,
+        ``MAX_TOKENS`` → ``TurnOutcome.MAX_TOKENS``,
+        ``ERROR`` → ``TurnOutcome.ERROR``,
+        and falls back to ``TurnOutcome.ERROR`` for any other
+        unexpected finish reason.
+
+        Args:
+            finish_reason: The provider's finish reason.
+            text: Any text produced before the abnormal stop.
+        """
+        outcome_map = {
+            FinishReason.SAFETY: TurnOutcome.SAFETY,
+            FinishReason.MAX_TOKENS: TurnOutcome.MAX_TOKENS,
+            FinishReason.ERROR: TurnOutcome.ERROR,
+        }
+        outcome = outcome_map.get(finish_reason, TurnOutcome.ERROR)
+        suffix = f"[Model stopped: {finish_reason}]"
+        if text:
+            combined = f"{text}\n\n{suffix}"
+        else:
+            combined = f"[Model stopped unexpectedly: {finish_reason}]"
+        return cls(
+            outcome=outcome,
+            text=combined,
+            finish_reason=finish_reason,
+            error_message=suffix,
+        )
+
+    @classmethod
+    def from_exception(cls, exc: Exception, error_message: str = "") -> 'TurnResult':
+        """Create an ERROR result from an exception.
+
+        Args:
+            exc: The original exception.
+            error_message: Optional human-readable summary. Defaults to
+                ``str(exc)`` if not provided.
+        """
+        return cls(
+            outcome=TurnOutcome.ERROR,
+            error=exc,
+            error_message=error_message or str(exc),
+            finish_reason=FinishReason.ERROR,
+        )
+
+    @classmethod
+    def from_provider_response(cls, provider_response: 'ProviderResponse') -> 'TurnResult':
+        """Create a TurnResult from a successful ``ProviderResponse``.
+
+        Maps the provider's ``finish_reason`` to the appropriate
+        ``TurnOutcome``:
+
+        * ``STOP``, ``UNKNOWN`` → ``RESPONSE``
+        * ``TOOL_USE`` → ``TOOL_USE``
+        * ``CANCELLED`` → ``CANCELLED``
+        * ``MAX_TOKENS`` → ``MAX_TOKENS``
+        * ``SAFETY`` → ``SAFETY``
+        * ``ERROR`` → ``ERROR``
+
+        Args:
+            provider_response: The ProviderResponse from the provider.
+
+        Returns:
+            A ``TurnResult`` with the ``response`` field set.
+        """
+        fr = provider_response.finish_reason
+        text = provider_response.get_text() or ""
+
+        outcome_map = {
+            FinishReason.STOP: TurnOutcome.RESPONSE,
+            FinishReason.UNKNOWN: TurnOutcome.RESPONSE,
+            FinishReason.TOOL_USE: TurnOutcome.TOOL_USE,
+            FinishReason.CANCELLED: TurnOutcome.CANCELLED,
+            FinishReason.MAX_TOKENS: TurnOutcome.MAX_TOKENS,
+            FinishReason.SAFETY: TurnOutcome.SAFETY,
+            FinishReason.ERROR: TurnOutcome.ERROR,
+        }
+        outcome = outcome_map.get(fr, TurnOutcome.RESPONSE)
+
+        return cls(
+            outcome=outcome,
+            text=text,
+            response=provider_response,
+            finish_reason=fr,
+        )
+
+    def __str__(self) -> str:
+        """Return the response text for backward compatibility.
+
+        This allows code that previously used the ``str`` return value
+        of ``send_message`` to continue working with minimal changes.
+        """
+        return self.text
+
+
 class CancelledException(Exception):
     """Raised when an operation is cancelled via CancelToken."""
 

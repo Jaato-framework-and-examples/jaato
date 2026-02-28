@@ -481,42 +481,16 @@ class TestConnection:
         provider._model_name = "test-model"
         assert provider.is_connected is True
 
-    def test_create_session(self):
+    def test_stateless_no_session_state(self):
+        """Provider should not hold any conversation state.
+
+        ``create_session`` / ``get_history`` have been removed as part of
+        the migration to the stateless ``complete()`` API.
+        """
         provider = NIMProvider()
-        provider._client = MagicMock()
-        provider._model_name = "test-model"
-
-        provider.create_session(
-            system_instruction="Be helpful",
-            tools=[ToolSchema(name="test", description="A test", parameters={})],
-        )
-
-        assert provider._system_instruction == "Be helpful"
-        assert len(provider._tools) == 1
-        assert provider._history == []
-
-    def test_create_session_with_history(self):
-        provider = NIMProvider()
-        provider._client = MagicMock()
-        provider._model_name = "test-model"
-
-        history = [Message.from_text(Role.USER, "Previous message")]
-        provider.create_session(history=history)
-
-        assert len(provider._history) == 1
-
-    def test_get_history_returns_copy(self):
-        provider = NIMProvider()
-        provider._client = MagicMock()
-        provider._model_name = "test-model"
-        provider.create_session()
-        provider._history.append(Message.from_text(Role.USER, "Test"))
-
-        history = provider.get_history()
-        assert len(history) == 1
-        # Should be a copy
-        history.append(Message.from_text(Role.USER, "Extra"))
-        assert len(provider._history) == 1
+        assert not hasattr(provider, '_system_instruction')
+        assert not hasattr(provider, '_tools')
+        assert not hasattr(provider, '_history')
 
 
 class TestCapabilities:
@@ -607,10 +581,8 @@ class TestShutdown:
         provider = NIMProvider()
         provider._client = MagicMock()
         provider._model_name = "test"
-        provider._history = [Message.from_text(Role.USER, "hi")]
 
         provider.shutdown()
 
         assert provider._client is None
         assert provider._model_name is None
-        assert provider._history == []

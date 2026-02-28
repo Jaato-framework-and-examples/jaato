@@ -59,6 +59,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     ToolSchema,
     TokenUsage,
+    TurnResult,
 )
 from .converters import (
     extract_reasoning_from_stream_delta,
@@ -1111,7 +1112,7 @@ class GitHubModelsProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
-    ) -> ProviderResponse:
+    ) -> TurnResult:
         """Stateless completion: convert messages to API format, call API, return response.
 
         The caller (session) is responsible for maintaining the message
@@ -1120,8 +1121,8 @@ class GitHubModelsProvider:
 
         Handles both the Copilot API and Azure SDK backends transparently.
 
-        When ``on_chunk`` is provided, the response is streamed token-by-token.
-        When ``on_chunk`` is None, the response is returned in batch mode.
+        Returns ``TurnResult.from_provider_response(r)`` on success and
+        **raises** transient errors for ``with_retry``.
 
         Args:
             messages: Full conversation history in provider-agnostic Message
@@ -1137,7 +1138,7 @@ class GitHubModelsProvider:
             on_thinking: Callback for extended thinking content.
 
         Returns:
-            ProviderResponse with text, function calls, and usage.
+            A ``TurnResult`` classifying the outcome.
 
         Raises:
             RuntimeError: If provider is not initialized/connected.
@@ -1146,7 +1147,7 @@ class GitHubModelsProvider:
 
         try:
             if self._use_copilot_api:
-                return self._complete_copilot(
+                provider_response = self._complete_copilot(
                     msg_list,
                     system_instruction=system_instruction,
                     tools=tools,
@@ -1158,7 +1159,7 @@ class GitHubModelsProvider:
                     on_thinking=on_thinking,
                 )
             else:
-                return self._complete_azure(
+                provider_response = self._complete_azure(
                     msg_list,
                     system_instruction=system_instruction,
                     tools=tools,
@@ -1169,6 +1170,7 @@ class GitHubModelsProvider:
                     on_function_call=on_function_call,
                     on_thinking=on_thinking,
                 )
+            return TurnResult.from_provider_response(provider_response)
         except Exception as e:
             self._handle_api_error(e)
             raise
