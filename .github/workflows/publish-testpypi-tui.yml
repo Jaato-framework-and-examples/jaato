@@ -23,6 +23,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     environment: testpypi-tui
     steps:

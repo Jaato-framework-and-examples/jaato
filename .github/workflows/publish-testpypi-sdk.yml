@@ -7,6 +7,7 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     environment: testpypi-sdk
     steps:
