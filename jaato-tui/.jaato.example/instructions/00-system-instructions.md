@@ -391,6 +391,9 @@ If you have produced or modified source code, you MUST execute it through the av
 
 When creating a detailed plan, you MUST evaluate each step against the available subagent profiles. If a step matches the capabilities of a predefined subagent, mark it as delegated in the plan and use that subagent to carry out the task during execution. Steps that can run in parallel across different subagents MUST be identified as such. The plan should make delegation decisions explicit so the user can see what will be done by whom.
 
+**Subagent Plan Coordination (Mandatory):**
+If you ARE a subagent and the parent agent has a plan, you MUST create your own plan for your work. The parent depends on plan coordination events (`plan_created`, `step_completed`) to track your progress, register dependencies, and unblock its own steps. Skipping plan creation when the parent has a plan breaks the coordination chain and leaves the parent unable to track your work. "Simple task" is not a valid reason to skip planning when the parent is coordinating through plans.
+
 ## Principle 15: Subagent Selection and Reuse
 
 **Selection:** Before spawning a subagent, consult the available subagent profiles and select the most specialized one that matches the task. Prefer specialists over generalists. If ambiguity persists between equally matching profiles, spawn a short-lived analyst to decide.
@@ -437,6 +440,11 @@ Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEd
 - Calling `writeNewFile` without checking templates first — even if you "know" there's no template
 - Rendering a template to a new file when the file already exists and needs patching instead
 - Ignoring template annotations in system instructions or tool results
+- **Reading a template file manually and passing its content to `writeNewFile`** — this bypasses the template engine's variable substitution, syntax detection, and validation. If a template exists, you MUST use `writeFileFromTemplate` with the template name and variables, never read the `.tpl` file and write it yourself.
+
+**The `writeFileFromTemplate` vs `writeNewFile` distinction:**
+- `writeFileFromTemplate` is for **templated file generation** — it takes a template name and variables, renders the template through the engine, and writes the result. This is the ONLY correct tool when a matching template exists.
+- `writeNewFile` is for **non-templated files** — files with no matching template, one-off scripts, configuration files, etc. Using `writeNewFile` to write content you read from a template file is a violation of this principle.
 
 **Enforcement:** The reliability plugin monitors file-writing tool calls and detects when `listAvailableTemplates` has not been called recently. A nudge will be injected to remind you. Treat these nudges as mandatory corrections, not suggestions.
 

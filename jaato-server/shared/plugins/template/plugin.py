@@ -529,6 +529,16 @@ call `listAvailableTemplates` at least once in the current or recent turns:
 a recent `listAvailableTemplates` check and will inject a nudge. Treat nudges as
 mandatory corrections — call `listAvailableTemplates` and re-evaluate before proceeding.
 
+### CRITICAL: Never Read Templates Manually
+
+Do NOT read `.tpl`/`.tmpl` template files with file-reading tools and then pass the content
+to `writeNewFile`. This bypasses the template engine's variable substitution, syntax
+detection, and validation. The ONLY correct way to use a template is:
+- `writeFileFromTemplate(template_name="...", variables={...}, output_path="...")`
+
+The template engine resolves the file location, detects syntax (Jinja2/Mustache),
+substitutes variables, and writes the result. Manual reading and writing skips all of this.
+
 ### Non-Compliance Policy
 
 WARNING: Code generated without using available templates will be:
