@@ -1279,7 +1279,12 @@ class JaatoSession:
             if p.text is not None or p.function_call is not None
         ]
         if history_parts:
-            self._history.append(Message(role=Role.MODEL, parts=history_parts))
+            self._history.append(Message(
+                role=Role.MODEL,
+                parts=history_parts,
+                model=self._model_name,
+                provider=self._provider.name if self._provider else None,
+            ))
 
     def _get_tools_for_provider(self) -> Optional[List['ToolSchema']]:
         """Get the tool list to pass to the provider.

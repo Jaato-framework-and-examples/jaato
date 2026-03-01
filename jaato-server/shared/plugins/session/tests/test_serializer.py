@@ -257,3 +257,106 @@ class TestSessionStateSerialization:
 
         with pytest.raises(ValueError, match="Unsupported session version"):
             deserialize_session_state(data)
+
+
+class TestMessageProvenanceSerialization:
+    """Tests for message provenance (model/provider) serialization."""
+
+    def test_serialize_message_with_provenance(self):
+        """Test that model and provider are included in serialized output."""
+        message = Message(
+            role=Role.MODEL,
+            parts=[Part.from_text("Hello")],
+            model="gemini-2.5-flash",
+            provider="google_genai",
+        )
+        result = serialize_message(message)
+
+        assert result["model"] == "gemini-2.5-flash"
+        assert result["provider"] == "google_genai"
+
+    def test_serialize_message_without_provenance(self):
+        """Test that model/provider keys are omitted when None."""
+        message = Message(
+            role=Role.USER,
+            parts=[Part.from_text("Hello")],
+        )
+        result = serialize_message(message)
+
+        assert "model" not in result
+        assert "provider" not in result
+
+    def test_deserialize_message_with_provenance(self):
+        """Test that model and provider are restored from serialized data."""
+        data = {
+            "role": "model",
+            "parts": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-5",
+            "provider": "anthropic",
+        }
+        message = deserialize_message(data)
+
+        assert message.model == "claude-sonnet-4-5"
+        assert message.provider == "anthropic"
+
+    def test_deserialize_message_without_provenance_backward_compat(self):
+        """Test backward compat: old data without model/provider deserializes to None."""
+        data = {
+            "role": "model",
+            "parts": [{"type": "text", "text": "Hello"}],
+        }
+        message = deserialize_message(data)
+
+        assert message.model is None
+        assert message.provider is None
+
+    def test_round_trip_provenance(self):
+        """Test that provenance round-trips through serialize/deserialize."""
+        original = Message(
+            role=Role.MODEL,
+            parts=[Part.from_text("Response")],
+            model="gemini-2.5-flash",
+            provider="google_genai",
+        )
+        data = serialize_message(original)
+        restored = deserialize_message(data)
+
+        assert restored.model == original.model
+        assert restored.provider == original.provider
+        assert restored.role == original.role
+        assert restored.parts[0].text == original.parts[0].text
+
+    def test_session_state_round_trip_preserves_provenance(self):
+        """Test that provenance survives full session state round-trip."""
+        history = [
+            Message(
+                role=Role.USER,
+                parts=[Part.from_text("What's the weather?")],
+            ),
+            Message(
+                role=Role.MODEL,
+                parts=[Part.from_text("Let me check...")],
+                model="gemini-2.5-flash",
+                provider="google_genai",
+            ),
+        ]
+
+        state = SessionState(
+            session_id="provenance_test",
+            history=history,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            description="Provenance round-trip test",
+            turn_count=1,
+        )
+
+        data = serialize_session_state(state)
+        restored = deserialize_session_state(data)
+
+        assert len(restored.history) == 2
+        # User message has no provenance
+        assert restored.history[0].model is None
+        assert restored.history[0].provider is None
+        # Model message preserves provenance
+        assert restored.history[1].model == "gemini-2.5-flash"
+        assert restored.history[1].provider == "google_genai"

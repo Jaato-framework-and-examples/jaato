@@ -130,20 +130,32 @@ def deserialize_part(data: Dict[str, Any]) -> Part:
 def serialize_message(message: Message) -> Dict[str, Any]:
     """Serialize a Message object to a dictionary.
 
+    Includes provenance fields (model, provider) when present, enabling
+    cross-provider history to round-trip through session persistence.
+
     Args:
         message: A Message object.
 
     Returns:
         Dictionary representation of the message.
     """
-    return {
+    result = {
         'role': message.role.value,
         'parts': [serialize_part(p) for p in (message.parts or [])]
     }
+    if message.model is not None:
+        result['model'] = message.model
+    if message.provider is not None:
+        result['provider'] = message.provider
+    return result
 
 
 def deserialize_message(data: Dict[str, Any]) -> Message:
     """Deserialize a dictionary to a Message object.
+
+    Reads provenance fields (model, provider) when present. Old persisted
+    sessions that lack these keys deserialize with None defaults
+    (backward-compatible).
 
     Args:
         data: Dictionary representation of message.
@@ -152,7 +164,12 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
         Reconstructed Message object.
     """
     parts = [deserialize_part(p) for p in data.get('parts', [])]
-    return Message(role=Role(data['role']), parts=parts)
+    return Message(
+        role=Role(data['role']),
+        parts=parts,
+        model=data.get('model'),
+        provider=data.get('provider'),
+    )
 
 
 def serialize_history(history: List[Message]) -> List[Dict[str, Any]]:

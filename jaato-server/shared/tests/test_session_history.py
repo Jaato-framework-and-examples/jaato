@@ -4,12 +4,15 @@ Tests cover:
 1. SessionHistory class behavior (append, replace, clear, dirty tracking)
 2. Integration with JaatoSession (get_history returns from SessionHistory,
    reset_session updates history, _history.replace/clear set history)
+3. Message provenance (_add_model_response_to_history stamps model/provider)
 """
 
 import pytest
 from unittest.mock import MagicMock, PropertyMock
 
-from jaato_sdk.plugins.model_provider.types import Message, Part, Role
+from jaato_sdk.plugins.model_provider.types import (
+    Message, Part, Role, ProviderResponse, FunctionCall,
+)
 
 from ..session_history import SessionHistory
 from ..jaato_session import JaatoSession
@@ -305,3 +308,66 @@ class TestSessionHistoryInSession:
 
         assert len(session._history) == 2
         assert session._history.messages[0].parts[0].text == "turn2"
+
+
+# ==================== Message Provenance Tests ====================
+
+
+class TestAddModelResponseProvenance:
+    """Tests that _add_model_response_to_history stamps model and provider."""
+
+    def test_provenance_stamped_on_model_response(self):
+        """_add_model_response_to_history sets model and provider on the message."""
+        session, mock_provider = _make_configured_session()
+        mock_provider.name = "google_genai"
+        session._model_name = "gemini-2.5-flash"
+
+        response = ProviderResponse(
+            parts=[Part.from_text("Hello from Gemini")],
+        )
+        session._add_model_response_to_history(response)
+
+        assert len(session._history) == 1
+        msg = session._history.messages[0]
+        assert msg.role == Role.MODEL
+        assert msg.model == "gemini-2.5-flash"
+        assert msg.provider == "google_genai"
+
+    def test_provenance_with_different_provider(self):
+        """Provenance reflects the actual provider and model at call time."""
+        session, mock_provider = _make_configured_session()
+        mock_provider.name = "anthropic"
+        session._model_name = "claude-sonnet-4-5"
+
+        response = ProviderResponse(
+            parts=[Part.from_text("Hello from Claude")],
+        )
+        session._add_model_response_to_history(response)
+
+        msg = session._history.messages[0]
+        assert msg.model == "claude-sonnet-4-5"
+        assert msg.provider == "anthropic"
+
+    def test_provenance_none_when_no_provider(self):
+        """Provider is None when session has no provider set."""
+        session, _ = _make_configured_session()
+        session._provider = None
+
+        response = ProviderResponse(
+            parts=[Part.from_text("orphan response")],
+        )
+        session._add_model_response_to_history(response)
+
+        msg = session._history.messages[0]
+        assert msg.model == "test-model"
+        assert msg.provider is None
+
+    def test_empty_response_not_appended(self):
+        """Responses with no text or function_call parts are not appended."""
+        session, mock_provider = _make_configured_session()
+        mock_provider.name = "google_genai"
+
+        response = ProviderResponse(parts=[])
+        session._add_model_response_to_history(response)
+
+        assert len(session._history) == 0

@@ -239,10 +239,19 @@ class Message:
         role: The role of the message sender (user, model, or tool).
         parts: List of content parts (text, function calls, etc.).
         message_id: Unique identifier for this message (for GC history-budget sync).
+        model: Model name that generated this message (e.g. "gemini-2.5-flash",
+            "claude-sonnet-4-5"). Set on role=MODEL messages by the session when
+            appending provider responses to history. None for user/tool messages.
+        provider: Provider plugin name that generated this message (e.g.
+            "google_genai", "anthropic", "claude_cli"). Set alongside model.
+            Enables cross-provider history: when a session switches providers
+            or subagents use different models, each message records its origin.
     """
     role: Role
     parts: List[Part] = field(default_factory=list)
     message_id: str = field(default_factory=_generate_message_id)
+    model: Optional[str] = None
+    provider: Optional[str] = None
 
     @classmethod
     def from_text(cls, role: Union[Role, str], text: str) -> 'Message':

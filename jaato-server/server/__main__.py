@@ -739,10 +739,15 @@ class JaatoDaemon:
                 # Serialize history to dicts
                 history_data = []
                 for msg in history:
-                    history_data.append({
+                    msg_data = {
                         "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
                         "parts": [self._serialize_part(p) for p in (msg.parts or [])],
-                    })
+                    }
+                    if getattr(msg, 'model', None) is not None:
+                        msg_data['model'] = msg.model
+                    if getattr(msg, 'provider', None) is not None:
+                        msg_data['provider'] = msg.provider
+                    history_data.append(msg_data)
 
                 self._route_event(client_id, HistoryEvent(
                     agent_id=event.agent_id,
