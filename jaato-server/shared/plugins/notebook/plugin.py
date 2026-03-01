@@ -83,7 +83,7 @@ class NotebookPlugin(StreamingCapable):
         # Cache last analysis for permission display
         self._last_analysis: Optional[AnalysisResult] = None
         # Notebook Tool Bindings state
-        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "").lower() in ("1", "true", "yes")
+        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")
         self._tool_bindings_bridge: Optional[ToolBridge] = None
         self._tool_bindings_module: Optional[types.ModuleType] = None
         self._tool_executor = None  # Set via set_session() for tool bindings bridge

@@ -473,30 +473,30 @@ except tools.ToolExecutionError as e:
 class TestNotebookPluginToolBindings:
     """Tests for tool bindings wiring in the NotebookPlugin."""
 
-    def test_tool_bindings_disabled_by_default(self):
-        """Tool bindings are disabled when JAATO_TOOL_BINDINGS is not set."""
+    def test_tool_bindings_enabled_by_default(self):
+        """Tool bindings are enabled when JAATO_TOOL_BINDINGS is not set."""
         import os
-        # Ensure env var is not set
+        # Ensure env var is not set (default = enabled)
         env_backup = os.environ.pop("JAATO_TOOL_BINDINGS", None)
-        try:
-            from ..plugin import NotebookPlugin
-            plugin = NotebookPlugin()
-            assert plugin._tool_bindings_enabled is False
-            assert plugin._tool_bindings_module is None
-        finally:
-            if env_backup is not None:
-                os.environ["JAATO_TOOL_BINDINGS"] = env_backup
-
-    def test_tool_bindings_enabled_via_env(self):
-        """Tool bindings are enabled when JAATO_TOOL_BINDINGS=true."""
-        import os
-        env_backup = os.environ.get("JAATO_TOOL_BINDINGS")
-        os.environ["JAATO_TOOL_BINDINGS"] = "true"
         try:
             from ..plugin import NotebookPlugin
             plugin = NotebookPlugin()
             assert plugin._tool_bindings_enabled is True
             # Module is not built yet (no registry or executor)
+            assert plugin._tool_bindings_module is None
+        finally:
+            if env_backup is not None:
+                os.environ["JAATO_TOOL_BINDINGS"] = env_backup
+
+    def test_tool_bindings_disabled_via_env(self):
+        """Tool bindings can be disabled with JAATO_TOOL_BINDINGS=false."""
+        import os
+        env_backup = os.environ.get("JAATO_TOOL_BINDINGS")
+        os.environ["JAATO_TOOL_BINDINGS"] = "false"
+        try:
+            from ..plugin import NotebookPlugin
+            plugin = NotebookPlugin()
+            assert plugin._tool_bindings_enabled is False
             assert plugin._tool_bindings_module is None
         finally:
             if env_backup is not None:
