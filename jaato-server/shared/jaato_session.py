@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
@@ -135,6 +135,30 @@ class _TokenCountRequest:
     label: str
     token_count: int = 0
     is_estimate: bool = False
+
+
+@dataclass
+class _CancellationResult:
+    """Result of a cancellation/mid-turn interrupt check.
+
+    Replaces the out-of-band ``_mid_turn_continuation_response`` mutable
+    field pattern. Callers inspect ``action`` to decide their next step:
+
+    - ``"continue"``: Not cancelled; keep processing normally.
+    - ``"end_turn"``: Turn should end; ``turn_result`` has the outcome.
+    - ``"switch_response"``: A mid-turn interrupt produced a new response;
+      continue the loop with ``new_response``.
+
+    Attributes:
+        action: What the caller should do next.
+        turn_result: Present when ``action == "end_turn"``. The
+            ``TurnResult`` to return from the chat loop.
+        new_response: Present when ``action == "switch_response"``. The
+            fresh ``ProviderResponse`` from the mid-turn prompt.
+    """
+    action: Literal["continue", "end_turn", "switch_response"]
+    turn_result: Optional[TurnResult] = None
+    new_response: Optional[ProviderResponse] = None
 
 
 class JaatoSession:
@@ -266,8 +290,6 @@ class JaatoSession:
         # Mid-turn prompt interrupt tracking
         # When True, cancellation was triggered by a pending user prompt, not user cancellation
         self._mid_turn_interrupt: bool = False
-        # Stash for _handle_cancellation to pass back a mid-turn continuation response
-        self._mid_turn_continuation_response: Optional[ProviderResponse] = None
 
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
@@ -2814,23 +2836,19 @@ NOTES
         cancellation_notified: bool,
         accumulated_text: Optional[List[str]] = None,
         context: str = "",
-    ) -> Optional[TurnResult]:
+    ) -> _CancellationResult:
         """Check for cancellation or mid-turn interrupt and return a result.
 
         This unifies the ~11 cancellation check sites that previously
         existed throughout ``_run_chat_loop``.
 
-        Returns ``None`` if the session is **not** cancelled and
-        processing should continue.
+        Returns a ``_CancellationResult`` whose ``action`` field tells
+        the caller what to do:
 
-        If a mid-turn interrupt is detected (a user prompt arrived
-        during streaming), this method resets the cancel token and
-        processes the queued prompt via ``_check_and_handle_mid_turn_prompt``.
-        If the mid-turn prompt produces a new response, that response is
-        *not* returned via ``TurnResult`` — the caller should check the
-        ``mid_turn_response`` attribute set on ``self`` instead.
-        We return ``None`` in that case so the caller can continue the
-        main loop with the new response.
+        - ``"continue"``: Not cancelled; keep processing normally.
+        - ``"end_turn"``: Turn should end; use ``turn_result``.
+        - ``"switch_response"``: A mid-turn interrupt produced a new
+          response; continue with ``new_response``.
 
         Args:
             response: The most recent provider response.
@@ -2845,13 +2863,10 @@ NOTES
                 cancellation was detected (for tracing).
 
         Returns:
-            A ``TurnResult`` with outcome ``CANCELLED`` if the turn
-            should end, or ``None`` if processing should continue
-            (either because not cancelled, or because a mid-turn
-            interrupt was successfully handled).
+            A ``_CancellationResult`` describing the action to take.
         """
         if not self._is_cancelled() and response.finish_reason != FinishReason.CANCELLED:
-            return None
+            return _CancellationResult(action="continue")
 
         partial_text = response.get_text()
 
@@ -2882,16 +2897,18 @@ NOTES
                 use_streaming, on_output, wrapped_usage_callback, turn_data
             )
             if mid_turn_response:
-                # Stash the new response for the caller to pick up.
-                # We return None to signal "continue processing" rather
-                # than "turn is done".
-                self._mid_turn_continuation_response = mid_turn_response
-                return None
+                return _CancellationResult(
+                    action="switch_response",
+                    new_response=mid_turn_response,
+                )
             else:
                 self._trace(
                     f"MID_TURN_INTERRUPT: No prompt in queue ({context}), returning partial"
                 )
-                return TurnResult.success(partial_text or "")
+                return _CancellationResult(
+                    action="end_turn",
+                    turn_result=TurnResult.success(partial_text or ""),
+                )
 
         # --- Normal cancellation path ---
         cancel_msg = "[Generation cancelled]"
@@ -2906,7 +2923,10 @@ NOTES
             all_text = partial_text
 
         self._notify_model_of_cancellation(cancel_msg, all_text)
-        return TurnResult.cancelled(all_text, context=context)
+        return _CancellationResult(
+            action="end_turn",
+            turn_result=TurnResult.cancelled(all_text, context=context),
+        )
 
     def _emit_text_parts(
         self,
@@ -3063,17 +3083,15 @@ NOTES
         )
 
         # 4. Handle cancellation / mid-turn interrupt on continuation
-        self._mid_turn_continuation_response = None
-        cancel_result = self._handle_cancellation(
+        cr = self._handle_cancellation(
             response, use_streaming, on_output, wrapped_usage_callback,
             turn_data, cancellation_notified, accumulated_text,
             context=f"after tool results ({context})",
         )
-        if cancel_result is not None:
-            return None, cancel_result
-        if self._mid_turn_continuation_response is not None:
-            response = self._mid_turn_continuation_response
-            self._mid_turn_continuation_response = None
+        if cr.action == "end_turn":
+            return None, cr.turn_result
+        if cr.action == "switch_response":
+            response = cr.new_response
 
         # 5. Classify finish reason for abnormal stops
         abnormal = self._classify_finish_reason(response)
@@ -3094,17 +3112,15 @@ NOTES
             if mid_turn_response:
                 response = mid_turn_response
                 # Check cancellation on the mid-turn response
-                self._mid_turn_continuation_response = None
-                cancel_result = self._handle_cancellation(
+                cr = self._handle_cancellation(
                     response, use_streaming, on_output, wrapped_usage_callback,
                     turn_data, cancellation_notified, accumulated_text,
                     context=f"after mid-turn ({context})",
                 )
-                if cancel_result is not None:
-                    return None, cancel_result
-                if self._mid_turn_continuation_response is not None:
-                    response = self._mid_turn_continuation_response
-                    self._mid_turn_continuation_response = None
+                if cr.action == "end_turn":
+                    return None, cr.turn_result
+                if cr.action == "switch_response":
+                    response = cr.new_response
 
         return response, None
 
@@ -3315,210 +3331,67 @@ NOTES
                 on_output("thinking", response.thinking, "write")
 
             # Check finish_reason for abnormal termination
-            if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
-                logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
-                response_text = response.get_text()
-                if response_text:
-                    return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
-                else:
-                    return f"[Model stopped unexpectedly: {response.finish_reason}]"
+            abnormal = self._classify_finish_reason(response)
+            if abnormal is not None:
+                return abnormal.text
 
-            # Check for cancellation after initial message (including parent)
-            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                partial_text = response.get_text()
-
-                # Check if this was a mid-turn interrupt (user prompt arrived during streaming)
-                if self._mid_turn_interrupt:
-                    self._trace(f"MID_TURN_INTERRUPT: Processing user prompt (partial response: {len(partial_text) if partial_text else 0} chars)")
-                    # Reset the interrupt flag
-                    self._mid_turn_interrupt = False
-                    # Reset the cancel token for subsequent operations
-                    self._cancel_token = CancelToken()
-
-                    # Peek at the pending prompt for the callback (don't pop yet)
-                    pending_prompts = self._message_queue.peek_all()
-                    user_prompt_preview = ""
-                    for msg in pending_prompts:
-                        if msg.source_type in (SourceType.USER, SourceType.PARENT, SourceType.SYSTEM):
-                            user_prompt_preview = msg.text[:100] if msg.text else ""
-                            break
-
-                    # Notify via callback for UI event emission
-                    if self._on_mid_turn_interrupt:
-                        self._on_mid_turn_interrupt(
-                            len(partial_text) if partial_text else 0,
-                            user_prompt_preview
-                        )
-
-                    # Process the mid-turn prompt - this sends it to the model
-                    # The partial response is preserved in provider history
-                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                        use_streaming, on_output, wrapped_usage_callback, turn_data
-                    )
-
-                    if mid_turn_response:
-                        # Update response to continue from the mid-turn prompt response
-                        response = mid_turn_response
-                        # Fall through to normal processing - don't return
-                    else:
-                        # No mid-turn prompt found (race condition?) - return partial
-                        self._trace("MID_TURN_INTERRUPT: No prompt in queue, returning partial")
-                        if partial_text:
-                            return partial_text
-                        return ""
-                else:
-                    # Normal user cancellation
-                    cancel_msg = "[Generation cancelled]"
-                    if on_output and not cancellation_notified:
-                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
-                        on_output("system", cancel_msg, "write")
-                        cancellation_notified = True
-                    elif cancellation_notified:
-                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
-                    # Notify model of cancellation for context on next turn
-                    self._notify_model_of_cancellation(cancel_msg, partial_text)
-                    if partial_text:
-                        return f"{partial_text}\n\n{cancel_msg}"
-                    return cancel_msg
+            # Check for cancellation / mid-turn interrupt after initial message
+            cr = self._handle_cancellation(
+                response, use_streaming, on_output, wrapped_usage_callback,
+                turn_data, cancellation_notified,
+                context="after initial message",
+            )
+            if cr.action == "end_turn":
+                return cr.turn_result.text
+            if cr.action == "switch_response":
+                response = cr.new_response
 
             # Handle function calling loop - process parts in order to support interleaved text/tools
             accumulated_text: List[str] = []
             self._trace(f"SESSION_PARTS_PROCESSING parts_count={len(response.parts)}")
 
-            def get_pending_function_calls() -> List[FunctionCall]:
-                """Extract function calls from response.parts."""
-                return [p.function_call for p in response.parts if p.function_call]
+            # Nudge if initial response indicates tool use but has no function calls
+            response = self._nudge_for_tool_use(
+                response, use_streaming, on_output, wrapped_usage_callback,
+                turn_data, context="after initial message",
+            )
 
-            def get_all_text() -> str:
-                """Concatenate all text from response.parts."""
-                texts = [p.text for p in response.parts if p.text]
-                return ''.join(texts) if texts else ''
-
-            pending_calls = get_pending_function_calls()
-
-            # Handle edge case: finish_reason indicates tool use but no function calls present
-            # This can happen when the model "narrates" intent to call a tool but doesn't emit the call
-            tool_use_nudge_attempts = 0
-            max_tool_use_nudge_attempts = 3
-            while (not pending_calls and response.finish_reason == FinishReason.TOOL_USE
-                   and tool_use_nudge_attempts < max_tool_use_nudge_attempts):
-                tool_use_nudge_attempts += 1
-                self._trace(f"TOOL_USE_WITHOUT_CALL: Model indicated tool use but no function call emitted (attempt {tool_use_nudge_attempts}/{max_tool_use_nudge_attempts})")
-                # Inject a prompt to push the model to execute the intended tool call
-                nudge_prompt = (
-                    "<hidden>Your response indicated TOOL_USE but contained no function call. "
-                    "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
-                    "Your next response MUST start with the function call, not text.</hidden>"
-                )
-                self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
-                # Process the injected prompt to get a new response
-                nudge_response = self._check_and_handle_mid_turn_prompt(
-                    use_streaming, on_output, wrapped_usage_callback, turn_data
-                )
-                if nudge_response:
-                    response = nudge_response
-                    pending_calls = get_pending_function_calls()
-                    self._trace(f"TOOL_USE_NUDGE_RESULT: Got response with {len(pending_calls)} function calls")
-                else:
-                    # No response from nudge, break to avoid infinite loop
-                    self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
-                    break
-
-            if tool_use_nudge_attempts >= max_tool_use_nudge_attempts and not pending_calls:
-                self._trace("TOOL_USE_NUDGE_EXHAUSTED: Max attempts reached, model still not calling tools")
-
-            while pending_calls:
-                # Check for cancellation before processing tools (including parent)
+            while response.has_function_calls():
+                # Check for cancellation before processing tools
                 if self._is_cancelled():
                     cancel_msg = "[Cancelled during tool execution]"
                     if on_output and not cancellation_notified:
                         self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before processing tools)")
                         on_output("system", cancel_msg, "write")
-                        cancellation_notified = True
-                    elif cancellation_notified:
-                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before processing tools) - already notified!")
-                    # Notify model of cancellation for context on next turn
-                    all_text = get_all_text()
+                    all_text = ''.join(accumulated_text) if accumulated_text else ''
                     self._notify_model_of_cancellation(cancel_msg, all_text)
-                    if all_text:
-                        return f"{all_text}\n\n{cancel_msg}"
-                    return cancel_msg
+                    return TurnResult.cancelled(all_text, context="before processing tools").text
 
                 # Process parts in order - emit text, collect function calls into groups
+                # When text appears between function calls, execute the preceding group first
                 current_fc_group: List[FunctionCall] = []
                 for idx, part in enumerate(response.parts):
-                    # Enhanced trace: show empty text parts (which indicate unknown SDK parts)
                     text_info = "empty" if part.text == "" else bool(part.text) if part.text else None
                     fc_info = part.function_call.name if part.function_call else None
                     self._trace(f"SESSION_PART[{idx}] text={text_info} fc={fc_info}")
                     if part.text:
                         # Before emitting text, execute any pending function calls
                         if current_fc_group:
-                            tool_results = self._execute_function_call_group(
-                                current_fc_group, turn_data, on_output, cancellation_notified
+                            new_response, turn_result = self._execute_tools_and_continue(
+                                current_fc_group, use_streaming, on_output,
+                                wrapped_usage_callback, turn_data, cancellation_notified,
+                                accumulated_text, context="interleaved tools",
                             )
-                            if self._is_cancelled():
-                                cancel_msg = "[Cancelled after tool execution]"
-                                if on_output and not cancellation_notified:
-                                    on_output("system", cancel_msg, "write")
-                                self._notify_model_of_cancellation(cancel_msg)
-                                return cancel_msg
-                            # Send tool results and get continuation
-                            response = self._send_tool_results_and_continue(
-                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
-                            )
-                            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                # Check if this was a mid-turn interrupt
-                                if self._mid_turn_interrupt:
-                                    self._trace("MID_TURN_INTERRUPT: Processing user prompt after interleaved tool result streaming")
-                                    self._mid_turn_interrupt = False
-                                    self._cancel_token = CancelToken()
-                                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                                        use_streaming, on_output, wrapped_usage_callback, turn_data
-                                    )
-                                    if mid_turn_response:
-                                        response = mid_turn_response
-                                    else:
-                                        partial = get_all_text()
-                                        if partial:
-                                            return partial
-                                        return ""
-                                else:
-                                    partial = get_all_text()
-                                    cancel_msg = "[Generation cancelled]"
-                                    if on_output and not cancellation_notified:
-                                        on_output("system", cancel_msg, "write")
-                                    self._notify_model_of_cancellation(cancel_msg, partial)
-                                    return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
-
-                            # Check for mid-turn prompts after interleaved tool execution
-                            # Only inject if response doesn't have more function calls
-                            # (otherwise we'd break the tool_use -> tool_result sequence)
-                            response_has_fc = any(p.function_call for p in response.parts)
-                            if not response_has_fc:
-                                mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                                    use_streaming, on_output, wrapped_usage_callback, turn_data
-                                )
-                                if mid_turn_response:
-                                    # Update response to the mid-turn prompt response
-                                    response = mid_turn_response
-                                    if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                        partial = get_all_text()
-                                        cancel_msg = "[Generation cancelled]"
-                                        if on_output and not cancellation_notified:
-                                            on_output("system", cancel_msg, "write")
-                                        self._notify_model_of_cancellation(cancel_msg, partial)
-                                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
-
+                            if turn_result is not None:
+                                return turn_result.text
+                            response = new_response
                             current_fc_group = []
 
                         # Emit text (only in non-streaming mode)
                         if not use_streaming:
                             if on_output:
                                 on_output("model", part.text, "write")
-                            # Forward to parent for visibility
                             self._forward_to_parent("MODEL_OUTPUT", part.text)
-                            # Notify reliability plugin of model text for pattern detection
                             if self._runtime.reliability_plugin:
                                 self._runtime.reliability_plugin.on_model_text(part.text)
                         accumulated_text.append(part.text)
@@ -3528,141 +3401,17 @@ NOTES
 
                 # Execute remaining function calls at end of parts
                 if current_fc_group:
-                    tool_results = self._execute_function_call_group(
-                        current_fc_group, turn_data, on_output, cancellation_notified
+                    new_response, turn_result = self._execute_tools_and_continue(
+                        current_fc_group, use_streaming, on_output,
+                        wrapped_usage_callback, turn_data, cancellation_notified,
+                        accumulated_text, context="end of parts",
                     )
-                    if self._is_cancelled():
-                        cancel_msg = "[Cancelled after tool execution]"
-                        if on_output and not cancellation_notified:
-                            on_output("system", cancel_msg, "write")
-                        self._notify_model_of_cancellation(cancel_msg)
-                        return cancel_msg
+                    if turn_result is not None:
+                        return turn_result.text
+                    response = new_response
 
-                    # Send tool results and get next response
-                    response = self._send_tool_results_and_continue(
-                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
-                    )
-                    if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                        # Check if this was a mid-turn interrupt (user prompt during tool result streaming)
-                        if self._mid_turn_interrupt:
-                            self._trace("MID_TURN_INTERRUPT: Processing user prompt after tool result streaming")
-                            self._mid_turn_interrupt = False
-                            self._cancel_token = CancelToken()
-
-                            if self._on_mid_turn_interrupt:
-                                pending_prompts = self._message_queue.peek_all()
-                                preview = ""
-                                for pm in pending_prompts:
-                                    if pm.source_type in (SourceType.USER, SourceType.PARENT, SourceType.SYSTEM):
-                                        preview = pm.text[:100] if pm.text else ""
-                                        break
-                                partial = get_all_text()
-                                self._on_mid_turn_interrupt(len(partial) if partial else 0, preview)
-
-                            mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                                use_streaming, on_output, wrapped_usage_callback, turn_data
-                            )
-                            if mid_turn_response:
-                                response = mid_turn_response
-                                # Fall through to normal processing
-                            else:
-                                self._trace("MID_TURN_INTERRUPT: No prompt in queue after tool result streaming")
-                                partial = get_all_text()
-                                if partial:
-                                    return partial
-                                return ""
-                        else:
-                            partial = get_all_text()
-                            cancel_msg = "[Generation cancelled]"
-                            if on_output and not cancellation_notified:
-                                on_output("system", cancel_msg, "write")
-                            self._notify_model_of_cancellation(cancel_msg, partial)
-                            return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
-
-                    if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
-                        import sys
-                        print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
-                        final_text = get_all_text()
-                        if final_text:
-                            return f"{final_text}\n\n[Model stopped: {response.finish_reason}]"
-                        else:
-                            return f"[Model stopped unexpectedly: {response.finish_reason}]"
-
-                    # Check for mid-turn prompts at this natural pause point
-                    # Only inject if response doesn't have more function calls
-                    # (otherwise we'd break the tool_use -> tool_result sequence)
-                    response_has_fc = any(p.function_call for p in response.parts)
-
-                    # Handle edge case: TOOL_USE without function calls, or UNKNOWN with empty response
-                    # Both indicate the model didn't properly continue after tool results
-                    response_is_empty = not response.parts or all(
-                        not p.text and not p.function_call for p in response.parts
-                    )
-                    needs_nudge = (
-                        (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE) or
-                        (response.finish_reason == FinishReason.UNKNOWN and response_is_empty)
-                    )
-                    main_loop_nudge_attempts = 0
-                    while needs_nudge and main_loop_nudge_attempts < max_tool_use_nudge_attempts:
-                        main_loop_nudge_attempts += 1
-                        nudge_reason = "TOOL_USE without function call" if response.finish_reason == FinishReason.TOOL_USE else "UNKNOWN with empty response"
-                        self._trace(f"NUDGE_REQUIRED: {nudge_reason} (attempt {main_loop_nudge_attempts}/{max_tool_use_nudge_attempts})")
-                        nudge_prompt = (
-                            "<hidden>Your previous response was incomplete or empty. "
-                            "You were in the middle of a task. Continue executing your plan. "
-                            "Do NOT describe or re-read files. Execute the next tool call directly. "
-                            "Your next response MUST continue the task, not restart or summarize.</hidden>"
-                        )
-                        self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
-                        nudge_response = self._check_and_handle_mid_turn_prompt(
-                            use_streaming, on_output, wrapped_usage_callback, turn_data
-                        )
-                        if nudge_response:
-                            response = nudge_response
-                            response_has_fc = any(p.function_call for p in response.parts)
-                            # Recalculate whether we still need to nudge
-                            response_is_empty = not response.parts or all(
-                                not p.text and not p.function_call for p in response.parts
-                            )
-                            needs_nudge = (
-                                (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE) or
-                                (response.finish_reason == FinishReason.UNKNOWN and response_is_empty)
-                            )
-                            self._trace(f"NUDGE_RESULT: Got response, has_fc={response_has_fc}, still_needs_nudge={needs_nudge}")
-                        else:
-                            self._trace("NUDGE_NO_RESPONSE: Nudge did not produce a response")
-                            break
-
-                    if not response_has_fc:
-                        mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                            use_streaming, on_output, wrapped_usage_callback, turn_data
-                        )
-                        if mid_turn_response:
-                            # The model responded to the injected prompt - use that response
-                            response = mid_turn_response
-                            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                partial = get_all_text()
-                                cancel_msg = "[Generation cancelled]"
-                                if on_output and not cancellation_notified:
-                                    on_output("system", cancel_msg, "write")
-                                self._notify_model_of_cancellation(cancel_msg, partial)
-                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
-
-                # Check for more function calls in the new response
-                pending_calls = get_pending_function_calls()
-
-            # Collect any remaining text from the final response
-            for part in response.parts:
-                if part.text:
-                    if not use_streaming:
-                        if on_output:
-                            on_output("model", part.text, "write")
-                        # Forward to parent for visibility
-                        self._forward_to_parent("MODEL_OUTPUT", part.text)
-                        # Notify reliability plugin of model text for pattern detection
-                        if self._runtime.reliability_plugin:
-                            self._runtime.reliability_plugin.on_model_text(part.text)
-                    accumulated_text.append(part.text)
+            # Collect any remaining text from the final response (no more tool calls)
+            self._emit_text_parts(response, use_streaming, on_output, accumulated_text)
 
             # Final check for mid-turn prompts before completing the turn
             # This handles prompts that arrived while the model was generating its final response
