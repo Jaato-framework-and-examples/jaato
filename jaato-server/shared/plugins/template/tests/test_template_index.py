@@ -1108,3 +1108,199 @@ class TestListMetadataInjection:
         content = output_file.read_text()
         assert "String customerName, BigDecimal amount)" in content
         assert ", )" not in content
+
+
+class TestSpringBootPlaceholderCollision:
+    """Tests for Spring Boot ``${VAR}`` / Handlebars ``{{{var}}}`` collision fix.
+
+    When a Mustache variable appears inside a Spring Boot property placeholder,
+    the sequence ``${{{VAR}}`` creates a collision with Handlebars triple-brace
+    unescaped syntax.  pybars3 would interpret ``{{{VAR}}}`` as an unescaped
+    variable and consume the opening brace that belongs to Spring's ``${``.
+
+    These tests verify that the sentinel-based protection correctly separates
+    the two syntaxes during rendering and variable extraction.
+    """
+
+    # -- _protect_spring_placeholders / _restore_spring_placeholders --
+
+    def test_protect_replaces_collision_pattern(self):
+        """${{{ is replaced with the sentinel to break the triple-brace."""
+        template = "base-url: ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}"
+        protected = TemplatePlugin._protect_spring_placeholders(template)
+        assert "${{{" not in protected
+        assert "{{SERVICE_NAME}}" in protected  # Mustache variable preserved
+
+    def test_protect_and_restore_roundtrip(self):
+        """Protect → restore produces a string that differs from the original
+        only in that ``${{{`` has been split into ``${`` + ``{{``."""
+        template = "x: ${{{A}}_URL:default}"
+        protected = TemplatePlugin._protect_spring_placeholders(template)
+        # After restore the sentinel is gone
+        restored = TemplatePlugin._restore_spring_placeholders(protected)
+        assert restored == "x: ${{{A}}_URL:default}"
+
+    def test_protect_no_op_without_collision(self):
+        """Templates without ${{{ are unchanged."""
+        template = "name: {{serviceName}}\nurl: ${FIXED_URL:http://localhost}"
+        protected = TemplatePlugin._protect_spring_placeholders(template)
+        assert protected == template
+
+    def test_protect_multiple_collisions(self):
+        """Multiple ${{{ occurrences in the same template are all protected."""
+        template = (
+            "a: ${{{X}}_A:d1}\n"
+            "b: ${{{Y}}_B:d2}\n"
+        )
+        protected = TemplatePlugin._protect_spring_placeholders(template)
+        assert protected.count("${{{") == 0
+        assert "{{X}}" in protected
+        assert "{{Y}}" in protected
+
+    # -- _render_mustache with Spring placeholders --
+
+    def test_render_mod017_systemapi_template(self, plugin):
+        """Renders the mod-code-017 application-systemapi.yml.tpl pattern.
+
+        The template mixes Mustache ``{{serviceName}}`` with Spring Boot
+        ``${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}``.
+        After rendering, the Spring placeholder must contain the expanded
+        variable name wrapped in ``${...}``.
+        """
+        template = textwrap.dedent("""\
+            system-api:
+              {{serviceName}}:
+                base-url: ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}
+        """)
+        variables = {
+            "serviceName": "customer",
+            "SERVICE_NAME": "CUSTOMER",
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert "customer:" in rendered
+        assert "${CUSTOMER_SYSTEM_API_URL:http://localhost:8081}" in rendered
+
+    def test_render_mod018_integration_template(self, plugin):
+        """Renders the mod-code-018 application-integration.yml.tpl pattern.
+
+        ``${{{BASE_URL_ENV}}:http://localhost:8081}`` must produce a valid
+        Spring Boot property placeholder after Mustache rendering.
+        """
+        template = "base-url: ${{{BASE_URL_ENV}}:http://localhost:8081}"
+        variables = {"BASE_URL_ENV": "ORDERS_API_URL"}
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert rendered == "base-url: ${ORDERS_API_URL:http://localhost:8081}"
+
+    def test_render_spring_placeholder_without_mustache_untouched(self, plugin):
+        """Plain Spring ``${FIXED_VAR}`` (no Mustache inside) passes through."""
+        template = "{{#feign}}\nurl: ${FIXED_URL:http://example.com}\n{{/feign}}"
+        variables = {"feign": True}
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert "${FIXED_URL:http://example.com}" in rendered
+
+    def test_render_full_systemapi_template(self, plugin):
+        """End-to-end rendering of a realistic multi-section template."""
+        template = textwrap.dedent("""\
+            system-api:
+              {{serviceName}}:
+                base-url: ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}
+
+            {{#feign}}
+            feign:
+              client:
+                config:
+                  default:
+                    connectTimeout: 5000
+            {{/feign}}
+
+            resilience4j:
+              circuitbreaker:
+                instances:
+                  {{serviceName}}:
+                    slidingWindowSize: 100
+        """)
+        variables = {
+            "serviceName": "payment",
+            "SERVICE_NAME": "PAYMENT",
+            "feign": True,
+        }
+        rendered, error = plugin._render_mustache(template, variables)
+        assert error is None
+        assert "${PAYMENT_SYSTEM_API_URL:http://localhost:8081}" in rendered
+        assert "payment:" in rendered
+        assert "connectTimeout: 5000" in rendered
+
+    # -- _extract_variables with Spring placeholders --
+
+    def test_extract_variables_spring_placeholder_no_bogus_brace(self, plugin):
+        """Variable extraction from ${{{VAR}} must yield 'VAR', not '{VAR'."""
+        template = textwrap.dedent("""\
+            {{#feign}}
+            base-url: ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}
+            name: {{serviceName}}
+            {{/feign}}
+        """)
+        variables = plugin._extract_variables(template)
+        assert "SERVICE_NAME" in variables
+        assert "serviceName" in variables
+        # Must NOT contain the bogus '{SERVICE_NAME' with leading brace
+        for v in variables:
+            assert not v.startswith("{"), f"Bogus variable with leading brace: {v}"
+
+    def test_extract_variables_mod018_pattern(self, plugin):
+        """Variable extraction for ${{{BASE_URL_ENV}}:default} pattern."""
+        template = textwrap.dedent("""\
+            {{#feign}}
+            base-url: ${{{BASE_URL_ENV}}:http://localhost:8081}
+            package: {{basePackage}}
+            {{/feign}}
+        """)
+        variables = plugin._extract_variables(template)
+        assert "BASE_URL_ENV" in variables
+        assert "basePackage" in variables
+        for v in variables:
+            assert not v.startswith("{"), f"Bogus variable with leading brace: {v}"
+
+    # -- writeFileFromTemplate end-to-end --
+
+    def test_writeFileFromTemplate_spring_placeholder(self, plugin):
+        """End-to-end: writeFileFromTemplate with Spring Boot placeholder collision.
+
+        Includes a Mustache section (``{{#feign}}...{{/feign}}``) so that
+        syntax auto-detection routes to the Mustache engine, matching how
+        mod-code-018's ``application-integration.yml.tpl`` is structured.
+        """
+        template = textwrap.dedent("""\
+            integration:
+              {{apiName}}:
+                base-url: ${{{BASE_URL_ENV}}:http://localhost:8081}
+                timeout:
+                  connect: 5s
+                  read: 10s
+
+            {{#feign}}
+            feign:
+              client:
+                config:
+                  default:
+                    connectTimeout: 5000
+            {{/feign}}
+        """)
+        output_file = plugin._base_path / "output" / "application-integration.yml"
+        result = plugin._execute_write_file_from_template({
+            "template": template,
+            "variables": {
+                "apiName": "orders",
+                "BASE_URL_ENV": "ORDERS_API_URL",
+                "feign": True,
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, f"Render failed: {result}"
+        content = output_file.read_text()
+        assert "orders:" in content
+        assert "${ORDERS_API_URL:http://localhost:8081}" in content
+        assert "connectTimeout: 5000" in content

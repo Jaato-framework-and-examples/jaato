@@ -92,6 +92,20 @@ MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\s*\.\s*\}\}')  # {{.}} or {{ .
 # Jinja2 specific patterns (distinguish from Mustache)
 JINJA2_FILTER_PATTERN = re.compile(r'\{\{.*\|.*\}\}')  # {{ var | filter }}
 
+# Spring Boot property placeholder collision protection.
+#
+# Spring Boot uses ${ENV_VAR:default} syntax for property placeholders.
+# When a Mustache variable appears inside a Spring placeholder, e.g.:
+#   ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}
+# the sequence $+{+{{VAR}} creates a collision with Handlebars triple-brace
+# unescaped syntax ({{{var}}}). pybars3 consumes the opening brace from
+# Spring's ${, breaking the output.
+#
+# The sentinel replaces the Spring opening brace before Mustache rendering
+# and is restored afterwards, keeping both syntaxes intact.
+_SPRING_BRACE_SENTINEL = "__JAATO_SPRING_BRACE__"
+_SPRING_COLLISION_RE = re.compile(r'\$\{\{\{')  # Matches ${{{ - the collision point
+
 # Regex to find fenced code blocks in markdown
 # Captures: language (group 1), content (group 2)
 CODE_BLOCK_PATTERN = re.compile(
@@ -1334,6 +1348,11 @@ Template rendering writes files to the workspace."""
         metadata placeholders (e.g. ``{{skillId}}``) are never reported as
         required template variables.
 
+        Spring Boot ``${...}`` placeholders containing Mustache variables are
+        protected before extraction so the regex does not produce bogus
+        variable names with a leading brace (see
+        ``_protect_spring_placeholders``).
+
         Args:
             content: Template content string.
 
@@ -1360,8 +1379,11 @@ Template rendering writes files to the workspace."""
 
         # Regex fallback for Mustache or if Jinja2 parsing failed
         if syntax == "mustache":
+            # Protect Spring Boot ${{{VAR}} patterns so the regex extracts
+            # the variable name cleanly (without a leading brace).
+            protected = self._protect_spring_placeholders(content)
             # Match simple variables {{var}}, excluding section markers and comments
-            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', content)
+            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', protected)
             variables = set()
             for m in matches:
                 var = m.strip()
@@ -1559,6 +1581,44 @@ Template rendering writes files to the workspace."""
 
         return _process_dict(variables)
 
+    @staticmethod
+    def _protect_spring_placeholders(template: str) -> str:
+        """Replace ``${{{`` with ``$SENTINEL{{`` to prevent Handlebars collision.
+
+        Spring Boot property placeholders like ``${VAR:default}`` can collide
+        with Handlebars triple-brace unescaped syntax when a Mustache variable
+        appears immediately inside, e.g.::
+
+            ${{{SERVICE_NAME}}_SYSTEM_API_URL:http://localhost:8081}
+
+        pybars3 would interpret ``{{{SERVICE_NAME}}}`` as an unescaped
+        variable, consuming the opening brace that belongs to Spring's ``${``.
+
+        This method replaces the ``${`` before the Mustache ``{{`` with a
+        sentinel so that pybars3 sees a normal double-brace variable instead.
+        Call ``_restore_spring_placeholders`` after rendering to put the
+        ``${`` back.
+
+        Args:
+            template: Raw template content.
+
+        Returns:
+            Template with ``${{{`` sequences protected by the sentinel.
+        """
+        return _SPRING_COLLISION_RE.sub('$' + _SPRING_BRACE_SENTINEL + '{{', template)
+
+    @staticmethod
+    def _restore_spring_placeholders(rendered: str) -> str:
+        """Restore ``${`` from the sentinel inserted by ``_protect_spring_placeholders``.
+
+        Args:
+            rendered: Rendered output containing sentinel markers.
+
+        Returns:
+            Output with sentinels replaced by ``${``.
+        """
+        return rendered.replace('$' + _SPRING_BRACE_SENTINEL, '${')
+
     def _render_mustache(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
         """Render template using Handlebars syntax.
 
@@ -1580,6 +1640,11 @@ Template rendering writes files to the workspace."""
         equivalent pybars3-compatible constructs before compilation
         (see ``_preprocess_mustache_dotted_paths``).
 
+        Spring Boot property placeholders (``${...}``) that contain Mustache
+        variables are protected before compilation to prevent a triple-brace
+        collision with Handlebars unescaped syntax (see
+        ``_protect_spring_placeholders``).
+
         Args:
             template: Template content string with Handlebars syntax.
             variables: Key-value pairs for template variable substitution.
@@ -1598,10 +1663,12 @@ Template rendering writes files to the workspace."""
 
         try:
             variables = self._inject_list_metadata(variables)
-            preprocessed = self._preprocess_mustache_dotted_paths(template)
+            protected = self._protect_spring_placeholders(template)
+            preprocessed = self._preprocess_mustache_dotted_paths(protected)
             compiler = Compiler()
             compiled_template = compiler.compile(preprocessed)
             rendered = compiled_template(variables)
+            rendered = self._restore_spring_placeholders(rendered)
             return rendered, None
         except Exception as e:
             return "", {
