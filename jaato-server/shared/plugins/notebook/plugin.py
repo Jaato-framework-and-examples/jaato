@@ -6,6 +6,7 @@ This plugin provides interactive Python notebook capabilities:
 - Variable inspection and notebook management
 - Streaming output support for real-time execution feedback
 - Security analysis for sandbox compliance
+- Notebook Tool Bindings for tool access from notebook scripts
 """
 
 import asyncio
@@ -14,9 +15,10 @@ import os
 import queue
 import tempfile
 import threading
+import types
 from datetime import datetime
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
 from jaato_sdk.plugins.model_provider.types import ToolSchema
@@ -24,6 +26,7 @@ from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
 from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
+from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.trace import trace as _trace_write
 
@@ -79,6 +82,16 @@ class NotebookPlugin(StreamingCapable):
         self._plugin_registry = None  # Set via set_plugin_registry() for path authorization
         # Cache last analysis for permission display
         self._last_analysis: Optional[AnalysisResult] = None
+        # Notebook Tool Bindings state
+        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "").lower() in ("1", "true", "yes")
+        self._tool_bindings_bridge: Optional[ToolBridge] = None
+        self._tool_bindings_module: Optional[types.ModuleType] = None
+        self._tool_executor = None  # Set via set_session() for tool bindings bridge
+        # Tools to exclude from bindings (notebook tools themselves to prevent recursion)
+        self._tool_bindings_exclude: FrozenSet[str] = frozenset({
+            "notebook_execute", "notebook_create", "notebook_variables",
+            "notebook_reset", "notebook_list", "notebook_backends",
+        })
 
     @property
     def name(self) -> str:
@@ -202,7 +215,59 @@ class NotebookPlugin(StreamingCapable):
         """
         self._plugin_registry = registry
         self._rebuild_code_analyzer()
+        self._maybe_build_tool_bindings()
         self._trace("set_plugin_registry: registry set")
+
+    def set_session(self, session: Any) -> None:
+        """Set the session reference for tool bindings executor access.
+
+        Auto-wired by the session during configure(). When tool bindings
+        are enabled, grabs the session's ToolExecutor to create the bridge
+        that notebook scripts use to call tools directly.
+
+        Args:
+            session: JaatoSession instance with ``_executor`` attribute.
+        """
+        executor = getattr(session, '_executor', None)
+        if executor is not None:
+            self._tool_executor = executor
+            self._maybe_build_tool_bindings()
+            self._trace("set_session: executor captured for tool bindings")
+        else:
+            self._trace("set_session: no executor on session")
+
+    def _maybe_build_tool_bindings(self) -> None:
+        """Build the tool bindings module if all prerequisites are met.
+
+        Prerequisites:
+        - Tool bindings enabled via JAATO_TOOL_BINDINGS env var
+        - Plugin registry available (for tool schemas)
+        - Tool executor available (for the bridge)
+
+        Called from set_plugin_registry() and set_session() — whichever
+        fires last completes the wiring.
+        """
+        if not self._tool_bindings_enabled:
+            return
+        if self._plugin_registry is None or self._tool_executor is None:
+            return
+        if self._tool_bindings_module is not None:
+            return  # Already built
+
+        schemas = self._plugin_registry.get_exposed_tool_schemas()
+        self._tool_bindings_bridge = ToolBridge(self._tool_executor.execute)
+        self._tool_bindings_module = generate_tools_module(
+            schemas, self._tool_bindings_bridge, exclude_tools=self._tool_bindings_exclude,
+        )
+        self._trace(
+            f"Tool bindings module built: {len(schemas)} schemas, "
+            f"{len(self._tool_bindings_module.list_tools())} tools exposed"
+        )
+
+        # Inject into all existing notebook namespaces
+        for backend in self._backends.values():
+            if isinstance(backend, LocalJupyterBackend):
+                backend.inject_tools_module(self._tool_bindings_module)
 
     def _rebuild_code_analyzer(self) -> None:
         """Rebuild the code analyzer with current configuration.
@@ -359,7 +424,12 @@ class NotebookPlugin(StreamingCapable):
         }
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions for notebook tools."""
+        """Return system instructions for notebook tools.
+
+        When tool bindings are enabled and the tools module is built,
+        appends tool bindings guidance with auto-generated function
+        signatures.
+        """
         backends_info = []
         for name, backend in self._backends.items():
             caps = backend.capabilities
@@ -380,6 +450,48 @@ class NotebookPlugin(StreamingCapable):
 """
             if self._workspace_root:
                 sandbox_info += f"- Workspace root: {self._workspace_root}\n"
+
+        # Tool bindings information
+        bindings_info = ""
+        if self._tool_bindings_enabled and self._tool_bindings_module is not None and self._plugin_registry is not None:
+            schemas = self._plugin_registry.get_exposed_tool_schemas()
+            signatures = generate_tool_signatures(schemas, exclude_tools=self._tool_bindings_exclude)
+            bindings_info = "\n".join([
+                "",
+                "**Notebook Tool Bindings:**",
+                "The notebook environment has a `tools` module pre-loaded. You can call any",
+                "jaato tool directly from Python scripts instead of making separate tool calls.",
+                "This is especially useful for:",
+                "- Batch operations (loops over files, bulk searches)",
+                "- Aggregation (collecting results from multiple tool calls)",
+                "- Conditional logic (branching based on tool results)",
+                "- Cross-referencing (using output of one tool as input to another)",
+                "",
+                "**Usage:**",
+                "```python",
+                "# Call tools directly",
+                'result = tools.web_search(query="python dataclasses")',
+                'content = tools.file_read(path="src/main.py")',
+                "",
+                "# Batch operations in loops",
+                'for f in ["a.py", "b.py", "c.py"]:',
+                "    result = tools.file_read(path=f)",
+                '    print(f"{f}: {len(result.get(\'content\', \'\'))} chars")',
+                "",
+                "# Error handling",
+                "try:",
+                '    result = tools.file_read(path="missing.txt")',
+                "except tools.ToolExecutionError as e:",
+                '    print(f"Failed: {e.message}")',
+                "",
+                "# List available tools",
+                "tools.list_tools()",
+                "```",
+                "",
+                "**Available tool functions:**",
+                signatures,
+                "",
+            ])
 
         return f"""You have access to Python notebook tools for executing code:
 
@@ -402,7 +514,7 @@ class NotebookPlugin(StreamingCapable):
 - 30 hours/week free GPU (P100/T4)
 - Execution is async (may take 1-5 minutes)
 - Best for: ML training, large computations
-{sandbox_info}"""
+{sandbox_info}{bindings_info}"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Read-only tools are auto-approved."""
@@ -617,6 +729,22 @@ class NotebookPlugin(StreamingCapable):
 
         elif result.status in (ExecutionStatus.QUEUED, ExecutionStatus.RUNNING):
             response["message"] = "Execution in progress (async backend). Poll with notebook_variables to check status."
+
+        # Include tool bindings call log if any calls were made
+        if self._tool_bindings_bridge and self._tool_bindings_bridge.call_log:
+            binding_calls = []
+            for record in self._tool_bindings_bridge.call_log:
+                entry = {
+                    "tool": record.tool_name,
+                    "success": record.success,
+                    "duration_seconds": round(record.duration_seconds, 3),
+                }
+                if record.error:
+                    entry["error"] = record.error
+                binding_calls.append(entry)
+            response["tool_calls"] = binding_calls
+            # Clear the log after including it so it doesn't accumulate
+            self._tool_bindings_bridge.call_log.clear()
 
         # Log response summary
         output_len = len(response.get("output", ""))
