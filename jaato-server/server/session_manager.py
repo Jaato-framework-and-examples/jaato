@@ -168,6 +168,10 @@ class SessionManager:
         # creates/restores within the same daemon process.
         self._instruction_token_cache = InstructionTokenCache()
 
+        # Gossip infrastructure references (set by daemon via set_gossip_context)
+        self._peer_registry = None   # Optional[PeerRegistry]
+        self._health_collector = None  # Optional[ServerHealthCollector]
+
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
     def _session_storage_dir(self, workspace_path: str) -> pathlib.Path:
@@ -189,6 +193,34 @@ class SessionManager:
         if not workspace_path:
             raise ValueError("workspace_path required for session storage")
         return pathlib.Path(workspace_path) / self._session_config.storage_path
+
+    def set_gossip_context(self, peer_registry, health_collector) -> None:
+        """Store gossip infrastructure references for injection into environment plugins.
+
+        Called by the daemon after gossip initialization. The references are
+        injected into each session's environment plugin during create_session()
+        and _load_session().
+
+        Args:
+            peer_registry: The PeerRegistry instance.
+            health_collector: The ServerHealthCollector instance.
+        """
+        self._peer_registry = peer_registry
+        self._health_collector = health_collector
+
+    def _configure_gossip_context(self, server: JaatoServer) -> None:
+        """Inject gossip references into a session's environment plugin.
+
+        Args:
+            server: The JaatoServer instance whose registry to search.
+        """
+        if self._peer_registry is None or self._health_collector is None:
+            return
+        if not server or not server.registry:
+            return
+        env_plugin = server.registry.get_plugin("environment")
+        if env_plugin and hasattr(env_plugin, 'set_gossip_context'):
+            env_plugin.set_gossip_context(self._peer_registry, self._health_collector)
 
     def set_event_callback(
         self,
@@ -605,6 +637,7 @@ class SessionManager:
         # Configure TODO plugin with session-scoped storage
         session_dir = self._session_storage_dir(workspace_path) / session_id
         self._configure_todo_storage(server, session_dir)
+        self._configure_gossip_context(server)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -911,6 +944,7 @@ class SessionManager:
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
+        self._configure_gossip_context(server)
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:

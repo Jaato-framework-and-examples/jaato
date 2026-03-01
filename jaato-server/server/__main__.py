@@ -961,6 +961,12 @@ class JaatoDaemon:
             available_models=[],
         )
 
+        # Inject gossip references into SessionManager so it can wire them
+        # into each session's environment plugin (jaato_agentic_servers aspect).
+        self._session_manager.set_gossip_context(
+            self._peer_registry, self._health_collector,
+        )
+
         logger.info(
             "Gossip configured: server_name=%s, %d peer(s)",
             server_name, len(peer_configs),

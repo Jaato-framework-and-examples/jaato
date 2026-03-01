@@ -71,6 +71,7 @@ class TestEnvironmentPluginToolSchemas:
         assert "context" in aspect_enum
         assert "session" in aspect_enum
         assert "datetime" in aspect_enum
+        assert "jaato_agentic_servers" in aspect_enum
         assert "all" in aspect_enum
 
 
@@ -949,6 +950,280 @@ class TestEnvironmentPluginNetworkInfo:
         assert result["ssl"]["requests_ca_bundle"] == "/etc/pki/tls/certs/corp-ca-bundle.crt"
         assert result["no_proxy"]["no_proxy"] == "localhost,127.0.0.1,.corp.com"
         assert result["no_proxy"]["jaato_no_proxy"] == "github.com,api.github.com"
+
+
+class TestEnvironmentPluginAgenticServersInfo:
+    """Tests for the jaato_agentic_servers aspect (cluster topology)."""
+
+    def test_agentic_servers_without_gossip(self):
+        """Without gossip context, returns an error message."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "jaato_agentic_servers"}))
+
+        assert "error" in result
+        assert "Gossip not configured" in result["error"]
+
+    def test_agentic_servers_with_self_only(self):
+        """With health collector but no peers, returns self + empty peers."""
+        plugin = EnvironmentPlugin()
+
+        class MockSnapshot:
+            cpu_percent = 23.5
+            memory_percent = 41.2
+            active_sessions = 2
+            active_agents = 5
+            uptime_seconds = 86400.0
+            available_providers = ["google_genai"]
+            available_models = ["gemini-2.5-flash"]
+            tags = ["local"]
+
+        class MockHealthCollector:
+            server_id = "test-uuid-1234"
+            server_name = "server-a"
+            def collect(self):
+                return MockSnapshot()
+
+        class MockPeerRegistry:
+            def get_peer_snapshots(self):
+                return []
+
+        plugin.set_gossip_context(MockPeerRegistry(), MockHealthCollector())
+        result = json.loads(plugin._get_environment({"aspect": "jaato_agentic_servers"}))
+
+        # Self info
+        assert result["self"]["name"] == "server-a"
+        assert result["self"]["server_id"] == "test-uuid-1234"
+        assert result["self"]["health"]["status"] == "healthy"
+        assert result["self"]["health"]["cpu_percent"] == 23.5
+        assert result["self"]["health"]["memory_percent"] == 41.2
+        assert result["self"]["health"]["active_sessions"] == 2
+        assert result["self"]["health"]["active_agents"] == 5
+        assert result["self"]["providers"] == ["google_genai"]
+        assert result["self"]["models"] == ["gemini-2.5-flash"]
+        assert result["self"]["tags"] == ["local"]
+
+        # Empty peers
+        assert result["peers"] == []
+
+        # Cluster summary (self only)
+        assert result["cluster_summary"]["total_servers"] == 1
+        assert result["cluster_summary"]["healthy"] == 1
+        assert result["cluster_summary"]["degraded"] == 0
+        assert result["cluster_summary"]["unreachable"] == 0
+        assert result["cluster_summary"]["total_active_sessions"] == 2
+        assert result["cluster_summary"]["total_active_agents"] == 5
+
+    def test_agentic_servers_with_peers(self):
+        """With peers in various states, returns full cluster topology."""
+        plugin = EnvironmentPlugin()
+
+        class MockSnapshot:
+            cpu_percent = 10.0
+            memory_percent = 30.0
+            active_sessions = 1
+            active_agents = 2
+            uptime_seconds = 3600.0
+            available_providers = []
+            available_models = []
+            tags = []
+
+        class MockHealthCollector:
+            server_id = "self-uuid"
+            server_name = "server-a"
+            def collect(self):
+                return MockSnapshot()
+
+        class MockHeartbeat:
+            def __init__(self, sid, cpu, mem, sessions, agents, uptime, providers, models):
+                self.server_id = sid
+                self.cpu_percent = cpu
+                self.memory_percent = mem
+                self.active_sessions = sessions
+                self.active_agents = agents
+                self.uptime_seconds = uptime
+                self.available_providers = providers
+                self.available_models = models
+
+        class MockConfig:
+            def __init__(self, name, tags):
+                self.name = name
+                self.tags = tags
+
+        class MockPeerEntry:
+            def __init__(self, name, state, tags, heartbeat=None, heartbeat_at=None):
+                self.config = MockConfig(name, tags)
+                self.state = type('PeerState', (), {'value': state})()
+                self.last_heartbeat = heartbeat
+                self.last_heartbeat_at = heartbeat_at
+
+        healthy_peer = MockPeerEntry(
+            name="server-b",
+            state="healthy",
+            tags=["gpu"],
+            heartbeat=MockHeartbeat("peer-uuid-b", 65.0, 78.3, 3, 7, 7200.0, ["anthropic"], ["claude-4"]),
+            heartbeat_at=time.monotonic() - 3.0,
+        )
+        degraded_peer = MockPeerEntry(
+            name="server-c",
+            state="degraded",
+            tags=[],
+            heartbeat=MockHeartbeat("peer-uuid-c", 90.0, 95.0, 0, 0, 1200.0, [], []),
+            heartbeat_at=time.monotonic() - 20.0,
+        )
+        unreachable_peer = MockPeerEntry(
+            name="server-d",
+            state="unreachable",
+            tags=["archive"],
+            heartbeat=None,
+            heartbeat_at=None,
+        )
+
+        class MockPeerRegistry:
+            def get_peer_snapshots(self):
+                return [healthy_peer, degraded_peer, unreachable_peer]
+
+        plugin.set_gossip_context(MockPeerRegistry(), MockHealthCollector())
+        result = json.loads(plugin._get_environment({"aspect": "jaato_agentic_servers"}))
+
+        # Verify peers
+        assert len(result["peers"]) == 3
+
+        # Healthy peer
+        pb = result["peers"][0]
+        assert pb["name"] == "server-b"
+        assert pb["state"] == "healthy"
+        assert pb["server_id"] == "peer-uuid-b"
+        assert pb["health"]["cpu_percent"] == 65.0
+        assert pb["health"]["active_sessions"] == 3
+        assert pb["tags"] == ["gpu"]
+        assert pb["providers"] == ["anthropic"]
+        assert pb["models"] == ["claude-4"]
+        assert pb["last_heartbeat_seconds_ago"] is not None
+        assert pb["last_heartbeat_seconds_ago"] >= 3.0
+
+        # Degraded peer
+        pc = result["peers"][1]
+        assert pc["name"] == "server-c"
+        assert pc["state"] == "degraded"
+        assert pc["health"]["cpu_percent"] == 90.0
+
+        # Unreachable peer (no heartbeat)
+        pd = result["peers"][2]
+        assert pd["name"] == "server-d"
+        assert pd["state"] == "unreachable"
+        assert pd["health"] is None
+        assert pd["last_heartbeat_seconds_ago"] is None
+
+        # Cluster summary
+        summary = result["cluster_summary"]
+        assert summary["total_servers"] == 4  # self + 3 peers
+        assert summary["healthy"] == 2        # self + server-b
+        assert summary["degraded"] == 1       # server-c
+        assert summary["unreachable"] == 1    # server-d
+        # self(1) + server-b(3) + server-c(0) = 4
+        assert summary["total_active_sessions"] == 4
+        # self(2) + server-b(7) + server-c(0) = 9
+        assert summary["total_active_agents"] == 9
+
+    def test_agentic_servers_excluded_from_all(self):
+        """aspect='all' does NOT include jaato_agentic_servers."""
+        plugin = EnvironmentPlugin()
+
+        class MockSnapshot:
+            cpu_percent = 10.0
+            memory_percent = 30.0
+            active_sessions = 0
+            active_agents = 0
+            uptime_seconds = 100.0
+            available_providers = []
+            available_models = []
+            tags = []
+
+        class MockHealthCollector:
+            server_id = "uuid"
+            server_name = "srv"
+            def collect(self):
+                return MockSnapshot()
+
+        class MockPeerRegistry:
+            def get_peer_snapshots(self):
+                return []
+
+        plugin.set_gossip_context(MockPeerRegistry(), MockHealthCollector())
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+
+        assert "jaato_agentic_servers" not in result
+
+    def test_agentic_servers_in_valid_aspects(self):
+        """jaato_agentic_servers is listed in VALID_ASPECTS and tool schema enum."""
+        plugin = EnvironmentPlugin()
+        assert "jaato_agentic_servers" in plugin.VALID_ASPECTS
+
+        schemas = plugin.get_tool_schemas()
+        aspect_enum = schemas[0].parameters["properties"]["aspect"]["enum"]
+        assert "jaato_agentic_servers" in aspect_enum
+
+    def test_agentic_servers_cluster_summary_counts(self):
+        """Verify aggregate counts are computed correctly."""
+        plugin = EnvironmentPlugin()
+
+        class MockSnapshot:
+            cpu_percent = 5.0
+            memory_percent = 20.0
+            active_sessions = 10
+            active_agents = 25
+            uptime_seconds = 500.0
+            available_providers = []
+            available_models = []
+            tags = []
+
+        class MockHealthCollector:
+            server_id = "uuid"
+            server_name = "main"
+            def collect(self):
+                return MockSnapshot()
+
+        class MockConfig:
+            def __init__(self, name):
+                self.name = name
+                self.tags = []
+
+        class MockHeartbeat:
+            def __init__(self, sessions, agents):
+                self.server_id = "p"
+                self.cpu_percent = 0
+                self.memory_percent = 0
+                self.active_sessions = sessions
+                self.active_agents = agents
+                self.uptime_seconds = 0
+                self.available_providers = []
+                self.available_models = []
+
+        class MockPeerEntry:
+            def __init__(self, name, state, sessions, agents):
+                self.config = MockConfig(name)
+                self.state = type('S', (), {'value': state})()
+                self.last_heartbeat = MockHeartbeat(sessions, agents)
+                self.last_heartbeat_at = time.monotonic()
+
+        class MockPeerRegistry:
+            def get_peer_snapshots(self):
+                return [
+                    MockPeerEntry("a", "healthy", 5, 10),
+                    MockPeerEntry("b", "healthy", 3, 8),
+                    MockPeerEntry("c", "degraded", 2, 4),
+                ]
+
+        plugin.set_gossip_context(MockPeerRegistry(), MockHealthCollector())
+        result = json.loads(plugin._get_environment({"aspect": "jaato_agentic_servers"}))
+
+        summary = result["cluster_summary"]
+        assert summary["total_servers"] == 4
+        assert summary["healthy"] == 3         # self + a + b
+        assert summary["degraded"] == 1        # c
+        assert summary["unreachable"] == 0
+        assert summary["total_active_sessions"] == 20  # 10 + 5 + 3 + 2
+        assert summary["total_active_agents"] == 47    # 25 + 10 + 8 + 4
 
 
 class TestEnvironmentPluginProtocol:
