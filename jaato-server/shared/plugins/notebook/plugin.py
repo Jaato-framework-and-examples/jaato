@@ -339,7 +339,7 @@ class NotebookPlugin(StreamingCapable):
                     "required": ["code"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability="core",
             ),
             ToolSchema(
                 name="notebook_create",
@@ -363,6 +363,7 @@ class NotebookPlugin(StreamingCapable):
                     "required": ["name"]
                 },
                 category="code",
+                discoverability="core",
             ),
             ToolSchema(
                 name="notebook_variables",
@@ -377,6 +378,7 @@ class NotebookPlugin(StreamingCapable):
                     },
                 },
                 category="code",
+                discoverability="core",
             ),
             ToolSchema(
                 name="notebook_reset",
@@ -391,6 +393,7 @@ class NotebookPlugin(StreamingCapable):
                     },
                 },
                 category="code",
+                discoverability="core",
             ),
             ToolSchema(
                 name="notebook_list",
@@ -400,6 +403,7 @@ class NotebookPlugin(StreamingCapable):
                     "properties": {},
                 },
                 category="code",
+                discoverability="core",
             ),
             ToolSchema(
                 name="notebook_backends",
@@ -409,6 +413,7 @@ class NotebookPlugin(StreamingCapable):
                     "properties": {},
                 },
                 category="code",
+                discoverability="core",
             ),
         ]
 
