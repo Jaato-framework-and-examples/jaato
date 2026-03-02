@@ -22,6 +22,8 @@ import threading
 from typing import Optional, Dict, Any
 
 from .ansi import strip_ansi
+from shared.ai_tool_runner import get_current_cancel_token
+from jaato_sdk.plugins.model_provider.types import CancelledException
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -522,7 +524,10 @@ class ShellSession:
         total_bytes: int,
     ) -> str:
         """pexpect path: read_nonblocking handles the idle wait internally."""
+        cancel_token = get_current_cancel_token()
         while time.time() < deadline:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                raise CancelledException("Interactive shell read cancelled")
             try:
                 chunk = self._process.read_nonblocking(
                     size=4096,
@@ -597,6 +602,7 @@ class ShellSession:
         """wexpect path: SpawnPipe.read_nonblocking blocks (win32file.ReadFile),
         so we must peek the pipe before reading to avoid hanging forever."""
         last_data_time = time.time()
+        cancel_token = get_current_cancel_token()
 
         # SpawnPipe stores the Win32 pipe handle as self.pipe.  We use
         # PeekNamedPipe to check data availability before calling the
@@ -615,6 +621,8 @@ class ShellSession:
                 )
 
         while time.time() < deadline:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                raise CancelledException("Interactive shell read cancelled")
             try:
                 # When we have a pipe handle, peek first to avoid blocking.
                 if _peek is not None:

@@ -17,9 +17,10 @@ from typing import AsyncIterator, Dict, List, Any, Callable, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand, CommandParameter, CommandCompletion, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, CancelledException
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
+from shared.ai_tool_runner import get_current_cancel_token
 from shared.trace import trace as _trace_write
 
 
@@ -1821,8 +1822,22 @@ class MCPToolPlugin:
             # Send request to MCP thread using new message format
             self._request_queue.put((MSG_CALL_TOOL, {'toolname': toolname, 'args': args}))
 
-            # Wait for response (30 second timeout)
-            status, result = self._response_queue.get(timeout=30)
+            # Poll response queue with short intervals so we can check for cancellation.
+            cancel_token = get_current_cancel_token()
+            poll_interval = 0.2
+            elapsed = 0.0
+            timeout = 30.0
+            status, result = None, None
+            while elapsed < timeout:
+                if cancel_token is not None and cancel_token.is_cancelled:
+                    raise CancelledException(f"MCP tool call cancelled: {toolname}")
+                try:
+                    status, result = self._response_queue.get(timeout=poll_interval)
+                    break  # Got a response
+                except queue.Empty:
+                    elapsed += poll_interval
+            else:
+                raise queue.Empty()  # Timed out — fall through to except queue.Empty handler
 
             if status == 'error':
                 return {'error': result}

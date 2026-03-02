@@ -21,13 +21,14 @@ logger = logging.getLogger(__name__)
 
 from shared.token_accounting import TokenLedger
 from jaato_sdk.plugins.base import OutputCallback
+from jaato_sdk.plugins.model_provider.types import CancelledException
 
 # Callback for streaming tool output during execution
 # (chunk: str) -> None - simplified since call_id is known at call site
 ToolOutputCallback = Callable[[str], None]
 
-# Thread-local storage for tool output callbacks
-# Used for parallel tool execution where each thread needs its own callback
+# Thread-local storage for tool output callbacks and cancel tokens.
+# Used for parallel tool execution where each thread needs its own state.
 _thread_local = threading.local()
 
 
@@ -41,6 +42,19 @@ def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
         The current thread's ToolOutputCallback, or None.
     """
     return getattr(_thread_local, 'tool_output_callback', None)
+
+
+def get_current_cancel_token():
+    """Get the cancel token for the current thread.
+
+    For use by plugins during tool execution to check if the operation has
+    been cancelled. Returns the token set for this thread, or None if not
+    in a tool execution context.
+
+    Returns:
+        The current thread's CancelToken, or None.
+    """
+    return getattr(_thread_local, 'cancel_token', None)
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
@@ -435,7 +449,8 @@ class ToolExecutor:
         name: str,
         args: Dict[str, Any],
         tool_output_callback: Optional[ToolOutputCallback] = None,
-        call_id: Optional[str] = None
+        call_id: Optional[str] = None,
+        cancel_token=None,
     ) -> Tuple[bool, Any]:
         """Execute a tool by name with the given arguments.
 
@@ -447,6 +462,9 @@ class ToolExecutor:
                 This enables thread-safe parallel execution where each tool has its own callback.
             call_id: Optional unique identifier for this tool call (for parallel tool matching
                 in permission UI).
+            cancel_token: Optional CancelToken. When set, plugins can poll
+                get_current_cancel_token() to abort long-running operations. Stored in
+                thread-local so it is safe for parallel tool execution.
 
         Returns:
             Tuple of (success: bool, result: Any).
@@ -458,18 +476,21 @@ class ToolExecutor:
             logger.debug(f"Error checking debug env var: {exc}")
             debug = False
 
-        # Set thread-local callback for parallel execution support
-        # This allows plugins reading from get_tool_output_callback() to get the correct
-        # callback even when multiple tools execute concurrently in different threads
+        # Set thread-local state for parallel execution support.
+        # Plugins call get_current_tool_output_callback() / get_current_cancel_token()
+        # from their executor to retrieve the per-thread values.
         if tool_output_callback is not None:
             _thread_local.tool_output_callback = tool_output_callback
+        if cancel_token is not None:
+            _thread_local.cancel_token = cancel_token
 
         try:
             return self._execute_impl(name, args, debug, call_id)
         finally:
-            # Clean up thread-local callback
             if tool_output_callback is not None:
                 _thread_local.tool_output_callback = None
+            if cancel_token is not None:
+                _thread_local.cancel_token = None
 
     def _execute_impl(
         self,
@@ -653,6 +674,11 @@ class ToolExecutor:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
             return True, result
+        except CancelledException:
+            # Tool was cancelled via CancelToken — not an error, not retried.
+            # Return a structured result so the session can record it in history.
+            logger.debug(f"Tool {name} was cancelled")
+            return False, {'error': 'cancelled'}
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
             if debug:

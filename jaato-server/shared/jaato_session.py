@@ -287,10 +287,6 @@ class JaatoSession:
         self._msg_token_cache: Dict[str, int] = {}
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
-        # Mid-turn prompt interrupt tracking
-        # When True, cancellation was triggered by a pending user prompt, not user cancellation
-        self._mid_turn_interrupt: bool = False
-
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
 
@@ -2876,12 +2872,19 @@ NOTES
         partial_text = response.get_text()
 
         # --- Mid-turn interrupt path ---
-        if self._mid_turn_interrupt:
+        # Distinguish user-initiated cancellation from a mid-turn interrupt
+        # (a parent/user message that arrived while the model was streaming).
+        # The streaming callbacks encode the reason on the cancel token so we
+        # don't need a separate boolean flag.
+        is_mid_turn_interrupt = (
+            self._cancel_token is not None
+            and self._cancel_token.cancel_reason == "mid_turn_interrupt"
+        )
+        if is_mid_turn_interrupt:
             self._trace(
                 f"MID_TURN_INTERRUPT: Processing user prompt "
                 f"({context}, partial: {len(partial_text) if partial_text else 0} chars)"
             )
-            self._mid_turn_interrupt = False
             self._cancel_token = CancelToken()
 
             # Peek at the pending prompt for the callback
@@ -3036,7 +3039,7 @@ NOTES
         accumulated_text: Optional[List[str]] = None,
         context: str = "",
         check_mid_turn: bool = True,
-    ) -> Tuple[Optional[ProviderResponse], Optional[TurnResult]]:
+    ) -> Tuple[Optional[ProviderResponse], Optional[TurnResult], bool]:
         """Execute a tool group, send results, and classify the continuation.
 
         This consolidates the repeated pattern of:
@@ -3063,10 +3066,14 @@ NOTES
                 called from within the mid-turn drain loop.
 
         Returns:
-            ``(response, None)`` — processing should continue with the
+            ``(response, None, False)`` — processing should continue with the
             new response.
-            ``(None, result)`` — the turn should end with the given
+            ``(None, result, False)`` — the turn should end with the given
             ``TurnResult``.
+            ``(response, None, True)`` — a mid-turn interrupt switched the
+            response. The caller should stop iterating any remaining parts
+            from the previous response and call
+            ``_inject_synthetic_cancelled_results`` for unexecuted tool calls.
         """
         # 1. Execute the tool group
         tool_results = self._execute_function_call_group(
@@ -3080,7 +3087,7 @@ NOTES
                 on_output("system", cancel_msg, "write")
             partial = ''.join(accumulated_text) if accumulated_text else ""
             self._notify_model_of_cancellation(cancel_msg, partial)
-            return None, TurnResult.cancelled(partial, context=f"after tool execution ({context})")
+            return None, TurnResult.cancelled(partial, context=f"after tool execution ({context})"), False
 
         # 3. Send results and get continuation
         response = self._send_tool_results_and_continue(
@@ -3094,14 +3101,15 @@ NOTES
             context=f"after tool results ({context})",
         )
         if cr.action == "end_turn":
-            return None, cr.turn_result
+            return None, cr.turn_result, False
         if cr.action == "switch_response":
-            response = cr.new_response
+            # Mid-turn interrupt: caller must not process remaining old parts
+            return cr.new_response, None, True
 
         # 5. Classify finish reason for abnormal stops
         abnormal = self._classify_finish_reason(response)
         if abnormal is not None:
-            return None, abnormal
+            return None, abnormal, False
 
         # 6. Nudge if TOOL_USE without function calls
         response = self._nudge_for_tool_use(
@@ -3123,11 +3131,11 @@ NOTES
                     context=f"after mid-turn ({context})",
                 )
                 if cr.action == "end_turn":
-                    return None, cr.turn_result
+                    return None, cr.turn_result, False
                 if cr.action == "switch_response":
                     response = cr.new_response
 
-        return response, None
+        return response, None, False
 
     def _run_chat_loop(
         self,
@@ -3155,7 +3163,6 @@ NOTES
 
         # Initialize cancellation support
         self._cancel_token = CancelToken()
-        self._mid_turn_interrupt = False  # Reset mid-turn interrupt flag for new message
         self._is_running = True
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
@@ -3248,9 +3255,8 @@ NOTES
                         # This allows user input to interrupt the current generation
                         if self._message_queue.has_parent_messages():
                             self._trace("MID_TURN_INTERRUPT: Detected pending user prompt during streaming")
-                            self._mid_turn_interrupt = True
                             if self._cancel_token:
-                                self._cancel_token.cancel()
+                                self._cancel_token.cancel(reason="mid_turn_interrupt")
                             # Don't return - let the current chunk be processed first
 
                         # Transition to STREAMING phase on first chunk
@@ -3373,16 +3379,20 @@ NOTES
                     return TurnResult.cancelled(all_text, context="before processing tools").text
 
                 # Process parts in order - emit text, collect function calls into groups
-                # When text appears between function calls, execute the preceding group first
+                # When text appears between function calls, execute the preceding group first.
+                # Snapshot parts before iteration: a mid-turn interrupt may switch `response`
+                # mid-loop, and we need the original list to find orphaned tool calls.
                 current_fc_group: List[FunctionCall] = []
-                for idx, part in enumerate(response.parts):
+                parts_snapshot = list(response.parts)
+                interrupted_at_idx: Optional[int] = None
+                for idx, part in enumerate(parts_snapshot):
                     text_info = "empty" if part.text == "" else bool(part.text) if part.text else None
                     fc_info = part.function_call.name if part.function_call else None
                     self._trace(f"SESSION_PART[{idx}] text={text_info} fc={fc_info}")
                     if part.text:
                         # Before emitting text, execute any pending function calls
                         if current_fc_group:
-                            new_response, turn_result = self._execute_tools_and_continue(
+                            new_response, turn_result, was_interrupted = self._execute_tools_and_continue(
                                 current_fc_group, use_streaming, on_output,
                                 wrapped_usage_callback, turn_data, cancellation_notified,
                                 accumulated_text, context="interleaved tools",
@@ -3391,6 +3401,9 @@ NOTES
                                 return turn_result.text
                             response = new_response
                             current_fc_group = []
+                            if was_interrupted:
+                                interrupted_at_idx = idx
+                                break  # Stop iterating stale parts from old response
 
                         # Emit text (only in non-streaming mode)
                         if not use_streaming:
@@ -3404,9 +3417,20 @@ NOTES
                     elif part.function_call:
                         current_fc_group.append(part.function_call)
 
+                # If a mid-turn interrupt fired during iteration, inject synthetic
+                # cancelled results for any tool calls in parts we never executed.
+                if interrupted_at_idx is not None:
+                    orphaned_fcs = [
+                        p.function_call
+                        for p in parts_snapshot[interrupted_at_idx + 1:]
+                        if p.function_call
+                    ]
+                    self._inject_synthetic_cancelled_results(orphaned_fcs)
+                    current_fc_group = []  # Already cleared above, defensive
+
                 # Execute remaining function calls at end of parts
                 if current_fc_group:
-                    new_response, turn_result = self._execute_tools_and_continue(
+                    new_response, turn_result, _was_interrupted = self._execute_tools_and_continue(
                         current_fc_group, use_streaming, on_output,
                         wrapped_usage_callback, turn_data, cancellation_notified,
                         accumulated_text, context="end of parts",
@@ -3445,7 +3469,7 @@ NOTES
                 # If the mid-turn response triggered function calls, execute them
                 mid_turn_fc = [p.function_call for p in mid_turn_response.parts if p.function_call]
                 if mid_turn_fc:
-                    new_response, turn_result = self._execute_tools_and_continue(
+                    new_response, turn_result, _was_interrupted = self._execute_tools_and_continue(
                         mid_turn_fc, use_streaming, on_output,
                         wrapped_usage_callback, turn_data, cancellation_notified,
                         accumulated_text, context="drain loop tools",
@@ -3459,7 +3483,7 @@ NOTES
                     while any(p.function_call for p in response.parts if p.function_call):
                         fc_group = [p.function_call for p in response.parts if p.function_call]
                         self._emit_text_parts(response, use_streaming, on_output, accumulated_text)
-                        new_response, turn_result = self._execute_tools_and_continue(
+                        new_response, turn_result, _was_interrupted = self._execute_tools_and_continue(
                             fc_group, use_streaming, on_output,
                             wrapped_usage_callback, turn_data, cancellation_notified,
                             accumulated_text, context="drain loop nested tools",
@@ -3538,7 +3562,7 @@ NOTES
                     streaming_fc = [p.function_call for p in streaming_response.parts if p.function_call]
                     if streaming_fc:
                         self._trace(f"STREAMING_CONTINUATION: Model called {len(streaming_fc)} tools")
-                        new_response, turn_result = self._execute_tools_and_continue(
+                        new_response, turn_result, _was_interrupted = self._execute_tools_and_continue(
                             streaming_fc, use_streaming, on_output,
                             wrapped_usage_callback, turn_data, cancellation_notified,
                             accumulated_text, context="streaming continuation",
@@ -3976,7 +4000,7 @@ NOTES
                         )
                 self._executor.set_task_done_callback(task_done_callback)
 
-                executor_result = self._executor.execute(name, args, call_id=fc.id)
+                executor_result = self._executor.execute(name, args, call_id=fc.id, cancel_token=self._cancel_token)
 
                 self._executor.set_tool_output_callback(None)
                 self._executor.set_task_done_callback(None)
@@ -4206,9 +4230,10 @@ NOTES
                         )
                 self._executor.set_task_done_callback(task_done_callback)
 
-                # Pass callback directly - executor will set it in thread-local
+                # Pass callback and cancel token directly - executor will set them in thread-local
                 executor_result = self._executor.execute(
-                    name, args, tool_output_callback=tool_output_callback, call_id=fc.id
+                    name, args, tool_output_callback=tool_output_callback, call_id=fc.id,
+                    cancel_token=self._cancel_token,
                 )
 
                 self._executor.set_task_done_callback(None)
@@ -4770,9 +4795,8 @@ NOTES
                     # This mirrors the interrupt detection in the initial streaming callback
                     if self._message_queue.has_parent_messages():
                         self._trace("MID_TURN_INTERRUPT: Detected pending user prompt during tool result streaming")
-                        self._mid_turn_interrupt = True
                         if self._cancel_token:
-                            self._cancel_token.cancel()
+                            self._cancel_token.cancel(reason="mid_turn_interrupt")
 
                     if on_output:
                         # First chunk after tool results starts a new block
@@ -5085,6 +5109,36 @@ NOTES
             result=result_dict,
             is_error=not ok,
             attachments=attachments
+        )
+
+    def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
+        """Append synthetic cancelled tool results to history for unexecuted tool calls.
+
+        When a mid-turn interrupt fires after executing some tool groups but
+        before executing others, the model's response in history contains
+        tool_use blocks that have no matching tool_result entry. Providers that
+        require a 1:1 tool_use ↔ tool_result correspondence (e.g. Anthropic)
+        will reject the next API call without these synthetic entries.
+
+        This method writes ``{"error": "cancelled"}`` results for each orphaned
+        function call directly into history, without making an additional
+        provider API call.
+
+        Args:
+            fcs: Function calls whose tool_use blocks are already in history but
+                 whose results were never sent because the turn was interrupted.
+        """
+        if not fcs:
+            return
+        tool_results = [
+            ToolResult(call_id=fc.id, name=fc.name, result={"error": "cancelled"}, is_error=True)
+            for fc in fcs
+        ]
+        tool_result_parts = [Part(function_response=r) for r in tool_results]
+        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+        self._trace(
+            f"INJECT_SYNTHETIC: {len(fcs)} orphaned tool calls cancelled: "
+            f"{[fc.name for fc in fcs]}"
         )
 
     def _enrich_tool_result_dict(
@@ -5773,7 +5827,7 @@ NOTES
                                     )
                             self._executor.set_task_done_callback(task_done_callback)
 
-                        executor_result = self._executor.execute(name, args, call_id=fc.id)
+                        executor_result = self._executor.execute(name, args, call_id=fc.id, cancel_token=self._cancel_token)
 
                         # Clear the callbacks after execution
                         self._executor.set_tool_output_callback(None)

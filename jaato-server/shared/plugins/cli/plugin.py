@@ -14,7 +14,8 @@ from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
-from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
+from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
 from shared.trace import trace as _trace_write
 
@@ -985,71 +986,58 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Use streaming execution if callback is set
             # Check thread-local first for parallel execution support
             effective_callback = self._get_effective_output_callback()
+            cancel_token = get_current_cancel_token()
             self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
+
+            # Both streaming and non-streaming use Popen so we can check the
+            # cancel token while the process runs.
+            cmd = command if use_shell else argv
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                env=env,
+                shell=use_shell,
+                cwd=self._workspace_root
+            )
+
+            stdout_lines = []
+            stderr_lines = []
+
             if effective_callback:
-                # Streaming mode with Popen for live output
-                cmd = command if use_shell else argv
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    env=env,
-                    shell=use_shell,
-                    cwd=self._workspace_root
-                )
-
-                # Read output line by line and stream to callback
-                stdout_lines = []
-                stderr_lines = []
-
-                # Read stdout with streaming callback
+                # Streaming mode: read stdout line by line, check cancel between lines
                 if proc.stdout:
                     for line in proc.stdout:
+                        if cancel_token is not None and cancel_token.is_cancelled:
+                            proc.kill()
+                            proc.wait()
+                            raise CancelledException("Tool cancelled during streaming output")
                         stdout_lines.append(line)
-                        # Call the callback with the line (strip newline for display)
                         effective_callback(line.rstrip('\n\r'))
-
-                # Read remaining stderr (non-streaming for simplicity)
-                if proc.stderr:
-                    stderr_lines = proc.stderr.readlines()
-
-                proc.wait()
-                stdout = ''.join(stdout_lines)
-                stderr = ''.join(stderr_lines)
-                returncode = proc.returncode
             else:
-                # Non-streaming mode with subprocess.run
-                if use_shell:
-                    # Shell mode: pass command string directly to shell
-                    proc = subprocess.run(
-                        command,
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        check=False,
-                        env=env,
-                        shell=True,
-                        cwd=self._workspace_root
-                    )
-                else:
-                    proc = subprocess.run(
-                        argv,
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        check=False,
-                        env=env,
-                        shell=False,
-                        cwd=self._workspace_root
-                    )
-                stdout = proc.stdout
-                stderr = proc.stderr
-                returncode = proc.returncode
+                # Non-streaming mode: read chunks, check cancel between reads
+                if proc.stdout:
+                    while True:
+                        if cancel_token is not None and cancel_token.is_cancelled:
+                            proc.kill()
+                            proc.wait()
+                            raise CancelledException("Tool cancelled during subprocess execution")
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        stdout_lines.append(chunk)
+
+            # Read remaining stderr after stdout is consumed
+            if proc.stderr:
+                stderr_lines = proc.stderr.readlines()
+
+            proc.wait()
+            stdout = ''.join(stdout_lines)
+            stderr = ''.join(stderr_lines)
+            returncode = proc.returncode
 
             # Truncate large outputs to prevent context window overflow
             truncated = False

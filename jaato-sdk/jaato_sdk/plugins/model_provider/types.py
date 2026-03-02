@@ -616,20 +616,27 @@ class CancelToken:
     def __init__(self):
         """Initialize a new cancel token."""
         self._cancelled = False
+        self._reason: str = ""
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._callbacks: List[Callable[[], None]] = []
 
-    def cancel(self) -> None:
-        """Request cancellation.
+    def cancel(self, reason: str = "") -> None:
+        """Request cancellation with an optional reason.
 
         This is idempotent - calling cancel() multiple times has no effect
         after the first call. All registered callbacks are invoked once.
+
+        Args:
+            reason: Optional string describing why cancellation was requested.
+                Use "mid_turn_interrupt" when a parent message arrived during
+                model streaming, to distinguish from user-initiated cancellation.
         """
         with self._lock:
             if self._cancelled:
                 return
             self._cancelled = True
+            self._reason = reason
             callbacks = list(self._callbacks)
 
         # Set event to wake up any waiters
@@ -641,6 +648,16 @@ class CancelToken:
                 callback()
             except Exception:
                 pass  # Swallow callback errors
+
+    @property
+    def cancel_reason(self) -> str:
+        """The reason cancellation was requested, or empty string if not cancelled.
+
+        Returns:
+            The reason string passed to cancel(), or "" if cancel() was never
+            called or was called without a reason.
+        """
+        return self._reason
 
     @property
     def is_cancelled(self) -> bool:
