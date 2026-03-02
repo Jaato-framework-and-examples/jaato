@@ -545,11 +545,11 @@ class IPCClient:
     async def _start_server(self) -> bool:
         """Auto-start the server daemon.
 
-        Checks if the server is already running (via PID file), and if not,
-        launches ``python -m server --daemon``.  The env file is NOT passed
-        as a CLI argument because the server is provider-agnostic — each
-        client sends its own env config via ``ClientConfigRequest`` after
-        connecting.
+        Checks if the server is already running (via PID file and, on
+        Windows, via pipe existence probe), and if not, launches
+        ``python -m server --daemon``.  The env file is NOT passed as a CLI
+        argument because the server is provider-agnostic — each client sends
+        its own env config via ``ClientConfigRequest`` after connecting.
 
         On Unix, if a stale socket file exists from a previous crash, it is
         removed before starting the server so the new instance can bind.
@@ -563,6 +563,21 @@ class IPCClient:
         if pid:
             # Server is running, just wait for socket/pipe
             return await self._wait_for_socket()
+
+        # On Windows, the PID-file check can fail even when the server IS
+        # running (e.g. stale PID, ctypes truncation on 64-bit, or the
+        # daemon hasn't written its PID file yet).  A named-pipe probe is
+        # a more reliable indicator: if the pipe exists, a server owns it.
+        if self._is_windows_pipe():
+            try:
+                if self._check_pipe_exists():
+                    logger.debug(
+                        "Named pipe exists — server is running, "
+                        "skipping auto-start"
+                    )
+                    return True
+            except Exception:
+                pass  # Best-effort; fall through to normal start
 
         # On Unix, clean up stale socket file left over from a crash.
         # The server also does this on startup, but removing it here avoids
@@ -664,6 +679,36 @@ class IPCClient:
                 await asyncio.sleep(0.2)
             return False
 
+    def _check_pipe_exists(self) -> bool:
+        """Check if the Windows named pipe already exists.
+
+        Uses ``WaitNamedPipeW`` with a minimal timeout to probe for the pipe
+        without consuming a pipe instance.  Returns ``True`` if the pipe
+        exists (server is running), even if all instances are currently busy.
+
+        Returns:
+            True if the pipe exists, False otherwise.
+        """
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.WaitNamedPipeW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
+        kernel32.WaitNamedPipeW.restype = ctypes.c_int
+
+        pipe_path = self._get_pipe_path()
+
+        # Probe with 1 ms timeout — fast enough for a presence check.
+        result = kernel32.WaitNamedPipeW(pipe_path, 1)
+        if result:
+            return True
+
+        # WaitNamedPipeW returned 0.  Distinguish "pipe exists but busy"
+        # (ERROR_SEM_TIMEOUT = 121) from "pipe not found"
+        # (ERROR_FILE_NOT_FOUND = 2).
+        error = ctypes.get_last_error()
+        ERROR_SEM_TIMEOUT = 121
+        return error == ERROR_SEM_TIMEOUT
+
     def _check_server_running(self) -> Optional[int]:
         """Check if server is already running.
 
@@ -681,11 +726,24 @@ class IPCClient:
                 pid = int(f.read().strip())
 
             if sys.platform == "win32":
-                # Windows: use ctypes to check process
+                # Windows: use ctypes to check process.  Explicit argtypes /
+                # restype are required so that the 64-bit HANDLE return value
+                # is not silently truncated to a 32-bit c_int.
                 import ctypes
                 kernel32 = ctypes.windll.kernel32
+                kernel32.OpenProcess.argtypes = [
+                    ctypes.c_ulong,   # DWORD dwDesiredAccess
+                    ctypes.c_int,     # BOOL  bInheritHandle
+                    ctypes.c_ulong,   # DWORD dwProcessId
+                ]
+                kernel32.OpenProcess.restype = ctypes.c_void_p
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel32.CloseHandle.restype = ctypes.c_int
+
                 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                handle = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+                )
                 if handle:
                     kernel32.CloseHandle(handle)
                     return pid

@@ -1456,6 +1456,41 @@ def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
             os.dup2(log.fileno(), sys.stderr.fileno())
 
 
+def check_pipe_exists(pipe_name: str) -> bool:
+    """Check if a Windows named pipe already exists.
+
+    Uses ``WaitNamedPipeW`` with a minimal timeout to probe without consuming
+    a pipe instance.
+
+    Args:
+        pipe_name: Bare pipe name (e.g. ``"jaato"``) or full path
+            (e.g. ``r"\\\\.\pipe\\jaato"``).
+
+    Returns:
+        True if the pipe exists, False otherwise.
+    """
+    import ctypes
+
+    WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\"
+
+    if pipe_name.startswith(WINDOWS_PIPE_PREFIX):
+        pipe_path = pipe_name
+    else:
+        pipe_path = f"{WINDOWS_PIPE_PREFIX}{pipe_name}"
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitNamedPipeW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
+    kernel32.WaitNamedPipeW.restype = ctypes.c_int
+
+    result = kernel32.WaitNamedPipeW(pipe_path, 1)
+    if result:
+        return True
+
+    error = ctypes.get_last_error()
+    ERROR_SEM_TIMEOUT = 121
+    return error == ERROR_SEM_TIMEOUT
+
+
 def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
     """Check if a server is already running.
 
@@ -1471,11 +1506,24 @@ def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
 
         # Check if process exists
         if sys.platform == "win32":
-            # Windows: use tasklist or ctypes to check process
+            # Windows: use ctypes to check process.  Explicit argtypes /
+            # restype are required so that the 64-bit HANDLE return value
+            # is not silently truncated to a 32-bit c_int.
             import ctypes
             kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.argtypes = [
+                ctypes.c_ulong,   # DWORD dwDesiredAccess
+                ctypes.c_int,     # BOOL  bInheritHandle
+                ctypes.c_ulong,   # DWORD dwProcessId
+            ]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+            )
             if handle:
                 kernel32.CloseHandle(handle)
                 return pid
@@ -1721,6 +1769,21 @@ Examples:
         print(f"Error: Jaato server is already running (PID: {pid})")
         print(f"  Use 'python -m server --stop' to stop it")
         sys.exit(1)
+
+    # On Windows, also check whether the named pipe already exists.
+    # The PID-file check can miss a running server (e.g. stale PID, ctypes
+    # issues on 64-bit, or daemon that hasn't written its PID yet).
+    if sys.platform == "win32" and args.ipc_socket:
+        try:
+            if check_pipe_exists(args.ipc_socket):
+                print(
+                    f"Error: Named pipe already exists "
+                    f"(another server is listening)"
+                )
+                print(f"  Use 'python -m server --stop' to stop it")
+                sys.exit(1)
+        except Exception:
+            pass  # Best-effort; ctypes may not be available
 
     # Daemonize if requested (skip if already daemonized on Windows)
     if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):
