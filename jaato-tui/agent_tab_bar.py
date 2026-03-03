@@ -153,7 +153,7 @@ class AgentTabBar:
     def _build_agent_tabs(self, agents, selected_id) -> List[Tuple[str, str, int]]:
         """Build individual tab entries with their widths.
 
-        Each tab shows the agent_id as its label. The selected tab is
+        Each tab shows the agent name as its label. The selected tab is
         rendered in reverse video; unselected tabs are dim.
 
         Args:
@@ -180,10 +180,10 @@ class AgentTabBar:
                 name_style = "class:agent-tab.dim"
             symbol_style = self._get_symbol_color_style(agent.status)
 
-            # Use agent_id as the tab label (middle-ellipsize to keep
+            # Use agent name as the tab label (middle-ellipsize to keep
             # both the prefix and the distinguishing suffix visible).
             max_name_len = 15
-            label = ellipsize_name(agent.agent_id, max_name_len)
+            label = ellipsize_name(agent.name, max_name_len)
 
             # Build tab parts
             tab_parts.append((symbol_style, symbol))
@@ -390,7 +390,7 @@ class AgentTabBar:
                 max_label = pane_right - cursor - 3  # symbol + space + margin
                 if max_label < 3:
                     break
-                label = ellipsize_name(agent_id, max_label)
+                label = ellipsize_name(agent.name, max_label)
 
                 if is_selected:
                     name_style = "class:agent-tab.selected reverse"
@@ -547,7 +547,7 @@ class AgentTabBar:
                 max_label = pane_right - cursor - 3
                 if max_label < 3:
                     break
-                label = ellipsize_name(agent_id, max_label)
+                label = ellipsize_name(agent.name, max_label)
 
                 if is_selected:
                     display_label = f" {label} "
