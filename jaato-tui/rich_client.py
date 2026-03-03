@@ -2463,7 +2463,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
                             type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
                         ]
-                    display.set_waiting_for_channel_input(True, exit_options)
+                    display.set_waiting_for_channel_input(True)
 
                 elif parsed.action == CommandAction.STOP:
                     await client.stop()

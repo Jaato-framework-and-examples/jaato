@@ -3760,6 +3760,9 @@ class PTDisplay:
         """
         self._waiting_for_channel_input = waiting
         self._comment_mode_active = False  # Always reset comment mode on state change
+        # Suppress normal completions while waiting for channel input
+        if self._input_handler:
+            self._input_handler.set_permission_mode(waiting, response_options)
         if waiting and response_options:
             # Permission mode: back up whatever the user was typing so it
             # can be restored after the permission prompt is resolved, then
