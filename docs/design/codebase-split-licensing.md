@@ -4,20 +4,60 @@
 
 | Package | License | Distribution | Install |
 |---------|---------|-------------|---------|
-| **jaato-sdk** | MIT | Public PyPI | `pip install jaato-sdk` |
-| **jaato-server** | MIT | Public PyPI | `pip install jaato-server` |
-| **jaato-tui** | MIT | Public PyPI | `pip install jaato-tui` |
+| **jaato-sdk** | BSL 1.1 | Public PyPI | `pip install jaato-sdk` |
+| **jaato-server** | BSL 1.1 | Public PyPI | `pip install jaato-server` |
+| **jaato-tui** | BSL 1.1 | Public PyPI | `pip install jaato-tui` |
 | **jaato-premium** | Commercial | Private GitHub repo | See [Premium Installation](#premium-installation) |
 
 The public packages remain exactly where they are (same repo, same PyPI).
 `jaato-premium` is a **separate private repo** that depends on `jaato-server`
 and extends it via the existing plugin entry-point system.
 
+### BSL 1.1 Parameters
+
+```
+Business Source License 1.1
+
+Parameters
+
+Licensor:             apanoia
+Licensed Work:        jaato [version]
+                      The Licensed Work is (c) 2024 apanoia.
+
+Additional Use Grant: You may make production use of the Licensed Work,
+                      provided that you may not use the Licensed Work
+                      to offer a commercial AI agent orchestration service
+                      or AI development tool that is provided to third
+                      parties as a hosted, managed, or embedded product
+                      and that includes substantial functionality of the
+                      Licensed Work.
+
+Change Date:          [4 years from release of each version]
+
+Change License:       Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed Work,
+please contact licensing@apanoia.dev
+```
+
+**What BSL 1.1 allows and prohibits:**
+
+| Use Case | Allowed? |
+|----------|----------|
+| Internal use at a company of any size | Yes |
+| Building a product that uses jaato internally | Yes |
+| Academic research | Yes |
+| Contributing to jaato | Yes |
+| Running jaato for personal projects | Yes |
+| Forking and modifying for internal use | Yes |
+| Offering "jaato Cloud" as a hosted service | **No** |
+| White-labeling jaato as a competing product | **No** |
+
 ---
 
 ## Installation
 
-### Public Packages (MIT — anyone)
+### Public Packages (BSL 1.1 — source-available)
 
 Published on PyPI. Standard pip install:
 
@@ -31,7 +71,7 @@ Or with optional extras:
 pip install "jaato-server[all]" "jaato-tui[all]"
 ```
 
-These give you the full open-source framework: 8 model providers, 58 plugins,
+These give you the full source-available framework: 8 model providers, 58 plugins,
 TUI client, web client, GC strategies, telemetry — everything needed to build
 and run single-server agentic AI applications.
 
@@ -87,7 +127,7 @@ pip install -e jaato-premium/
 
 ## What Goes Where
 
-### PUBLIC (MIT) — stays in this repo
+### PUBLIC (BSL 1.1) — stays in this repo
 
 Everything that is **framework plumbing** — the engine that makes tools run,
 providers connect, sessions manage state. A fully functional single-server
@@ -113,8 +153,8 @@ multi-server clustering.
 
 #### jaato-server — standard plugins (58 plugin directories)
 
-All existing plugins stay MIT. They are the framework's value as an
-open-source project. Specifically:
+All existing plugins stay in the public repo under BSL 1.1. They are the
+framework's value as a source-available project. Specifically:
 
 **Tool plugins:** cli, file_edit, filesystem_query, calculator, mcp,
 interactive_shell, web_fetch, web_search, multimodal, notebook, todo,
@@ -400,7 +440,7 @@ Separation of concerns between "methodology premium" and "infrastructure premium
 
 #### Approach D: Feature-flagged within jaato-server (free code, premium activation)
 
-All gossip code stays in the public `jaato-server`. The code is MIT-licensed
+All gossip code stays in the public `jaato-server`. The code is BSL 1.1-licensed
 and fully visible. But `servers.json` loading and gossip activation require
 a valid **activation key** checked at runtime against the premium package.
 
@@ -409,8 +449,8 @@ The code is open, the right to run it commercially is gated by license.
 
 **Pros:** No code split needed at all. Community can read, audit, and
 contribute to gossip code. Only licensing changes.
-**Cons:** Requires a license-key mechanism. Blurs the MIT/commercial boundary
-(MIT code with commercial runtime restriction is confusing).
+**Cons:** Requires a license-key mechanism. Blurs the BSL/commercial boundary
+(BSL code with additional commercial runtime restriction is confusing).
 
 ### Recommended approach
 
@@ -476,7 +516,7 @@ up and returns the references the daemon needs.
 ```
 jaato-premium/
 ├── pyproject.toml              # Commercial license, depends on jaato-server
-├── LICENSE                     # Commercial/BSL license
+├── LICENSE                     # Commercial license (All Rights Reserved)
 ├── README.md
 ├── jaato_premium/
 │   ├── __init__.py
@@ -526,9 +566,11 @@ init = "jaato_premium.gossip:init_gossip"
 
 Move (not copy) the premium content out of the public repo:
 - `.jaato/instructions/00-system-instructions.md` → jaato-premium
-- `.jaato/profiles/*.json` (15 files) → jaato-premium
+- `.jaato/profiles/*.json` (14 of 15 files) → jaato-premium
+  - **Keep** `github-resolver.json` in public repo as example profile
 - `.jaato/references/*.json` → jaato-premium
-- `.jaato/prompts/*.md` → jaato-premium
+- `.jaato/prompts/*.md` (premium prompts) → jaato-premium
+  - **Keep** `gh_issue_fixer.md` in public repo as example prompt
 - `knowledge/` → jaato-premium
 - `shared/prompt_templates/` → jaato-premium
 - `server/peers.py`, `remote_spawn.py`, `workspace_sync.py`,
@@ -545,8 +587,12 @@ Replace `_init_gossip()` in `__main__.py` with entry-point lookup.
 
 - Keep `.jaato/instructions/` as an empty directory with a README
   explaining that users can add their own instructions
-- Keep `.jaato/profiles/` with a README and one example profile
-  (demonstrating the schema, not production methodology)
+- Keep `.jaato.example/profiles/` with `github-resolver.json` as a working
+  example profile (demonstrates the schema and a real use case, not production
+  methodology) plus a README explaining how to create custom profiles
+- Keep `.jaato.example/prompts/` with `gh_issue_fixer.md` as a working
+  example prompt (the operational prompt loaded by the github-resolver profile)
+  plus a README explaining how to create custom prompts
 - Keep `.jaato/references/` empty with README
 - Update `CLAUDE.md` to remove references to moved content
 - Update `README.md` to mention the premium package as optional

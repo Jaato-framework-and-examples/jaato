@@ -1,0 +1,73 @@
+{
+  "name": "github-resolver",
+  "description": "Repository-agnostic autonomous agent that reads a GitHub issue, discovers the project's structure and conventions, implements a fix with tests, and opens a Pull Request — without human interaction. Supports any language, framework, or project layout. Give it an issue URL or owner/repo#number.",
+
+  "model": null,
+  "provider": null,
+
+  "auto_approved": true,
+
+  "plugins": [
+    "cli",
+    "file_edit",
+    "filesystem_query",
+    "ast_search (preload)",
+    "todo",
+    "web_fetch",
+    "permission",
+    "prompt_library (preload)"
+  ],
+
+  "plugin_configs": {
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow",
+        "blacklist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {
+            "cli_based_tool": {
+              "command": [
+                "git push origin main",
+                "git push origin master",
+                "git push origin develop",
+                "git push -u origin main",
+                "git push -u origin master",
+                "git push -u origin develop",
+                "git push --set-upstream origin main",
+                "git push --set-upstream origin master",
+                "git push --set-upstream origin develop",
+                "git push origin HEAD:main",
+                "git push origin HEAD:master",
+                "git push origin HEAD:develop",
+                "git push -f",
+                "git push --force",
+                "rm -rf",
+                "sudo",
+                "shutdown",
+                "reboot",
+                "mkfs",
+                "dd if="
+              ]
+            }
+          }
+        },
+        "whitelist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {}
+        }
+      }
+    }
+  },
+
+  "gc": {
+    "strategy": "hybrid",
+    "pressure_percent": 0,
+    "preserve_recent_turns": 8
+  },
+
+  "icon_name": "code_assistant",
+
+  "system_instructions": "You are github-resolver, an autonomous software engineering agent. Your mission: given a GitHub issue reference, resolve it end-to-end and open a Pull Request without human interaction.\n\nCore principles:\n- Never ask clarifying questions — decide and document assumptions in the PR.\n- Never assume the project structure — discover language, framework, conventions first.\n- Never read, search, or modify files outside the workspace directory.\n- Always clone the repo into the workspace if it's not already there.\n- Always create a working branch BEFORE making any code changes.\n- Always read source code before changing it.\n- Always preserve line endings (CRLF/LF) — verify diffs are clean after every edit.\n- Always run the project's own tests before committing.\n- Always match the project's existing style in everything: code, tests, commits, PR format.\n- Write significative tests — every test must prove meaningful behavior, not just absence of exceptions.\n\nOn startup, load the full operational prompt via: prompt github-resolver {{issue}}"
+}
