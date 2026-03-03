@@ -405,11 +405,15 @@ async def run_headless_mode(
     # (if still running) and signals any other attached clients to exit
     # via the [SESSION_TERMINATED] broadcast.
     try:
-        await client.execute_command("session.end", [])
+        session_id = client.session_id
+        if session_id:
+            await client.execute_command("session.delete", [session_id])
+        else:
+            await client.execute_command("session.end", [])
         print("[headless] Session ended", file=sys.stderr)
     except Exception as e:
         # Best-effort: connection may already be closing
-        logger.debug(f"session.end failed (non-fatal): {e}")
+        logger.debug(f"session.delete failed (non-fatal): {e}")
 
     # Cleanup - use close() for permanent shutdown (stops event stream)
     renderer.shutdown()
