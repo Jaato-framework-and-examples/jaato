@@ -121,6 +121,7 @@ class JaatoClient:
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"
+        self._agent_name: str = "Main Agent"
 
     def _trace(self, msg: str) -> None:
         """Write trace message to the provider trace log.
@@ -301,7 +302,7 @@ class JaatoClient:
         if self._ui_hooks:
             self._ui_hooks.on_agent_created(
                 agent_id=self._agent_id,
-                agent_name="main",
+                agent_name=self._agent_name,
                 agent_type="main",
                 profile_name=None,
                 parent_agent_id=None,

@@ -1117,9 +1117,10 @@ class JaatoServer:
             logger.debug("  _create_main_agent: 'main' already exists (created by hooks), skipping")
             return
 
+        agent_name = self._profile.name if self._profile else "Main Agent"
         agent = AgentState(
             agent_id="main",
-            name="Main Agent",
+            name=agent_name,
             agent_type="main",
         )
         self._agents["main"] = agent
@@ -1611,6 +1612,8 @@ class JaatoServer:
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
+        if self._profile:
+            self._jaato._agent_name = self._profile.name
         logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
         self._jaato.set_ui_hooks(hooks)
         logger.debug("  _setup_agent_hooks: jaato.set_ui_hooks done")
