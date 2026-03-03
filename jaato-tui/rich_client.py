@@ -2313,10 +2313,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.stop()
                         break
                     elif choice == "e":
-                        # End session - delete from server
+                        # End session - stop agent and delete from server
                         if model_running:
                             await client.stop()
-                        # TODO: Add client.delete_session() when available
+                        if client.session_id:
+                            try:
+                                await client.execute_command("session.delete", [client.session_id])
+                            except Exception as exc:
+                                logger.debug(f"session.delete failed: {exc}")
                         display.add_system_message("Session ended.", style="system_warning")
                         should_exit = True
                         display.stop()

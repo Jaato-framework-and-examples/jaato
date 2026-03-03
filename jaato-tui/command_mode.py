@@ -102,8 +102,8 @@ async def run_command_mode(
 
         # Execute based on action type
         if parsed.action == CommandAction.EXIT:
-            # End session - stop agent and signal all attached clients to exit
-            await client.execute_command("session.end", [])
+            # End session - stop agent and delete from server
+            await client.execute_command("session.delete", [session_id])
             print(f"Session '{session_id}' ended")
 
         elif parsed.action == CommandAction.STOP:
