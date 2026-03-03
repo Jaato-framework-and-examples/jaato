@@ -141,17 +141,6 @@ _JSON_TYPE_MAP = {
 }
 
 
-def _resolve_json_type(raw_type) -> str:
-    """Map a JSON Schema type to a Python type name.
-
-    Handles union types (``["string", "null"]``) by picking the first
-    non-null entry.  Falls back to ``"Any"`` for unknown types.
-    """
-    if isinstance(raw_type, list):
-        raw_type = next((t for t in raw_type if t != "null"), raw_type[0] if raw_type else "")
-    return _JSON_TYPE_MAP.get(raw_type, "Any")
-
-
 def _build_docstring(schema: ToolSchema) -> str:
     """Build a Python docstring from a ToolSchema.
 
@@ -172,7 +161,7 @@ def _build_docstring(schema: ToolSchema) -> str:
     if props:
         lines.append("Args:")
         for param_name, param_spec in props.items():
-            ptype = _resolve_json_type(param_spec.get("type", ""))
+            ptype = _JSON_TYPE_MAP.get(param_spec.get("type", ""), "Any")
             desc = param_spec.get("description", "")
             opt = "" if param_name in required else ", optional"
             lines.append(f"    {param_name} ({ptype}{opt}): {desc}")
@@ -302,7 +291,7 @@ def generate_tool_signatures(schemas: List[ToolSchema], exclude_tools: Optional[
         required = set(schema.parameters.get("required", []))
         params = []
         for pname, pspec in props.items():
-            ptype = _resolve_json_type(pspec.get("type", ""))
+            ptype = _JSON_TYPE_MAP.get(pspec.get("type", ""), "Any")
             if pname in required:
                 params.append(f"{pname}: {ptype}")
             else:

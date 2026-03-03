@@ -1136,21 +1136,11 @@ class JaatoSession:
                 subagent_plugin.set_parent_session(self)
 
         # Auto-wire plugins that need session access
-        # Any plugin with set_session() will receive this session reference.
-        # When the session has an explicit plugin list (agent profile), only
-        # wire plugins that are in that list (plus introspection which is
-        # always essential).  This prevents plugins like notebook from
-        # injecting instructions when the profile didn't include them.
+        # Any plugin with set_session() will receive this session reference
         if self._runtime.registry:
             import threading
             self._trace(f"configure: wiring plugins with session, thread_id={threading.current_thread().ident}")
-            wire_set = None
-            if tools is not None:
-                wire_set = set(tools)
-                wire_set.add("introspection")
             for plugin_name in self._runtime.registry._exposed:
-                if wire_set is not None and plugin_name not in wire_set:
-                    continue
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
