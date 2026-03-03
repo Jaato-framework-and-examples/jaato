@@ -1,17 +1,18 @@
 """Sandbox Manager plugin for runtime path permission management.
 
 This plugin enables users to dynamically grant or revoke filesystem access
-at runtime through a three-tier configuration model:
+at runtime through a four-tier configuration model:
 
 1. Global (~/.jaato/sandbox_paths.json) - User-wide settings
 2. Workspace (<workspace>/.jaato/sandbox.json) - Project-specific settings
 3. Session (<workspace>/.jaato/sessions/<id>/sandbox.json) - Runtime overrides
+4. Profile (plugin_configs.sandbox_manager in agent profile) - Profile overrides
 
-Session configuration has highest precedence and can override paths from
-other levels.
+Profile configuration has highest precedence, consistent with the "profile
+overrides local config" pattern used by permissions and GC.
 
 User Commands:
-    sandbox list   - Show all effective paths from all three levels
+    sandbox list   - Show all effective paths from all levels
     sandbox add    - Grant temporary access for current session
     sandbox remove - Block a path for this session (even if globally allowed)
 """
@@ -45,7 +46,7 @@ SESSION_CONFIG_FILE = "sandbox.json"
 class SandboxPath:
     """A sandbox path entry with metadata."""
     path: str
-    source: str  # "global", "workspace", or "session"
+    source: str  # "global", "workspace", "session", or "profile"
     action: str  # "allow" or "deny"
     access: str = "readwrite"  # "readonly" or "readwrite"
     added_at: Optional[str] = None
@@ -89,6 +90,9 @@ class SandboxManagerPlugin:
         # list of absolute paths that currently have readwrite access.
         # Used by the workspace monitor to start/stop watching sandbox dirs.
         self._on_readwrite_paths_changed: Optional[Callable[[List[str]], None]] = None
+        # Paths parsed from profile plugin_configs during initialize().
+        # Applied as the highest-precedence "profile" tier in _load_all_configs().
+        self._profile_paths: List[SandboxPath] = []
 
     @property
     def name(self) -> str:
@@ -104,15 +108,69 @@ class SandboxManagerPlugin:
         Args:
             config: Optional configuration dict containing:
                 - session_id: Session identifier for session-level config
+                - allowed_paths: List of paths to allow (from profile plugin_configs).
+                    Each item is a string (path, defaults to readwrite) or a dict
+                    with ``path`` and optional ``access`` ("readonly"/"readwrite").
+                - denied_paths: List of paths to deny (from profile plugin_configs).
+                    Each item is a string (path).
         """
         config = config or {}
         self._session_id = config.get("session_id")
+        self._profile_paths = self._parse_profile_paths(config)
         self._initialized = True
-        self._trace(f"initialize: session_id={self._session_id}")
+        self._trace(f"initialize: session_id={self._session_id}, "
+                    f"profile_paths={len(self._profile_paths)}")
 
         # Load configuration if workspace is already set
         if self._workspace_path:
             self._load_all_configs()
+
+    def _parse_profile_paths(self, config: Dict[str, Any]) -> List[SandboxPath]:
+        """Parse allowed_paths and denied_paths from profile plugin_configs.
+
+        Uses the same format as sandbox.json config files: allowed_paths entries
+        can be plain strings (default readwrite) or dicts with path/access keys;
+        denied_paths entries are plain strings or dicts with a path key.
+
+        Args:
+            config: The plugin config dict passed to initialize().
+
+        Returns:
+            List of SandboxPath entries with source="profile".
+        """
+        paths: List[SandboxPath] = []
+
+        for item in config.get("allowed_paths", []):
+            if isinstance(item, str):
+                paths.append(SandboxPath(
+                    path=msys2_to_windows_path(item),
+                    source="profile", action="allow",
+                ))
+            elif isinstance(item, dict) and "path" in item:
+                access = item.get("access", "readwrite")
+                if access not in ("readonly", "readwrite"):
+                    access = "readwrite"
+                paths.append(SandboxPath(
+                    path=msys2_to_windows_path(item["path"]),
+                    source="profile",
+                    action="allow",
+                    access=access,
+                ))
+
+        for item in config.get("denied_paths", []):
+            if isinstance(item, str):
+                paths.append(SandboxPath(
+                    path=msys2_to_windows_path(item),
+                    source="profile", action="deny",
+                ))
+            elif isinstance(item, dict) and "path" in item:
+                paths.append(SandboxPath(
+                    path=msys2_to_windows_path(item["path"]),
+                    source="profile",
+                    action="deny",
+                ))
+
+        return paths
 
     def shutdown(self) -> None:
         """Shutdown the sandbox manager plugin."""
@@ -123,6 +181,7 @@ class SandboxManagerPlugin:
             self._registry.clear_denied_paths(self.name)
         self._config = None
         self._pending_programmatic_paths.clear()
+        self._profile_paths.clear()
         self._initialized = False
 
     def set_on_readwrite_paths_changed(
@@ -301,12 +360,21 @@ class SandboxManagerPlugin:
             self._config.allowed_paths.extend(allowed)
             self._config.denied_paths.extend(denied)
 
-        # Load session config (highest precedence)
+        # Load session config
         session_path = self._get_session_config_path()
         if session_path:
             allowed, denied = self._load_config_file(session_path, "session")
             self._config.allowed_paths.extend(allowed)
             self._config.denied_paths.extend(denied)
+
+        # Apply profile paths (highest precedence)
+        if self._profile_paths:
+            for entry in self._profile_paths:
+                if entry.action == "allow":
+                    self._config.allowed_paths.append(entry)
+                else:
+                    self._config.denied_paths.append(entry)
+            self._trace(f"Applied {len(self._profile_paths)} profile paths")
 
         # Sync to registry
         self._sync_to_registry()
@@ -378,6 +446,13 @@ class SandboxManagerPlugin:
                     allowed, denied = self._load_config_file(session_path, "session")
                     self._config.allowed_paths.extend(allowed)
                     self._config.denied_paths.extend(denied)
+                # Re-apply profile paths (highest precedence)
+                if self._profile_paths:
+                    for entry in self._profile_paths:
+                        if entry.action == "allow":
+                            self._config.allowed_paths.append(entry)
+                        else:
+                            self._config.denied_paths.append(entry)
                 self._sync_to_registry()
             else:
                 # Persistence failed — at least keep them in registry
@@ -455,7 +530,7 @@ class SandboxManagerPlugin:
         if not self._config:
             return False
 
-        precedence = {"global": 0, "workspace": 1, "session": 2}
+        precedence = {"global": 0, "workspace": 1, "session": 2, "profile": 3}
         source_precedence = precedence.get(source, 0)
 
         for entry in self._config.denied_paths:

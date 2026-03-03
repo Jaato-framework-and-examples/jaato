@@ -836,7 +836,16 @@ class JaatoServer:
             "waypoint": {
                 "session_id": self._session_id,
             },
+            # Pass session_id to sandbox_manager; profile may add allowed_paths/denied_paths
+            "sandbox_manager": {
+                "session_id": self._session_id,
+            },
         }
+        # Apply agent profile's sandbox_manager config (allowed_paths, denied_paths)
+        if self._profile and self._profile.plugin_configs:
+            profile_sandbox_config = self._profile.plugin_configs.get("sandbox_manager")
+            if profile_sandbox_config:
+                plugin_configs["sandbox_manager"].update(profile_sandbox_config)
         def _on_plugin_progress(plugin_name: str) -> None:
             self._emit_init_progress(
                 "Loading plugins", "running", 3, total_steps, message=plugin_name
@@ -972,12 +981,13 @@ class JaatoServer:
                 if runtime:
                     runtime.set_formatter_pipeline(self._formatter_pipeline)
 
-            gc_result = load_gc_from_file()
-
-            # Agent profile GC overrides take precedence over file-based GC
-            if self._profile and self._profile.gc and not gc_result:
+            # Agent profile GC takes precedence over file-based GC
+            gc_result = None
+            if self._profile and self._profile.gc:
                 from shared.plugins.subagent.config import gc_profile_to_plugin_config
                 gc_result = gc_profile_to_plugin_config(self._profile.gc)
+            if not gc_result:
+                gc_result = load_gc_from_file()
 
         gc_threshold = None
         gc_strategy = None
@@ -1054,6 +1064,10 @@ class JaatoServer:
             ))
 
         self._emit_init_progress("Setting up session", "done", 6, total_steps)
+
+        # Emit initial permission status so clients show the correct policy
+        # from the start (profile may have set a non-default policy).
+        self.emit_permission_status()
 
         auth_info = self._jaato.auth_info if self._jaato else ""
         auth_suffix = f" ({auth_info})" if auth_info else ""
