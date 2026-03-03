@@ -1074,19 +1074,14 @@ class JaatoServer:
         if not self._profile:
             return None
 
-        from shared.plugins.subagent.config import (
-            expand_plugin_configs,
-            parse_plugin_list,
-        )
+        from shared.plugins.subagent.config import expand_plugin_configs
 
         kwargs: Dict[str, Any] = {}
 
         if self._profile.plugins:
-            # Re-parse in case they weren't split already
-            clean_plugins, preloaded = parse_plugin_list(self._profile.plugins)
-            kwargs["tools"] = clean_plugins
-            if preloaded:
-                kwargs["preloaded_plugins"] = preloaded
+            kwargs["tools"] = self._profile.plugins
+            if self._profile.preloaded_plugins:
+                kwargs["preloaded_plugins"] = self._profile.preloaded_plugins
 
         if self._profile.system_instructions:
             kwargs["system_instructions"] = self._profile.system_instructions

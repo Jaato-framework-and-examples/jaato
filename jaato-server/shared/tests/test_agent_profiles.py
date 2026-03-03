@@ -198,40 +198,44 @@ class TestBuildProfileSessionKwargs:
 
     def test_profile_with_preload_annotations(self):
         """Profile with (preload) annotations produces preloaded_plugins."""
-        from shared.plugins.subagent.config import SubagentProfile, parse_plugin_list
+        from shared.plugins.subagent.config import SubagentProfile
 
+        # Simulate real flow: profile loaded from JSON has clean plugins
+        # and preloaded_plugins already separated
         profile = SubagentProfile(
             name="test",
             description="Test",
-            plugins=["cli", "todo(preload)", "web_search"],
+            plugins=["cli", "todo", "web_search"],
+            preloaded_plugins={"todo"},
         )
 
         kwargs = {}
         if profile.plugins:
-            clean_plugins, preloaded = parse_plugin_list(profile.plugins)
-            kwargs["tools"] = clean_plugins
-            if preloaded:
-                kwargs["preloaded_plugins"] = preloaded
+            kwargs["tools"] = profile.plugins
+            if profile.preloaded_plugins:
+                kwargs["preloaded_plugins"] = profile.preloaded_plugins
 
         assert kwargs["tools"] == ["cli", "todo", "web_search"]
         assert kwargs["preloaded_plugins"] == {"todo"}
 
     def test_profile_with_space_before_preload(self):
         """Profile with space before (preload) annotation is parsed correctly."""
-        from shared.plugins.subagent.config import SubagentProfile, parse_plugin_list
+        from shared.plugins.subagent.config import SubagentProfile
 
+        # Simulate real flow: profile loaded from JSON has clean plugins
+        # and preloaded_plugins already separated
         profile = SubagentProfile(
             name="test",
             description="Test",
-            plugins=["cli", "ast_search (preload)", "todo", "prompt_library (preload)"],
+            plugins=["cli", "ast_search", "todo", "prompt_library"],
+            preloaded_plugins={"ast_search", "prompt_library"},
         )
 
         kwargs = {}
         if profile.plugins:
-            clean_plugins, preloaded = parse_plugin_list(profile.plugins)
-            kwargs["tools"] = clean_plugins
-            if preloaded:
-                kwargs["preloaded_plugins"] = preloaded
+            kwargs["tools"] = profile.plugins
+            if profile.preloaded_plugins:
+                kwargs["preloaded_plugins"] = profile.preloaded_plugins
 
         assert kwargs["tools"] == ["cli", "ast_search", "todo", "prompt_library"]
         assert kwargs["preloaded_plugins"] == {"ast_search", "prompt_library"}
