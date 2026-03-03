@@ -1995,6 +1995,12 @@ class JaatoSession:
         current_tool_names = {t.name for t in (self._tools or [])}
         activated = []
 
+        # Build allowed plugin set from session's tool_plugins (profile filter)
+        allowed_plugins: Optional[set] = None
+        if self._tool_plugins is not None:
+            allowed_plugins = set(self._tool_plugins)
+            allowed_plugins.add("introspection")  # Always allowed
+
         # Get schemas for requested tools from registry
         all_schemas = self._runtime.registry.get_exposed_tool_schemas()
         schema_map = {s.name: s for s in all_schemas}
@@ -2004,6 +2010,17 @@ class JaatoSession:
                 continue  # Already active
             if tool_name not in schema_map:
                 continue  # Tool doesn't exist
+
+            # Enforce profile plugin filter: only activate tools from
+            # plugins that the profile explicitly lists.
+            if allowed_plugins is not None:
+                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
+                if plugin and plugin.name not in allowed_plugins:
+                    self._trace(
+                        f"activate_discovered_tools: skipping '{tool_name}' "
+                        f"(plugin '{plugin.name}' not in profile)"
+                    )
+                    continue
 
             schema = schema_map[tool_name]
             if self._tools is None:

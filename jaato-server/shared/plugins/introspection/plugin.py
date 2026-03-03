@@ -252,6 +252,46 @@ class IntrospectionPlugin:
         """Return user commands (none for this plugin)."""
         return []
 
+    def _get_session_allowed_schemas(self) -> List[ToolSchema]:
+        """Get tool schemas filtered by the current session's allowed plugins.
+
+        When a session is created with a profile that specifies an explicit
+        plugin list (``_tool_plugins``), only tools from those plugins (plus
+        ``introspection``) should be visible.  If no session exists or the
+        session has no plugin restriction (``_tool_plugins is None``), all
+        globally-exposed schemas are returned.
+
+        Returns:
+            Filtered list of ToolSchema objects visible to the current session.
+        """
+        all_schemas = self._registry.get_exposed_tool_schemas()
+
+        session = self._session
+        if session is None:
+            return all_schemas
+
+        allowed_plugins = getattr(session, '_tool_plugins', None)
+        if allowed_plugins is None:
+            return all_schemas
+
+        # Build the effective set: profile plugins + introspection (essential)
+        allowed_set = set(allowed_plugins)
+        allowed_set.add("introspection")
+
+        # Filter schemas to those whose owning plugin is in the allowed set
+        filtered = []
+        for schema in all_schemas:
+            plugin = self._registry.get_plugin_for_tool(schema.name)
+            if plugin is None:
+                # Core tools registered directly on the registry have no
+                # owning plugin — keep them (e.g. dismiss_stream).
+                filtered.append(schema)
+                continue
+            if plugin.name in allowed_set:
+                filtered.append(schema)
+
+        return filtered
+
     def _execute_list_tools(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the list_tools tool.
 
@@ -268,8 +308,8 @@ class IntrospectionPlugin:
         category = args.get("category")
         verbose = args.get("verbose", False)
 
-        # Get all tool schemas from exposed plugins
-        all_schemas = self._registry.get_exposed_tool_schemas()
+        # Get tool schemas filtered by session's allowed plugins
+        all_schemas = self._get_session_allowed_schemas()
 
         # If no category specified, return category summary only
         if not category:
@@ -393,8 +433,8 @@ class IntrospectionPlugin:
         if not isinstance(names, list):
             names = [names]  # Handle single name as array
 
-        # Get all available schemas for lookup
-        all_schemas = self._registry.get_exposed_tool_schemas()
+        # Get schemas filtered by session's allowed plugins
+        all_schemas = self._get_session_allowed_schemas()
         schema_map = {s.name: s for s in all_schemas}
         available_tools = list(schema_map.keys())
 

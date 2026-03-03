@@ -789,8 +789,12 @@ class JaatoRuntime:
     def _get_core_plugins(self) -> List[str]:
         """Find all plugins that provide tools with discoverability='core'.
 
-        These plugins are essential for the framework to function and should
-        always be included regardless of profile configuration.
+        .. note::
+
+           This helper is no longer called by ``_get_essential_plugins`` — a
+           profile's explicit plugin list is now authoritative and only
+           ``introspection`` is auto-added.  The method is retained for
+           potential diagnostic use.
 
         Returns:
             List of plugin names that have at least one core tool.
@@ -814,30 +818,31 @@ class JaatoRuntime:
         return core_plugins
 
     def _get_essential_plugins(self, plugin_names: List[str]) -> List[str]:
-        """Get plugin list with core plugins added automatically.
+        """Get plugin list with only truly essential plugins added.
 
-        Plugins that provide tools with discoverability='core' are essential
-        for the framework to function (e.g., introspection for tool discovery).
-        These plugins are automatically included even if not explicitly listed
-        in profile definitions.
-
-        Also ensures core plugins are properly exposed (initialized) in the
-        registry so they function correctly.
+        Only ``introspection`` is unconditionally essential — it provides the
+        ``list_tools`` / ``get_tool_schemas`` tools that the deferred-loading
+        mechanism depends on.  All other core plugins are **not** auto-added;
+        the profile's explicit plugin list is authoritative.  If a profile
+        omits a plugin, that plugin's tools must not appear in the session,
+        even if the plugin has ``discoverability='core'`` tools.
 
         Args:
-            plugin_names: Original list of plugin names from profile.
+            plugin_names: Plugin names from the profile (authoritative list).
 
         Returns:
-            Plugin list with core plugins added (if not already present).
+            Plugin list with ``introspection`` added (if not already present).
         """
-        # Find all plugins with core tools
-        core_plugins = self._get_core_plugins()
-
         result = list(plugin_names)
-        for name in core_plugins:
+
+        # Only introspection is unconditionally essential (needed for deferred
+        # tool discovery).  Other core plugins are NOT auto-added — the
+        # profile's plugin list takes precedence.
+        essential = ["introspection"]
+        for name in essential:
             if name not in result:
                 result.append(name)
-            # Ensure core plugin is exposed (initialized with registry access)
+            # Ensure the essential plugin is exposed in the registry
             if self._registry and name not in self._registry._exposed:
                 try:
                     self._registry.expose_tool(name)

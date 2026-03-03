@@ -138,6 +138,7 @@ def _make_session(
     session._gc_config = None
     session._system_instruction = None
     session._tools = []
+    session._tool_plugins = None  # No profile restriction by default
     session._deferred_plugin_instructions = set()
     session._preloaded_plugins = set()
 
