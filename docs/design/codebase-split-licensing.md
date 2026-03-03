@@ -33,7 +33,7 @@ pip install "jaato-server[all]" "jaato-tui[all]"
 
 These give you the full open-source framework: 8 model providers, 58 plugins,
 TUI client, web client, GC strategies, telemetry — everything needed to build
-and run agentic AI applications.
+and run single-server agentic AI applications.
 
 ### Premium Installation
 
@@ -65,7 +65,7 @@ pip install git+ssh://git@github.com/Jaato-framework-and-examples/jaato-premium.
 **In requirements.txt:**
 
 ```
-jaato-server>=0.2.48
+jaato-server>=0.2.53
 jaato-premium @ git+ssh://git@github.com/Jaato-framework-and-examples/jaato-premium.git@v1.0.0
 ```
 
@@ -90,22 +90,29 @@ pip install -e jaato-premium/
 ### PUBLIC (MIT) — stays in this repo
 
 Everything that is **framework plumbing** — the engine that makes tools run,
-providers connect, sessions manage state. A fully functional agentic
-orchestrator, but without the opinionated "secret sauce."
+providers connect, sessions manage state. A fully functional single-server
+agentic orchestrator, but without the opinionated "secret sauce" or
+multi-server clustering.
 
-#### jaato-sdk (unchanged)
+#### jaato-sdk
+
 - IPC/WebSocket client protocol
 - Base plugin interfaces
-- Event types, model provider types
+- Event types (including peer event dataclasses — harmless without gossip)
+- Model provider types, `CancelToken`, streaming types
 
 #### jaato-server — core
+
 - `shared/jaato_client.py`, `jaato_runtime.py`, `jaato_session.py`
 - `shared/instruction_budget.py`, `shared/token_accounting.py`
 - `shared/ai_tool_runner.py`, `shared/mcp_context_manager.py`
 - `shared/plugins/base.py`, `shared/plugins/registry.py`
-- `server/` (core, ipc, websocket, session_manager, etc.)
+- `server/core.py`, `server/ipc.py`, `server/websocket.py`
+- `server/session_manager.py` (single-server session management)
+- `server/__main__.py` (daemon entry point with gossip hook points)
 
 #### jaato-server — standard plugins (58 plugin directories)
+
 All existing plugins stay MIT. They are the framework's value as an
 open-source project. Specifically:
 
@@ -135,11 +142,26 @@ antigravity, ollama, nim, zhipuai
 
 **Coordination plugins:** subagent (plugin, config, serializer), references, template, reliability
 
+#### jaato-server — agent profiles infrastructure
+
+The **profile mechanism** stays public (framework plumbing):
+- `SubagentProfile` dataclass, JSON schema, variable expansion
+- Profile file discovery from `.jaato/profiles/`
+- `SessionManager.create_session(profile_name=...)` / `list_profiles()`
+- `SessionProfilesEvent` in SDK events
+- Profile-authoritative plugin visibility (introspection filtering)
+- `--profile` CLI flag
+
+The **curated profile files** themselves (15 JSON files defining specific
+agent types) are premium content — see below.
+
 #### jaato-tui (unchanged)
+
 - Rich terminal client, themes, renderers, keybindings
 - `.jaato.example/` scaffold
 
 #### Other public content
+
 - `docs/` (architecture, design docs, etc.)
 - `web-client/` (React web client)
 - `out-of-tree-plugins/` (plugin development example)
@@ -148,11 +170,17 @@ antigravity, ollama, nim, zhipuai
 
 ### PRIVATE (Commercial) — new `jaato-premium` repo
 
+Two categories of premium content: **methodology** (opinionated knowledge and
+behavioral tuning) and **infrastructure** (multi-server clustering).
+
+#### Category 1: Methodology
+
 Content that represents **opinionated methodology, curated knowledge, and
 behavioral tuning** — the things that make jaato agents work *well* rather
 than just *work*.
 
-#### 1. System Instructions (`instructions/`)
+##### 1. System Instructions (`instructions/`)
+
 **Source:** `.jaato/instructions/00-system-instructions.md`
 
 The 19 behavioral principles (Transparency Mandate, Large Output Protocol,
@@ -163,7 +191,8 @@ on how to make LLM agents behave reliably.
 These become the premium package's default instructions, loaded via
 the same `.jaato/instructions/` mechanism the framework already supports.
 
-#### 2. Knowledge Base (`knowledge/`)
+##### 2. Knowledge Base (`knowledge/`)
+
 **Source:** `knowledge/` (155 files)
 
 - `ADRs/` — Architecture Decision Records (6 ADRs)
@@ -174,34 +203,44 @@ the same `.jaato/instructions/` mechanism the framework already supports.
   compensation) — 10 modules with Handlebars templates
 - `model/` — Knowledge model definitions (domains, standards, authoring prompts)
 
-#### 3. Subagent Profiles (`profiles/`)
-**Source:** `.jaato/profiles/*.json`
+##### 3. Subagent Profiles (`profiles/`)
 
-Curated subagent profile definitions:
-- `skill-code-*` / `skill-mod-code-*` — Coding specialist profiles
-- `validator-tier*` — Multi-tier validation profiles
-- `analyst-*` — Analysis profiles
+**Source:** `.jaato/profiles/*.json` (15 files)
 
-#### 4. Reference Catalog (`references/`)
+Curated subagent profile definitions — the JSON files, not the loading
+infrastructure:
+- `skill-code-*` / `skill-mod-code-*` — Coding specialist profiles (12)
+- `validator-tier*` — Multi-tier validation profiles (3)
+- `analyst-*` — Analysis profiles (1)
+
+The framework discovers and loads these from `.jaato/profiles/`. Premium
+supplies the actual definitions. Users can also write their own.
+
+##### 4. Reference Catalog (`references/`)
+
 **Source:** `.jaato/references/*.json`
 
 Pre-built reference JSON files that link ADRs, ERIs, and modules
 into a structured catalog with semantic embeddings and validation rules.
 
-#### 5. Prompt Templates (`prompt_templates/`)
+##### 5. Prompt Templates (`prompt_templates/`)
+
 **Source:** `jaato-server/shared/prompt_templates/`
 
 - COBOL analysis prompts (identify_code_changes, parse_mod_history)
 - Confluence integration prompts (get_page, search, update_page — CLI & MCP)
 - GitHub integration prompts (get_issue, list_issues, search_issues — CLI & MCP)
 
-#### 6. Curated Prompts (`prompts/`)
-**Source:** `.jaato/prompts/gen-references.md`
+##### 6. Curated Prompts (`prompts/`)
 
-The gen-references prompt — a sophisticated prompt for scanning knowledge
-bases and generating reference catalogs, template indexes, and subagent profiles.
+**Source:** `.jaato/prompts/`
 
-#### 7. Framework Prompt Constants
+- `gen-references.md` — Prompt for scanning knowledge bases and generating
+  reference catalogs, template indexes, and subagent profiles
+- `execute-from-inputs.md` — Autonomous orchestrated execution prompt
+
+##### 7. Framework Prompt Constants
+
 **Source:** `jaato-server/shared/jaato_runtime.py` (lines 26-49)
 
 Three embedded prompt constants:
@@ -213,20 +252,209 @@ These are injected into every system prompt. In the split:
 - The public repo keeps **generic placeholders** (or empty strings)
 - The premium repo provides these via a hook/override mechanism
 
-#### 8. Training Data & Specialized Tools
+##### 8. Training Data & Specialized Tools
+
 - `modlog-training-set-test/` — COBOL modification log training set generator
 - `cli_vs_mcp/` — CLI vs MCP comparison harness
 - `create_self_extractor.py` — Self-extracting archive builder
+
+#### Category 2: Multi-Server Clustering
+
+Server infrastructure enabling distributed jaato deployments — peer
+discovery, remote subagent delegation, workspace replication, and
+cluster management.
+
+##### 9. Gossip Protocol & Peer Management (~5,500 LOC)
+
+| Module | LOC | Description |
+|--------|-----|-------------|
+| `server/peers.py` | 551 | Gossip protocol, peer registry, heartbeats, liveness tracking |
+| `server/remote_spawn.py` | 731 | Remote subagent delegation (origin + remote sides) |
+| `server/workspace_sync.py` | 584 | Git-based workspace replication for remote subagents |
+| `server/server_reliability.py` | 412 | Trust state, failure history, affinity scores for peers |
+| `server/health.py` | 84 | Server health metrics collection (CPU, memory, sessions) |
+| `server/health_http.py` | 301 | HTTP health endpoint + dashboard route dispatch |
+| `server/dashboard/routes.py` | 560 | REST API for cluster config CRUD, Docker launch operations |
+| `server/dashboard/docker_launcher.py` | 755 | Docker Compose generation + container lifecycle management |
+| `server/dashboard/static/index.html` | 1,502 | Self-contained SPA for web-based cluster management |
+
+Plus integration touchpoints in:
+- `server/__main__.py` — `_init_gossip()`, `_load_servers_config()`, CLI args
+  (`--health-port`, `--server-name`, `--servers-json`)
+- `server/session_manager.py` — `set_gossip_context()`,
+  `_configure_gossip_context()`
+- `shared/plugins/environment/plugin.py` — `jaato_agentic_servers` aspect
+- `shared/plugins/subagent/plugin.py` — `server` parameter on
+  `spawn_subagent`, `_execute_remote_spawn()`
+- `tests/e2e/gossip/`, `tests/e2e/workspace-sync/` — Docker-based E2E tests
+
+---
+
+## The Server-Level Split Challenge
+
+The methodology-only premium items (categories 1-8) follow a clean boundary:
+the framework provides a **loading mechanism**, the premium package provides
+the **content**. No framework code changes needed.
+
+The gossip/clustering modules (category 9) are fundamentally different:
+
+1. **They modify core files** — `__main__.py` and `session_manager.py` both
+   gain gossip-specific methods and constructor parameters
+2. **They extend existing plugin APIs** — `subagent` plugin gains a `server`
+   parameter, `environment` plugin gains a `jaato_agentic_servers` aspect
+3. **They add SDK types** — `jaato-sdk/events.py` gets 8 new event types
+   that must be present for deserialization even in non-gossip deployments
+4. **They are conditionally activated** — `servers.json` gates everything,
+   so a vanilla install never activates gossip, but the code is still present
+5. **They include a full dashboard** — REST API, Docker orchestration, and
+   a web SPA that are only useful with clustering
+
+### Split approaches
+
+#### Approach A: Conditional imports (keep code in jaato-server, gate on premium)
+
+Keep the gossip modules in `jaato-server` but make them **import-gated on
+jaato-premium**. The modules exist in the public PyPI package but refuse
+to activate without the premium package installed.
+
+```python
+# server/__main__.py
+def _init_gossip(self) -> None:
+    try:
+        from jaato_premium.gossip import verify_license
+        verify_license()
+    except ImportError:
+        logger.info("Multi-server gossip requires jaato-premium")
+        return
+    # ... proceed with gossip setup
+```
+
+**Pros:** Simplest implementation, no code reorganization needed.
+**Cons:** Premium code ships in the public PyPI package (visible to all).
+Source is inspectable even though it won't run. Enforcement is trivial to
+bypass (just comment out the check).
+
+#### Approach B: Plugin-based gossip (extract to jaato-premium)
+
+Extract all gossip modules into `jaato-premium` and have them register
+via entry points. The public `jaato-server` only contains **hook points**
+(the `set_gossip_context` methods, the `server` parameter schema stub).
+
+```
+jaato-premium/
+├── jaato_premium/
+│   ├── gossip/
+│   │   ├── peers.py
+│   │   ├── remote_spawn.py
+│   │   ├── workspace_sync.py
+│   │   ├── server_reliability.py
+│   │   ├── health.py
+│   │   ├── health_http.py
+│   │   └── dashboard/
+│   │       ├── routes.py
+│   │       ├── docker_launcher.py
+│   │       └── static/index.html
+│   └── ...
+```
+
+The daemon's `__main__.py` would check for the entry point:
+
+```python
+def _init_gossip(self) -> None:
+    eps = importlib.metadata.entry_points(group="jaato.gossip")
+    if not eps:
+        return  # No gossip provider installed
+    gossip_init = eps["init"].load()
+    gossip_init(self)  # Wire everything up
+```
+
+**Pros:** Premium code is truly separate — not in public PyPI. Clean boundary.
+**Cons:** Requires careful interface design. The gossip init function needs
+access to daemon internals (`session_manager`, transport info, CLI args).
+The SDK event types (`PeerHeartbeat`, etc.) must still live in `jaato-sdk`
+for deserialization, or be dynamically registered.
+
+#### Approach C: Separate package `jaato-cluster` (premium, not in jaato-premium)
+
+Create a dedicated `jaato-cluster` package (also private/commercial) rather
+than bundling gossip into `jaato-premium`. This mirrors how many projects
+separate their clustering/enterprise tier.
+
+```
+jaato-cluster/
+├── jaato_cluster/
+│   ├── peers.py
+│   ├── remote_spawn.py
+│   ├── workspace_sync.py
+│   ├── server_reliability.py
+│   ├── health.py
+│   ├── health_http.py
+│   ├── dashboard/
+│   └── daemon_mixin.py      # Mixin/hook that wires into __main__
+```
+
+**Pros:** Clean conceptual boundary (single-server free, multi-server premium).
+Separation of concerns between "methodology premium" and "infrastructure premium."
+**Cons:** Two private repos to maintain. Users who want everything need
+`pip install jaato-premium jaato-cluster`.
+
+#### Approach D: Feature-flagged within jaato-server (free code, premium activation)
+
+All gossip code stays in the public `jaato-server`. The code is MIT-licensed
+and fully visible. But `servers.json` loading and gossip activation require
+a valid **activation key** checked at runtime against the premium package.
+
+This is the "open core" model used by GitLab, Minio, CockroachDB, etc.
+The code is open, the right to run it commercially is gated by license.
+
+**Pros:** No code split needed at all. Community can read, audit, and
+contribute to gossip code. Only licensing changes.
+**Cons:** Requires a license-key mechanism. Blurs the MIT/commercial boundary
+(MIT code with commercial runtime restriction is confusing).
+
+### Recommended approach
+
+**Approach B (plugin-based extraction)** best fits the existing architecture:
+
+1. jaato already has an entry-point plugin system
+2. The gossip modules are naturally self-contained (9 files in `server/`,
+   not scattered changes across `shared/`)
+3. The integration points are narrow — `_init_gossip()` is one method,
+   plugin wiring is two `set_*_context()` calls
+4. The SDK event types can stay in `jaato-sdk` (they're just data classes,
+   harmless without gossip)
+5. The dashboard (routes + Docker launcher + SPA) is entirely self-contained
+   and has zero coupling to existing framework code
+
+The key design work is defining the `jaato.gossip` entry-point interface:
+what the daemon passes to the gossip initializer, and what the initializer
+wires back.
+
+### Integration surface to keep public
+
+Even under Approach B, certain **hook points** must remain in the public
+jaato-server for the plugin to wire into:
+
+- `SessionManager.set_gossip_context()` — stores references for plugin injection
+- `SessionManager._configure_gossip_context()` — wires references into per-session plugins
+- `EnvironmentPlugin.set_gossip_context()` — accepts gossip references
+- `SubagentPlugin.set_peer_context()` — accepts peer registry + remote handler
+- `SubagentPlugin._execute_remote_spawn()` — stub that delegates to the handler
+- `spawn_subagent` tool schema's `server` parameter — conditionally added when handler is present
+- SDK event types (`PeerHeartbeat`, etc.) — data classes, safe to keep public
+
+These are lightweight (a few `Optional[Any]` fields and setter methods) and
+don't expose premium logic.
 
 ---
 
 ## Implementation Approach
 
-### Step 1: Create premium plugin entry point in jaato-server
+### Step 1: Create premium plugin entry points in jaato-server
 
-Add a `jaato.premium` entry-point group to `jaato-server/pyproject.toml`
-that premium plugins can register with. The runtime checks for these at
-startup and loads them if present.
+Add `jaato.premium` and `jaato.gossip` entry-point groups to
+`jaato-server/pyproject.toml` that premium plugins can register with.
+The runtime checks for these at startup and loads them if present.
 
 ### Step 2: Make framework prompt constants pluggable
 
@@ -236,7 +464,14 @@ that:
 1. Checks if a premium prompt provider is registered (via entry point)
 2. Falls back to generic defaults if not
 
-### Step 3: Create jaato-premium repo structure
+### Step 3: Make gossip initialization pluggable
+
+In `__main__.py`, replace the direct `_init_gossip()` implementation with
+an entry-point lookup. The daemon passes a context object (session_manager,
+transport info, CLI args) to the gossip initializer, which wires everything
+up and returns the references the daemon needs.
+
+### Step 4: Create jaato-premium repo structure
 
 ```
 jaato-premium/
@@ -248,15 +483,31 @@ jaato-premium/
 │   ├── prompts.py              # Premium prompt constants (the 3 from jaato_runtime)
 │   ├── instructions/           # 00-system-instructions.md (19 principles)
 │   ├── knowledge/              # ADRs, ERIs, modules, model
-│   ├── profiles/               # Subagent profiles
+│   ├── profiles/               # 15 curated subagent profile JSON files
 │   ├── references/             # Reference catalog JSONs
 │   ├── prompt_templates/       # COBOL, Confluence, GitHub prompts
-│   └── prompts/                # gen-references.md and others
-├── setup.cfg                   # Entry point registration
-└── tests/
+│   ├── prompts/                # gen-references.md, execute-from-inputs.md
+│   └── gossip/                 # Multi-server clustering
+│       ├── __init__.py         # Entry point: init(daemon_context) -> GossipRefs
+│       ├── peers.py
+│       ├── remote_spawn.py
+│       ├── workspace_sync.py
+│       ├── server_reliability.py
+│       ├── health.py
+│       ├── health_http.py
+│       └── dashboard/
+│           ├── routes.py
+│           ├── docker_launcher.py
+│           └── static/index.html
+├── tests/
+│   ├── test_prompts.py
+│   └── e2e/
+│       ├── gossip/
+│       └── workspace-sync/
+└── docker/                     # Dockerfiles for cluster deployments
 ```
 
-### Step 4: Wire premium content loading
+### Step 5: Wire premium content loading
 
 The premium package registers itself via entry points:
 
@@ -266,27 +517,36 @@ The premium package registers itself via entry points:
 prompt_provider = "jaato_premium.prompts:get_prompts"
 instructions = "jaato_premium:get_instructions_path"
 knowledge = "jaato_premium:get_knowledge_path"
+
+[project.entry-points."jaato.gossip"]
+init = "jaato_premium.gossip:init_gossip"
 ```
 
-### Step 5: Move content from public repo
+### Step 6: Move content from public repo
 
 Move (not copy) the premium content out of the public repo:
 - `.jaato/instructions/00-system-instructions.md` → jaato-premium
-- `.jaato/profiles/*.json` → jaato-premium
+- `.jaato/profiles/*.json` (15 files) → jaato-premium
 - `.jaato/references/*.json` → jaato-premium
-- `.jaato/prompts/gen-references.md` → jaato-premium
+- `.jaato/prompts/*.md` → jaato-premium
 - `knowledge/` → jaato-premium
 - `shared/prompt_templates/` → jaato-premium
+- `server/peers.py`, `remote_spawn.py`, `workspace_sync.py`,
+  `server_reliability.py`, `health.py`, `health_http.py` → jaato-premium
+- `server/dashboard/` → jaato-premium
+- `tests/e2e/gossip/`, `tests/e2e/workspace-sync/` → jaato-premium
 - `modlog-training-set-test/` → jaato-premium
 - `cli_vs_mcp/` → jaato-premium
 
 Replace the 3 prompt constants in `jaato_runtime.py` with generic fallbacks.
+Replace `_init_gossip()` in `__main__.py` with entry-point lookup.
 
-### Step 6: Update public repo
+### Step 7: Update public repo
 
 - Keep `.jaato/instructions/` as an empty directory with a README
   explaining that users can add their own instructions
-- Keep `.jaato/profiles/` empty with README
+- Keep `.jaato/profiles/` with a README and one example profile
+  (demonstrating the schema, not production methodology)
 - Keep `.jaato/references/` empty with README
 - Update `CLAUDE.md` to remove references to moved content
 - Update `README.md` to mention the premium package as optional
@@ -298,14 +558,20 @@ Replace the 3 prompt constants in `jaato_runtime.py` with generic fallbacks.
 - **Zero breaking changes** — the public framework works exactly as before
 - **Plugin architecture unchanged** — premium is just more plugins
 - **Existing users unaffected** — `pip install jaato-server` still works
-- **Clear value boundary** — framework (free) vs methodology (premium)
+- **Clear value boundary** — framework (free) vs methodology + clustering (premium)
 - **Simple upgrade path** — `pip install git+ssh://...` adds premium on top
+- **Profile infrastructure stays open** — anyone can create their own profiles
+- **SDK types stay public** — peer event dataclasses are harmless without gossip
 
 ## What Premium Users Get
 
 1. Battle-tested system instructions (19 principles of agent behavior)
 2. Knowledge base with ADRs, ERIs, and code generation modules
-3. Pre-built subagent profiles for coding, validation, and analysis
+3. 15 pre-built subagent profiles for coding, validation, and analysis
 4. Reference catalog with semantic matching
 5. Domain-specific prompt templates (COBOL, Confluence, GitHub)
-6. Optimized framework prompts (anti-fabrication, parallel batching, summarization)
+6. Curated orchestration prompts (gen-references, execute-from-inputs)
+7. Optimized framework prompts (anti-fabrication, parallel batching, summarization)
+8. Multi-server gossip clustering (peer discovery, remote subagent delegation,
+   workspace sync, server reliability tracking, health monitoring)
+9. Cluster management dashboard (web SPA, REST API, Docker orchestration)
