@@ -49,6 +49,7 @@ from jaato_sdk.events import (
     ErrorEvent,
     SessionInfoEvent,
     SessionDescriptionUpdatedEvent,
+    SessionProfilesEvent,
     ContextUpdatedEvent,
     AgentCreatedEvent,
     InstructionBudgetEvent,
@@ -189,6 +190,28 @@ class SessionManager:
         if not workspace_path:
             raise ValueError("workspace_path required for session storage")
         return pathlib.Path(workspace_path) / self._session_config.storage_path
+
+    def _resolve_profile(
+        self,
+        profile_name: str,
+        workspace_path: str,
+    ) -> Optional[Any]:
+        """Resolve an agent profile by name from the workspace.
+
+        Discovers profiles from ``.jaato/profiles/`` in the workspace
+        and returns the matching ``SubagentProfile``, or None if not found.
+
+        Args:
+            profile_name: Name of the profile to look up.
+            workspace_path: Workspace directory containing ``.jaato/profiles/``.
+
+        Returns:
+            The ``SubagentProfile`` instance, or None if not found.
+        """
+        from shared.plugins.subagent.config import discover_profiles
+
+        profiles = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        return profiles.get(profile_name)
 
     def set_event_callback(
         self,
@@ -536,6 +559,7 @@ class SessionManager:
         session_name: Optional[str] = None,
         workspace_path: Optional[str] = None,
         env_overrides: Optional[Dict[str, str]] = None,
+        profile_name: Optional[str] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -545,6 +569,10 @@ class SessionManager:
             workspace_path: Client's working directory for file operations.
             env_overrides: Optional env vars that override the .env file
                           (e.g., JAATO_PROVIDER/MODEL_NAME from post-auth wizard).
+            profile_name: Optional agent profile name. If provided, the profile
+                is loaded from ``.jaato/profiles/`` in the workspace and applied
+                to the session (model, provider, plugins, system instructions,
+                GC configuration, etc.).
 
         Returns:
             The session ID (empty string on failure).
@@ -578,6 +606,19 @@ class SessionManager:
         logger.info(f"Creating session for client {client_id}: env_file={session_env_file}")
         logger.info(f"  Client config: {client_config}")
 
+        # Resolve agent profile if requested
+        profile = None
+        if profile_name and workspace_path:
+            profile = self._resolve_profile(profile_name, workspace_path)
+            if profile is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Agent profile '{profile_name}' not found in .jaato/profiles/",
+                    error_type="ProfileNotFoundError",
+                    recoverable=True,
+                ))
+                return ""
+            logger.info(f"  Using agent profile: {profile_name}")
+
         # Create JaatoServer for this session
         # Provider is determined by env_file, with optional overrides
         server = JaatoServer(
@@ -589,6 +630,7 @@ class SessionManager:
             session_id=session_id,
             env_overrides=env_overrides,
             instruction_token_cache=self._instruction_token_cache,
+            profile=profile,
         )
 
         # Initialize the server (events go directly to requesting client).
@@ -1696,6 +1738,40 @@ class SessionManager:
             logger.error(f"Failed to list persisted sessions: {e}")
             return []
 
+    def list_profiles(
+        self,
+        workspace_path: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List available agent profiles from the workspace.
+
+        Discovers profiles from ``.jaato/profiles/`` and returns summary
+        dicts suitable for client display (profile picker).
+
+        Args:
+            workspace_path: Workspace directory to discover profiles from.
+
+        Returns:
+            List of profile summary dicts with keys: name, description,
+            model, provider, icon_name, plugins.
+        """
+        if not workspace_path:
+            return []
+
+        from shared.plugins.subagent.config import discover_profiles
+
+        profiles = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        result = []
+        for name, profile in profiles.items():
+            result.append({
+                "name": name,
+                "description": profile.description,
+                "model": profile.model,
+                "provider": profile.provider,
+                "icon_name": profile.icon_name,
+                "plugins": profile.plugins,
+            })
+        return result
+
     def list_sessions(self) -> List[RuntimeSessionInfo]:
         """List all sessions (in-memory and on-disk).
 
@@ -1815,6 +1891,7 @@ class SessionManager:
             session_name=session.name,
             model_provider=session.server.model_provider if session.server else "",
             model_name=session.server.model_name if session.server else "",
+            profile_name=session.server.profile_name if session.server else None,
             sessions=sessions_data,
             tools=tools_data,
             models=models_data,

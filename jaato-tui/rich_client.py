@@ -754,7 +754,7 @@ async def _handle_client_side_edit(
 
 async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
                        initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
-                       new_session: bool = False):
+                       new_session: bool = False, profile: Optional[str] = None):
     """Run the client in IPC mode, connecting to a server.
 
     Uses full PTDisplay for rich TUI experience with plan panel, scrolling output,
@@ -767,6 +767,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         initial_prompt: Optional initial prompt to send.
         single_prompt: Optional single prompt (non-interactive mode).
         new_session: Whether to start a new session instead of resuming default.
+        profile: Optional agent profile name from .jaato/profiles/ to apply.
     """
     # Load env vars for client-side components (OutputBuffer tracing, etc.)
     load_dotenv(env_file)
@@ -2068,8 +2069,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ipc_trace("Input handler: requesting session")
         # Request session - new or default
         try:
-            if new_session:
-                await client.create_session()
+            if new_session or profile:
+                await client.create_session(profile=profile)
             else:
                 await client.get_default_session()
             ipc_trace("Input handler: session requested")
@@ -2667,6 +2668,12 @@ To connect to a specific server: jaato --connect /path/to/socket
         help="Start with a new session instead of resuming the default"
     )
     parser.add_argument(
+        "--profile",
+        type=str,
+        metavar="NAME",
+        help="Create a new session using an agent profile from .jaato/profiles/"
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help="Run in headless mode with file output (requires --prompt). "
@@ -2751,6 +2758,7 @@ To connect to a specific server: jaato --connect /path/to/socket
             auto_start=not args.no_auto_start,
             env_file=args.env_file,
             new_session=args.new_session,
+            profile=args.profile,
         ))
         return
 
@@ -2762,6 +2770,7 @@ To connect to a specific server: jaato --connect /path/to/socket
         initial_prompt=args.initial_prompt,
         single_prompt=args.prompt,
         new_session=args.new_session,
+        profile=args.profile,
     ))
 
 

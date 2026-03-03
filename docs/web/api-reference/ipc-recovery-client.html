@@ -145,7 +145,11 @@ async def main():
         on_status_change=on_status,
     )
     await client.connect()
-    session_id = await client.create_session("work")
+
+    # Create session with an agent profile
+    session_id = await client.create_session(
+        "work", profile="researcher-claude"
+    )
     client.set_session_id(session_id)
 
     await client.send_message("Hello!")
@@ -389,10 +393,18 @@ print(client.is_closed)       # True</code></pre>
 
           <h3>create_session</h3>
           <div class="method-signature">
-            <span class="token-keyword">async</span> <span class="method-name">create_session</span>(<span class="param">name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>) -> <span class="type">Optional[str]</span>
+            <span class="token-keyword">async</span> <span class="method-name">create_session</span>(<br>
+            &nbsp;&nbsp;<span class="param">name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">profile</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">Optional[str]</span>
           </div>
 
-          <p>Create a new session on the server. Automatically tracks the session ID for recovery.</p>
+          <p>
+            Create a new session on the server. Automatically tracks the session ID
+            for recovery. Optionally initialize the session with a predefined
+            <a href="../enterprise/subagent-architecture.html#agent-profiles">agent profile</a>
+            that configures the model, provider, tools, system instructions, and GC settings.
+          </p>
 
           <ul class="param-list">
             <li>
@@ -400,6 +412,17 @@ print(client.is_closed)       # True</code></pre>
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
               <div class="param-desc">Human-readable name for the session.</div>
+            </li>
+            <li>
+              <span class="param-name">profile</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Name of an agent profile from <code>.jaato/profiles/</code> to apply.
+                The profile configures the session's model, provider, tools, system
+                instructions, and GC settings. Profile files are JSON files in the
+                workspace's <code>.jaato/profiles/</code> directory.
+              </div>
             </li>
           </ul>
 
@@ -459,9 +482,50 @@ print(client.is_closed)       # True</code></pre>
 
           <h3 id="session-id">session_id <span class="badge badge-property">property</span></h3>
           <p>Returns the current session ID, or <code>None</code> if no session is tracked.</p>
+
+          <h3>list_profiles</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">list_profiles</span>() -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Request the server to list available agent profiles. The server responds
+            with a <code>SessionProfilesEvent</code> containing profile summaries
+            (name, description, model, provider, icon). Profiles are discovered from
+            <code>.jaato/profiles/*.json</code> files in the workspace.
+          </p>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <code>ReconnectingError</code> if currently reconnecting.<br>
+              <code>ConnectionClosedError</code> if connection is closed.
+            </div>
+          </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Creating and tracking sessions</div>
+          <div class="code-label">Creating a session with a profile</div>
+          <div class="code-block">
+            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+await client.connect()
+
+# List available profiles first
+await client.list_profiles()
+async for event in client.events():
+    if isinstance(event, SessionProfilesEvent):
+        for p in event.profiles:
+            print(f"{p['name']}: {p['description']}")
+        break
+
+# Create a session with a profile
+session_id = await client.create_session(
+    name="research-task",
+    profile="researcher-claude",
+)
+client.set_session_id(session_id)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Creating and tracking sessions</div>
           <div class="code-block">
             <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
 await client.connect()

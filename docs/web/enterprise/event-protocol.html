@@ -251,13 +251,14 @@
             <tr><td><strong>Context &amp; Tokens</strong></td><td>4</td><td>S&rarr;C</td><td>Token usage, budget breakdown, turn progress</td></tr>
             <tr><td><strong>System Messages</strong></td><td>5</td><td>S&rarr;C</td><td>Info, errors, help, init progress, retries</td></tr>
             <tr><td><strong>Client Requests</strong></td><td>8</td><td>C&rarr;S</td><td>Messages, commands, config, history</td></tr>
+            <tr><td><strong>Agent Profiles</strong></td><td>1</td><td>S&rarr;C</td><td>Available profile listing for session creation</td></tr>
             <tr><td><strong>Workspace Config</strong></td><td>8</td><td>S&harr;C</td><td>Workspace list, create, select, configure</td></tr>
           </tbody>
         </table>
 
         <h2 id="connection-lifecycle">Connection Lifecycle</h2>
         <p>
-          When a client connects, it receives a <code>ConnectedEvent</code> with protocol version and <code>server_info</code> (including <code>server_version</code> — the server's package version from <code>pyproject.toml</code>), followed by a <code>SessionInfoEvent</code> containing the full state snapshot: session metadata, available tools, model list, and command history. Clients can compare <code>server_version</code> against their own minimum to refuse connection to obsolete servers. This allows the client to fully initialize without additional requests.
+          When a client connects, it receives a <code>ConnectedEvent</code> with protocol version and <code>server_info</code> (including <code>server_version</code> — the server's package version from <code>pyproject.toml</code>), followed by a <code>SessionInfoEvent</code> containing the full state snapshot: session metadata, available tools, model list, and command history. If the session was created with an <a href="subagent-architecture.html#agent-profiles">agent profile</a>, the <code>SessionInfoEvent</code> includes a <code>profile_name</code> field identifying which profile is active. Clients can compare <code>server_version</code> against their own minimum to refuse connection to obsolete servers. This allows the client to fully initialize without additional requests.
         </p>
         <p>
           On reconnection (e.g., after network drop), the server calls <code>emit_current_state()</code> which replays all relevant events: session info, tracked agents and their status, instruction budgets, and clears any stale pending permission/clarification requests.
@@ -300,6 +301,36 @@
         <p>
           Clarification follows a similar pattern but supports multiple sequential questions, each with options for single or multi-choice answers.
         </p>
+
+        <h2 id="agent-profile-events">Agent Profile Events</h2>
+        <p>
+          Agent profiles allow sessions to be created with predefined configurations (model, provider, tools, system instructions, GC settings). Profile-related events enable clients to discover and display available profiles.
+        </p>
+        <ul>
+          <li><strong><code>SessionProfilesEvent</code></strong> (S&rarr;C) &mdash; Lists available agent profiles from the workspace's <code>.jaato/profiles/</code> directory. Each profile entry includes <code>name</code>, <code>description</code>, <code>model</code>, <code>provider</code>, and <code>icon_name</code>. Emitted in response to a <code>session.profiles</code> command.</li>
+        </ul>
+        <p>
+          Additionally, the existing <code>SessionInfoEvent</code> now includes an optional <code>profile_name</code> field (<code>str | None</code>). When a session is created with a profile (via <code>create_session(profile="...")</code>), this field identifies the active profile. Clients can use this to display the profile name or icon in the session header.
+        </p>
+
+        <h3>IPC Commands</h3>
+        <table>
+          <thead>
+            <tr><th>Command</th><th>Args</th><th>Response Event</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>session.new</code></td>
+              <td><code>[name] [--profile &lt;name&gt;]</code></td>
+              <td><code>SessionInfoEvent</code> (with <code>profile_name</code> if profile used)</td>
+            </tr>
+            <tr>
+              <td><code>session.profiles</code></td>
+              <td><em>none</em></td>
+              <td><code>SessionProfilesEvent</code></td>
+            </tr>
+          </tbody>
+        </table>
 
         <h2 id="transport">Transport Layers</h2>
         <p>

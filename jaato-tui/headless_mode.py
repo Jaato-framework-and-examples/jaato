@@ -27,6 +27,7 @@ async def run_headless_mode(
     auto_start: bool = True,
     env_file: str = ".env",
     new_session: bool = False,
+    profile: Optional[str] = None,
 ):
     """Run the client in headless mode with file output.
 
@@ -53,6 +54,7 @@ async def run_headless_mode(
         auto_start: Whether to auto-start the server if not running.
         env_file: Path to .env file for auto-started server.
         new_session: Whether to start a new session instead of resuming default.
+        profile: Optional agent profile name from .jaato/profiles/ to apply.
     """
     # Load env vars
     load_dotenv(env_file)
@@ -137,8 +139,8 @@ async def run_headless_mode(
         return
 
     # Request new session if specified (recommended for headless to ensure isolation)
-    if new_session:
-        await client.create_session()
+    if new_session or profile:
+        await client.create_session(profile=profile)
 
     # Set default permission policy to "allow" for headless mode
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses

@@ -142,6 +142,9 @@ class EventType(str, Enum):
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
 
+    # Agent profiles (Client <-> Server)
+    SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
+
     # Workspace file monitoring (Server -> Client)
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
@@ -698,6 +701,7 @@ class SessionInfoEvent(Event):
     session_name: str = ""
     model_provider: str = ""
     model_name: str = ""
+    profile_name: Optional[str] = None  # Agent profile used to create this session
     # State snapshot for local use
     sessions: List[Dict[str, Any]] = field(default_factory=list)
     # ^ [{id, name, model_provider, model_name, is_loaded, client_count, turn_count}, ...]
@@ -721,6 +725,20 @@ class SessionDescriptionUpdatedEvent(Event):
     type: EventType = field(default=EventType.SESSION_DESCRIPTION_UPDATED)
     session_id: str = ""
     description: str = ""
+
+
+@dataclass
+class SessionProfilesEvent(Event):
+    """List of available agent profiles for session creation.
+
+    Sent in response to a ``session.profiles`` command. Each profile
+    is a summary dict containing the profile's name, description,
+    model, provider, icon_name, and list of plugins — enough for a
+    client to display a profile picker.
+    """
+    type: EventType = field(default=EventType.SESSION_PROFILES)
+    profiles: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ [{name, description, model, provider, icon_name, plugins}, ...]
 
 
 # =============================================================================
@@ -1320,6 +1338,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
+    EventType.SESSION_PROFILES.value: SessionProfilesEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,

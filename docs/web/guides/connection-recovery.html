@@ -212,7 +212,10 @@ async def main():
     await client.connect()
 
     # Create a session and track it for recovery
-    session_id = await client.create_session("my-session")
+    # Optionally pass profile= to use an agent profile
+    session_id = await client.create_session(
+        "my-session", profile="researcher-claude"
+    )
     client.set_session_id(session_id)
 
     # Use normally — recovery is automatic
@@ -544,7 +547,10 @@ async for event in client.events():
 await client.connect()
 
 # Create session and track it
-session_id = await client.create_session("work")
+# (optionally with an agent profile)
+session_id = await client.create_session(
+    "work", profile="researcher-claude"
+)
 client.set_session_id(session_id)
 
 # After reconnection, the client automatically

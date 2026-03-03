@@ -143,6 +143,39 @@ When model returns multiple function calls, jaato executes them in parallel usin
 - Maximum 8 concurrent tools per turn
 - Thread-safe callbacks via thread-local storage
 
+### Agent Profiles
+
+Sessions can be created with a predefined agent profile that configures model, provider, plugins, system instructions, and GC strategy. Profiles are JSON files in `.jaato/profiles/`.
+
+**Profile schema** (same as `SubagentProfile` in `shared/plugins/subagent/config.py`):
+```json
+{
+  "name": "researcher",
+  "description": "Deep research profile",
+  "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
+  "plugins": ["cli", "web_search", "memory", "todo(preload)"],
+  "plugin_configs": {},
+  "system_instructions": "You are a research analyst...",
+  "gc": { "type": "budget", "threshold_percent": 80.0 }
+}
+```
+
+**SDK API:**
+```python
+# List available profiles
+await client.list_profiles()  # → SessionProfilesEvent
+
+# Create session with a profile
+await client.create_session(profile="researcher")
+```
+
+**IPC command protocol:**
+- `session.new [name] --profile <name>` — create session from profile
+- `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
+
+**Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, system_instructions, plugin_configs, GC) during `initialize()`.
+
 ### Subagent Architecture
 
 Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:

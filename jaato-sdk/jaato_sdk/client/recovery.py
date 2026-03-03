@@ -418,11 +418,18 @@ class IPCRecoveryClient:
             return True
         return False
 
-    async def create_session(self, name: Optional[str] = None) -> Optional[str]:
+    async def create_session(
+        self,
+        name: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> Optional[str]:
         """Create a new session.
 
         Args:
             name: Optional name for the session.
+            profile: Optional agent profile name. If provided, the session
+                will be configured using the predefined profile from
+                ``.jaato/profiles/<name>.json``.
 
         Returns:
             Session ID if created, None otherwise.
@@ -434,11 +441,26 @@ class IPCRecoveryClient:
         self._check_can_send()
 
         if self._client:
-            session_id = await self._client.create_session(name)
+            session_id = await self._client.create_session(name, profile=profile)
             if session_id:
                 self._session_id = session_id
             return session_id
         return None
+
+    async def list_profiles(self) -> None:
+        """Request list of available agent profiles.
+
+        The server responds with a ``SessionProfilesEvent`` containing
+        profile summaries discovered from ``.jaato/profiles/``.
+
+        Raises:
+            ReconnectingError: If currently reconnecting.
+            ConnectionClosedError: If connection is closed.
+        """
+        self._check_can_send()
+
+        if self._client:
+            await self._client.list_profiles()
 
     async def get_default_session(self) -> None:
         """Get or create the default session."""

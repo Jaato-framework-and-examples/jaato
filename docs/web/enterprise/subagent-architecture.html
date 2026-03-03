@@ -145,10 +145,17 @@
           The core architectural insight is separating <strong>shared environment</strong> (<code>JaatoRuntime</code>) from <strong>per-agent state</strong> (<code>JaatoSession</code>). The runtime holds provider configurations, plugin registry, permissions, and the token ledger. Each session holds its own conversation history, model selection, system instructions, and GC state. This split enables fast subagent spawning &mdash; <code>runtime.create_session()</code> is lightweight with no redundant SDK connections.
         </p>
 
-        <h2 id="subagent-profiles">Subagent Profiles</h2>
+        <h2 id="agent-profiles">Agent Profiles</h2>
         <p>
-          Subagent behavior is configured through <code>SubagentProfile</code> dataclasses, which can be defined inline in code or discovered from <code>.jaato/profiles/*.json</code> files. Each profile specifies the model, provider, plugins, system instructions, max turns, auto-approved tools, GC configuration, and an icon for UI display.
+          Agent behavior is configured through <code>SubagentProfile</code> dataclasses, which can be defined inline in code or discovered from <code>.jaato/profiles/*.json</code> files. Each profile specifies the model, provider, plugins, system instructions, max turns, auto-approved tools, GC configuration, and an icon for UI display.
         </p>
+        <p>
+          Profiles are used in two contexts:
+        </p>
+        <ul>
+          <li><strong>Subagent delegation</strong> &mdash; The main agent delegates tasks to subagents configured by profiles (the original use case)</li>
+          <li><strong>Main session creation</strong> &mdash; Any SDK client can create a new session with a profile via <code>create_session(profile="...")</code>, applying the profile's model, provider, tools, system instructions, and GC configuration to the main session itself. See the <a href="../api-reference/ipc-recovery-client.html#sessions">IPCRecoveryClient Sessions API</a>.</li>
+        </ul>
         <table>
           <thead>
             <tr><th>Profile Field</th><th>Purpose</th></tr>

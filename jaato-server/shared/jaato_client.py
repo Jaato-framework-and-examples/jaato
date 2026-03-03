@@ -427,7 +427,8 @@ class JaatoClient:
         self,
         registry: 'PluginRegistry',
         permission_plugin: Optional['PermissionPlugin'] = None,
-        ledger: Optional[TokenLedger] = None
+        ledger: Optional[TokenLedger] = None,
+        session_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure tools from plugin registry.
 
@@ -435,6 +436,11 @@ class JaatoClient:
             registry: PluginRegistry with exposed plugins.
             permission_plugin: Optional permission plugin for access control.
             ledger: Optional token ledger for accounting.
+            session_kwargs: Optional extra keyword arguments passed to
+                ``JaatoRuntime.create_session()``.  Used by agent profiles
+                to inject ``tools``, ``system_instructions``,
+                ``plugin_configs``, ``provider_name``, and
+                ``preloaded_plugins`` into the main session.
         """
         if not self._runtime:
             raise RuntimeError("Client not connected. Call connect() first.")
@@ -442,8 +448,11 @@ class JaatoClient:
         # Configure runtime with plugins
         self._runtime.configure_plugins(registry, permission_plugin, ledger)
 
-        # Create main session
-        self._session = self._runtime.create_session(model=self._model_name)
+        # Create main session, applying profile overrides if provided
+        kwargs: Dict[str, Any] = {"model": self._model_name}
+        if session_kwargs:
+            kwargs.update(session_kwargs)
+        self._session = self._runtime.create_session(**kwargs)
 
         # Pass UI hooks to session if they were set before configure_tools
         if self._ui_hooks:

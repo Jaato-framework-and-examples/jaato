@@ -392,9 +392,19 @@ class JaatoDaemon:
                 workspace_path = self._ipc_server.get_client_workspace(client_id)
 
             if cmd == "session.new":
-                name = event.args[0] if event.args else None
+                # Parse args: positional name and --profile flag
+                name = None
+                profile_name = None
+                args_iter = iter(event.args)
+                for arg in args_iter:
+                    if arg == "--profile":
+                        profile_name = next(args_iter, None)
+                    elif name is None:
+                        name = arg
+
                 new_session_id = self._session_manager.create_session(
-                    client_id, name, workspace_path=workspace_path
+                    client_id, name, workspace_path=workspace_path,
+                    profile_name=profile_name,
                 )
                 if new_session_id:
                     # Update logging context now that session_id is known.
@@ -500,6 +510,14 @@ class JaatoDaemon:
                 } for s in sessions]
 
                 self._route_event(client_id, SessionListEvent(sessions=session_data))
+                return
+
+            elif cmd == "session.profiles":
+                from jaato_sdk.events import SessionProfilesEvent
+                profiles = self._session_manager.list_profiles(
+                    workspace_path=workspace_path,
+                )
+                self._route_event(client_id, SessionProfilesEvent(profiles=profiles))
                 return
 
             elif cmd == "session.default":

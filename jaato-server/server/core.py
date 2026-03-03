@@ -165,6 +165,7 @@ class JaatoServer:
         session_id: Optional[str] = None,
         env_overrides: Optional[Dict[str, str]] = None,
         instruction_token_cache: Optional[InstructionTokenCache] = None,
+        profile: Optional[Any] = None,
     ):
         """Initialize the server.
 
@@ -181,10 +182,15 @@ class JaatoServer:
             instruction_token_cache: Optional shared cache for instruction
                 token counts, passed from ``SessionManager`` so cached counts
                 survive across session creates/restores within a daemon.
+            profile: Optional ``SubagentProfile`` instance to apply during
+                initialization. When set, the profile's model, provider,
+                plugins, system_instructions, plugin_configs, and GC
+                settings override the session defaults.
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
         self._provider = provider
+        self._profile = profile
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
         self._workspace_path = workspace_path
@@ -744,7 +750,7 @@ class JaatoServer:
             active_bundle = active_cert_bundle(verbose=False)
 
             model_name = get_config("MODEL_NAME")
-            if not model_name:
+            if not model_name and not (self._profile and self._profile.model):
                 self.emit(ErrorEvent(
                     error="Missing required environment variables: JAATO_PROVIDER and MODEL_NAME",
                     error_type="ConfigurationError",
@@ -755,6 +761,13 @@ class JaatoServer:
             # Get provider from session env (takes precedence over constructor arg)
             session_provider = get_config("JAATO_PROVIDER")
             provider_to_use = session_provider or self._provider
+
+            # Apply agent profile overrides for model and provider
+            if self._profile:
+                if self._profile.model:
+                    model_name = self._profile.model
+                if self._profile.provider:
+                    provider_to_use = self._profile.provider
 
             # Get provider-specific settings (may be None for non-Google providers)
             project_id = get_config("PROJECT_ID")
@@ -939,7 +952,12 @@ class JaatoServer:
         # config and tokens are loaded from the correct location
         self._emit_init_progress("Configuring tools", "running", 5, total_steps)
         with self._with_session_env(), self._in_workspace():
-            self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+            # Build session creation kwargs from agent profile (if any)
+            session_kwargs = self._build_profile_session_kwargs()
+            self._jaato.configure_tools(
+                self.registry, self.permission_plugin, self.ledger,
+                session_kwargs=session_kwargs,
+            )
 
             # Wire formatter pipeline into runtime so output formatters can
             # contribute system instructions (e.g., mermaid rendering hints)
@@ -949,6 +967,12 @@ class JaatoServer:
                     runtime.set_formatter_pipeline(self._formatter_pipeline)
 
             gc_result = load_gc_from_file()
+
+            # Agent profile GC overrides take precedence over file-based GC
+            if self._profile and self._profile.gc and not gc_result:
+                from shared.plugins.subagent.config import gc_profile_to_plugin_config
+                gc_result = gc_profile_to_plugin_config(self._profile.gc)
+
         gc_threshold = None
         gc_strategy = None
         gc_target_percent = None
@@ -1033,6 +1057,50 @@ class JaatoServer:
         ))
 
         return True
+
+    def _build_profile_session_kwargs(self) -> Optional[Dict[str, Any]]:
+        """Build ``create_session()`` kwargs from the agent profile.
+
+        Returns:
+            Dict of kwargs for ``JaatoRuntime.create_session()``, or None
+            if no profile is set.
+        """
+        if not self._profile:
+            return None
+
+        from shared.plugins.subagent.config import (
+            expand_plugin_configs,
+            parse_plugin_list,
+        )
+
+        kwargs: Dict[str, Any] = {}
+
+        if self._profile.plugins:
+            # Re-parse in case they weren't split already
+            clean_plugins, preloaded = parse_plugin_list(self._profile.plugins)
+            kwargs["tools"] = clean_plugins
+            if preloaded:
+                kwargs["preloaded_plugins"] = preloaded
+
+        if self._profile.system_instructions:
+            kwargs["system_instructions"] = self._profile.system_instructions
+
+        if self._profile.plugin_configs:
+            expanded = expand_plugin_configs(
+                self._profile.plugin_configs,
+                workspace_root_override=self._workspace_path,
+            )
+            kwargs["plugin_configs"] = expanded
+
+        if self._profile.provider:
+            kwargs["provider_name"] = self._profile.provider
+
+        return kwargs or None
+
+    @property
+    def profile_name(self) -> Optional[str]:
+        """Name of the agent profile used for this session, if any."""
+        return self._profile.name if self._profile else None
 
     def _create_main_agent(self) -> None:
         """Create the main agent entry.
