@@ -169,6 +169,12 @@ class SessionManager:
         # creates/restores within the same daemon process.
         self._instruction_token_cache = InstructionTokenCache()
 
+        # Gossip infrastructure references (set by daemon via set_gossip_context)
+        self._peer_registry = None   # Optional[PeerRegistry]
+        self._health_collector = None  # Optional[ServerHealthCollector]
+        self._remote_handler = None   # Optional[RemoteSpawnHandler]
+        self._server_reliability = None  # Optional[ServerReliabilityTracker]
+
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
     def _session_storage_dir(self, workspace_path: str) -> pathlib.Path:
@@ -212,6 +218,63 @@ class SessionManager:
 
         profiles = discover_profiles(".jaato/profiles", base_path=workspace_path)
         return profiles.get(profile_name)
+
+    def set_gossip_context(
+        self,
+        peer_registry,
+        health_collector,
+        remote_handler=None,
+        server_reliability=None,
+    ) -> None:
+        """Store gossip infrastructure references for injection into plugins.
+
+        Called by the daemon after gossip initialization. The references are
+        injected into each session's environment plugin (cluster topology)
+        and subagent plugin (remote delegation) during create_session()
+        and _load_session().
+
+        Args:
+            peer_registry: The PeerRegistry instance.
+            health_collector: The ServerHealthCollector instance.
+            remote_handler: The RemoteSpawnHandler instance (Phase 3).
+            server_reliability: The ServerReliabilityTracker instance (Phase 4).
+        """
+        self._peer_registry = peer_registry
+        self._health_collector = health_collector
+        self._remote_handler = remote_handler
+        self._server_reliability = server_reliability
+
+    def _configure_gossip_context(self, server: JaatoServer) -> None:
+        """Inject gossip references into a session's environment and subagent plugins.
+
+        Wires the PeerRegistry and ServerHealthCollector into the environment
+        plugin (for cluster topology) and the RemoteSpawnHandler into the
+        subagent plugin (for remote delegation).
+
+        Args:
+            server: The JaatoServer instance whose registry to search.
+        """
+        if self._peer_registry is None or self._health_collector is None:
+            return
+        if not server or not server.registry:
+            return
+
+        # Wire environment plugin (Phase 2 — cluster topology, Phase 4 — reliability)
+        env_plugin = server.registry.get_plugin("environment")
+        if env_plugin and hasattr(env_plugin, 'set_gossip_context'):
+            env_plugin.set_gossip_context(
+                self._peer_registry,
+                self._health_collector,
+                server_reliability=getattr(self, '_server_reliability', None),
+            )
+
+        # Wire subagent plugin (Phase 3 — remote delegation)
+        if self._remote_handler is not None:
+            subagent_plugin = server.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_peer_context'):
+                subagent_plugin.set_peer_context(
+                    self._peer_registry, self._remote_handler,
+                )
 
     def set_event_callback(
         self,
@@ -647,6 +710,7 @@ class SessionManager:
         # Configure TODO plugin with session-scoped storage
         session_dir = self._session_storage_dir(workspace_path) / session_id
         self._configure_todo_storage(server, session_dir)
+        self._configure_gossip_context(server)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -953,6 +1017,7 @@ class SessionManager:
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
+        self._configure_gossip_context(server)
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
@@ -2225,6 +2290,109 @@ class SessionManager:
                     if self._save_session(session):
                         saved += 1
         return saved
+
+    # ------------------------------------------------------------------
+    # Ephemeral sessions (Phase 3 — remote subagent delegation)
+    # ------------------------------------------------------------------
+
+    def run_ephemeral_session(
+        self,
+        profile_json: str,
+        inline_config_json: str,
+        prompt: str,
+        agent_name: str,
+        on_output: Any,
+        workspace_path: Optional[str] = None,
+    ) -> str:
+        """Create and run an ephemeral session for a remote subagent request.
+
+        This is a blocking call intended to be run from a background thread
+        (via ``asyncio.to_thread``).  The session is not persisted to disk
+        and is not visible in the session list.
+
+        When ``workspace_path`` is provided (Phase 5 workspace replication),
+        the ephemeral session runs with that directory as its working
+        directory, and ``JAATO_WORKSPACE_ROOT`` is set accordingly.  The
+        server's plugin registry also gets the workspace path so plugins
+        can discover project files.
+
+        Args:
+            profile_json: JSON-serialized SubagentProfile from the origin.
+            inline_config_json: JSON-serialized inline config (empty if profile-based).
+            prompt: The full prompt to send.
+            agent_name: Display name for the subagent.
+            on_output: Callback ``(source: str, text: str, mode: str) -> None``
+                invoked for each output chunk.
+            workspace_path: Optional workspace directory for the session.
+                When provided, CWD and ``JAATO_WORKSPACE_ROOT`` are set to
+                this path for the duration of the session.
+
+        Returns:
+            Summary string from the model's final response.
+        """
+        import json as _json
+        from server.core import JaatoServer
+
+        # Parse profile/config
+        profile_data = _json.loads(profile_json) if profile_json else {}
+        inline_data = _json.loads(inline_config_json) if inline_config_json else {}
+
+        # Determine model and plugins from profile or inline config
+        model = profile_data.get("model") or inline_data.get("model")
+        provider = profile_data.get("provider") or inline_data.get("provider")
+        plugins = profile_data.get("plugins") or inline_data.get("plugins", [])
+        system_instructions = (
+            profile_data.get("system_instructions")
+            or inline_data.get("system_instructions")
+        )
+        max_turns = profile_data.get("max_turns") or inline_data.get("max_turns", 10)
+
+        # Save and set workspace context if provided (Phase 5)
+        prev_cwd = None
+        prev_workspace_root = None
+        if workspace_path:
+            prev_cwd = os.getcwd()
+            prev_workspace_root = os.environ.get("JAATO_WORKSPACE_ROOT")
+            os.chdir(workspace_path)
+            os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
+
+        try:
+            # Create a temporary JaatoServer for the ephemeral session
+            server = JaatoServer()
+            server.initialize(
+                model=model,
+                provider_name=provider,
+                tools=plugins,
+                system_instructions=system_instructions,
+            )
+
+            # Set workspace path on the registry so plugins discover it
+            if workspace_path and hasattr(server, 'registry') and server.registry:
+                server.registry.set_workspace_path(workspace_path)
+
+            # Run the prompt and collect output
+            collected_output = []
+
+            def _output_callback(source: str, text: str, mode: str = "") -> None:
+                collected_output.append(text)
+                if on_output:
+                    on_output(source, text, mode)
+
+            response = server.send_message(prompt, on_output=_output_callback)
+
+            # Cleanup
+            server.shutdown()
+
+            return response or "".join(collected_output) or "Task completed."
+
+        finally:
+            # Restore previous workspace context
+            if prev_cwd is not None:
+                os.chdir(prev_cwd)
+            if prev_workspace_root is not None:
+                os.environ["JAATO_WORKSPACE_ROOT"] = prev_workspace_root
+            elif workspace_path:
+                os.environ.pop("JAATO_WORKSPACE_ROOT", None)
 
     def shutdown(self) -> None:
         """Shutdown all sessions, saving to disk first."""

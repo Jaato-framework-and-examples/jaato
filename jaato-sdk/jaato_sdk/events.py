@@ -149,6 +149,16 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
 
+    # Peer channel events (server-to-server gossip)
+    PEER_HEARTBEAT = "peer.heartbeat"
+    PEER_SPAWN_REQUEST = "peer.spawn_request"
+    PEER_SPAWN_ACCEPTED = "peer.spawn_accepted"
+    PEER_SPAWN_REJECTED = "peer.spawn_rejected"
+    PEER_AGENT_OUTPUT = "peer.agent_output"
+    PEER_AGENT_COMPLETED = "peer.agent_completed"
+    PEER_STOP_REQUEST = "peer.stop_request"
+    PEER_STOP_ACKNOWLEDGED = "peer.stop_acknowledged"
+
 
 # =============================================================================
 # Base Event
@@ -1292,6 +1302,142 @@ class InterruptedTurnRecoveredEvent(Event):
 
 
 # =============================================================================
+# Peer Channel Events (Server-to-Server Gossip)
+# =============================================================================
+
+@dataclass
+class PeerHeartbeatEvent(Event):
+    """Heartbeat sent between peer servers at a configurable interval.
+
+    Contains server identity, workload metrics, and health data used by the
+    PeerRegistry to track peer liveness and by the environment aspect (Phase 2)
+    to expose cluster state to the model.
+    """
+    type: EventType = field(default=EventType.PEER_HEARTBEAT)
+    server_id: str = ""
+    server_name: str = ""
+    server_version: str = ""
+    active_sessions: int = 0
+    active_agents: int = 0
+    available_providers: List[str] = field(default_factory=list)
+    available_models: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    uptime_seconds: float = 0.0
+    # Server-level reliability self-report (Phase 4).
+    # Primitives only — no enum imports in SDK.
+    trust_state: str = "trusted"
+    success_rate_1h: float = 1.0
+    escalated_tools: int = 0
+
+
+# =============================================================================
+# Peer Spawn Events (Server-to-Server Remote Subagent Delegation)
+# =============================================================================
+
+@dataclass
+class PeerSpawnRequestEvent(Event):
+    """Request to spawn a subagent on a remote peer server.
+
+    Sent from the origin server (where the model called
+    ``spawn_subagent(server=...)``) to the remote peer that should execute
+    the subagent.  The ``request_id`` correlates all subsequent events in
+    this spawn lifecycle.
+    """
+    type: EventType = field(default=EventType.PEER_SPAWN_REQUEST)
+    request_id: str = ""
+    origin_server: str = ""
+    agent_name: str = ""
+    task: str = ""
+    context: str = ""
+    profile_json: str = ""
+    inline_config_json: str = ""
+    # Workspace replication fields (Phase 5)
+    workspace_git_url: str = ""
+    workspace_branch: str = ""
+    workspace_commit: str = ""
+    workspace_temp_branch: str = ""
+
+
+@dataclass
+class PeerSpawnAcceptedEvent(Event):
+    """Confirmation that a remote peer accepted the spawn request.
+
+    Sent back to the origin server once the remote has created the
+    ephemeral session and is about to start processing.
+    """
+    type: EventType = field(default=EventType.PEER_SPAWN_ACCEPTED)
+    request_id: str = ""
+    remote_agent_id: str = ""
+
+
+@dataclass
+class PeerSpawnRejectedEvent(Event):
+    """Notification that a remote peer rejected the spawn request.
+
+    The ``reason`` field contains a human-readable explanation (e.g.
+    capacity limits, missing provider, unknown profile).
+    """
+    type: EventType = field(default=EventType.PEER_SPAWN_REJECTED)
+    request_id: str = ""
+    reason: str = ""
+
+
+@dataclass
+class PeerAgentOutputEvent(Event):
+    """Streamed output chunk from a remote subagent.
+
+    Sent from the remote server back to the origin as the subagent
+    produces output.  The origin's ``RemoteSpawnHandler`` forwards these
+    to the parent session via ``inject_prompt``.
+    """
+    type: EventType = field(default=EventType.PEER_AGENT_OUTPUT)
+    request_id: str = ""
+    remote_agent_id: str = ""
+    text: str = ""
+    source: str = ""  # "model" or "tool"
+
+
+@dataclass
+class PeerAgentCompletedEvent(Event):
+    """Signal that a remote subagent has finished execution.
+
+    ``success`` indicates whether the subagent completed normally.
+    ``summary`` contains a brief result description; ``error`` is
+    populated only when ``success`` is False.
+    """
+    type: EventType = field(default=EventType.PEER_AGENT_COMPLETED)
+    request_id: str = ""
+    remote_agent_id: str = ""
+    success: bool = True
+    summary: str = ""
+    error: str = ""
+    # Workspace replication field (Phase 5)
+    workspace_modified: bool = False
+
+
+@dataclass
+class PeerStopRequestEvent(Event):
+    """Request to cancel a running remote subagent.
+
+    Sent from the origin server when the parent session wants to stop
+    a previously spawned remote subagent.
+    """
+    type: EventType = field(default=EventType.PEER_STOP_REQUEST)
+    request_id: str = ""
+    remote_agent_id: str = ""
+
+
+@dataclass
+class PeerStopAcknowledgedEvent(Event):
+    """Confirmation that a remote peer received and processed the stop request."""
+    type: EventType = field(default=EventType.PEER_STOP_ACKNOWLEDGED)
+    request_id: str = ""
+    remote_agent_id: str = ""
+
+
+# =============================================================================
 # Serialization Helpers
 # =============================================================================
 
@@ -1369,6 +1515,15 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file monitoring
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
+    # Peer channel
+    EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
+    EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
+    EventType.PEER_SPAWN_ACCEPTED.value: PeerSpawnAcceptedEvent,
+    EventType.PEER_SPAWN_REJECTED.value: PeerSpawnRejectedEvent,
+    EventType.PEER_AGENT_OUTPUT.value: PeerAgentOutputEvent,
+    EventType.PEER_AGENT_COMPLETED.value: PeerAgentCompletedEvent,
+    EventType.PEER_STOP_REQUEST.value: PeerStopRequestEvent,
+    EventType.PEER_STOP_ACKNOWLEDGED.value: PeerStopAcknowledgedEvent,
 }
 
 

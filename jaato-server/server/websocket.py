@@ -11,12 +11,16 @@ Usage:
 """
 
 import asyncio
+import errno
 import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
 import threading
+
+if TYPE_CHECKING:
+    from .peers import PeerRegistry
 
 try:
     import websockets
@@ -100,6 +104,7 @@ class JaatoWSServer:
         host: str = "localhost",
         port: int = 8080,
         workspace_root: Optional[str] = None,
+        peer_registry: Optional["PeerRegistry"] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -109,6 +114,9 @@ class JaatoWSServer:
             workspace_root: Root directory for workspaces. Remote clients select
                 from subdirectories; each workspace has its own .env file that
                 determines the provider.
+            peer_registry: Optional PeerRegistry for server-to-server gossip.
+                When set, inbound connections with ``X-Jaato-Peer: true`` header
+                are routed to the registry instead of normal client handling.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -118,6 +126,7 @@ class JaatoWSServer:
         self.host = host
         self.port = port
         self._workspace_root = workspace_root
+        self._peer_registry = peer_registry
 
         # Server state
         self._server: Optional[Any] = None
@@ -147,39 +156,44 @@ class JaatoWSServer:
         JaatoServer initialization is deferred until a workspace is selected
         and configured by the client.
         """
-        # WebSocket server requires workspace_root for remote clients
-        if not self._workspace_root:
-            raise RuntimeError(
-                "WebSocket server requires --workspace-root. "
-                "Remote clients select workspaces from the server."
-            )
-
-        self._workspace_manager = WorkspaceManager(self._workspace_root)
-        self._workspace_manager.discover_workspaces()
-        logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
+        # Initialize workspace manager if root is provided.
+        # When running in daemon mode without workspace_root, the WS server
+        # still accepts peer gossip connections and IPC-attached client events.
+        if self._workspace_root:
+            self._workspace_manager = WorkspaceManager(self._workspace_root)
+            self._workspace_manager.discover_workspaces()
+            logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
 
         # Start WebSocket server
-        async with websockets.serve(
-            self._handle_client,
-            self.host,
-            self.port,
-            ping_interval=30,
-            ping_timeout=10,
-        ) as server:
-            self._server = server
-            logger.info(f"WebSocket server listening on ws://{self.host}:{self.port}")
+        try:
+            async with websockets.serve(
+                self._handle_client,
+                self.host,
+                self.port,
+                ping_interval=30,
+                ping_timeout=10,
+            ) as server:
+                self._server = server
+                logger.info(f"WebSocket server listening on ws://{self.host}:{self.port}")
 
-            # Run event broadcaster and wait for shutdown
-            broadcast_task = asyncio.create_task(self._broadcast_loop())
+                # Run event broadcaster and wait for shutdown
+                broadcast_task = asyncio.create_task(self._broadcast_loop())
 
-            try:
-                await self._shutdown_event.wait()
-            finally:
-                broadcast_task.cancel()
                 try:
-                    await broadcast_task
-                except asyncio.CancelledError:
-                    pass
+                    await self._shutdown_event.wait()
+                finally:
+                    broadcast_task.cancel()
+                    try:
+                        await broadcast_task
+                    except asyncio.CancelledError:
+                        pass
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                raise OSError(
+                    e.errno,
+                    f"Cannot start WebSocket server: port {self.port} is already in use",
+                ) from None
+            raise
 
         # Cleanup
         if self._jaato_server:
@@ -269,7 +283,21 @@ class JaatoWSServer:
                 logger.info(f"Client disconnected: {client_id}")
 
     async def _handle_client(self, websocket: ServerConnection) -> None:
-        """Handle a single client connection."""
+        """Handle a single client connection.
+
+        Peer servers identify themselves with an ``X-Jaato-Peer: true`` header.
+        When detected, the connection is handed off to the PeerRegistry and
+        never enters normal client handling.
+        """
+        # Peer detection — route server-to-server connections to gossip handler
+        if (
+            self._peer_registry
+            and websocket.request
+            and websocket.request.headers.get("X-Jaato-Peer") == "true"
+        ):
+            await self._peer_registry.handle_peer_connection(websocket)
+            return
+
         # Assign client ID
         async with self._lock:
             self._client_counter += 1

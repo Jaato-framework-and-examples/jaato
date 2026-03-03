@@ -1,0 +1,17 @@
+name: E2E Workspace Sync Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  workspace-sync-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run E2E workspace sync test
+        working-directory: tests/e2e/workspace-sync
+        run: ./run.sh
