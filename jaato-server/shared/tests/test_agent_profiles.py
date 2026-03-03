@@ -216,6 +216,26 @@ class TestBuildProfileSessionKwargs:
         assert kwargs["tools"] == ["cli", "todo", "web_search"]
         assert kwargs["preloaded_plugins"] == {"todo"}
 
+    def test_profile_with_space_before_preload(self):
+        """Profile with space before (preload) annotation is parsed correctly."""
+        from shared.plugins.subagent.config import SubagentProfile, parse_plugin_list
+
+        profile = SubagentProfile(
+            name="test",
+            description="Test",
+            plugins=["cli", "ast_search (preload)", "todo", "prompt_library (preload)"],
+        )
+
+        kwargs = {}
+        if profile.plugins:
+            clean_plugins, preloaded = parse_plugin_list(profile.plugins)
+            kwargs["tools"] = clean_plugins
+            if preloaded:
+                kwargs["preloaded_plugins"] = preloaded
+
+        assert kwargs["tools"] == ["cli", "ast_search", "todo", "prompt_library"]
+        assert kwargs["preloaded_plugins"] == {"ast_search", "prompt_library"}
+
     def test_profile_with_system_instructions(self):
         """Profile system_instructions are passed through."""
         from shared.plugins.subagent.config import SubagentProfile
@@ -362,3 +382,78 @@ class TestSessionNewArgParsing:
         name, profile = self._parse_session_new_args(["--profile"])
         assert name is None
         assert profile is None
+
+
+class TestProfilePermissionConfig:
+    """Tests for profile permission config being applied to the middleware."""
+
+    def test_permission_init_config_merges_profile_policy(self):
+        """Profile's plugin_configs.permission overrides the default policy."""
+        # Simulate the logic in JaatoServer.initialize() that merges
+        # the profile's permission config into the middleware init config.
+        from shared.plugins.subagent.config import SubagentProfile
+
+        profile = SubagentProfile(
+            name="test-agent",
+            description="Test agent with allow policy",
+            plugin_configs={
+                "permission": {
+                    "policy": {
+                        "defaultPolicy": "allow",
+                        "blacklist": {
+                            "tools": [],
+                            "patterns": [],
+                            "arguments": {
+                                "cli_based_tool": {
+                                    "command": ["rm -rf", "sudo"]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+
+        # Default middleware config (hardcoded in core.py)
+        permission_init_config = {
+            "channel_type": "queue",
+            "channel_config": {"use_colors": False},
+            "policy": {
+                "defaultPolicy": "ask",
+                "whitelist": {"tools": [], "patterns": []},
+                "blacklist": {"tools": [], "patterns": []},
+            }
+        }
+
+        # Apply profile overrides (same logic as core.py)
+        if profile.plugin_configs:
+            profile_perm_config = profile.plugin_configs.get("permission")
+            if profile_perm_config:
+                permission_init_config.update(profile_perm_config)
+
+        # The profile's policy should override the default "ask"
+        assert permission_init_config["policy"]["defaultPolicy"] == "allow"
+        # Channel config should be preserved (not in profile override)
+        assert permission_init_config["channel_type"] == "queue"
+        # Blacklist from profile should be present
+        assert "cli_based_tool" in permission_init_config["policy"]["blacklist"]["arguments"]
+
+    def test_permission_init_config_unchanged_without_profile(self):
+        """Without a profile, default 'ask' policy is used."""
+        permission_init_config = {
+            "channel_type": "queue",
+            "channel_config": {"use_colors": False},
+            "policy": {
+                "defaultPolicy": "ask",
+                "whitelist": {"tools": [], "patterns": []},
+                "blacklist": {"tools": [], "patterns": []},
+            }
+        }
+
+        profile = None
+        if profile and hasattr(profile, 'plugin_configs') and profile.plugin_configs:
+            profile_perm_config = profile.plugin_configs.get("permission")
+            if profile_perm_config:
+                permission_init_config.update(profile_perm_config)
+
+        assert permission_init_config["policy"]["defaultPolicy"] == "ask"

@@ -854,7 +854,7 @@ class JaatoServer:
         # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
 
         self.permission_plugin = PermissionPlugin()
-        self.permission_plugin.initialize({
+        permission_init_config: Dict[str, Any] = {
             "channel_type": "queue",
             "channel_config": {"use_colors": False},
             "policy": {
@@ -862,7 +862,13 @@ class JaatoServer:
                 "whitelist": {"tools": [], "patterns": []},
                 "blacklist": {"tools": [], "patterns": []},
             }
-        })
+        }
+        # Apply agent profile's permission config (policy, channel overrides)
+        if self._profile and self._profile.plugin_configs:
+            profile_perm_config = self._profile.plugin_configs.get("permission")
+            if profile_perm_config:
+                permission_init_config.update(profile_perm_config)
+        self.permission_plugin.initialize(permission_init_config)
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
         # Set up formatter pipeline for server-side output formatting

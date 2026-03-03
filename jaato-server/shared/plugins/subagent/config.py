@@ -18,8 +18,12 @@ def parse_plugin_entry(entry: str) -> Tuple[str, bool]:
     annotation to force all of the plugin's tools (including discoverable
     ones) to be loaded into the initial context rather than deferred.
 
+    An optional space before the parenthesised annotation is accepted so
+    that both ``"template(preload)"`` and ``"template (preload)"`` work.
+
     Args:
-        entry: Plugin entry string, e.g. ``"template"`` or ``"template(preload)"``.
+        entry: Plugin entry string, e.g. ``"template"``, ``"template(preload)"``,
+            or ``"template (preload)"``.
 
     Returns:
         Tuple of (plugin_name, is_preloaded).
@@ -27,10 +31,12 @@ def parse_plugin_entry(entry: str) -> Tuple[str, bool]:
     Examples:
         >>> parse_plugin_entry("template(preload)")
         ('template', True)
+        >>> parse_plugin_entry("template (preload)")
+        ('template', True)
         >>> parse_plugin_entry("cli")
         ('cli', False)
     """
-    match = re.match(r'^(\w+)\(preload\)$', entry)
+    match = re.match(r'^(\w+)\s*\(preload\)$', entry)
     if match:
         return match.group(1), True
     return entry, False
