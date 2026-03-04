@@ -851,6 +851,8 @@ def gc_profile_to_plugin_config(
     # Create GCConfig for the session
     gc_config = GCConfig(
         threshold_percent=gc_profile.threshold_percent,
+        target_percent=gc_profile.target_percent,
+        pressure_percent=gc_profile.pressure_percent,
         max_turns=gc_profile.max_turns,
         preserve_recent_turns=gc_profile.preserve_recent_turns,
         plugin_config=gc_profile.plugin_config,
