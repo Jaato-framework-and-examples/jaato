@@ -301,6 +301,9 @@ class CopilotClient:
                     except httpx.HTTPStatusError:
                         pass  # Fall through to original error handling
 
+            # Streaming responses must be read before accessing .text
+            if e.response.stream and not e.response.is_stream_consumed:
+                e.response.read()
             status_code = e.response.status_code
             error_body = e.response.text
             try:
