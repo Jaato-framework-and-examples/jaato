@@ -134,10 +134,10 @@ class TestProfileDiscoveryForSession:
 
             # Use discover_profiles directly (same as _resolve_profile uses)
             from shared.plugins.subagent.config import discover_profiles
-            profiles = discover_profiles(".jaato/profiles", base_path=workspace)
+            result = discover_profiles(".jaato/profiles", base_path=workspace)
 
-            assert "test-agent" in profiles
-            profile = profiles["test-agent"]
+            assert "test-agent" in result.profiles
+            profile = result.profiles["test-agent"]
             assert profile.description == "A test agent profile"
             assert profile.plugins == ["cli", "todo"]
             assert profile.system_instructions == "You are a test agent."
@@ -151,16 +151,16 @@ class TestProfileDiscoveryForSession:
             profiles_dir.mkdir(parents=True)
 
             from shared.plugins.subagent.config import discover_profiles
-            profiles = discover_profiles(".jaato/profiles", base_path=workspace)
+            result = discover_profiles(".jaato/profiles", base_path=workspace)
 
-            assert profiles.get("nonexistent") is None
+            assert result.profiles.get("nonexistent") is None
 
     def test_resolve_profile_no_profiles_dir(self):
         """Missing .jaato/profiles/ directory returns empty dict."""
         with tempfile.TemporaryDirectory() as workspace:
             from shared.plugins.subagent.config import discover_profiles
-            profiles = discover_profiles(".jaato/profiles", base_path=workspace)
-            assert profiles == {}
+            result = discover_profiles(".jaato/profiles", base_path=workspace)
+            assert result.profiles == {}
 
 
 class TestBuildProfileSessionKwargs:

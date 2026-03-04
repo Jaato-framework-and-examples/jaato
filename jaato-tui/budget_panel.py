@@ -117,9 +117,7 @@ class BudgetPanel:
         """
         if agent_id == "_total":
             return "Total"
-        if agent_id == "main":
-            return "Main"
-        name = self._agent_names.get(agent_id, agent_id)
+        name = self._agent_names.get(agent_id, "Main" if agent_id == "main" else agent_id)
         if len(name) > max_len:
             return name[:max_len - 1] + "…"
         return name

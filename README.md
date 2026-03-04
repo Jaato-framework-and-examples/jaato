@@ -318,7 +318,6 @@ jaato/
 ├── docs/                          # Comprehensive documentation (45+ docs)
 ├── examples/                      # Usage examples
 ├── out-of-tree-plugins/           # Third-party plugin template
-├── cli_vs_mcp/                    # CLI vs MCP benchmarking harness
 ├── demo-scripts/                  # YAML-driven demo recording
 └── scripts/                       # Utility scripts
 ```
@@ -376,20 +375,6 @@ jaato/
 
 ## Tooling
 
-### CLI vs MCP Harness
-
-Benchmark token usage between CLI and MCP tool approaches:
-
-```bash
-.venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
-  --domain github \
-  --scenarios list_issues \
-  --domain-params '{"owner": "your-org", "repo": "your-repo"}' \
-  --verbose
-```
-
-Supported domains: GitHub, Confluence. See `cli_vs_mcp/` for full documentation.
-
 ### Sequence Diagram Generator
 
 Generate sequence diagrams from execution traces:
@@ -426,4 +411,8 @@ termtosvg -c "python demo-scripts/run_demo.py demo.yaml" -g 100x40 demo.svg
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+Business Source License 1.1 (BSL 1.1) — free for internal use, self-hosted deployments, and contributions. Converts to Apache 2.0 on 2030-09-01. See [LICENSE](LICENSE) for full terms.
+
+## Premium Extensions
+
+[jaato-premium](https://github.com/Jaato-framework-and-examples/jaato-premium) is an optional commercial package that adds curated system instructions, subagent profiles, knowledge modules, and multi-server gossip clustering. The public framework is fully functional without it — premium adds opinionated methodology and distributed infrastructure on top.

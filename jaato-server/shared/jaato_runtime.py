@@ -5,7 +5,10 @@ and subagents). This separates the "environment" (connections, plugins, permissi
 from the "session" (conversation history, per-agent state).
 """
 
+import importlib.metadata
+import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -22,7 +25,17 @@ if TYPE_CHECKING:
     from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
 
-# Framework-level instruction appended to all system prompts and tool results
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Framework prompt constants
+#
+# These are functional defaults necessary for correct agent behavior.
+# The jaato-premium package can provide enhanced versions via the
+# ``jaato.premium`` → ``prompt_provider`` entry point.
+# ---------------------------------------------------------------------------
+
+# Anti-fabrication + relentless completion — core safety behavior
 _TASK_COMPLETION_INSTRUCTION = (
     "After each action, continue working until the request is truly fulfilled. "
     "Pause only for permissions or clarifications—never from uncertainty. "
@@ -31,7 +44,7 @@ _TASK_COMPLETION_INSTRUCTION = (
     "cannot be verified, mark it failed honestly—do not invent success."
 )
 
-# Parallel tool execution guidance - encourages model to batch independent operations
+# Parallel tool execution guidance — basic efficiency
 _PARALLEL_TOOL_GUIDANCE = (
     "When you need to perform multiple independent operations (e.g., reading several files, "
     "searching multiple patterns, fetching multiple URLs), issue all tool calls in a single "
@@ -39,7 +52,7 @@ _PARALLEL_TOOL_GUIDANCE = (
     "significantly reducing latency."
 )
 
-# Turn-end summary guidance - encourages model to summarize after complex tool-using turns
+# Turn-end summary guidance — needed for GC to work effectively
 _TURN_SUMMARY_INSTRUCTION = (
     "After completing a complex turn involving multiple tool calls, provide a concise summary "
     "of what was done and why. This helps maintain context for future turns and enables "
@@ -47,6 +60,93 @@ _TURN_SUMMARY_INSTRUCTION = (
     "goals accomplished, rationale for non-obvious decisions, and next steps if applicable. "
     "Skip summaries for simple single-tool lookups or direct conversational responses."
 )
+
+
+def _apply_premium_prompt_overrides() -> None:
+    """Load premium prompt overrides if a ``jaato.premium`` prompt provider is installed.
+
+    Looks for a ``prompt_provider`` entry point in the ``jaato.premium``
+    group.  If found, calls it to get a dict of ``{constant_name: value}``
+    and patches the module-level constants.
+
+    Called once at module load time.
+    """
+    global _TASK_COMPLETION_INSTRUCTION, _PARALLEL_TOOL_GUIDANCE, _TURN_SUMMARY_INSTRUCTION
+
+    eps = importlib.metadata.entry_points()
+    if sys.version_info >= (3, 12):
+        premium_eps = eps.select(group="jaato.premium", name="prompt_provider")
+    elif sys.version_info >= (3, 10):
+        premium_eps = eps.select(group="jaato.premium")
+        premium_eps = [ep for ep in premium_eps if ep.name == "prompt_provider"]
+    else:
+        premium_eps = [
+            ep for ep in eps.get("jaato.premium", [])
+            if ep.name == "prompt_provider"
+        ]
+
+    for ep in premium_eps:
+        try:
+            provider_fn = ep.load()
+            overrides = provider_fn()
+            if not isinstance(overrides, dict):
+                logger.warning("Premium prompt_provider returned %s, expected dict", type(overrides).__name__)
+                continue
+            if "task_completion" in overrides:
+                _TASK_COMPLETION_INSTRUCTION = overrides["task_completion"]
+            if "parallel_tool_guidance" in overrides:
+                _PARALLEL_TOOL_GUIDANCE = overrides["parallel_tool_guidance"]
+            if "turn_summary" in overrides:
+                _TURN_SUMMARY_INSTRUCTION = overrides["turn_summary"]
+            logger.debug("Premium prompt overrides applied: %s", list(overrides.keys()))
+            return  # Only one provider
+        except Exception:
+            logger.warning("Failed to load premium prompt_provider", exc_info=True)
+
+
+_apply_premium_prompt_overrides()
+
+
+# Cache for premium content paths — resolved once per entry-point name.
+_premium_content_cache: Dict[str, Optional[str]] = {}
+
+
+def _get_premium_content_path(name: str) -> Optional[str]:
+    """Return a filesystem path provided by a ``jaato.premium`` entry point.
+
+    Premium content entry points (``instructions``, ``profiles``, etc.)
+    return a directory path where the premium package stores its content
+    files.  Results are cached for the lifetime of the process.
+
+    Args:
+        name: The entry-point name within the ``jaato.premium`` group
+            (e.g. ``"instructions"``, ``"profiles"``).
+
+    Returns:
+        Absolute path string, or ``None`` if no provider is registered.
+    """
+    if name in _premium_content_cache:
+        return _premium_content_cache[name]
+
+    result = None
+    eps = importlib.metadata.entry_points()
+    if sys.version_info >= (3, 12):
+        matches = eps.select(group="jaato.premium", name=name)
+    elif sys.version_info >= (3, 10):
+        matches = [ep for ep in eps.select(group="jaato.premium") if ep.name == name]
+    else:
+        matches = [ep for ep in eps.get("jaato.premium", []) if ep.name == name]
+
+    for ep in matches:
+        try:
+            provider_fn = ep.load()
+            result = provider_fn()
+            break
+        except Exception:
+            logger.warning("Failed to load premium content path '%s'", name, exc_info=True)
+
+    _premium_content_cache[name] = result
+    return result
 
 
 def _get_sandbox_guidance() -> Optional[str]:
@@ -195,9 +295,18 @@ class JaatoRuntime:
         The combined contents are prepended to all agent system instructions,
         ensuring consistent behavior across main agent and all subagents.
         """
-        # Primary: look for an instructions/ folder
         # Use explicit workspace_path when provided (daemon mode), else cwd
         base = self._workspace_path or Path.cwd()
+
+        all_parts: List[str] = []
+
+        # 1. Premium instructions (loaded first — baseline behavioral layer)
+        premium_dir = _get_premium_content_path("instructions")
+        if premium_dir and Path(premium_dir).is_dir():
+            premium_parts = self._load_instruction_files(Path(premium_dir))
+            all_parts.extend(premium_parts)
+
+        # 2. Workspace or user instructions (layered on top of premium)
         search_dirs = [
             base / ".jaato" / "instructions",
             Path.home() / ".jaato" / "instructions",
@@ -207,8 +316,12 @@ class JaatoRuntime:
             if instructions_dir.is_dir():
                 parts = self._load_instruction_files(instructions_dir)
                 if parts:
-                    self._base_system_instructions = "\n\n".join(parts)
-                    return
+                    all_parts.extend(parts)
+                    break  # First match wins for workspace/user layer
+
+        if all_parts:
+            self._base_system_instructions = "\n\n".join(all_parts)
+            return
 
         # Fallback: legacy single-file path
         legacy_paths = [
@@ -1062,15 +1175,13 @@ class JaatoRuntime:
             if ctx_instruction:
                 result_parts.append(ctx_instruction)
 
-        # 6. Framework-level task completion instruction (always included)
-        result_parts.append(_TASK_COMPLETION_INSTRUCTION)
-
-        # 7. Parallel tool guidance (when parallel execution is enabled)
-        if _is_parallel_tools_enabled():
+        # 6. Framework-level prompt constants (provided by jaato-premium)
+        if _TASK_COMPLETION_INSTRUCTION:
+            result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+        if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
             result_parts.append(_PARALLEL_TOOL_GUIDANCE)
-
-        # 8. Turn-end summary guidance (always included)
-        result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        if _TURN_SUMMARY_INSTRUCTION:
+            result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
         return "\n\n".join(result_parts)
 

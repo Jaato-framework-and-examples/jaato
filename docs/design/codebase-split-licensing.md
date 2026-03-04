@@ -279,18 +279,19 @@ into a structured catalog with semantic embeddings and validation rules.
   reference catalogs, template indexes, and subagent profiles
 - `execute-from-inputs.md` — Autonomous orchestrated execution prompt
 
-##### 7. Framework Prompt Constants
+##### 7. Framework Prompt Constants (PUBLIC — stays in jaato-server)
 
-**Source:** `jaato-server/shared/jaato_runtime.py` (lines 26-49)
+**Source:** `jaato-server/shared/jaato_runtime.py`
 
 Three embedded prompt constants:
 - `_TASK_COMPLETION_INSTRUCTION` — Anti-fabrication + relentless completion
 - `_PARALLEL_TOOL_GUIDANCE` — Parallel tool batching guidance
 - `_TURN_SUMMARY_INSTRUCTION` — Turn-end summarization guidance
 
-These are injected into every system prompt. In the split:
-- The public repo keeps **generic placeholders** (or empty strings)
-- The premium repo provides these via a hook/override mechanism
+These are **necessary for correct agent behavior** (safety, efficiency, GC)
+and stay in the public repo as functional defaults. The premium package can
+provide **enhanced versions** via the `jaato.premium` → `prompt_provider`
+entry point, but the base agent works correctly without premium installed.
 
 ##### 8. Training Data & Specialized Tools
 

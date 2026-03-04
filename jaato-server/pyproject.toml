@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.2.59"
+version = "0.3.0"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
 ]
@@ -116,6 +116,17 @@ gc_budget = "shared.plugins.gc_budget:create_plugin"
 cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
 cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
 cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
+
+# Entry points for premium extensions
+# The jaato-premium package registers prompt providers, content paths,
+# and gossip infrastructure via these groups.
+[project.entry-points."jaato.premium"]
+# Reserved for jaato-premium: prompt_provider, instructions, profiles, etc.
+
+# Entry points for daemon extensions (e.g., gossip clustering from jaato-premium).
+# Extensions are loaded at daemon startup; see server/__main__.py _load_extensions().
+[project.entry-points."jaato.extensions"]
+# Reserved — external packages register extensions in this group.
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -16,11 +16,8 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Set
 import threading
-
-if TYPE_CHECKING:
-    from .peers import PeerRegistry
 
 try:
     import websockets
@@ -104,7 +101,6 @@ class JaatoWSServer:
         host: str = "localhost",
         port: int = 8080,
         workspace_root: Optional[str] = None,
-        peer_registry: Optional["PeerRegistry"] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -114,9 +110,6 @@ class JaatoWSServer:
             workspace_root: Root directory for workspaces. Remote clients select
                 from subdirectories; each workspace has its own .env file that
                 determines the provider.
-            peer_registry: Optional PeerRegistry for server-to-server gossip.
-                When set, inbound connections with ``X-Jaato-Peer: true`` header
-                are routed to the registry instead of normal client handling.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -126,7 +119,10 @@ class JaatoWSServer:
         self.host = host
         self.port = port
         self._workspace_root = workspace_root
-        self._peer_registry = peer_registry
+
+        # Connection interceptors registered by daemon extensions.
+        # See ``set_connection_interceptor()`` for the protocol.
+        self._interceptors: list = []
 
         # Server state
         self._server: Optional[Any] = None
@@ -282,21 +278,57 @@ class JaatoWSServer:
                 del self._clients[client_id]
                 logger.info(f"Client disconnected: {client_id}")
 
+    def set_connection_interceptor(
+        self,
+        check: Callable,
+        handler: Callable,
+    ) -> None:
+        """Register an interceptor for incoming WebSocket connections.
+
+        Interceptors are evaluated in registration order **before** normal
+        client handling.  When ``check(websocket)`` returns ``True``, the
+        connection is handed off to ``handler(websocket)`` and never enters
+        the regular client flow.
+
+        This is the primary mechanism for daemon extensions (e.g., gossip
+        clustering) to route special connections to custom handlers.
+
+        Args:
+            check: A callable ``(websocket) -> bool`` that inspects the
+                inbound connection (e.g., checking request headers) and
+                returns ``True`` if this interceptor should handle it.
+            handler: An async callable ``(websocket) -> None`` that takes
+                over the connection when ``check`` returns ``True``.
+                The handler is responsible for the full connection lifecycle.
+
+        Example (from a daemon extension's ``start()`` method)::
+
+            ws_server.set_connection_interceptor(
+                check=lambda ws: (
+                    ws.request
+                    and ws.request.headers.get("X-My-Header") == "true"
+                ),
+                handler=self._handle_special_connection,
+            )
+        """
+        self._interceptors.append((check, handler))
+
     async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single client connection.
 
-        Peer servers identify themselves with an ``X-Jaato-Peer: true`` header.
-        When detected, the connection is handed off to the PeerRegistry and
-        never enters normal client handling.
+        Before normal client handling, registered interceptors are checked.
+        If any interceptor's ``check`` returns ``True``, the connection is
+        handed off to that interceptor's ``handler`` and this method returns.
         """
-        # Peer detection — route server-to-server connections to gossip handler
-        if (
-            self._peer_registry
-            and websocket.request
-            and websocket.request.headers.get("X-Jaato-Peer") == "true"
-        ):
-            await self._peer_registry.handle_peer_connection(websocket)
-            return
+        # Check registered interceptors (e.g., peer gossip connections)
+        for check, handler in self._interceptors:
+            try:
+                if check(websocket):
+                    await handler(websocket)
+                    return
+            except Exception as exc:
+                logger.error("Connection interceptor failed: %s", exc)
+                return
 
         # Assign client ID
         async with self._lock:

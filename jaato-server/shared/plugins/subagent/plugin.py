@@ -126,9 +126,9 @@ class SubagentPlugin:
         self._plan_reporter: Optional[Any] = None  # TodoReporter instance
         # Workspace path (set by registry broadcast in server mode)
         self._workspace_path: Optional[str] = None
-        # Peer gossip references for remote subagent delegation (Phase 3)
-        self._peer_registry: Optional[Any] = None   # PeerRegistry
-        self._remote_handler: Optional[Any] = None   # RemoteSpawnHandler
+        # Remote spawn handler registered by a daemon extension (e.g., gossip).
+        # See ``register_remote_handler()`` for the protocol.
+        self._remote_spawn_handler: Optional[Any] = None
 
     @property
     def name(self) -> str:
@@ -181,9 +181,9 @@ class SubagentPlugin:
 
         # Auto-discover profiles from profiles_dir if enabled
         if self._config.auto_discover_profiles:
-            discovered = discover_profiles(self._config.profiles_dir)
+            discovery = discover_profiles(self._config.profiles_dir)
             # Merge discovered profiles, with explicit profiles taking precedence
-            for name, profile in discovered.items():
+            for name, profile in discovery.profiles.items():
                 if name not in self._config.profiles:
                     self._config.profiles[name] = profile
                 else:
@@ -1123,20 +1123,48 @@ class SubagentPlugin:
         self._workspace_path = path
         logger.debug("SubagentPlugin: workspace path set to %s", path)
 
-    def set_peer_context(self, peer_registry: Any, remote_handler: Any) -> None:
-        """Set gossip infrastructure references for remote subagent delegation.
+    def register_remote_handler(self, handler: Any) -> None:
+        """Register a handler for remote subagent delegation.
 
-        Called by the daemon (via SessionManager) after gossip initialization.
-        When these are set, the ``server`` parameter on ``spawn_subagent``
-        becomes functional.
+        When set, the ``server`` parameter on the ``spawn_subagent`` tool
+        becomes functional — instead of running a subagent locally, the
+        request is delegated to a remote server via this handler.
+
+        This is typically called by a daemon extension (e.g., gossip
+        clustering from jaato-premium) during session initialization,
+        through a session hook.
+
+        The handler must be a callable with the following keyword arguments:
+
+        ================ ====== ========================================
+        Argument         Type   Description
+        ================ ====== ========================================
+        ``server``       str    Name of the target peer server.
+        ``task``         str    The prompt/task for the subagent.
+        ``profile_name`` str    Profile name (empty for inline).
+        ``context``      Any    Context string or structured dict.
+        ``inline_config``dict|None  Optional inline config overrides.
+        ``custom_name``  str    Optional custom agent name.
+        ================ ====== ========================================
+
+        The handler must return a dict with at least ``success`` (bool).
+        On failure, include ``error`` (str).  On success, include
+        ``subagent_id``, ``status``, ``remote_server``, ``message``.
+
+        Without this handler, the ``server`` parameter returns a clear
+        error asking the user to install jaato-premium.
 
         Args:
-            peer_registry: The ``PeerRegistry`` instance.
-            remote_handler: The ``RemoteSpawnHandler`` instance.
+            handler: A callable that handles remote subagent delegation.
+
+        Example (from a daemon extension)::
+
+            subagent_plugin.register_remote_handler(
+                self._execute_remote_spawn,
+            )
         """
-        self._peer_registry = peer_registry
-        self._remote_handler = remote_handler
-        logger.debug("SubagentPlugin: peer context set")
+        self._remote_spawn_handler = handler
+        logger.debug("SubagentPlugin: remote spawn handler registered")
 
     # ------------------------------------------------------------------
     # Owner-scoped helpers (session isolation)
@@ -1867,215 +1895,12 @@ class SubagentPlugin:
         del self._active_sessions[agent_id]
         logger.info(f"Closed subagent session: {agent_id}")
 
-    def _execute_remote_spawn(
-        self,
-        server: str,
-        task: str,
-        profile_name: str,
-        context: Any,
-        inline_config: Optional[Dict[str, Any]],
-        custom_name: str,
-    ) -> Dict[str, Any]:
-        """Delegate a subagent spawn to a remote peer server.
-
-        Validates peer reachability, generates IDs, serializes the profile
-        or inline config, and sends a ``PeerSpawnRequestEvent`` via the
-        ``RemoteSpawnHandler``.
-
-        Args:
-            server: Name of the target peer server.
-            task: The prompt/task.
-            profile_name: Profile name (empty for inline).
-            context: Context string or structured dict.
-            inline_config: Optional inline overrides.
-            custom_name: Optional custom agent name.
-
-        Returns:
-            Result dict with agent_id and status.
-        """
-        import json as _json
-
-        if not self._peer_registry or not self._remote_handler:
-            return SubagentResult(
-                success=False,
-                response='',
-                error=(
-                    f"Cannot delegate to server '{server}': gossip not configured. "
-                    f"Ensure servers.json is set up and the daemon has peer connectivity."
-                ),
-            ).to_dict()
-
-        # Check peer exists and is reachable
-        peer_entry = self._peer_registry.get_peer(server)
-        if peer_entry is None:
-            known_peers = [p.config.name for p in self._peer_registry.get_peer_snapshots()]
-            return SubagentResult(
-                success=False,
-                response='',
-                error=(
-                    f"Unknown server '{server}'. "
-                    f"Known peers: {known_peers}"
-                ),
-            ).to_dict()
-
-        from server.peers import PeerState
-        if peer_entry.state == PeerState.UNREACHABLE:
-            return SubagentResult(
-                success=False,
-                response='',
-                error=(
-                    f"Server '{server}' is UNREACHABLE — cannot delegate. "
-                    f"Check that the server is running and network is available."
-                ),
-            ).to_dict()
-
-        # Generate agent_id
-        owner_id = self._get_owner_id()
-        with self._sessions_lock:
-            agent_id = self._next_agent_id(owner_id)
-
-        # Serialize context
-        if isinstance(context, dict):
-            context_str = _json.dumps(context)
-        elif isinstance(context, str):
-            context_str = context
-        else:
-            context_str = str(context) if context else ""
-
-        # Serialize profile or inline config
-        profile_json = ""
-        inline_config_json = ""
-        if profile_name and self._config:
-            profile = self._config.get_profile(profile_name)
-            if profile:
-                # Serialize the profile to JSON
-                profile_json = _json.dumps({
-                    "name": profile.name,
-                    "description": profile.description,
-                    "plugins": profile.plugins,
-                    "system_instructions": profile.system_instructions,
-                    "max_turns": profile.max_turns,
-                    "model": profile.model,
-                    "provider": profile.provider,
-                })
-            else:
-                return SubagentResult(
-                    success=False,
-                    response='',
-                    error=f"Profile '{profile_name}' not found.",
-                ).to_dict()
-        elif inline_config:
-            inline_config_json = _json.dumps(inline_config)
-
-        agent_name = custom_name or profile_name or "remote_agent"
-
-        # Resolve workspace path for workspace replication (Phase 5)
-        workspace_path = self._workspace_path
-        if workspace_path is None and self._runtime and self._runtime.registry:
-            workspace_path = self._runtime.registry.get_workspace_path()
-        if workspace_path is None:
-            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
-        if workspace_path is None:
-            workspace_path = os.getcwd()
-
-        # Prepare workspace sync context
-        workspace_git_url = ""
-        workspace_branch = ""
-        workspace_commit = ""
-        workspace_temp_branch = ""
-        try:
-            from server.workspace_sync import WorkspaceSync
-            ws_info = WorkspaceSync.get_workspace_info(workspace_path)
-            if ws_info is not None:
-                if ws_info.has_uncommitted:
-                    delegation = WorkspaceSync.prepare_delegation(
-                        workspace_path, server,
-                    )
-                    workspace_git_url = delegation.git_remote_url
-                    workspace_branch = delegation.branch
-                    workspace_commit = delegation.commit
-                    workspace_temp_branch = delegation.temp_branch
-                else:
-                    workspace_git_url = ws_info.git_remote_url
-                    workspace_branch = ws_info.branch
-                    workspace_commit = ws_info.commit
-        except Exception as exc:
-            logger.warning(
-                "Workspace sync preparation failed (proceeding without): %s",
-                exc,
-            )
-
-        # Register in active sessions as a remote entry
-        with self._sessions_lock:
-            self._active_sessions[agent_id] = {
-                'session': None,  # No local session for remote agents
-                'profile': None,
-                'agent_id': agent_id,
-                'owner_id': owner_id,
-                'created_at': datetime.now(),
-                'last_activity': datetime.now(),
-                'turn_count': 0,
-                'max_turns': 0,
-                'is_remote': True,
-                'remote_server': server,
-            }
-
-        # Send the request via RemoteSpawnHandler (async).
-        # The tool executor runs in a thread pool, so we schedule
-        # the coroutine on the daemon's event loop.
-        import asyncio
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            coro = self._remote_handler.request_remote_spawn(
-                peer_name=server,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                task=task,
-                context=context_str,
-                profile_json=profile_json,
-                inline_config_json=inline_config_json,
-                parent_session=self._parent_session,
-                workspace_git_url=workspace_git_url,
-                workspace_branch=workspace_branch,
-                workspace_commit=workspace_commit,
-                workspace_temp_branch=workspace_temp_branch,
-            )
-
-            if loop is not None and loop.is_running():
-                asyncio.run_coroutine_threadsafe(coro, loop)
-            else:
-                asyncio.run(coro)
-        except ConnectionError as exc:
-            # Clean up the registered session
-            with self._sessions_lock:
-                self._active_sessions.pop(agent_id, None)
-            return SubagentResult(
-                success=False,
-                response='',
-                error=f"Failed to reach server '{server}': {exc}",
-            ).to_dict()
-
-        return {
-            'success': True,
-            'subagent_id': agent_id,
-            'status': 'spawned_remote',
-            'remote_server': server,
-            'message': (
-                f'Subagent {agent_id} delegated to remote server {server}. '
-                f'END YOUR TURN NOW. Real events will be sent to you automatically.'
-            ),
-        }
-
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
 
         When the ``server`` parameter is provided, the subagent is delegated
-        to a remote peer server via the gossip protocol instead of running
-        locally.
+        to a remote peer server instead of running locally. Requires a
+        remote spawn handler registered by a daemon extension.
 
         Args:
             args: Tool arguments containing:
@@ -2111,7 +1936,16 @@ class SubagentPlugin:
 
         # ── Remote spawn path ──────────────────────────────────────────
         if server:
-            return self._execute_remote_spawn(
+            if self._remote_spawn_handler is None:
+                return SubagentResult(
+                    success=False,
+                    response='',
+                    error=(
+                        'Remote subagent delegation requires jaato-premium. '
+                        'Install it to enable the "server" parameter on spawn_subagent.'
+                    ),
+                ).to_dict()
+            return self._remote_spawn_handler(
                 server=server,
                 task=task,
                 profile_name=profile_name or '',

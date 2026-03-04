@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ..config import SubagentConfig, SubagentProfile, discover_profiles
+from ..config import SubagentConfig, SubagentProfile, ProfileDiscoveryResult, discover_profiles
 from ..plugin import SubagentPlugin
 
 
@@ -28,10 +28,10 @@ class TestDiscoverProfiles:
             profile_path.write_text(json.dumps(profile_data))
 
             # Discover profiles
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert "test_agent" in profiles
-            profile = profiles["test_agent"]
+            assert "test_agent" in result.profiles
+            profile = result.profiles["test_agent"]
             assert profile.name == "test_agent"
             assert profile.description == "A test agent"
             assert profile.plugins == ["cli", "todo"]
@@ -48,10 +48,10 @@ class TestDiscoverProfiles:
             profile_path = Path(tmpdir) / "my_custom_agent.json"
             profile_path.write_text(json.dumps(profile_data))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert "my_custom_agent" in profiles
-            assert profiles["my_custom_agent"].description == "Agent from filename"
+            assert "my_custom_agent" in result.profiles
+            assert result.profiles["my_custom_agent"].description == "Agent from filename"
 
     def test_discover_multiple_profiles(self):
         """Test discovering multiple profiles from a directory."""
@@ -66,26 +66,28 @@ class TestDiscoverProfiles:
                 path = Path(tmpdir) / f"{data['name']}.json"
                 path.write_text(json.dumps(data))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert len(profiles) == 3
-            assert "agent1" in profiles
-            assert "agent2" in profiles
-            assert "agent3" in profiles
+            assert len(result.profiles) == 3
+            assert "agent1" in result.profiles
+            assert "agent2" in result.profiles
+            assert "agent3" in result.profiles
 
     def test_discover_nonexistent_directory(self):
         """Test that non-existent directory returns empty dict."""
-        profiles = discover_profiles("/nonexistent/path/to/profiles")
-        assert profiles == {}
+        result = discover_profiles("/nonexistent/path/to/profiles")
+        assert result.profiles == {}
+        assert result.errors == {}
 
     def test_discover_empty_directory(self):
-        """Test that empty directory returns empty dict."""
+        """Test that empty directory returns empty result."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            profiles = discover_profiles(tmpdir)
-            assert profiles == {}
+            result = discover_profiles(tmpdir)
+            assert result.profiles == {}
+            assert result.errors == {}
 
     def test_discover_skips_invalid_json(self):
-        """Test that invalid JSON files are skipped."""
+        """Test that invalid JSON files are reported as errors."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create valid profile
             valid_path = Path(tmpdir) / "valid.json"
@@ -98,13 +100,15 @@ class TestDiscoverProfiles:
             invalid_path = Path(tmpdir) / "invalid.json"
             invalid_path.write_text("{ not valid json }")
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert len(profiles) == 1
-            assert "valid" in profiles
+            assert len(result.profiles) == 1
+            assert "valid" in result.profiles
+            assert "invalid" in result.errors
+            assert "Invalid JSON" in result.errors["invalid"]
 
     def test_discover_skips_non_dict_json(self):
-        """Test that JSON files not containing dicts are skipped."""
+        """Test that JSON files not containing dicts are reported as errors."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create JSON with array instead of dict
             array_path = Path(tmpdir) / "array.json"
@@ -117,10 +121,12 @@ class TestDiscoverProfiles:
                 "description": "Valid profile"
             }))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert len(profiles) == 1
-            assert "valid" in profiles
+            assert len(result.profiles) == 1
+            assert "valid" in result.profiles
+            assert "array" in result.errors
+            assert "JSON object" in result.errors["array"]
 
     def test_discover_skips_non_profile_files(self):
         """Test that non-JSON/YAML files are skipped."""
@@ -137,10 +143,10 @@ class TestDiscoverProfiles:
                 "description": "Valid profile"
             }))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert len(profiles) == 1
-            assert "valid" in profiles
+            assert len(result.profiles) == 1
+            assert "valid" in result.profiles
 
     def test_discover_relative_path(self):
         """Test discovering profiles with relative path."""
@@ -156,9 +162,9 @@ class TestDiscoverProfiles:
             }))
 
             # Use relative path with base_path
-            profiles = discover_profiles(".jaato/profiles", base_path=tmpdir)
+            result = discover_profiles(".jaato/profiles", base_path=tmpdir)
 
-            assert "test" in profiles
+            assert "test" in result.profiles
 
     def test_discover_all_profile_fields(self):
         """Test that all profile fields are parsed correctly."""
@@ -178,9 +184,9 @@ class TestDiscoverProfiles:
             profile_path = Path(tmpdir) / "full_agent.json"
             profile_path.write_text(json.dumps(profile_data))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            profile = profiles["full_agent"]
+            profile = result.profiles["full_agent"]
             assert profile.name == "full_agent"
             assert profile.description == "Agent with all fields"
             assert profile.plugins == ["cli", "mcp", "todo"]
@@ -221,10 +227,10 @@ class TestDiscoverYamlProfiles:
             profile_path = Path(tmpdir) / "yaml_agent.yaml"
             profile_path.write_text(yaml.dump(profile_data))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert "yaml_agent" in profiles
-            assert profiles["yaml_agent"].description == "A YAML-defined agent"
+            assert "yaml_agent" in result.profiles
+            assert result.profiles["yaml_agent"].description == "A YAML-defined agent"
 
     def test_discover_yml_extension(self, yaml_available):
         """Test discovering profiles with .yml extension."""
@@ -242,9 +248,9 @@ class TestDiscoverYamlProfiles:
             profile_path = Path(tmpdir) / "yml_agent.yml"
             profile_path.write_text(yaml.dump(profile_data))
 
-            profiles = discover_profiles(tmpdir)
+            result = discover_profiles(tmpdir)
 
-            assert "yml_agent" in profiles
+            assert "yml_agent" in result.profiles
 
 
 class TestSubagentConfigAutoDiscover:

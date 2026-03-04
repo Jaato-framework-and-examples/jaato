@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import asyncio
+import importlib.metadata
 import json
 import logging
 import logging.handlers
@@ -70,6 +71,53 @@ DEFAULT_CONFIG_FILE = str(_TEMP_DIR / "jaato.config.json")
 # Log rotation settings
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
 LOG_BACKUP_COUNT = 5  # Keep 5 backup files
+
+
+class _ExtensionContext:
+    """Context namespace passed to daemon extension factories.
+
+    Provides access to the daemon's core infrastructure so that extensions
+    can register hooks, interceptors, and other integrations without
+    depending on concrete daemon internals.
+
+    This class is intentionally simple — a plain namespace with typed
+    attributes.  Extensions should treat it as read-only.
+
+    Attributes:
+        session_manager: The daemon's ``SessionManager`` instance.
+            Extensions typically call ``session_manager.add_session_hook()``
+            to register a callback invoked after each session is initialized.
+        ws_server: The ``JaatoWSServer`` instance if ``--web-socket`` was
+            passed, or ``None`` otherwise.  Extensions can call
+            ``ws_server.set_connection_interceptor(check, handler)`` to
+            route special WebSocket connections to custom handlers.
+        web_socket: The raw ``--web-socket`` CLI argument string (e.g.
+            ``:8080``, ``0.0.0.0:8080``), or ``None``.
+        ipc_socket: The raw ``--ipc-socket`` CLI argument string, or ``None``.
+        server_name: The ``--server-name`` CLI argument, or ``None``.
+        health_port: The ``--health-port`` CLI argument (int), or ``None``.
+    """
+
+    __slots__ = (
+        "session_manager", "ws_server", "web_socket",
+        "ipc_socket", "server_name", "health_port",
+    )
+
+    def __init__(
+        self,
+        session_manager,
+        ws_server,
+        web_socket: Optional[str],
+        ipc_socket: Optional[str],
+        server_name: Optional[str],
+        health_port: Optional[int],
+    ):
+        self.session_manager = session_manager
+        self.ws_server = ws_server
+        self.web_socket = web_socket
+        self.ipc_socket = ipc_socket
+        self.server_name = server_name
+        self.health_port = health_port
 
 
 def configure_logging(
@@ -153,8 +201,8 @@ class JaatoDaemon:
             log_file: Path to log file for daemon mode.
             socket_mode: Unix file permissions for the IPC socket (default: 0o666).
             health_port: TCP port for the health HTTP endpoint (None to disable).
-            server_name: Explicit server name for gossip self-identification.
-                When set, ``_init_gossip()`` matches by name instead of address.
+            server_name: Explicit server name for self-identification.
+                Passed to daemon extensions via ``_ExtensionContext``.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -170,14 +218,9 @@ class JaatoDaemon:
         self._ipc_server = None
         self._ws_server = None
 
-        # Peer gossip (populated if servers.json exists)
-        self._peer_registry = None   # Optional[PeerRegistry]
-        self._health_collector = None  # Optional[ServerHealthCollector]
-        self._remote_handler = None  # Optional[RemoteSpawnHandler]
-        self._server_reliability = None  # Optional[ServerReliabilityTracker]
-
-        # Health HTTP endpoint (populated if --health-port is set)
-        self._health_http_server = None  # Optional[HealthHTTPServer]
+        # Daemon extensions loaded via ``jaato.extensions`` entry points.
+        # See ``_load_extensions()`` for the discovery and lifecycle protocol.
+        self._extensions: list = []
 
         # Session-independent plugins (auth plugins loaded at daemon startup)
         # These provide user commands that work without an active session/provider.
@@ -212,8 +255,8 @@ class JaatoDaemon:
         # before any session/provider connection exists.
         self._discover_daemon_plugins()
 
-        # Initialize peer gossip if servers.json is configured
-        self._init_gossip()
+        # Load daemon extensions (e.g., gossip clustering from jaato-premium)
+        self._load_extensions()
 
         tasks = []
 
@@ -262,7 +305,6 @@ class JaatoDaemon:
             self._ws_server = JaatoWSServer(
                 host=host,
                 port=port,
-                peer_registry=self._peer_registry,
             )
             t = asyncio.create_task(self._ws_server.start())
             t.add_done_callback(_on_task_done)
@@ -283,42 +325,9 @@ class JaatoDaemon:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
-        # Start gossip after transport servers are up
-        if self._peer_registry and self._health_collector:
-            await self._peer_registry.start(self._health_collector)
-
-        # Start health HTTP endpoint (and dashboard) if configured
-        if self._health_port is not None:
-            from server.health_http import HealthHTTPServer
-            from server.dashboard.routes import DashboardAPI
-
-            # Derive project root from package location so Docker builds
-            # can find the Dockerfiles under tests/e2e/gossip/.
-            _pkg_dir = Path(__file__).resolve().parent.parent  # jaato-server/
-            _project_root = str(_pkg_dir.parent)  # repo root
-
-            from server.dashboard.docker_launcher import get_local_ip
-            _host_ws_address: Optional[str] = None
-            if self.web_socket:
-                _local_ip = get_local_ip()
-                # Re-parse the port from the --web-socket arg
-                _ws_port = int(self.web_socket.rsplit(":", 1)[-1])
-                _host_ws_address = f"ws://{_local_ip}:{_ws_port}"
-
-            dashboard_api = DashboardAPI(
-                peer_registry=self._peer_registry,
-                health_collector=self._health_collector,
-                project_root=_project_root,
-                event_loop=asyncio.get_running_loop(),
-                host_ws_address=_host_ws_address,
-                host_server_name=self._server_name,
-            )
-            self._health_http_server = HealthHTTPServer(
-                peer_registry=self._peer_registry,
-                health_collector=self._health_collector,
-                dashboard_api=dashboard_api,
-            )
-            await self._health_http_server.start("0.0.0.0", self._health_port)
+        # Start daemon extensions after transport servers are up
+        for ext in self._extensions:
+            await ext.start()
 
         logger.info("Jaato server started")
 
@@ -346,10 +355,11 @@ class JaatoDaemon:
         logger.info("Shutdown requested...")
         self._shutdown_event.set()
 
-        if self._health_http_server:
-            await self._health_http_server.stop()
-        if self._peer_registry:
-            await self._peer_registry.shutdown()
+        for ext in reversed(self._extensions):
+            try:
+                await ext.stop()
+            except Exception as exc:
+                logger.warning("Extension stop failed: %s", exc)
         if self._ipc_server:
             await self._ipc_server.stop()
         if self._ws_server:
@@ -875,237 +885,119 @@ class JaatoDaemon:
         # WebSocket routing would be added here
 
     # ------------------------------------------------------------------
-    # Gossip / Peer Infrastructure
+    # Daemon Extensions (entry-point-based lifecycle objects)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _load_servers_config() -> Optional[dict]:
-        """Load ``~/.jaato/servers.json`` if it exists.
+    def _load_extensions(self) -> None:
+        """Discover and instantiate daemon extensions from entry points.
 
-        Returns the parsed dict or ``None`` when the file is absent.
-        The daemon is workspace-agnostic, so only the user-level path is
-        checked. Workspace-level servers.json is a future extension.
+        Extensions are loaded from the ``jaato.extensions`` entry-point group.
+        Each entry point must resolve to a **factory function** with the
+        signature::
+
+            def create_extension(context: ExtensionContext) -> Extension
+
+        The factory receives an ``_ExtensionContext`` (a simple namespace)
+        with the following attributes:
+
+        =================== ============================== ================
+        Attribute           Type                           Description
+        =================== ============================== ================
+        ``session_manager`` ``SessionManager``             The daemon's
+                                                           session manager
+                                                           instance.
+        ``ws_server``       ``JaatoWSServer | None``       WebSocket server
+                                                           (``None`` when
+                                                           ``--web-socket``
+                                                           was not passed).
+        ``web_socket``      ``str | None``                 Raw CLI arg
+                                                           (e.g. ``:8080``).
+        ``ipc_socket``      ``str | None``                 Raw CLI arg.
+        ``server_name``     ``str | None``                 ``--server-name``
+                                                           CLI argument.
+        ``health_port``     ``int | None``                 ``--health-port``
+                                                           CLI argument.
+        =================== ============================== ================
+
+        The returned extension object must implement two **async** methods:
+
+        * ``async start()`` — called **after** transport servers (IPC and
+          WebSocket) are up and listening.  Extensions should perform their
+          startup work here (e.g., start background tasks, register hooks).
+
+        * ``async stop()``  — called **before** the daemon shuts down.
+          Extensions should clean up resources here.
+
+        Extensions are started in discovery order and stopped in reverse
+        order.
+
+        **Registering an extension** (in ``pyproject.toml``)::
+
+            [project.entry-points."jaato.extensions"]
+            my_ext = "my_package.ext:create_extension"
+
+        **Minimal extension skeleton**::
+
+            class MyExtension:
+                def __init__(self, ctx):
+                    self._ctx = ctx
+
+                async def start(self):
+                    # Register a session hook so we get called for each
+                    # new session:
+                    self._ctx.session_manager.add_session_hook(self._hook)
+
+                async def stop(self):
+                    pass  # clean up
+
+                def _hook(self, server):
+                    # ``server`` is the JaatoServer for the new session.
+                    plugin = server.registry.get_plugin("environment")
+                    if plugin and hasattr(plugin, 'register_aspect'):
+                        plugin.register_aspect("my_aspect", self._handler)
+
+        Extensions typically combine several hooks:
+
+        1. **Session hooks** (``session_manager.add_session_hook``) — run
+           after each session is initialized to wire per-session plugins.
+        2. **WS connection interceptors** (``ws_server.set_connection_interceptor``)
+           — route special WebSocket connections to custom handlers.
+        3. **Custom environment aspects** (``env_plugin.register_aspect``)
+           — add dynamic aspects to the ``get_environment`` tool.
+        4. **Remote spawn handlers** (``subagent_plugin.register_remote_handler``)
+           — enable remote subagent delegation.
         """
-        servers_file = Path.home() / ".jaato" / "servers.json"
-        if not servers_file.exists():
-            return None
-        try:
-            with open(servers_file) as f:
-                return json.load(f)
-        except Exception as exc:
-            logger.warning("Failed to load %s: %s", servers_file, exc)
-            return None
+        eps = importlib.metadata.entry_points()
+        if sys.version_info >= (3, 12):
+            ext_eps = list(eps.select(group="jaato.extensions"))
+        elif sys.version_info >= (3, 10):
+            ext_eps = list(eps.select(group="jaato.extensions"))
+        else:
+            ext_eps = list(eps.get("jaato.extensions", []))
 
-    @staticmethod
-    def _get_or_create_server_id() -> str:
-        """Return a stable UUID for this server, creating one on first run.
-
-        Persisted to ``~/.jaato/server_id``.
-        """
-        import uuid
-        id_file = Path.home() / ".jaato" / "server_id"
-        if id_file.exists():
-            return id_file.read_text().strip()
-        id_file.parent.mkdir(parents=True, exist_ok=True)
-        server_id = str(uuid.uuid4())
-        id_file.write_text(server_id)
-        logger.info("Generated server_id: %s", server_id)
-        return server_id
-
-    def _init_gossip(self) -> None:
-        """Initialize peer gossip infrastructure if ``servers.json`` is present.
-
-        Parses the config, identifies which entries are remote peers (WS
-        entries whose address does not match this server's WS address), and
-        creates a ``PeerRegistry`` + ``ServerHealthCollector``.
-
-        The registry is *created* here but not yet *started* — that happens
-        after transport servers are up (in ``start()``).
-        """
-        import time as _time
-        config = self._load_servers_config()
-        if not config or not config.get("servers"):
+        if not ext_eps:
             return
 
-        from server.peers import PeerRegistry, GossipConfig, ServerConfig
-        from server.health import ServerHealthCollector
-
-        server_id = self._get_or_create_server_id()
-
-        # Parse gossip tuning
-        gossip_raw = config.get("gossip", {})
-        gossip_config = GossipConfig(
-            heartbeat_interval_seconds=gossip_raw.get(
-                "heartbeat_interval_seconds",
-                GossipConfig.heartbeat_interval_seconds,
-            ),
-            degraded_after_missed=gossip_raw.get(
-                "degraded_after_missed",
-                GossipConfig.degraded_after_missed,
-            ),
-            unreachable_after_missed=gossip_raw.get(
-                "unreachable_after_missed",
-                GossipConfig.unreachable_after_missed,
-            ),
-        )
-
-        # Determine this server's WS address (if any) for self-identification
-        own_ws_address = None
-        if self.web_socket:
-            # Normalize to match servers.json format: ws://host:port
-            if ':' in self.web_socket:
-                if self.web_socket.startswith(':'):
-                    own_ws_address = f"ws://0.0.0.0{self.web_socket}"
-                else:
-                    own_ws_address = f"ws://{self.web_socket}"
-            else:
-                own_ws_address = f"ws://0.0.0.0:{self.web_socket}"
-
-        # Identify self and collect peers
-        self_name = None
-        self_tags: list = []
-        peer_configs: list = []
-        for entry in config["servers"]:
-            name = entry.get("name", "")
-            transport = entry.get("transport", "")
-            address = entry.get("address", "")
-            tags = entry.get("tags", [])
-
-            # Self-identification: match by explicit --server-name first,
-            # then fall back to address matching.
-            is_self = False
-            if self._server_name and name == self._server_name:
-                is_self = True
-            elif not self._server_name:
-                # Legacy address-based self-identification
-                if transport == "ws" and own_ws_address and address == own_ws_address:
-                    is_self = True
-                elif transport == "ipc" and self.ipc_socket and address == self.ipc_socket:
-                    is_self = True
-
-            if is_self:
-                self_name = name
-                self_tags = tags
-                continue
-
-            # Only WS peers are connectable in Phase 1
-            if transport == "ws":
-                peer_configs.append(ServerConfig(
-                    name=name,
-                    transport=transport,
-                    address=address,
-                    tags=tags,
-                ))
-
-        if not peer_configs:
-            logger.info("servers.json loaded but no remote peers found")
-            return
-
-        server_name = self_name or f"server-{server_id[:8]}"
-
-        self._peer_registry = PeerRegistry(
-            server_id=server_id,
-            server_name=server_name,
-            gossip_config=gossip_config,
-            peer_configs=peer_configs,
-        )
-
-        # Health collector — providers/models are empty at startup; they get
-        # populated as sessions connect. Phase 2 will update them dynamically.
-        self._health_collector = ServerHealthCollector(
+        # Build the context namespace passed to every extension factory.
+        context = _ExtensionContext(
             session_manager=self._session_manager,
-            server_id=server_id,
-            server_name=server_name,
-            tags=self_tags,
-            start_time=_time.monotonic(),
-            available_providers=[],
-            available_models=[],
+            ws_server=self._ws_server,
+            web_socket=self.web_socket,
+            ipc_socket=self.ipc_socket,
+            server_name=self._server_name,
+            health_port=self._health_port,
         )
 
-        # Create remote spawn handler for Phase 3 (remote subagent delegation)
-        from server.remote_spawn import RemoteSpawnHandler
-        self._remote_handler = RemoteSpawnHandler(
-            self._peer_registry, self._session_manager,
-        )
-        self._remote_handler.register_handlers()
-
-        # Create server reliability tracker (Phase 4)
-        from server.server_reliability import ServerReliabilityTracker
-        from shared.plugins.reliability.types import EscalationRule, FailureSeverity
-
-        policies = config.get("server_policies", {})
-        default_rule_raw = policies.get("default_rule", {})
-        default_rule = self._parse_escalation_rule(default_rule_raw)
-
-        server_rules: Dict[str, EscalationRule] = {}
-        for srv_name, rule_raw in policies.get("server_rules", {}).items():
-            server_rules[srv_name] = self._parse_escalation_rule(rule_raw)
-
-        affinity_weights = policies.get("affinity_weights")
-
-        self._server_reliability = ServerReliabilityTracker(
-            default_rule=default_rule,
-            server_rules=server_rules,
-            affinity_weights=affinity_weights,
-        )
-
-        # Wire reliability tracker into peer registry and remote handler
-        self._peer_registry.set_reliability(self._server_reliability)
-        self._remote_handler.set_reliability(self._server_reliability)
-
-        # Inject gossip references into SessionManager so it can wire them
-        # into each session's environment plugin (cluster topology) and
-        # subagent plugin (remote delegation).
-        self._session_manager.set_gossip_context(
-            self._peer_registry, self._health_collector, self._remote_handler,
-            server_reliability=self._server_reliability,
-        )
-
-        logger.info(
-            "Gossip configured: server_name=%s, %d peer(s)",
-            server_name, len(peer_configs),
-        )
-
-    @staticmethod
-    def _parse_escalation_rule(raw: Dict[str, Any]) -> "EscalationRule":
-        """Parse an ``EscalationRule`` from a ``servers.json`` dict.
-
-        Missing keys fall back to ``EscalationRule`` defaults.  The
-        ``severity_filter`` key accepts a list of severity value strings
-        (e.g. ``["server_error", "crash"]``) which are converted to the
-        ``FailureSeverity`` enum.
-
-        Args:
-            raw: Dict from the ``server_policies.default_rule`` or
-                ``server_policies.server_rules.<name>`` section.
-
-        Returns:
-            An ``EscalationRule`` instance.
-        """
-        from shared.plugins.reliability.types import EscalationRule, FailureSeverity
-
-        kwargs: Dict[str, Any] = {}
-        if "count_threshold" in raw:
-            kwargs["count_threshold"] = raw["count_threshold"]
-        if "consecutive_threshold" in raw:
-            kwargs["consecutive_threshold"] = raw["consecutive_threshold"]
-        if "rate_threshold" in raw:
-            kwargs["rate_threshold"] = raw["rate_threshold"]
-        if "window_seconds" in raw:
-            kwargs["window_seconds"] = raw["window_seconds"]
-        if "escalation_duration_seconds" in raw:
-            kwargs["escalation_duration_seconds"] = raw["escalation_duration_seconds"]
-        if "notify_user" in raw:
-            kwargs["notify_user"] = raw["notify_user"]
-        if "cooldown_seconds" in raw:
-            kwargs["cooldown_seconds"] = raw["cooldown_seconds"]
-        if "success_count_to_recover" in raw:
-            kwargs["success_count_to_recover"] = raw["success_count_to_recover"]
-        if "severity_filter" in raw:
-            kwargs["severity_filter"] = {
-                FailureSeverity(s) for s in raw["severity_filter"]
-            }
-        return EscalationRule(**kwargs)
+        for ep in ext_eps:
+            try:
+                factory = ep.load()
+                ext = factory(context)
+                self._extensions.append(ext)
+                logger.info("Loaded daemon extension: %s", ep.name)
+            except Exception:
+                logger.warning(
+                    "Failed to load extension %s", ep.name, exc_info=True,
+                )
 
     def _discover_daemon_plugins(self) -> None:
         """Discover session-independent plugins at daemon startup.
@@ -1998,7 +1890,7 @@ Examples:
         "--server-name",
         metavar="NAME",
         default=None,
-        help="Explicit server name for gossip self-identification. "
+        help="Explicit server name for self-identification. "
              "When set, the server matches itself by name in servers.json "
              "instead of by address.",
     )

@@ -29,7 +29,7 @@ class EnvironmentPlugin:
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "network", "jaato_agentic_servers", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "network", "all"]
 
     @property
     def name(self) -> str:
@@ -48,9 +48,10 @@ class EnvironmentPlugin:
 
     def __init__(self):
         self._workspace_path: Optional[str] = None
-        self._peer_registry: Optional[Any] = None
-        self._health_collector: Optional[Any] = None
-        self._server_reliability: Optional[Any] = None
+        # Custom aspects registered by daemon extensions at runtime.
+        # See ``register_aspect()`` for the protocol.
+        self._custom_aspects: Dict[str, Any] = {}
+        self._custom_aspect_descriptions: Dict[str, str] = {}
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Called by registry with configuration."""
@@ -101,20 +102,7 @@ class EnvironmentPlugin:
                         "aspect": {
                             "type": "string",
                             "enum": self.VALID_ASPECTS,
-                            "description": (
-                                "Which aspect of the environment to query. "
-                                "'os' = operating system, "
-                                "'shell' = shell type, "
-                                "'arch' = CPU architecture, "
-                                "'cwd' = current working directory, "
-                                "'terminal' = terminal emulation, capabilities, and TTY detection, "
-                                "'context' = token usage and GC thresholds, "
-                                "'session' = current session identifier and agent info, "
-                                "'datetime' = current date, time, timezone, and UTC offset, "
-                                "'network' = proxy settings, proxy authentication, SSL/TLS config, and no-proxy rules, "
-                                "'jaato_agentic_servers' = cluster topology: this server + peers with health, load, and state (excluded from 'all'; query explicitly when planning subagent delegation), "
-                                "'all' = everything except jaato_agentic_servers (default)"
-                            )
+                            "description": self._build_aspect_description()
                         }
                     },
                     "required": []
@@ -176,10 +164,10 @@ class EnvironmentPlugin:
         if aspect in ("network", "all"):
             result["network"] = self._get_network_info()
 
-        # jaato_agentic_servers is explicitly excluded from "all" — only
-        # returned when the model queries it directly for delegation planning.
-        if aspect == "jaato_agentic_servers":
-            result["jaato_agentic_servers"] = self._get_agentic_servers()
+        # Custom aspects registered by extensions are excluded from "all"
+        # — only returned when the model queries them directly.
+        if aspect in self._custom_aspects:
+            result[aspect] = self._custom_aspects[aspect]()
 
         # For single aspect (not "all"), flatten the response
         if aspect != "all" and len(result) == 1:
@@ -492,164 +480,93 @@ class EnvironmentPlugin:
             "iso_utc": utc_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
-    def set_gossip_context(
+    def register_aspect(
         self,
-        peer_registry: Any,
-        health_collector: Any,
-        server_reliability: Any = None,
+        name: str,
+        handler: Any,
+        description: str = "",
     ) -> None:
-        """Inject gossip infrastructure references for the agentic_servers aspect.
+        """Register a custom environment aspect provided by a daemon extension.
 
-        Called by SessionManager after session initialization when the daemon
-        has gossip enabled. Not stored in thread-local storage because
-        PeerRegistry and ServerHealthCollector are process-wide singletons.
+        Custom aspects extend the ``get_environment`` tool with additional
+        data sources at runtime.  They are **excluded from the ``'all'``
+        aspect** — the model must query them explicitly by name.
+
+        This is the primary mechanism for daemon extensions to surface
+        dynamic data (e.g., cluster topology, feature flags) through the
+        environment tool without modifying the plugin's source code.
+
+        The registered aspect automatically appears in:
+
+        * ``VALID_ASPECTS`` — the validation list.
+        * The ``aspect`` enum in the tool schema — so the model can
+          discover and select it.
+        * The tool schema description — using the ``description`` arg.
 
         Args:
-            peer_registry: The PeerRegistry instance (from server.peers).
-            health_collector: The ServerHealthCollector instance (from server.health).
-            server_reliability: The ServerReliabilityTracker instance (Phase 4).
+            name: The aspect name (e.g., ``"jaato_agentic_servers"``).
+                Must not collide with a built-in aspect.
+            handler: A callable ``() -> dict`` that returns the aspect
+                data.  Called each time the model queries this aspect.
+            description: Human-readable description appended to the tool
+                schema so the model knows what this aspect provides.
+
+        Example (from a daemon extension's session hook)::
+
+            env_plugin.register_aspect(
+                "jaato_agentic_servers",
+                lambda: self._get_cluster_topology(),
+                description=(
+                    "cluster topology: this server + peers with health, "
+                    "load, and state (excluded from 'all'; query explicitly "
+                    "when planning subagent delegation)"
+                ),
+            )
         """
-        self._peer_registry = peer_registry
-        self._health_collector = health_collector
-        self._server_reliability = server_reliability
+        self._custom_aspects[name] = handler
+        if description:
+            self._custom_aspect_descriptions[name] = description
+        if name not in self.VALID_ASPECTS:
+            # Insert before 'all' so the enum ordering stays sensible.
+            idx = self.VALID_ASPECTS.index("all")
+            self.VALID_ASPECTS.insert(idx, name)
 
-    def _get_agentic_servers(self) -> Dict[str, Any]:
-        """Get cluster topology: this server, peers, and aggregate summary.
+    def _build_aspect_description(self) -> str:
+        """Build the ``aspect`` parameter description for the tool schema.
 
-        Returns self info from the health collector, peer info from the
-        peer registry, and a cluster_summary with aggregate counts.
-        Requires gossip context to be set via set_gossip_context().
+        Combines the built-in aspect descriptions with any custom aspects
+        registered via ``register_aspect()``.  Custom aspects are appended
+        dynamically, so the model always sees the current set.
+
+        Returns:
+            A single description string for the ``aspect`` enum.
         """
-        if self._health_collector is None or self._peer_registry is None:
-            return {
-                "error": "Gossip not configured. This server is not part of a multi-server cluster.",
-                "hint": "Configure servers.json with peer entries to enable cluster awareness."
-            }
+        parts = [
+            "Which aspect of the environment to query. ",
+            "'os' = operating system, ",
+            "'shell' = shell type, ",
+            "'arch' = CPU architecture, ",
+            "'cwd' = current working directory, ",
+            "'terminal' = terminal emulation, capabilities, and TTY detection, ",
+            "'context' = token usage and GC thresholds, ",
+            "'session' = current session identifier and agent info, ",
+            "'datetime' = current date, time, timezone, and UTC offset, ",
+            "'network' = proxy settings, proxy authentication, SSL/TLS config, and no-proxy rules, ",
+        ]
 
-        import time as _time
+        # Append custom aspect descriptions
+        for name, desc in self._custom_aspect_descriptions.items():
+            parts.append(f"'{name}' = {desc}, ")
 
-        # --- Self info ---
-        snapshot = self._health_collector.collect()
-        self_info: Dict[str, Any] = {
-            "name": self._health_collector.server_name,
-            "server_id": self._health_collector.server_id,
-            "health": {
-                "status": "healthy",
-                "cpu_percent": snapshot.cpu_percent,
-                "memory_percent": snapshot.memory_percent,
-                "active_sessions": snapshot.active_sessions,
-                "active_agents": snapshot.active_agents,
-                "uptime_seconds": round(snapshot.uptime_seconds, 1),
-            },
-            "providers": snapshot.available_providers,
-            "models": snapshot.available_models,
-            "tags": snapshot.tags,
-        }
+        # Closing description for 'all'
+        custom_names = list(self._custom_aspects.keys())
+        if custom_names:
+            exclusions = " or ".join(f"'{n}'" for n in custom_names)
+            parts.append(f"'all' = everything except {exclusions} (default)")
+        else:
+            parts.append("'all' = all of the above (default)")
 
-        # Add reliability self-report (Phase 4).
-        if self._server_reliability is not None:
-            report = self._server_reliability.get_self_report()
-            self_info["reliability"] = {
-                "trust_state": report.get("trust_state", "trusted"),
-                "success_rate_1h": report.get("success_rate_1h", 1.0),
-                "escalated_tools": report.get("escalated_tools", 0),
-                "affinity_score": None,  # Not applicable for self
-            }
-
-        # --- Peers ---
-        peers = []
-        now = _time.monotonic()
-        for entry in self._peer_registry.get_peer_snapshots():
-            peer_info: Dict[str, Any] = {
-                "name": entry.config.name,
-                "state": entry.state.value,
-                "tags": entry.config.tags,
-            }
-
-            if entry.last_heartbeat is not None:
-                hb = entry.last_heartbeat
-                peer_info["server_id"] = hb.server_id
-                peer_info["health"] = {
-                    "status": entry.state.value,
-                    "cpu_percent": hb.cpu_percent,
-                    "memory_percent": hb.memory_percent,
-                    "active_sessions": hb.active_sessions,
-                    "active_agents": hb.active_agents,
-                    "uptime_seconds": round(hb.uptime_seconds, 1),
-                }
-                peer_info["providers"] = hb.available_providers
-                peer_info["models"] = hb.available_models
-            else:
-                peer_info["health"] = None
-
-            if entry.last_heartbeat_at is not None:
-                peer_info["last_heartbeat_seconds_ago"] = round(
-                    now - entry.last_heartbeat_at, 1
-                )
-            else:
-                peer_info["last_heartbeat_seconds_ago"] = None
-
-            # Add reliability data for this peer (Phase 4).
-            if self._server_reliability is not None:
-                peer_name = entry.config.name
-                # Self-reported fields from the peer's heartbeat.
-                reliability_info: Dict[str, Any] = {}
-                if entry.last_heartbeat is not None:
-                    hb = entry.last_heartbeat
-                    reliability_info["trust_state"] = getattr(hb, "trust_state", "trusted")
-                    reliability_info["success_rate_1h"] = getattr(hb, "success_rate_1h", 1.0)
-                    reliability_info["escalated_tools"] = getattr(hb, "escalated_tools", 0)
-                else:
-                    reliability_info["trust_state"] = "trusted"
-                    reliability_info["success_rate_1h"] = 1.0
-                    reliability_info["escalated_tools"] = 0
-
-                # Locally computed affinity score.
-                reliability_info["affinity_score"] = self._server_reliability.get_affinity_score(peer_name)
-
-                # Include escalation reason if escalated locally.
-                local_state = self._server_reliability.get_state(peer_name)
-                if local_state and local_state.escalation_reason:
-                    reliability_info["escalation_reason"] = local_state.escalation_reason
-
-                peer_info["reliability"] = reliability_info
-
-            peers.append(peer_info)
-
-        # --- Cluster summary ---
-        total = 1 + len(peers)  # self + peers
-        healthy = 1  # self is always healthy
-        degraded = 0
-        unreachable = 0
-        total_sessions = snapshot.active_sessions
-        total_agents = snapshot.active_agents
-
-        for p in peers:
-            if p["state"] == "healthy":
-                healthy += 1
-            elif p["state"] == "degraded":
-                degraded += 1
-            else:
-                unreachable += 1
-
-            if p["health"] is not None:
-                total_sessions += p["health"]["active_sessions"]
-                total_agents += p["health"]["active_agents"]
-
-        cluster_summary = {
-            "total_servers": total,
-            "healthy": healthy,
-            "degraded": degraded,
-            "unreachable": unreachable,
-            "total_active_sessions": total_sessions,
-            "total_active_agents": total_agents,
-        }
-
-        return {
-            "self": self_info,
-            "peers": peers,
-            "cluster_summary": cluster_summary,
-        }
+        return "".join(parts)
 
     def _get_network_info(self) -> Dict[str, Any]:
         """Get network connectivity configuration.

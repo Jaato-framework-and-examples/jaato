@@ -362,14 +362,17 @@ class SubagentProfile:
     gc: Optional[GCProfileConfig] = None
 
 
-def _parse_profile_file(file_path: Path) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+def _parse_profile_file(
+    file_path: Path,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
     """Parse a single profile file (JSON or YAML).
 
     Args:
         file_path: Path to the profile file.
 
     Returns:
-        Tuple of (profile_name, profile_data) or (None, None) on error.
+        Tuple of ``(profile_name, profile_data, None)`` on success, or
+        ``(None, None, error_message)`` on parse/read failure.
     """
     try:
         content = file_path.read_text(encoding='utf-8')
@@ -379,38 +382,54 @@ def _parse_profile_file(file_path: Path) -> Tuple[Optional[str], Optional[Dict[s
                 import yaml
                 data = yaml.safe_load(content)
             except ImportError:
-                logger.warning(
-                    "PyYAML not installed, skipping YAML profile: %s",
-                    file_path
-                )
-                return None, None
+                msg = f"PyYAML not installed, cannot parse YAML profile: {file_path.name}"
+                logger.warning(msg)
+                return None, None, msg
         elif file_path.suffix == '.json':
             data = json.loads(content)
         else:
             logger.debug("Skipping non-profile file: %s", file_path)
-            return None, None
+            return None, None, None
 
         if not isinstance(data, dict):
-            logger.warning("Profile file must contain a dict: %s", file_path)
-            return None, None
+            msg = f"Profile file must contain a JSON object: {file_path.name}"
+            logger.warning(msg)
+            return None, None, msg
 
         # Profile name is either explicit 'name' field or derived from filename
         name = data.get('name') or file_path.stem
 
-        return name, data
+        return name, data, None
 
     except json.JSONDecodeError as e:
-        logger.warning("Invalid JSON in profile file %s: %s", file_path, e)
-        return None, None
+        msg = f"Invalid JSON in {file_path.name}: {e}"
+        logger.warning(msg)
+        return None, None, msg
     except Exception as e:
-        logger.warning("Error reading profile file %s: %s", file_path, e)
-        return None, None
+        msg = f"Error reading {file_path.name}: {e}"
+        logger.warning(msg)
+        return None, None, msg
+
+
+@dataclass
+class ProfileDiscoveryResult:
+    """Result of profile discovery, carrying both valid profiles and parse errors.
+
+    Callers that only need the profiles dict can use ``result.profiles``.
+    Callers that want to surface actionable diagnostics (e.g. when a
+    requested profile is missing) should also inspect ``result.errors``
+    — a mapping from the profile file stem (e.g. ``"github-resolver"``)
+    to the human-readable error message.
+    """
+
+    profiles: Dict[str, 'SubagentProfile'] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)
 
 
 def discover_profiles(
     profiles_dir: str,
     base_path: Optional[str] = None
-) -> Dict[str, 'SubagentProfile']:
+) -> ProfileDiscoveryResult:
     """Discover subagent profiles from a directory.
 
     Scans the specified directory for .json and .yaml/.yml files,
@@ -422,7 +441,7 @@ def discover_profiles(
                    Defaults to current working directory.
 
     Returns:
-        Dict mapping profile names to SubagentProfile instances.
+        ProfileDiscoveryResult with discovered profiles and any parse errors.
     """
     if base_path is None:
         base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
@@ -434,13 +453,14 @@ def discover_profiles(
 
     if not profiles_path.exists():
         logger.debug("Profiles directory does not exist: %s", profiles_path)
-        return {}
+        return ProfileDiscoveryResult()
 
     if not profiles_path.is_dir():
         logger.warning("Profiles path is not a directory: %s", profiles_path)
-        return {}
+        return ProfileDiscoveryResult()
 
     profiles: Dict[str, SubagentProfile] = {}
+    errors: Dict[str, str] = {}
 
     # Scan for profile files
     for file_path in profiles_path.iterdir():
@@ -450,7 +470,10 @@ def discover_profiles(
         if file_path.suffix not in ('.json', '.yaml', '.yml'):
             continue
 
-        name, data = _parse_profile_file(file_path)
+        name, data, error = _parse_profile_file(file_path)
+        if error:
+            errors[file_path.stem] = error
+            continue
         if name is None or data is None:
             continue
 
@@ -491,6 +514,73 @@ def discover_profiles(
             ", ".join(profiles.keys())
         )
 
+    # Also discover profiles from premium entry-point path (if installed).
+    # Workspace profiles take precedence over premium ones.
+    premium_profiles = _discover_premium_profiles()
+    for name, profile in premium_profiles.items():
+        if name not in profiles:
+            profiles[name] = profile
+
+    return ProfileDiscoveryResult(profiles=profiles, errors=errors)
+
+
+def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
+    """Discover profiles provided by the ``jaato.premium`` → ``profiles`` entry point.
+
+    Returns an empty dict if no premium package is installed.
+    """
+    try:
+        from shared.jaato_runtime import _get_premium_content_path
+    except ImportError:
+        return {}
+
+    premium_dir = _get_premium_content_path("profiles")
+    if not premium_dir or not Path(premium_dir).is_dir():
+        return {}
+
+    # Re-use discover_profiles logic on the premium path, but pass
+    # an absolute path to avoid workspace-relative resolution.
+    profiles: Dict[str, SubagentProfile] = {}
+    for file_path in Path(premium_dir).iterdir():
+        if not file_path.is_file():
+            continue
+        if file_path.suffix not in ('.json', '.yaml', '.yml'):
+            continue
+
+        name, data, _error = _parse_profile_file(file_path)
+        if name is None or data is None:
+            continue
+
+        gc_config = None
+        if 'gc' in data and data['gc']:
+            gc_config = GCProfileConfig.from_dict(data['gc'])
+
+        raw_plugins = data.get('plugins', [])
+        clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+
+        profile = SubagentProfile(
+            name=name,
+            description=data.get('description', ''),
+            plugins=clean_plugins,
+            preloaded_plugins=preloaded,
+            plugin_configs=data.get('plugin_configs', {}),
+            system_instructions=data.get('system_instructions'),
+            model=data.get('model'),
+            provider=data.get('provider'),
+            max_turns=data.get('max_turns', 10),
+            auto_approved=data.get('auto_approved', False),
+            icon=data.get('icon'),
+            icon_name=data.get('icon_name'),
+            gc=gc_config,
+        )
+        profiles[name] = profile
+        logger.debug("Discovered premium profile '%s' from %s", name, file_path)
+
+    if profiles:
+        logger.info(
+            "Discovered %d premium profile(s): %s",
+            len(profiles), ", ".join(profiles.keys())
+        )
     return profiles
 
 

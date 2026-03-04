@@ -40,13 +40,14 @@ Example usage:
 PLUGIN_KIND = "tool"
 
 from .plugin import SubagentPlugin, create_plugin
-from .config import SubagentConfig, SubagentProfile, SubagentResult, discover_profiles
+from .config import SubagentConfig, SubagentProfile, SubagentResult, ProfileDiscoveryResult, discover_profiles
 
 __all__ = [
     'SubagentPlugin',
     'SubagentConfig',
     'SubagentProfile',
     'SubagentResult',
+    'ProfileDiscoveryResult',
     'discover_profiles',
     'create_plugin',
 ]

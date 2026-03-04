@@ -104,12 +104,15 @@ init = "jaato_premium.gossip:init_gossip"
 
 ## Phase 3: Move methodology content
 
-### Task 3.1 — Move prompt constants to premium
+### Task 3.1 — Prompt constants stay public
 
-- Implement `jaato_premium/prompts.py` with the 3 constants
-- Remove them from `jaato_runtime.py` (the entry-point loader now fetches
-  from premium)
-- Verify: with premium installed → same prompts. Without → empty/generic.
+The 3 framework prompt constants (`_TASK_COMPLETION_INSTRUCTION`,
+`_PARALLEL_TOOL_GUIDANCE`, `_TURN_SUMMARY_INSTRUCTION`) are necessary for
+correct agent behavior (safety, efficiency, GC) and stay in `jaato_runtime.py`
+as functional defaults.
+
+The premium package can provide **enhanced versions** via the
+`prompt_provider` entry point but the base agent works correctly without it.
 
 ### Task 3.2 — Move content files
 

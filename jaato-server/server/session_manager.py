@@ -23,7 +23,7 @@ import pathlib
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # Add project root to path
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -169,11 +169,9 @@ class SessionManager:
         # creates/restores within the same daemon process.
         self._instruction_token_cache = InstructionTokenCache()
 
-        # Gossip infrastructure references (set by daemon via set_gossip_context)
-        self._peer_registry = None   # Optional[PeerRegistry]
-        self._health_collector = None  # Optional[ServerHealthCollector]
-        self._remote_handler = None   # Optional[RemoteSpawnHandler]
-        self._server_reliability = None  # Optional[ServerReliabilityTracker]
+        # Session hooks — callbacks invoked after each session is initialized.
+        # Registered by daemon extensions via ``add_session_hook()``.
+        self._session_hooks: List[Callable] = []
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
@@ -201,80 +199,80 @@ class SessionManager:
         self,
         profile_name: str,
         workspace_path: str,
-    ) -> Optional[Any]:
+    ) -> Tuple[Optional[Any], Optional[str]]:
         """Resolve an agent profile by name from the workspace.
 
         Discovers profiles from ``.jaato/profiles/`` in the workspace
-        and returns the matching ``SubagentProfile``, or None if not found.
+        and returns the matching ``SubagentProfile``.  When the profile
+        is not found, the second element carries a user-friendly error
+        message (e.g. a JSON parse error for a broken profile file).
 
         Args:
             profile_name: Name of the profile to look up.
             workspace_path: Workspace directory containing ``.jaato/profiles/``.
 
         Returns:
-            The ``SubagentProfile`` instance, or None if not found.
+            Tuple of ``(profile, None)`` on success, or
+            ``(None, error_message)`` when the profile cannot be resolved.
         """
         from shared.plugins.subagent.config import discover_profiles
 
-        profiles = discover_profiles(".jaato/profiles", base_path=workspace_path)
-        return profiles.get(profile_name)
+        result = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        profile = result.profiles.get(profile_name)
+        if profile is not None:
+            return profile, None
 
-    def set_gossip_context(
-        self,
-        peer_registry,
-        health_collector,
-        remote_handler=None,
-        server_reliability=None,
-    ) -> None:
-        """Store gossip infrastructure references for injection into plugins.
-
-        Called by the daemon after gossip initialization. The references are
-        injected into each session's environment plugin (cluster topology)
-        and subagent plugin (remote delegation) during create_session()
-        and _load_session().
-
-        Args:
-            peer_registry: The PeerRegistry instance.
-            health_collector: The ServerHealthCollector instance.
-            remote_handler: The RemoteSpawnHandler instance (Phase 3).
-            server_reliability: The ServerReliabilityTracker instance (Phase 4).
-        """
-        self._peer_registry = peer_registry
-        self._health_collector = health_collector
-        self._remote_handler = remote_handler
-        self._server_reliability = server_reliability
-
-    def _configure_gossip_context(self, server: JaatoServer) -> None:
-        """Inject gossip references into a session's environment and subagent plugins.
-
-        Wires the PeerRegistry and ServerHealthCollector into the environment
-        plugin (for cluster topology) and the RemoteSpawnHandler into the
-        subagent plugin (for remote delegation).
-
-        Args:
-            server: The JaatoServer instance whose registry to search.
-        """
-        if self._peer_registry is None or self._health_collector is None:
-            return
-        if not server or not server.registry:
-            return
-
-        # Wire environment plugin (Phase 2 — cluster topology, Phase 4 — reliability)
-        env_plugin = server.registry.get_plugin("environment")
-        if env_plugin and hasattr(env_plugin, 'set_gossip_context'):
-            env_plugin.set_gossip_context(
-                self._peer_registry,
-                self._health_collector,
-                server_reliability=getattr(self, '_server_reliability', None),
+        # Profile not in the successfully parsed set — check if there was
+        # a parse error for a file matching the requested name.
+        if profile_name in result.errors:
+            return None, (
+                f"Profile '{profile_name}' exists but failed to parse: "
+                f"{result.errors[profile_name]}"
             )
+        return None, f"Agent profile '{profile_name}' not found in .jaato/profiles/"
 
-        # Wire subagent plugin (Phase 3 — remote delegation)
-        if self._remote_handler is not None:
-            subagent_plugin = server.registry.get_plugin("subagent")
-            if subagent_plugin and hasattr(subagent_plugin, 'set_peer_context'):
-                subagent_plugin.set_peer_context(
-                    self._peer_registry, self._remote_handler,
-                )
+    def add_session_hook(self, hook: Callable) -> None:
+        """Register a callback invoked after each session is initialized.
+
+        Session hooks are the primary mechanism for daemon extensions to
+        inject per-session functionality (e.g., registering custom
+        environment aspects, wiring remote spawn handlers).
+
+        The hook is called with a single argument — the ``JaatoServer``
+        instance for the newly created or loaded session.  At the point
+        the hook is called, the server is fully initialized: the plugin
+        registry is populated, the provider is connected, and tools are
+        configured.
+
+        Hooks are called in registration order.  If a hook raises an
+        exception, it is logged and subsequent hooks still run.
+
+        Args:
+            hook: A callable with signature ``(server: JaatoServer) -> None``.
+
+        Example (from a daemon extension)::
+
+            def _on_session_ready(self, server):
+                env = server.registry.get_plugin("environment")
+                if env and hasattr(env, 'register_aspect'):
+                    env.register_aspect("my_aspect", self._handler)
+
+            # In the extension's start():
+            ctx.session_manager.add_session_hook(self._on_session_ready)
+        """
+        self._session_hooks.append(hook)
+
+    def _run_session_hooks(self, server: JaatoServer) -> None:
+        """Invoke all registered session hooks for a newly set-up session.
+
+        Args:
+            server: The JaatoServer instance to pass to each hook.
+        """
+        for hook in self._session_hooks:
+            try:
+                hook(server)
+            except Exception as exc:
+                logger.warning("Session hook failed: %s", exc, exc_info=True)
 
     def set_event_callback(
         self,
@@ -672,10 +670,10 @@ class SessionManager:
         # Resolve agent profile if requested
         profile = None
         if profile_name and workspace_path:
-            profile = self._resolve_profile(profile_name, workspace_path)
+            profile, error = self._resolve_profile(profile_name, workspace_path)
             if profile is None:
                 self._emit_to_client(client_id, ErrorEvent(
-                    error=f"Agent profile '{profile_name}' not found in .jaato/profiles/",
+                    error=error,
                     error_type="ProfileNotFoundError",
                     recoverable=True,
                 ))
@@ -710,7 +708,7 @@ class SessionManager:
         # Configure TODO plugin with session-scoped storage
         session_dir = self._session_storage_dir(workspace_path) / session_id
         self._configure_todo_storage(server, session_dir)
-        self._configure_gossip_context(server)
+        self._run_session_hooks(server)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -1017,7 +1015,7 @@ class SessionManager:
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
-        self._configure_gossip_context(server)
+        self._run_session_hooks(server)
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
@@ -1824,9 +1822,9 @@ class SessionManager:
 
         from shared.plugins.subagent.config import discover_profiles
 
-        profiles = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        discovery = discover_profiles(".jaato/profiles", base_path=workspace_path)
         result = []
-        for name, profile in profiles.items():
+        for name, profile in discovery.profiles.items():
             result.append({
                 "name": name,
                 "description": profile.description,
@@ -1834,6 +1832,16 @@ class SessionManager:
                 "provider": profile.provider,
                 "icon_name": profile.icon_name,
                 "plugins": profile.plugins,
+            })
+        # Surface parse errors so the profile listing shows broken files
+        for stem, error in discovery.errors.items():
+            result.append({
+                "name": stem,
+                "description": f"[parse error] {error}",
+                "model": None,
+                "provider": None,
+                "icon_name": None,
+                "plugins": [],
             })
         return result
 

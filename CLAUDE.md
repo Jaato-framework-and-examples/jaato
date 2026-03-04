@@ -621,4 +621,5 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
+- [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

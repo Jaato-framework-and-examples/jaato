@@ -138,10 +138,10 @@ class TestDiscoverProfilesWithGC:
             with open(profile_path, "w") as f:
                 json.dump(profile_data, f)
 
-            profiles = discover_profiles(temp_dir)
+            result = discover_profiles(temp_dir)
 
-            assert "gc-test-agent" in profiles
-            profile = profiles["gc-test-agent"]
+            assert "gc-test-agent" in result.profiles
+            profile = result.profiles["gc-test-agent"]
             assert profile.gc is not None
             assert profile.gc.type == "hybrid"
             assert profile.gc.threshold_percent == 85.0
@@ -161,10 +161,10 @@ class TestDiscoverProfilesWithGC:
             with open(profile_path, "w") as f:
                 json.dump(profile_data, f)
 
-            profiles = discover_profiles(temp_dir)
+            result = discover_profiles(temp_dir)
 
-            assert "no-gc-agent" in profiles
-            profile = profiles["no-gc-agent"]
+            assert "no-gc-agent" in result.profiles
+            profile = result.profiles["no-gc-agent"]
             assert profile.gc is None
 
 
