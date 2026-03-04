@@ -302,8 +302,8 @@ Use this to discover which tools can be run in background mode.""",
             Dict with task info including status, output, and result.
         """
         task_id = args.get("task_id")
-        stdout_offset = args.get("stdout_offset", 0)
-        stderr_offset = args.get("stderr_offset", 0)
+        stdout_offset = int(args.get("stdout_offset", 0))
+        stderr_offset = int(args.get("stderr_offset", 0))
         self._trace(
             f"getBackgroundTask: task_id={task_id}, "
             f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}"
