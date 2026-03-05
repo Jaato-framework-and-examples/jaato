@@ -1,8 +1,8 @@
-# Symphony Plugin — Webhook-Driven Daemon Sessions
+# Webhook Plugin — Webhook-Driven Daemon Sessions
 
 ## Overview
 
-The Symphony plugin enables **long-running daemon agent sessions** that react to
+The Webhook plugin enables **long-running daemon agent sessions** that react to
 external events delivered via HTTP webhooks. A daemon session is just a regular
 `JaatoSession` created with a profile whose system prompt instructs it to
 subscribe to events and process them eternally.
@@ -18,7 +18,7 @@ The session never "completes." It stays idle between events and wakes up when a
 webhook arrives via the event bus.
 
 ```
-External Service                  Symphony Plugin              TaskEventBus
+External Service                  Webhook Plugin               TaskEventBus
 (GitHub, Slack, etc.)             (HTTP listener)              (shared singleton)
         │                                │                            │
         │  POST /webhook/github          │                            │
@@ -31,7 +31,7 @@ External Service                  Symphony Plugin              TaskEventBus
         │                                │                            │
                                                                       │
                                               Daemon Session          │
-                                              (subscribe_events tool) │
+                                              (webhook_subscribe)     │
                                                       │               │
                                                       │  wait_for_events()
                                                       │◄──────────────┤
@@ -52,7 +52,7 @@ Jaato already supports:
 - **Daemon extensions** (external packages hook into the server lifecycle)
 
 What's missing is receiving external events and routing them to agent sessions.
-The Symphony plugin bridges this gap by adding an HTTP ingress that feeds into
+The Webhook plugin bridges this gap by adding an HTTP ingress that feeds into
 the existing `TaskEventBus`.
 
 ## Design Principles
@@ -60,24 +60,24 @@ the existing `TaskEventBus`.
 1. **No shared ports.** Each plugin instance owns its own HTTP listener port,
    configured per-instance — never shared across the server or other plugins.
 2. **Standard config precedence.** Configuration is loaded in order:
-   profile `plugin_configs` → workspace `.jaato/symphony.json` →
-   user `~/.jaato/symphony.json` → built-in defaults.
+   profile `plugin_configs` → workspace `.jaato/webhook.json` →
+   user `~/.jaato/webhook.json` → built-in defaults.
 3. **Bus-mediated delivery.** Webhooks publish to `TaskEventBus`; sessions
    subscribe via tools. This decouples ingress from session lifecycle and
    enables fan-out to multiple sessions.
 4. **The model drives the loop.** The session's system prompt instructs it to
-   call `subscribe_events` then loop on `poll_events`. The plugin doesn't
+   call `webhook_subscribe` then loop on `webhook_poll`. The plugin doesn't
    inject messages or force turns — the model is in control.
 
 ## Configuration
 
-### Config File: `symphony.json`
+### Config File: `webhook.json`
 
 ```json
 {
   "port": 9100,
   "host": "127.0.0.1",
-  "secret": "${SYMPHONY_WEBHOOK_SECRET}",
+  "secret": "${WEBHOOK_SECRET}",
   "routes": {
     "github": {
       "path": "/webhook/github",
@@ -106,10 +106,10 @@ the existing `TaskEventBus`.
 ### Config Precedence
 
 ```
-1. Profile plugin_configs.symphony   (highest — per-session override)
-2. <workspace>/.jaato/symphony.json  (project-level)
-3. ~/.jaato/symphony.json            (user-level)
-4. Built-in defaults                 (lowest)
+1. Profile plugin_configs.webhook   (highest — per-session override)
+2. <workspace>/.jaato/webhook.json  (project-level)
+3. ~/.jaato/webhook.json            (user-level)
+4. Built-in defaults                (lowest)
 ```
 
 Each layer is merged, not replaced — a profile can override just `port` while
@@ -130,8 +130,8 @@ inheriting routes from the workspace config.
 
 Config values support `${VAR}` expansion (via existing `expand_variables()`):
 
-- `${SYMPHONY_WEBHOOK_SECRET}` — webhook verification secret
-- `${SYMPHONY_PORT}` — listener port
+- `${WEBHOOK_SECRET}` — webhook verification secret
+- `${WEBHOOK_PORT}` — listener port
 - `${workspaceRoot}` — workspace path (for file-based config paths)
 
 ## Plugin Architecture
@@ -139,11 +139,11 @@ Config values support `${VAR}` expansion (via existing `expand_variables()`):
 ### Module Structure
 
 ```
-shared/plugins/symphony/
+shared/plugins/webhook/
 ├── __init__.py          # PLUGIN_KIND = "tool", create_plugin()
-├── plugin.py            # SymphonyPlugin — tool plugin with HTTP server
-├── http_server.py       # Lightweight async HTTP server (aiohttp or http.server)
-├── config.py            # SymphonyConfig dataclass, config loading/merging
+├── plugin.py            # WebhookPlugin — tool plugin with HTTP server
+├── http_server.py       # Lightweight async HTTP server (http.server in thread)
+├── config.py            # WebhookConfig dataclass, config loading/merging
 ├── routes.py            # Route matching, secret verification, body parsing
 └── tests/
     ├── test_plugin.py
@@ -155,7 +155,7 @@ shared/plugins/symphony/
 ### Plugin Class
 
 ```python
-class SymphonyPlugin:
+class WebhookPlugin:
     """Webhook ingress plugin for daemon agent sessions.
 
     Starts a per-instance HTTP server that receives webhooks and publishes
@@ -177,7 +177,7 @@ class SymphonyPlugin:
 
     @property
     def name(self) -> str:
-        return "symphony"
+        return "webhook"
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Load config with standard precedence: explicit > workspace > user > defaults."""
@@ -200,13 +200,13 @@ class SymphonyPlugin:
 
 The plugin exposes three tools, all `discoverability="discoverable"`:
 
-#### `symphony_subscribe`
+#### `webhook_subscribe`
 
 Subscribe to webhook events on the bus. Returns a subscription ID.
 
 ```json
 {
-  "name": "symphony_subscribe",
+  "name": "webhook_subscribe",
   "description": "Subscribe to incoming webhook events. Returns a subscription ID for polling. Call this once at session start.",
   "parameters": {
     "type": "object",
@@ -238,21 +238,21 @@ Subscribe to webhook events on the bus. Returns a subscription ID.
 }
 ```
 
-#### `symphony_poll`
+#### `webhook_poll`
 
 Long-poll for events on an existing subscription. Blocks up to `timeout`
 seconds. The model calls this in a loop.
 
 ```json
 {
-  "name": "symphony_poll",
+  "name": "webhook_poll",
   "description": "Poll for new webhook events. Blocks up to timeout seconds waiting for events. Call this in a loop after subscribing.",
   "parameters": {
     "type": "object",
     "properties": {
       "subscription_id": {
         "type": "string",
-        "description": "Subscription ID from symphony_subscribe"
+        "description": "Subscription ID from webhook_subscribe"
       },
       "timeout": {
         "type": "number",
@@ -287,13 +287,13 @@ seconds. The model calls this in a loop.
 
 When no events arrive within the timeout, returns `{"events": [], "cursor": "..."}`.
 
-#### `symphony_status`
+#### `webhook_status`
 
 Check the HTTP listener status, active subscriptions, and event stats.
 
 ```json
 {
-  "name": "symphony_status",
+  "name": "webhook_status",
   "description": "Show webhook listener status, active routes, and event statistics.",
   "parameters": {
     "type": "object",
@@ -325,12 +325,12 @@ Check the HTTP listener status, active subscriptions, and event stats.
 The plugin defines a new event type constant for the `TaskEventBus`:
 
 ```python
-# In symphony/plugin.py or as extension to TaskEventType
-SYMPHONY_EVENT_TYPE = "webhook_received"
+# In webhook/plugin.py or as extension to TaskEventType
+WEBHOOK_EVENT_TYPE = "webhook_received"
 ```
 
 Since `TaskEventBus` currently uses `TaskEventType` enum (from
-`jaato_sdk/plugins/todo/models.py`), the Symphony plugin publishes events using
+`jaato_sdk/plugins/todo/models.py`), the Webhook plugin publishes events using
 a **wrapper pattern** — it creates `TaskEvent` objects with a custom event type
 that carries the webhook payload in the event's data fields.
 
@@ -341,7 +341,7 @@ def _on_webhook_received(self, route_name, event_type, headers, payload):
     """Called by HTTP server when a webhook is received."""
     event = TaskEvent.create(
         event_type=TaskEventType.CUSTOM,  # New enum value for plugin events
-        agent_id=f"symphony:{route_name}",
+        agent_id=f"webhook:{route_name}",
         data={
             "source": route_name,
             "event_type": event_type,
@@ -355,8 +355,8 @@ def _on_webhook_received(self, route_name, event_type, headers, payload):
 
 ### Subscription Flow
 
-The `symphony_subscribe` tool creates a `TaskEventBus` subscription filtered to
-`CUSTOM` events from `symphony:*` agents:
+The `webhook_subscribe` tool creates a `TaskEventBus` subscription filtered to
+`CUSTOM` events from `webhook:*` agents:
 
 ```python
 def _execute_subscribe(self, args):
@@ -367,7 +367,7 @@ def _execute_subscribe(self, args):
         subscriber_agent=self._session_agent_id,
         filter=EventFilter(
             event_types=[TaskEventType.CUSTOM],
-            agent_id_prefix="symphony:",
+            agent_id_prefix="webhook:",
             # Further source filtering done in callback
         ),
         callback=lambda event: self._buffer_event(sub_id, event, sources),
@@ -378,7 +378,7 @@ def _execute_subscribe(self, args):
 
 ### Polling Flow
 
-The `symphony_poll` tool uses the bus's `wait_for_events()` for efficient
+The `webhook_poll` tool uses the bus's `wait_for_events()` for efficient
 long-polling:
 
 ```python
@@ -447,12 +447,12 @@ class WebhookHTTPServer:
 - **HMAC verification** per-route using standard algorithms (SHA-256).
 - **Body size limits** to prevent memory exhaustion.
 - **No path traversal** — routes are matched as exact prefixes.
-- **Secret via env var** — `${SYMPHONY_WEBHOOK_SECRET}` avoids hardcoding
+- **Secret via env var** — `${WEBHOOK_SECRET}` avoids hardcoding
   secrets in config files.
 
 ## Daemon Session Profile
 
-A daemon session is created with a profile that loads the Symphony plugin and
+A daemon session is created with a profile that loads the Webhook plugin and
 instructs the model to subscribe and loop:
 
 ### Example: `.jaato/profiles/github-watcher.json`
@@ -463,9 +463,9 @@ instructs the model to subscribe and loop:
   "description": "Daemon session that reacts to GitHub webhook events",
   "model": "gemini-2.5-flash",
   "provider": "google_genai",
-  "plugins": ["symphony(preload)", "cli", "file_edit", "todo"],
+  "plugins": ["webhook(preload)", "cli", "file_edit", "todo"],
   "plugin_configs": {
-    "symphony": {
+    "webhook": {
       "port": 9100,
       "routes": {
         "github": {
@@ -477,7 +477,7 @@ instructs the model to subscribe and loop:
       }
     }
   },
-  "system_instructions": "You are a GitHub automation daemon. On startup, call symphony_subscribe with sources=['github']. Then loop forever calling symphony_poll. For each event, analyze it and take appropriate action:\n- push events: review the commits and summarize changes\n- pull_request events: review the PR diff and post feedback\n- issue events: triage and label the issue\nNever stop polling. After processing each batch of events, immediately call symphony_poll again.",
+  "system_instructions": "You are a GitHub automation daemon. On startup, call webhook_subscribe with sources=['github']. Then loop forever calling webhook_poll. For each event, analyze it and take appropriate action:\n- push events: review the commits and summarize changes\n- pull_request events: review the PR diff and post feedback\n- issue events: triage and label the issue\nNever stop polling. After processing each batch of events, immediately call webhook_poll again.",
   "max_turns": 0,
   "gc": {
     "type": "budget",
@@ -492,7 +492,7 @@ instructs the model to subscribe and loop:
 | Setting | Value | Rationale |
 |---------|-------|-----------|
 | `max_turns` | `0` | Unlimited — daemon runs forever |
-| `symphony(preload)` | — | Load tools immediately, no discovery step |
+| `webhook(preload)` | — | Load tools immediately, no discovery step |
 | `gc.type` | `"budget"` | Proactive GC keeps context window healthy |
 | `gc.preserve_recent_turns` | `3` | Keep recent event processing, discard old |
 
@@ -535,8 +535,8 @@ profiles (via `session.new --profile`), the server already doesn't enforce
 ## TaskEventType Extension
 
 The `TaskEventType` enum needs a `CUSTOM` value for plugin-generated events.
-Alternatively, Symphony can define its own event type string and use a custom
-`EventFilter.matches()` predicate.
+Alternatively, the Webhook plugin can define its own event type string and use a
+custom `EventFilter.matches()` predicate.
 
 **Option A: Add `CUSTOM` to TaskEventType** (preferred — minimal, reusable):
 ```python
@@ -545,7 +545,7 @@ class TaskEventType(str, Enum):
     CUSTOM = "custom"  # Plugin-defined events
 ```
 
-**Option B: Symphony-specific filter** (no SDK changes needed):
+**Option B: Webhook-specific filter** (no SDK changes needed):
 The plugin subscribes with a callback filter that checks `event.source_agent`
 prefix instead of `event_type`. This works with the existing `EventFilter`
 `agent_id` field.
@@ -562,7 +562,7 @@ from model polling:
 Webhook arrives → TaskEventBus.publish() → subscription callback
     → appends to per-subscription buffer (thread-safe deque)
 
-Model calls symphony_poll → drains buffer (up to limit)
+Model calls webhook_poll → drains buffer (up to limit)
     → returns events + cursor
     → if buffer empty, blocks on threading.Event for up to timeout
 ```
@@ -577,7 +577,7 @@ This ensures:
 
 | Scenario | Behavior |
 |----------|----------|
-| HTTP server fails to bind | `symphony_subscribe` returns error with diagnostic |
+| HTTP server fails to bind | `webhook_subscribe` returns error with diagnostic |
 | Webhook body too large | 413 response, event dropped |
 | Invalid JSON body | 400 response, event dropped |
 | HMAC verification fails | 403 response, event dropped |
@@ -589,7 +589,7 @@ This ensures:
 ## Lifecycle & Cleanup
 
 1. **Plugin initialize** — config loaded and merged, server not yet started.
-2. **First `symphony_subscribe` call** — HTTP server starts lazily (avoids
+2. **First `webhook_subscribe` call** — HTTP server starts lazily (avoids
    binding ports for sessions that don't use webhooks).
 3. **Session active** — server running, events flowing.
 4. **Session GC** — old turns with processed events are garbage-collected;
@@ -620,7 +620,7 @@ No `requests` or `aiohttp` needed in tests.
 
 ## Future Extensions
 
-- **Outbound actions** — `symphony_respond` tool for sending HTTP responses
+- **Outbound actions** — `webhook_respond` tool for sending HTTP responses
   back to webhook sources (e.g., GitHub status checks).
 - **Event filtering DSL** — JSONPath or jq-like expressions for payload filtering.
 - **Webhook registration** — tools to dynamically add/remove routes at runtime.
