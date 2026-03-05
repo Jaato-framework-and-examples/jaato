@@ -57,6 +57,26 @@ The Webhook plugin is the first real webhook infrastructure in the codebase. It
 adds an HTTP ingress that receives external events and feeds them into the
 existing `TaskEventBus`, enabling event-driven agent sessions.
 
+## Distribution: Public Plugin, Premium Profiles
+
+The **plugin itself** lives in the public codebase (`shared/plugins/webhook/`).
+It's a straightforward HTTP→EventBus bridge built on stdlib — no proprietary
+logic, and all its dependencies (`TaskEventBus`, config precedence, plugin base)
+are already public. Gating it behind premium would feel wrong given that more
+complex plugins (`interactive_shell`, `service_connector`) are open.
+
+**Premium ships curated profiles** — production-ready daemon session profiles
+with battle-tested system prompts, route configurations, and HMAC setups for
+specific integrations:
+
+- `github-watcher` — PR review, commit summarization, issue triage
+- `slack-responder` — channel monitoring, thread responses, slash commands
+- `jira-triager` — issue classification, priority assignment, label management
+
+These profiles encode operational knowledge (what events to subscribe to, how to
+process them, what tools to use) that enterprise users pay for. The bare plugin
+gives you the plumbing; premium gives you the recipes.
+
 ## Design Principles
 
 1. **No shared ports.** Each plugin instance owns its own HTTP listener port,
