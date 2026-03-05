@@ -50,6 +50,37 @@ class RouteConfig:
 
 
 @dataclass
+class TLSConfig:
+    """TLS/SSL configuration for the webhook HTTP server.
+
+    When ``enabled`` is True, the server wraps its socket with an
+    ``ssl.SSLContext``. Both ``certfile`` and ``keyfile`` are required.
+
+    Attributes:
+        enabled: Whether to enable TLS (default: False).
+        certfile: Path to PEM certificate file (or chain).
+        keyfile: Path to PEM private key file.
+        ca_certfile: Optional CA certificate for client certificate verification
+            (mutual TLS). When set, clients must present a valid certificate
+            signed by this CA.
+    """
+    enabled: bool = False
+    certfile: Optional[str] = None
+    keyfile: Optional[str] = None
+    ca_certfile: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TLSConfig':
+        """Create TLSConfig from a dictionary."""
+        return cls(
+            enabled=data.get('enabled', False),
+            certfile=data.get('certfile'),
+            keyfile=data.get('keyfile'),
+            ca_certfile=data.get('ca_certfile'),
+        )
+
+
+@dataclass
 class WebhookConfig:
     """Top-level configuration for the webhook plugin.
 
@@ -60,10 +91,17 @@ class WebhookConfig:
         port: HTTP listener port (default: 9100).
         host: Bind address (default: '127.0.0.1' — localhost only).
         secret: Global shared secret for HMAC verification. Per-route secrets
-            override this when the route's secret_header is set.
+            override this when the route's secret_header is set. Use
+            ``${ENV_VAR}`` syntax to avoid storing secrets in plain text.
         routes: Named routes mapping source names to RouteConfig.
         max_body_size: Maximum request body size in bytes (default: 1 MB).
         response_timeout: Seconds before responding to webhook sender (default: 5.0).
+        tls: TLS/SSL configuration. When enabled, the server uses HTTPS.
+        allowed_ips: List of allowed source IPs or CIDR ranges (e.g.,
+            ``['192.168.1.0/24', '10.0.0.5']``). Empty list means all IPs
+            are allowed. Supports both IPv4 and IPv6.
+        rate_limit_per_second: Maximum requests per second per source IP
+            (default: 0 = unlimited). Excess requests receive 429.
     """
     port: int = 9100
     host: str = '127.0.0.1'
@@ -71,6 +109,9 @@ class WebhookConfig:
     routes: Dict[str, RouteConfig] = field(default_factory=dict)
     max_body_size: int = 1048576  # 1 MB
     response_timeout: float = 5.0
+    tls: TLSConfig = field(default_factory=TLSConfig)
+    allowed_ips: List[str] = field(default_factory=list)
+    rate_limit_per_second: float = 0
 
     def __post_init__(self):
         if not self.routes:
@@ -93,6 +134,9 @@ class WebhookConfig:
             if isinstance(route_data, dict):
                 routes[name] = RouteConfig.from_dict(route_data)
 
+        tls_data = data.get('tls', {})
+        tls = TLSConfig.from_dict(tls_data) if isinstance(tls_data, dict) else TLSConfig()
+
         return cls(
             port=data.get('port', 9100),
             host=data.get('host', '127.0.0.1'),
@@ -100,6 +144,9 @@ class WebhookConfig:
             routes=routes,
             max_body_size=data.get('max_body_size', 1048576),
             response_timeout=data.get('response_timeout', 5.0),
+            tls=tls,
+            allowed_ips=data.get('allowed_ips', []),
+            rate_limit_per_second=data.get('rate_limit_per_second', 0),
         )
 
 
@@ -271,6 +318,44 @@ def validate_config(data: Dict[str, Any]) -> Tuple[bool, List[str]]:
             errors.append("'response_timeout' must be a number")
         elif timeout <= 0:
             errors.append("'response_timeout' must be positive")
+
+    rate_limit = data.get('rate_limit_per_second')
+    if rate_limit is not None:
+        if not isinstance(rate_limit, (int, float)) or isinstance(rate_limit, bool):
+            errors.append("'rate_limit_per_second' must be a number")
+        elif rate_limit < 0:
+            errors.append("'rate_limit_per_second' must be non-negative")
+
+    # Validate TLS config
+    tls = data.get('tls')
+    if tls is not None:
+        if not isinstance(tls, dict):
+            errors.append("'tls' must be an object")
+        else:
+            if tls.get('enabled'):
+                if not tls.get('certfile'):
+                    errors.append("tls.certfile is required when TLS is enabled")
+                if not tls.get('keyfile'):
+                    errors.append("tls.keyfile is required when TLS is enabled")
+
+    # Validate allowed_ips
+    allowed_ips = data.get('allowed_ips')
+    if allowed_ips is not None:
+        if not isinstance(allowed_ips, list):
+            errors.append("'allowed_ips' must be an array")
+        else:
+            import ipaddress
+            for i, entry in enumerate(allowed_ips):
+                if not isinstance(entry, str):
+                    errors.append(f"allowed_ips[{i}] must be a string")
+                    continue
+                try:
+                    if '/' in entry:
+                        ipaddress.ip_network(entry, strict=False)
+                    else:
+                        ipaddress.ip_address(entry)
+                except ValueError as e:
+                    errors.append(f"allowed_ips[{i}] is not a valid IP/CIDR: {e}")
 
     routes = data.get('routes')
     if routes is not None:

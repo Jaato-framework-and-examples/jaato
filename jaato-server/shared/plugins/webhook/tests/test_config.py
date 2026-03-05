@@ -10,6 +10,7 @@ import pytest
 
 from shared.plugins.webhook.config import (
     RouteConfig,
+    TLSConfig,
     WebhookConfig,
     _deep_merge,
     _expand_env_vars,
@@ -255,3 +256,107 @@ class TestValidateConfig:
     def test_invalid_response_timeout(self):
         is_valid, errors = validate_config({"response_timeout": 0})
         assert not is_valid
+
+    def test_valid_tls_config(self):
+        is_valid, errors = validate_config({
+            "tls": {
+                "enabled": True,
+                "certfile": "/path/to/cert.pem",
+                "keyfile": "/path/to/key.pem",
+            },
+        })
+        assert is_valid
+
+    def test_tls_missing_certfile(self):
+        is_valid, errors = validate_config({
+            "tls": {"enabled": True, "keyfile": "/key.pem"},
+        })
+        assert not is_valid
+        assert any("certfile" in e for e in errors)
+
+    def test_tls_missing_keyfile(self):
+        is_valid, errors = validate_config({
+            "tls": {"enabled": True, "certfile": "/cert.pem"},
+        })
+        assert not is_valid
+        assert any("keyfile" in e for e in errors)
+
+    def test_tls_disabled_no_files_required(self):
+        is_valid, errors = validate_config({
+            "tls": {"enabled": False},
+        })
+        assert is_valid
+
+    def test_valid_allowed_ips(self):
+        is_valid, errors = validate_config({
+            "allowed_ips": ["192.168.1.0/24", "10.0.0.5", "::1"],
+        })
+        assert is_valid
+
+    def test_invalid_allowed_ip(self):
+        is_valid, errors = validate_config({
+            "allowed_ips": ["not-an-ip"],
+        })
+        assert not is_valid
+        assert any("not a valid IP" in e for e in errors)
+
+    def test_valid_rate_limit(self):
+        is_valid, errors = validate_config({"rate_limit_per_second": 10})
+        assert is_valid
+
+    def test_invalid_rate_limit_negative(self):
+        is_valid, errors = validate_config({"rate_limit_per_second": -1})
+        assert not is_valid
+
+
+class TestTLSConfig:
+    """Tests for TLSConfig dataclass."""
+
+    def test_defaults(self):
+        tls = TLSConfig()
+        assert tls.enabled is False
+        assert tls.certfile is None
+
+    def test_from_dict(self):
+        tls = TLSConfig.from_dict({
+            "enabled": True,
+            "certfile": "/cert.pem",
+            "keyfile": "/key.pem",
+            "ca_certfile": "/ca.pem",
+        })
+        assert tls.enabled is True
+        assert tls.certfile == "/cert.pem"
+        assert tls.ca_certfile == "/ca.pem"
+
+
+class TestWebhookConfigSecurityFields:
+    """Tests for security-related config fields."""
+
+    def test_defaults_no_tls(self):
+        config = WebhookConfig()
+        assert config.tls.enabled is False
+        assert config.allowed_ips == []
+        assert config.rate_limit_per_second == 0
+
+    def test_from_dict_with_tls(self):
+        config = WebhookConfig.from_dict({
+            "tls": {
+                "enabled": True,
+                "certfile": "/cert.pem",
+                "keyfile": "/key.pem",
+            },
+        })
+        assert config.tls.enabled is True
+        assert config.tls.certfile == "/cert.pem"
+
+    def test_from_dict_with_allowed_ips(self):
+        config = WebhookConfig.from_dict({
+            "allowed_ips": ["10.0.0.0/8"],
+        })
+        assert config.allowed_ips == ["10.0.0.0/8"]
+
+    def test_from_dict_with_rate_limit(self):
+        config = WebhookConfig.from_dict({
+            "rate_limit_per_second": 50,
+        })
+        assert config.rate_limit_per_second == 50
