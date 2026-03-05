@@ -46,14 +46,16 @@ External Service                  Webhook Plugin               TaskEventBus
 
 ## Motivation
 
-Jaato already supports:
-- **Outbound webhooks** (TODO plugin `WebhookReporter` sends events out)
-- **Internal pub/sub** (`TaskEventBus` for cross-agent task coordination)
-- **Daemon extensions** (external packages hook into the server lifecycle)
+Jaato has **internal pub/sub** (`TaskEventBus` for cross-agent task
+coordination) and **daemon extensions** (external packages hook into the server
+lifecycle), but no way to receive events from the outside world. The TODO
+plugin's `WebhookReporter` sends progress updates to an HTTP endpoint, but
+that's scoped to plan/step lifecycle reporting — not a general-purpose webhook
+system.
 
-What's missing is receiving external events and routing them to agent sessions.
-The Webhook plugin bridges this gap by adding an HTTP ingress that feeds into
-the existing `TaskEventBus`.
+The Webhook plugin is the first real webhook infrastructure in the codebase. It
+adds an HTTP ingress that receives external events and feeds them into the
+existing `TaskEventBus`, enabling event-driven agent sessions.
 
 ## Design Principles
 
