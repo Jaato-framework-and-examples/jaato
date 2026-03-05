@@ -147,6 +147,9 @@ inheriting routes from the workspace config.
 | `routes` | `{"generic": {"path": "/webhook"}}` | Single catch-all route |
 | `max_body_size` | `1048576` (1 MB) | Maximum request body size |
 | `response_timeout` | `5.0` | Seconds before responding to webhook sender |
+| `tls` | `{"enabled": false}` | TLS/SSL config (`enabled`, `certfile`, `keyfile`, `ca_certfile`) |
+| `allowed_ips` | `[]` | IP/CIDR allowlist. Empty = all allowed. |
+| `rate_limit_per_second` | `0` | Per-IP rate limit (token bucket). 0 = unlimited. |
 
 ### Environment Variable Support
 
@@ -464,13 +467,53 @@ class WebhookHTTPServer:
 
 ### Security
 
+The HTTP server implements a layered security pipeline. All checks use
+Python stdlib only — no external dependencies.
+
+**Request pipeline** (checks applied in order):
+1. IP allowlist → 403 Forbidden
+2. Per-IP rate limit → 429 Too Many Requests
+3. Route matching → 404 Not Found
+4. Body size limit → 413 Payload Too Large
+5. Content-Type check → 415 Unsupported Media Type
+6. HMAC signature verification → 403 Forbidden
+7. JSON body parsing → 400 Bad Request
+
+**Network security:**
 - **Bind to localhost by default** (`127.0.0.1`). Explicitly set `host` to
   `0.0.0.0` to accept external connections.
-- **HMAC verification** per-route using standard algorithms (SHA-256).
-- **Body size limits** to prevent memory exhaustion.
-- **No path traversal** — routes are matched as exact prefixes.
+- **TLS/SSL** — optional HTTPS via `ssl.SSLContext`. Supports server-only TLS
+  and mutual TLS (client certificate verification via `ca_certfile`).
+- **IP allowlisting** — `allowed_ips` config with CIDR support via
+  `ipaddress` module. IPv4-mapped IPv6 addresses (`::ffff:1.2.3.4`) are
+  normalized. Empty list (default) allows all IPs.
+
+**Application security:**
+- **HMAC verification** per-route using HMAC-SHA256. Supports GitHub's
+  `sha256=` prefix convention.
+- **Body size limits** to prevent memory exhaustion (default 1 MB).
+- **Per-IP rate limiting** — token-bucket algorithm. Configurable via
+  `rate_limit_per_second` (default 0 = unlimited). Each source IP gets its
+  own bucket with 1-second burst capacity.
+- **No path traversal** — routes are matched as exact strings.
 - **Secret via env var** — `${WEBHOOK_SECRET}` avoids hardcoding
   secrets in config files.
+
+**Corporate deployment example:**
+```json
+{
+  "host": "0.0.0.0",
+  "secret": "${WEBHOOK_SECRET}",
+  "tls": {
+    "enabled": true,
+    "certfile": "/etc/ssl/webhook.pem",
+    "keyfile": "/etc/ssl/webhook-key.pem",
+    "ca_certfile": "/etc/ssl/corporate-ca.pem"
+  },
+  "allowed_ips": ["10.0.0.0/8", "172.16.0.0/12"],
+  "rate_limit_per_second": 50
+}
+```
 
 ## Daemon Session Profile
 
