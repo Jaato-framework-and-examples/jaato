@@ -340,6 +340,10 @@ class JaatoSession:
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
 
+        # Current turn span — set while a turn is in progress so that
+        # _enrich_tool_result_dict can emit enrichment telemetry events on it.
+        self._current_turn_span = None
+
         # Callback when instruction budget is updated
         # Used by server to emit InstructionBudgetEvent
         # Callback receives the budget snapshot dict
@@ -2604,6 +2608,8 @@ NOTES
             agent_name=self._agent_name,
             turn_index=self._turn_index,
         ) as turn_span:
+            self._current_turn_span = turn_span
+
             # Check and perform GC if needed (pre-send)
             if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
                 self._maybe_collect_before_send()
@@ -2626,7 +2632,7 @@ NOTES
                 self._runtime.registry.set_output_callback(on_output, self._terminal_width)
 
             # Run prompt enrichment if registry is available
-            processed_message = self._enrich_and_clean_prompt(message)
+            processed_message = self._enrich_and_clean_prompt(message, turn_span=turn_span)
 
             try:
                 response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
@@ -2652,6 +2658,7 @@ NOTES
             if self._runtime.reliability_plugin:
                 self._runtime.reliability_plugin.on_turn_end()
 
+            self._current_turn_span = None
             return response
 
     def _wrap_usage_callback_with_gc_check(
@@ -2808,14 +2815,32 @@ NOTES
             except Exception as e:
                 self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
-    def _enrich_and_clean_prompt(self, prompt: str) -> str:
-        """Run prompt through enrichment pipeline and strip @references."""
+    def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
+        """Run prompt through enrichment pipeline and strip @references.
+
+        Args:
+            prompt: The user prompt to enrich.
+            turn_span: Optional span context for emitting enrichment telemetry
+                events.  When provided, any ``_telemetry`` dicts found in the
+                enrichment metadata are forwarded as span events.
+        """
         enriched_prompt = prompt
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
+
+            # Forward enrichment telemetry as span events on the turn span
+            if turn_span and result.metadata:
+                for plugin_name, meta in result.metadata.items():
+                    if isinstance(meta, dict):
+                        telem = meta.get('_telemetry')
+                        if isinstance(telem, dict):
+                            turn_span.add_event(
+                                f'enrichment.prompt.{plugin_name}',
+                                telem,
+                            )
 
         # Strip @references
         return AT_REFERENCE_PATTERN.sub(r'\1', enriched_prompt)
@@ -4076,6 +4101,11 @@ NOTES
                     if isinstance(telem, dict):
                         for attr_key, attr_val in telem.items():
                             tool_span.set_attribute(attr_key, attr_val)
+            elif isinstance(executor_result, dict):
+                telem = executor_result.get('_telemetry')
+                if isinstance(telem, dict):
+                    for attr_key, attr_val in telem.items():
+                        tool_span.set_attribute(attr_key, attr_val)
 
         # Emit hook: tool ended
         if self._ui_hooks:
@@ -4296,6 +4326,11 @@ NOTES
                     if isinstance(telem, dict):
                         for attr_key, attr_val in telem.items():
                             tool_span.set_attribute(attr_key, attr_val)
+            elif isinstance(executor_result, dict):
+                telem = executor_result.get('_telemetry')
+                if isinstance(telem, dict):
+                    for attr_key, attr_val in telem.items():
+                        tool_span.set_attribute(attr_key, attr_val)
 
         return _ToolExecutionResult(
             fc=fc,
@@ -5223,6 +5258,7 @@ NOTES
                     # If enrichment broke JSON, keep original and append as text
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
             self._check_and_pin_reference(enrichment.metadata, result_json)
+            self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
             return enriched_dict
 
         # For other tools: enrich large text fields
@@ -5245,8 +5281,37 @@ NOTES
                         enriched_dict[field] = enrichment.result
                     # Check for pinning signal (only need first match)
                     self._check_and_pin_reference(enrichment.metadata, value)
+                    self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
 
         return enriched_dict
+
+    def _emit_enrichment_telemetry(
+        self,
+        metadata: Dict[str, Any],
+        enrichment_type: str
+    ) -> None:
+        """Forward ``_telemetry`` dicts from enrichment metadata as span events.
+
+        Enrichment plugins can include a ``_telemetry`` key in their metadata
+        dict.  This method checks each plugin's metadata entry and emits a
+        span event on the current turn span when found.
+
+        Args:
+            metadata: Combined enrichment metadata keyed by plugin name.
+            enrichment_type: ``"prompt"`` or ``"tool_result"`` — used in the
+                event name prefix.
+        """
+        turn_span = self._current_turn_span
+        if not turn_span or not metadata:
+            return
+        for plugin_name, meta in metadata.items():
+            if isinstance(meta, dict):
+                telem = meta.get('_telemetry')
+                if isinstance(telem, dict):
+                    turn_span.add_event(
+                        f'enrichment.{enrichment_type}.{plugin_name}',
+                        telem,
+                    )
 
     def _check_and_pin_reference(
         self,

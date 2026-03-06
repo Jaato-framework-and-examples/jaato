@@ -441,6 +441,11 @@ The tool returns responses keyed by question number (1-based):
             if self._on_clarification_resolved and not is_subagent_mode:
                 self._on_clarification_resolved("request_clarification", qa_pairs)
 
+            result['_telemetry'] = {
+                'jaato.clarification.operation': 'clarify',
+                'jaato.clarification.question_count': len(questions),
+            }
+
             return result
 
         except Exception as e:

@@ -756,6 +756,12 @@ class NotebookPlugin(StreamingCapable):
         error = response.get("error", "")
         self._trace(f"Response: status={result.status.value}, output_len={output_len}, error={error[:100] if error else 'none'}")
 
+        response['_telemetry'] = {
+            'jaato.notebook.operation': 'execute',
+            'jaato.notebook.status': result.status.value,
+            'jaato.notebook.execution_count': result.execution_count or 0,
+        }
+
         return response
 
     def _create_notebook(self, args: Dict[str, Any]) -> Dict[str, Any]:

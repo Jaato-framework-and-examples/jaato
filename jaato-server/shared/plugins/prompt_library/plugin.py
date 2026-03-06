@@ -1547,6 +1547,12 @@ class PromptLibraryPlugin:
                 result['missing_params'] = missing
                 result['hint'] = f'Some parameters were not provided: {", ".join(missing)}'
 
+            result['_telemetry'] = {
+                'jaato.prompt.operation': 'use',
+                'jaato.prompt.name': name,
+                'jaato.prompt.source': info.source,
+            }
+
             return result
 
         except Exception as e:
@@ -1647,7 +1653,12 @@ description: {description}
                 'path': str(prompt_path),
                 'overwritten': is_update,
                 'tool': f'prompt.{name}',
-                'message': f'Prompt "{name}" {action}. It is now available as tool `prompt.{name}` — you can invoke it directly.'
+                'message': f'Prompt "{name}" {action}. It is now available as tool `prompt.{name}` — you can invoke it directly.',
+                '_telemetry': {
+                    'jaato.prompt.operation': 'save',
+                    'jaato.prompt.name': name,
+                    'jaato.prompt.overwritten': is_update,
+                },
             }
         except Exception as e:
             return {
@@ -1714,7 +1725,11 @@ description: {description}
                 'success': True,
                 'name': name,
                 'path': str(info.path),
-                'message': f'Prompt "{name}" deleted from {info.source}.'
+                'message': f'Prompt "{name}" deleted from {info.source}.',
+                '_telemetry': {
+                    'jaato.prompt.operation': 'delete',
+                    'jaato.prompt.name': name,
+                },
             }
         except PermissionError:
             return {

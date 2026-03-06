@@ -614,6 +614,13 @@ Guidelines:
             "pattern": pattern,
             "language": language,
             "path": str(search_path),
+            "_telemetry": {
+                "jaato.ast.operation": "search",
+                "jaato.ast.total_matches": total_matches,
+                "jaato.ast.files_with_matches": files_with_matches,
+                "jaato.ast.files_searched": files_searched,
+                "jaato.ast.language": language,
+            },
         }
 
         if errors and len(errors) <= 5:

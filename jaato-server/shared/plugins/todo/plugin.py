@@ -966,6 +966,11 @@ class TodoPlugin:
             "status": plan.status.value,
             "steps": step_dicts,
             "progress": plan.get_progress(),
+            "_telemetry": {
+                "jaato.todo.operation": "create_plan",
+                "jaato.todo.plan_id": plan.plan_id,
+                "jaato.todo.step_count": len(step_dicts),
+            },
         }
 
     def _execute_start_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1165,6 +1170,12 @@ class TodoPlugin:
                     "Do NOT recreate the plan from scratch with createPlan."
                 )
 
+        response['_telemetry'] = {
+            'jaato.todo.operation': 'set_step_status',
+            'jaato.todo.step_id': step.step_id,
+            'jaato.todo.status': step.status.value,
+        }
+
         return response
 
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1289,6 +1300,11 @@ class TodoPlugin:
             "completed_at": plan.completed_at,
             "summary": plan.summary,
             "progress": plan.get_progress(),
+            "_telemetry": {
+                "jaato.todo.operation": "complete_plan",
+                "jaato.todo.plan_id": plan.plan_id,
+                "jaato.todo.status": plan.status.value,
+            },
         }
 
     def _execute_add_step(self, args: Dict[str, Any]) -> Dict[str, Any]:

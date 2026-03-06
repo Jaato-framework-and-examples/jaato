@@ -946,3 +946,55 @@ class TestGitignoreIntegration:
             })
             paths = [f["path"] for f in result["files"]]
             assert "data/file.py" in paths
+
+
+class TestTelemetry:
+    """Tests for _telemetry dict in tool results."""
+
+    def test_glob_result_includes_telemetry_dict(self):
+        """Test that glob_files result includes _telemetry for span enrichment."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("# test")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_glob_files({
+                "pattern": "*.py",
+                "root": tmpdir,
+            })
+
+            assert "_telemetry" in result
+            telem = result["_telemetry"]
+            assert telem["jaato.fs.operation"] == "glob"
+            assert "jaato.fs.total_found" in telem
+            assert telem["jaato.fs.total_found"] == 1
+            assert "jaato.fs.returned" in telem
+            assert telem["jaato.fs.returned"] == 1
+            assert "jaato.fs.truncated" in telem
+            assert telem["jaato.fs.truncated"] is False
+
+    def test_grep_result_includes_telemetry_dict(self):
+        """Test that grep_content result includes _telemetry for span enrichment."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("def hello():\n    pass\n")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "def hello",
+                "path": tmpdir,
+            })
+
+            assert "_telemetry" in result
+            telem = result["_telemetry"]
+            assert telem["jaato.fs.operation"] == "grep"
+            assert "jaato.fs.total_matches" in telem
+            assert telem["jaato.fs.total_matches"] == 1
+            assert "jaato.fs.files_with_matches" in telem
+            assert telem["jaato.fs.files_with_matches"] == 1
+            assert "jaato.fs.files_searched" in telem
+            assert telem["jaato.fs.files_searched"] >= 1
+            assert "jaato.fs.truncated" in telem
+            assert telem["jaato.fs.truncated"] is False

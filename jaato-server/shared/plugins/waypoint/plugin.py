@@ -444,7 +444,11 @@ always navigate back to where you were.
                     "waypoint_id": waypoint_id,
                     "description": description,
                     "files_restored": files_restored,
-                }
+                },
+                "_telemetry": {
+                    "jaato.enrichment.waypoint.restored": True,
+                    "jaato.enrichment.waypoint.files_count": len(files_restored),
+                },
             }
         )
 

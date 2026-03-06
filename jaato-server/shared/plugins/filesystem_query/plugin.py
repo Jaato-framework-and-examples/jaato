@@ -618,6 +618,12 @@ Tips:
                 "truncated": truncated,
                 "root": normalize_result_path(str(root_path)),
                 "pattern": pattern,
+                "_telemetry": {
+                    "jaato.fs.operation": "glob",
+                    "jaato.fs.total_found": total_found,
+                    "jaato.fs.returned": len(files),
+                    "jaato.fs.truncated": truncated,
+                },
             }
 
         except NotImplementedError:
@@ -821,6 +827,13 @@ Tips:
             "pattern": pattern,
             "path": normalize_result_path(str(search_path)),
             "file_glob": file_glob,
+            "_telemetry": {
+                "jaato.fs.operation": "grep",
+                "jaato.fs.total_matches": total_matches,
+                "jaato.fs.files_with_matches": files_with_matches,
+                "jaato.fs.files_searched": files_searched,
+                "jaato.fs.truncated": truncated,
+            },
         }
 
     def _is_binary_file(self, path: Path, sample_size: int = 8192) -> bool:

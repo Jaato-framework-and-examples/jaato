@@ -1131,6 +1131,14 @@ Backups are automatically created for file modifications."""
             }
             if backup_path:
                 result["backup"] = normalize_result_path(str(backup_path))
+            # _telemetry: Convention-based telemetry
+            result['_telemetry'] = {
+                'jaato.file.operation': 'update',
+                'jaato.file.path': normalize_result_path(path),
+                'jaato.file.size_bytes': len(new_content),
+                'jaato.file.lines': len(new_content.splitlines()),
+                'jaato.file.had_backup': backup_path is not None,
+            }
             return result
         except OSError as e:
             return {"error": f"Failed to write file: {e}"}
@@ -1161,7 +1169,14 @@ Backups are automatically created for file modifications."""
                 "success": True,
                 "path": normalize_result_path(path),
                 "size": len(content),
-                "lines": len(content.splitlines())
+                "lines": len(content.splitlines()),
+                # _telemetry: Convention-based telemetry
+                "_telemetry": {
+                    "jaato.file.operation": "write_new",
+                    "jaato.file.path": normalize_result_path(path),
+                    "jaato.file.size_bytes": len(content),
+                    "jaato.file.lines": len(content.splitlines()),
+                },
             }
         except OSError as e:
             return {"error": f"Failed to create file: {e}"}
@@ -1200,6 +1215,11 @@ Backups are automatically created for file modifications."""
             }
             if backup_path:
                 result["backup"] = normalize_result_path(str(backup_path))
+            # _telemetry: Convention-based telemetry
+            result['_telemetry'] = {
+                'jaato.file.operation': 'remove',
+                'jaato.file.path': normalize_result_path(path),
+            }
             return result
         except OSError as e:
             return {"error": f"Failed to delete file: {e}"}
@@ -1265,6 +1285,12 @@ Backups are automatically created for file modifications."""
                 result["source_backup"] = normalize_result_path(str(backup_path))
             if dest_backup_path:
                 result["destination_backup"] = normalize_result_path(str(dest_backup_path))
+            # _telemetry: Convention-based telemetry
+            result['_telemetry'] = {
+                'jaato.file.operation': 'move',
+                'jaato.file.had_backup': backup_path is not None,
+                'jaato.file.overwrite': overwrite,
+            }
             return result
         except OSError as e:
             return {
@@ -1299,7 +1325,12 @@ Backups are automatically created for file modifications."""
                 "success": True,
                 "path": normalize_result_path(path),
                 "restored_from": normalize_result_path(str(backup_path)) if backup_path else "unknown",
-                "message": f"File restored from backup"
+                "message": f"File restored from backup",
+                # _telemetry: Convention-based telemetry
+                "_telemetry": {
+                    "jaato.file.operation": "undo",
+                    "jaato.file.path": normalize_result_path(path),
+                },
             }
         else:
             return {"error": f"Failed to restore file from backup"}
@@ -1325,7 +1356,14 @@ Backups are automatically created for file modifications."""
         # Execute the batch
         result = executor.execute(operations)
 
-        return result.to_dict()
+        result_dict = result.to_dict()
+        # _telemetry: Convention-based telemetry
+        result_dict['_telemetry'] = {
+            'jaato.file.operation': 'multi_edit',
+            'jaato.file.files_count': len(operations),
+            'jaato.file.all_succeeded': result_dict.get('success', False),
+        }
+        return result_dict
 
     def _execute_find_and_replace(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute findAndReplace tool for regex-based find/replace across files."""
@@ -1371,7 +1409,15 @@ Backups are automatically created for file modifications."""
             include_ignored=include_ignored
         )
 
-        return result.to_dict()
+        result_dict = result.to_dict()
+        # _telemetry: Convention-based telemetry
+        result_dict['_telemetry'] = {
+            'jaato.file.operation': 'find_replace',
+            'jaato.file.files_matched': result_dict.get('files_modified_count', 0),
+            'jaato.file.replacements': result_dict.get('total_replacements', 0),
+            'jaato.file.dry_run': dry_run,
+        }
+        return result_dict
 
     def _execute_restore_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute restoreFile tool to restore from a specific backup."""
@@ -1411,7 +1457,12 @@ Backups are automatically created for file modifications."""
                 "success": True,
                 "path": normalize_result_path(path),
                 "restored_from": normalize_result_path(str(backup_path)),
-                "message": "File restored from backup"
+                "message": "File restored from backup",
+                # _telemetry: Convention-based telemetry
+                "_telemetry": {
+                    "jaato.file.operation": "restore",
+                    "jaato.file.path": normalize_result_path(path),
+                },
             }
         else:
             return {"error": "Failed to restore file from backup"}
@@ -1447,7 +1498,12 @@ Backups are automatically created for file modifications."""
                     }
                     for b in backups
                 ],
-                "count": len(backups)
+                "count": len(backups),
+                # _telemetry: Convention-based telemetry
+                "_telemetry": {
+                    "jaato.file.operation": "list_backups",
+                    "jaato.file.count": len(backups),
+                },
             }
         else:
             # List all backups
@@ -1461,7 +1517,12 @@ Backups are automatically created for file modifications."""
 
             return {
                 "backups": [b.to_dict() for b in all_backups],
-                "count": len(all_backups)
+                "count": len(all_backups),
+                # _telemetry: Convention-based telemetry
+                "_telemetry": {
+                    "jaato.file.operation": "list_backups",
+                    "jaato.file.count": len(all_backups),
+                },
             }
 
     def _format_multi_file_edit(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:

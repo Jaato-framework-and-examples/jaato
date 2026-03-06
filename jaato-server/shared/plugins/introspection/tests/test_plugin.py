@@ -483,6 +483,40 @@ class TestToolCategories:
         assert schema.category is None
 
 
+class TestTelemetry:
+    """Tests for _telemetry dict in tool results."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.plugin = create_plugin()
+        self.plugin.initialize({})
+
+        self.registry = MockRegistry()
+
+        fs_plugin = MockPlugin("file_edit", [
+            ToolSchema(
+                name="readFile",
+                description="Read a file from disk.",
+                parameters={"type": "object", "properties": {}},
+                category="filesystem",
+            ),
+        ])
+        self.registry.register_plugin(fs_plugin)
+
+        self.plugin.set_plugin_registry(self.registry)
+
+    def test_list_tools_result_includes_telemetry_dict(self):
+        """Test that list_tools result includes _telemetry for span enrichment."""
+        executors = self.plugin.get_executors()
+        result = executors["list_tools"]({})
+
+        assert "_telemetry" in result
+        telem = result["_telemetry"]
+        assert telem["jaato.introspection.operation"] == "list_tools"
+        assert "jaato.introspection.total_tools" in telem
+        assert telem["jaato.introspection.total_tools"] >= 1
+
+
 class TestToolDiscoverability:
     """Tests for tool discoverability feature."""
 

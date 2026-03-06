@@ -172,6 +172,30 @@ class TestCLIPluginExecution:
         assert "error" not in result
         assert result["returncode"] == 0
 
+    def test_execute_result_includes_telemetry_dict(self):
+        """Test that cli_based_tool result includes _telemetry for span enrichment."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._execute({"command": "echo hello"})
+
+        assert "_telemetry" in result
+        telem = result["_telemetry"]
+
+        expected_keys = [
+            "jaato.cli.command",
+            "jaato.cli.returncode",
+            "jaato.cli.stdout_bytes",
+            "jaato.cli.stderr_bytes",
+            "jaato.cli.shell_mode",
+            "jaato.cli.cwd",
+        ]
+        for key in expected_keys:
+            assert key in telem, f"Expected key {key!r} missing from _telemetry"
+
+        assert telem["jaato.cli.returncode"] == 0
+        assert telem["jaato.cli.command"].startswith("echo")
+
 
 class TestCLIPluginShellDetection:
     """Tests for shell metacharacter detection."""

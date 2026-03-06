@@ -1006,3 +1006,69 @@ class TestMoveFileToolSchemas:
         tool_names = [d.name for d in declarations]
         assert "moveFile" in tool_names
         assert "renameFile" in tool_names
+
+
+class TestTelemetryEnrichment:
+    """Tests for _telemetry convention dicts in tool results."""
+
+    def test_update_file_result_includes_telemetry_dict(self, tmp_path):
+        """updateFile result must include _telemetry with file operation metadata."""
+        plugin = FileEditPlugin()
+        backup_dir = tmp_path / "backups"
+        plugin.initialize({"backup_dir": str(backup_dir)})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Original content")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "new_content": "Updated content"
+        })
+
+        assert "error" not in result
+        assert "_telemetry" in result
+        telemetry = result["_telemetry"]
+        assert telemetry["jaato.file.operation"] == "update"
+        assert "jaato.file.path" in telemetry
+        assert telemetry["jaato.file.size_bytes"] == len("Updated content")
+        assert telemetry["jaato.file.lines"] == len("Updated content".splitlines())
+        assert "jaato.file.had_backup" in telemetry
+        assert telemetry["jaato.file.had_backup"] is True
+
+    def test_write_new_file_result_includes_telemetry_dict(self, tmp_path):
+        """writeNewFile result must include _telemetry with file operation metadata."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        new_file = tmp_path / "new.txt"
+        content = "New file content\nLine 2\n"
+
+        result = plugin._execute_write_new_file({
+            "path": str(new_file),
+            "content": content
+        })
+
+        assert "error" not in result
+        assert "_telemetry" in result
+        telemetry = result["_telemetry"]
+        assert telemetry["jaato.file.operation"] == "write_new"
+        assert "jaato.file.path" in telemetry
+        assert telemetry["jaato.file.size_bytes"] == len(content)
+        assert telemetry["jaato.file.lines"] == len(content.splitlines())
+
+    def test_remove_file_result_includes_telemetry_dict(self, tmp_path):
+        """removeFile result must include _telemetry with file operation metadata."""
+        plugin = FileEditPlugin()
+        backup_dir = tmp_path / "backups"
+        plugin.initialize({"backup_dir": str(backup_dir)})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Content to delete")
+
+        result = plugin._execute_remove_file({"path": str(test_file)})
+
+        assert "error" not in result
+        assert "_telemetry" in result
+        telemetry = result["_telemetry"]
+        assert telemetry["jaato.file.operation"] == "remove"
+        assert "jaato.file.path" in telemetry

@@ -1642,14 +1642,22 @@ class SubagentPlugin:
 
             self._close_session_unlocked(subagent_id)
 
+            # _telemetry: Convention-based telemetry
+            _telem = {
+                'jaato.subagent.operation': 'close',
+                'jaato.subagent.id': subagent_id,
+                'jaato.subagent.was_running': was_running,
+            }
             if was_running:
                 return {
                     'success': True,
-                    'message': f'Session {subagent_id} cancelled and closed successfully'
+                    'message': f'Session {subagent_id} cancelled and closed successfully',
+                    '_telemetry': _telem,
                 }
             return {
                 'success': True,
-                'message': f'Session {subagent_id} closed successfully'
+                'message': f'Session {subagent_id} closed successfully',
+                '_telemetry': _telem,
             }
 
     def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1715,7 +1723,12 @@ class SubagentPlugin:
                 )
             return {
                 'success': True,
-                'message': f'Cancellation requested for session {subagent_id}. The subagent will stop at the next checkpoint.'
+                'message': f'Cancellation requested for session {subagent_id}. The subagent will stop at the next checkpoint.',
+                # _telemetry: Convention-based telemetry
+                '_telemetry': {
+                    'jaato.subagent.operation': 'cancel',
+                    'jaato.subagent.id': subagent_id,
+                },
             }
         else:
             return {
@@ -2111,7 +2124,15 @@ class SubagentPlugin:
             'success': True,
             'subagent_id': agent_id,
             'status': 'spawned',
-            'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.'
+            'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.',
+            # _telemetry: Convention-based telemetry
+            '_telemetry': {
+                'jaato.subagent.operation': 'spawn',
+                'jaato.subagent.id': agent_id,
+                'jaato.subagent.profile': profile.name,
+                'jaato.subagent.model': profile.model or '',
+                'jaato.subagent.provider': profile.provider or '',
+            },
         }
 
     def _run_subagent_async(
