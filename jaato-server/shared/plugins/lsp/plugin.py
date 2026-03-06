@@ -880,17 +880,24 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
         # Build enriched result with diagnostic summary
         enriched_result = self._build_enriched_result(result, all_diagnostics)
+        total_errors = sum(
+            sum(1 for d in diags if d.get("severity") == "Error")
+            for diags in all_diagnostics.values()
+        )
+        total_warnings = sum(
+            sum(1 for d in diags if d.get("severity") == "Warning")
+            for diags in all_diagnostics.values()
+        )
         metadata = {
             "files_checked": list(supported_files),
             "files_with_diagnostics": list(all_diagnostics.keys()),
-            "total_errors": sum(
-                sum(1 for d in diags if d.get("severity") == "Error")
-                for diags in all_diagnostics.values()
-            ),
-            "total_warnings": sum(
-                sum(1 for d in diags if d.get("severity") == "Warning")
-                for diags in all_diagnostics.values()
-            ),
+            "total_errors": total_errors,
+            "total_warnings": total_warnings,
+            "_telemetry": {
+                "jaato.enrichment.lsp.files_checked": len(supported_files),
+                "jaato.enrichment.lsp.total_errors": total_errors,
+                "jaato.enrichment.lsp.total_warnings": total_warnings,
+            },
         }
 
         return ToolResultEnrichmentResult(result=enriched_result, metadata=metadata)
@@ -2387,7 +2394,11 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 "new_name": new_name,
                 "files_affected": len(affected_files),
                 "changes": file_info,
-                "message": f"Would rename '{symbol}' to '{new_name}' in {len(affected_files)} file(s). Set apply=true to apply."
+                "message": f"Would rename '{symbol}' to '{new_name}' in {len(affected_files)} file(s). Set apply=true to apply.",
+                "_telemetry": {
+                    "jaato.lsp.operation": "rename_preview",
+                    "jaato.lsp.files_affected": len(affected_files),
+                },
             }
         else:
             # Apply the changes
@@ -2400,7 +2411,11 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 "success": apply_result["success"],
                 "files_modified": apply_result["files_modified"],
                 "changes": apply_result["changes"],
-                "errors": apply_result["errors"] if apply_result["errors"] else None
+                "errors": apply_result["errors"] if apply_result["errors"] else None,
+                "_telemetry": {
+                    "jaato.lsp.operation": "rename_applied",
+                    "jaato.lsp.files_modified": len(apply_result.get("files_modified", [])),
+                },
             }
 
     def _exec_get_code_actions(self, args: Dict[str, Any]) -> Any:
@@ -2463,7 +2478,11 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
         return {
             "actions": actions_list,
-            "count": len(actions_list)
+            "count": len(actions_list),
+            "_telemetry": {
+                "jaato.lsp.operation": "get_code_actions",
+                "jaato.lsp.count": len(actions_list),
+            },
         }
 
     def _exec_apply_code_action(self, args: Dict[str, Any]) -> Any:
@@ -2544,6 +2563,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             }
             if apply_result["errors"]:
                 result["errors"] = apply_result["errors"]
+            result['_telemetry'] = {
+                'jaato.lsp.operation': 'apply_code_action',
+                'jaato.lsp.success': apply_result.get('success', False),
+            }
             return result
 
         # Execute command if present (some actions only have commands)
@@ -2557,7 +2580,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             return {
                 "action": action_title,
                 "command_executed": cmd.get('command'),
-                "result": cmd_result
+                "result": cmd_result,
+                "_telemetry": {
+                    "jaato.lsp.operation": "apply_code_action",
+                },
             }
 
         return {"error": f"Code action '{action_title}' has no edit or command to apply"}

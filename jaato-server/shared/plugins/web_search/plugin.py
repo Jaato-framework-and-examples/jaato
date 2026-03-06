@@ -196,7 +196,11 @@ Tips for effective searches:
                 return {
                     'query': query,
                     'results': [],
-                    'message': 'No results found for the query'
+                    'message': 'No results found for the query',
+                    '_telemetry': {
+                        'jaato.web.operation': 'search',
+                        'jaato.web.result_count': 0,
+                    },
                 }
 
             # Format results for the model
@@ -211,7 +215,11 @@ Tips for effective searches:
             return {
                 'query': query,
                 'result_count': len(formatted_results),
-                'results': formatted_results
+                'results': formatted_results,
+                '_telemetry': {
+                    'jaato.web.operation': 'search',
+                    'jaato.web.result_count': len(formatted_results),
+                },
             }
 
         except Exception as exc:

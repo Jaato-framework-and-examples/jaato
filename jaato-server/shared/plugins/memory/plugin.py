@@ -484,7 +484,11 @@ class MemoryPlugin:
                 "trigger_keywords": matched_tags,
                 "notification": {
                     "message": f"added context about {len(matches)} memories (tags: {tag_summary})"
-                }
+                },
+                "_telemetry": {
+                    "jaato.enrichment.memory.matches": len(matches),
+                    "jaato.enrichment.memory.trigger_keywords": len(matched_tags),
+                },
             }
         )
 

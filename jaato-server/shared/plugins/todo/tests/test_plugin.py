@@ -1012,3 +1012,26 @@ class TestGetTaskEventsExecutor:
 
         assert "error" not in result
         assert elapsed >= 0.15
+
+
+class TestTelemetry:
+    """Tests for _telemetry dict in tool results."""
+
+    def test_create_plan_result_includes_telemetry_dict(self):
+        """Test that createPlan result includes _telemetry for span enrichment."""
+        plugin = TodoPlugin()
+        plugin.initialize()
+        executors = plugin.get_executors()
+
+        result = executors["createPlan"]({
+            "title": "Telemetry Test Plan",
+            "steps": ["Step 1", "Step 2", "Step 3"]
+        })
+
+        assert "_telemetry" in result
+        telem = result["_telemetry"]
+        assert telem["jaato.todo.operation"] == "create_plan"
+        assert "jaato.todo.plan_id" in telem
+        assert telem["jaato.todo.plan_id"] == result["plan_id"]
+        assert "jaato.todo.step_count" in telem
+        assert telem["jaato.todo.step_count"] == 3

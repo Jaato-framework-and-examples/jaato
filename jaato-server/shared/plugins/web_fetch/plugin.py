@@ -1291,6 +1291,13 @@ web_fetch(url="https://example.com", include_headers=true)
             }
             result['response_headers'] = useful_headers
 
+        result['_telemetry'] = {
+            'jaato.web.operation': 'fetch',
+            'jaato.web.content_type': result.get('content_type', ''),
+            'jaato.web.content_bytes': len(result.get('content', '')),
+            'jaato.web.truncated': result.get('truncated', False),
+        }
+
         return result
 
 

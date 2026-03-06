@@ -745,3 +745,36 @@ class TestStreamingExecution:
             # Sequences should be monotonically increasing
             assert sequences == sorted(sequences)
             assert len(set(sequences)) == len(sequences)  # All unique
+
+
+@requires_ast_grep
+class TestTelemetry:
+    """Tests for _telemetry dict in tool results."""
+
+    def test_ast_search_result_includes_telemetry_dict(self):
+        """Test that ast_search result includes _telemetry for span enrichment."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text(
+                "def hello():\n"
+                "    pass\n"
+                "\n"
+                "def world(x, y):\n"
+                "    return x + y\n"
+            )
+
+            plugin = ASTSearchPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_ast_search({
+                "pattern": "def $FUNC($$$): $$$",
+                "path": tmpdir,
+                "language": "python",
+            })
+
+            assert "_telemetry" in result
+            telem = result["_telemetry"]
+            assert telem["jaato.ast.operation"] == "search"
+            assert "jaato.ast.total_matches" in telem
+            assert telem["jaato.ast.total_matches"] == 2
+            assert "jaato.ast.files_searched" in telem
+            assert telem["jaato.ast.files_searched"] >= 1

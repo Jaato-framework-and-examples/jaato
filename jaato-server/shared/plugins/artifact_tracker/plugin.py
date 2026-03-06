@@ -1248,7 +1248,10 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             "dependents_flagged": all_dependents,
             "notification": {
                 "message": notification_message
-            }
+            },
+            "_telemetry": {
+                "jaato.enrichment.artifact.dependents_count": len(all_dependents),
+            },
         }
 
         self._trace(f"enrich_tool_result: flagged {len(all_dependents)} dependents")

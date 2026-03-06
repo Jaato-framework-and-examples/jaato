@@ -1396,6 +1396,11 @@ class ReferencesPlugin:
         if transitive_sources:
             result["transitive_count"] = len(transitive_sources)
 
+        result['_telemetry'] = {
+            'jaato.references.operation': 'select',
+            'jaato.references.selected_count': len(selected_sources),
+        }
+
         return result
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1472,6 +1477,10 @@ class ReferencesPlugin:
             "selected_count": sum(
                 1 for s in sources if s.id in self._selected_source_ids
             ),
+            "_telemetry": {
+                "jaato.references.operation": "list",
+                "jaato.references.total": len(sources),
+            },
         }
 
     def _execute_validate_reference(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1516,6 +1525,12 @@ class ReferencesPlugin:
             "path": str(path_obj),
             "errors": errors,
             "warnings": warnings,
+            "_telemetry": {
+                "jaato.references.operation": "validate",
+                "jaato.references.valid": is_valid,
+                "jaato.references.error_count": len(errors),
+                "jaato.references.warning_count": len(warnings),
+            },
         }
 
     def _execute_compute_embedding(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1564,7 +1579,11 @@ class ReferencesPlugin:
         if result is None:
             return {"error": "Embedding computation failed — provider returned None."}
 
-        return result.to_dict()
+        result_dict = result.to_dict()
+        result_dict['_telemetry'] = {
+            'jaato.references.operation': 'compute_embedding',
+        }
+        return result_dict
 
     def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
         """Execute the 'references' user command.
@@ -2153,6 +2172,13 @@ class ReferencesPlugin:
                     enriched_result = enriched_result + "\n\n" + annotation
                     metadata["reference_contents"] = ref_id
 
+        if metadata:
+            telemetry = metadata.get("_telemetry", {})
+            if "pinned_reference" in metadata:
+                telemetry["jaato.enrichment.references.pinned"] = True
+            if telemetry:
+                metadata["_telemetry"] = telemetry
+
         return ToolResultEnrichmentResult(
             result=enriched_result,
             metadata=metadata
@@ -2678,6 +2704,16 @@ class ReferencesPlugin:
             )
 
         if all_metadata:
+            # Count total references expanded across all passes
+            expanded_count = (
+                len(all_metadata.get("mentioned_references", []))
+                + len(all_metadata.get("tag_matched_references", {}))
+                + len(all_metadata.get("semantic_matched_references", {}))
+                + len(all_metadata.get("transitive_references", {}))
+            )
+            all_metadata["_telemetry"] = {
+                "jaato.enrichment.references.expanded_count": expanded_count,
+            }
             return PromptEnrichmentResult(
                 prompt=enriched_content,
                 metadata=all_metadata

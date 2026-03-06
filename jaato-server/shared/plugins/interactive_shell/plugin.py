@@ -503,6 +503,14 @@ IMPORTANT NOTES:
                     'Process exited immediately. Check the command and output.'
                 )
 
+            # _telemetry: Convention-based telemetry
+            result['_telemetry'] = {
+                'jaato.shell.operation': 'spawn',
+                'jaato.shell.session_id': session_id,
+                'jaato.shell.command': command[:200],
+                'jaato.shell.is_alive': session.is_alive,
+            }
+
             self._trace(
                 f"spawn: id={session_id} output_len={len(initial_output)} "
                 f"alive={session.is_alive}"
@@ -544,6 +552,14 @@ IMPORTANT NOTES:
             result = {
                 'output': strip_ansi(output),
                 'is_alive': session.is_alive,
+                # _telemetry: Convention-based telemetry
+                '_telemetry': {
+                    'jaato.shell.operation': 'input',
+                    'jaato.shell.session_id': session_id,
+                    'jaato.shell.input_len': len(text),
+                    'jaato.shell.output_len': len(output),
+                    'jaato.shell.is_alive': session.is_alive,
+                },
             }
             if session.is_alive:
                 return (result, {"continuation_id": session_id, "show_output": False})
@@ -607,6 +623,13 @@ IMPORTANT NOTES:
             result = {
                 'output': strip_ansi(output),
                 'is_alive': session.is_alive,
+                # _telemetry: Convention-based telemetry
+                '_telemetry': {
+                    'jaato.shell.operation': 'control',
+                    'jaato.shell.session_id': session_id,
+                    'jaato.shell.key': key,
+                    'jaato.shell.is_alive': session.is_alive,
+                },
             }
             if session.is_alive:
                 return (result, {"continuation_id": session_id, "show_output": False})
@@ -638,6 +661,12 @@ IMPORTANT NOTES:
             self._trace(
                 f"close: id={session_id} exit_status={result.get('exit_status')}"
             )
+            # _telemetry: Convention-based telemetry
+            result['_telemetry'] = {
+                'jaato.shell.operation': 'close',
+                'jaato.shell.session_id': session_id,
+                'jaato.shell.exit_status': result.get('exit_status'),
+            }
             return (result, {"show_output": True})
 
         except Exception as exc:

@@ -343,6 +343,10 @@ class IntrospectionPlugin:
                 ],
                 "total_tools": len(all_schemas),
                 "hint": "Call list_tools(category='<name>') to see tools in a specific category.",
+                "_telemetry": {
+                    "jaato.introspection.operation": "list_tools",
+                    "jaato.introspection.total_tools": len(all_schemas),
+                },
             }
 
         # Category specified - return tools in that category
@@ -411,6 +415,12 @@ class IntrospectionPlugin:
                     f"Call '<tool_name>:stream' (e.g., '{streaming_tools[0]}:stream') "
                     f"to receive results as they're found. Use dismiss_stream(stream_id) when done."
                 )
+
+        result['_telemetry'] = {
+            'jaato.introspection.operation': 'list_tools',
+            'jaato.introspection.tool_count': len(tools),
+            'jaato.introspection.category': category,
+        }
 
         return result
 
@@ -506,6 +516,11 @@ class IntrospectionPlugin:
             if activated:
                 result["activated"] = activated
                 result["activation_note"] = "These tools are now available to call."
+
+        result['_telemetry'] = {
+            'jaato.introspection.operation': 'get_tool_schemas',
+            'jaato.introspection.count': len(schemas),
+        }
 
         return result
 

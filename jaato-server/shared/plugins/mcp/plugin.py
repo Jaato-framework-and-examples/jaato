@@ -1805,12 +1805,14 @@ class MCPToolPlugin:
         if not self._tool_cache:
             return {'error': 'MCP tools not available'}
 
-        # Verify tool exists
+        # Verify tool exists and find its server
         found = False
-        for tools in self._tool_cache.values():
+        server_name_for_tool = ''
+        for srv_name, tools in self._tool_cache.items():
             for t in tools:
                 if t.name == toolname:
                     found = True
+                    server_name_for_tool = srv_name
                     break
             if found:
                 break
@@ -1870,7 +1872,17 @@ class MCPToolPlugin:
                     details=f"~{int(estimated_tokens):,} tokens ({len(result_str):,} chars)"
                 )
 
-            return {'result': out}
+            return {
+                'result': out,
+                # _telemetry: Convention-based telemetry
+                '_telemetry': {
+                    'jaato.mcp.server_name': server_name_for_tool,
+                    'jaato.mcp.original_tool': toolname,
+                    'jaato.mcp.is_error': getattr(result, 'isError', False),
+                    'jaato.mcp.content_items': len(content_list),
+                    'jaato.mcp.estimated_tokens': int(estimated_tokens),
+                },
+            }
 
         except queue.Empty:
             self._log_event(LOG_ERROR, f"Tool call timed out: {toolname}", details="Queue get operation timed out after 30s")

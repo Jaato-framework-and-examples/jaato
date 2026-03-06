@@ -947,7 +947,10 @@ Template rendering writes files to the workspace."""
                 "templates": [
                     {"hash": h, "path": str(p), "variables": v}
                     for h, p, v in extracted
-                ]
+                ],
+                "_telemetry": {
+                    "jaato.enrichment.template.extracted_count": len(extracted),
+                },
             }
         )
 
@@ -1885,7 +1888,11 @@ Template rendering writes files to the workspace."""
 
         return {
             "templates": templates,
-            "count": len(templates)
+            "count": len(templates),
+            "_telemetry": {
+                "jaato.template.operation": "list",
+                "jaato.template.count": len(templates),
+            },
         }
 
     def _execute_write_file_from_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1992,7 +1999,13 @@ Template rendering writes files to the workspace."""
             "bytes_written": bytes_written,
             "variables_used": sorted(variables.keys()),
             "template_source": template_source,
-            "template_syntax": syntax
+            "template_syntax": syntax,
+            "_telemetry": {
+                "jaato.template.operation": "write",
+                "jaato.template.path": str(out_path),
+                "jaato.template.bytes_written": bytes_written,
+                "jaato.template.syntax": syntax,
+            },
         }
 
     def _validate_template_index(self, data: Any) -> Tuple[bool, List[str], List[str]]:

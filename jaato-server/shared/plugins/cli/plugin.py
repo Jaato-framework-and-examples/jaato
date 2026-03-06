@@ -1059,6 +1059,17 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     "Consider using more specific commands (e.g., add filters, limits, or pipe to head/tail)."
                 )
 
+            # _telemetry: Convention-based telemetry: jaato_session forwards
+            # these as span attributes on the enclosing tool_span.
+            result['_telemetry'] = {
+                'jaato.cli.command': command[:200],
+                'jaato.cli.returncode': returncode,
+                'jaato.cli.stdout_bytes': len(stdout),
+                'jaato.cli.stderr_bytes': len(stderr),
+                'jaato.cli.shell_mode': use_shell,
+                'jaato.cli.cwd': str(self._workspace_root or ''),
+            }
+
             return result
 
         except Exception as exc:
