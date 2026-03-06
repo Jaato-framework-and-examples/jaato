@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..subagent.config import expand_variables
+
 logger = logging.getLogger(__name__)
 
 
@@ -245,42 +247,20 @@ def load_config(
         merged = _deep_merge(merged, explicit_config)
         logger.debug("Applied explicit webhook config from profile")
 
-    # Expand environment variables in string values
-    merged = _expand_env_vars(merged)
+    # Expand ${VAR} references in string values (env vars + context like ${workspaceRoot}).
+    # Uses the shared expand_variables() from subagent config — same function
+    # used by the MCP plugin.
+    # NOTE: expansion reads os.environ at call time. When called during
+    # set_workspace_path() (init), .env values may not yet be in os.environ.
+    # Plugins that need .env values should re-resolve config at tool execution
+    # time, when _with_session_env() has populated os.environ.
+    merged = expand_variables(merged)
 
     if merged:
         return WebhookConfig.from_dict(merged)
     return WebhookConfig()
 
 
-def _expand_env_vars(value: Any) -> Any:
-    """Expand ${VAR} references in config values.
-
-    Supports environment variables only. Uses the same ${VAR} syntax
-    as the subagent profile variable expansion.
-
-    Args:
-        value: Value to expand (string, dict, list, or other).
-
-    Returns:
-        Value with variables expanded.
-    """
-    import re
-
-    if isinstance(value, str):
-        if '${' not in value:
-            return value
-
-        def replace_var(match):
-            var_name = match.group(1)
-            return os.environ.get(var_name, match.group(0))
-
-        return re.sub(r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}', replace_var, value)
-    elif isinstance(value, dict):
-        return {k: _expand_env_vars(v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [_expand_env_vars(item) for item in value]
-    return value
 
 
 def validate_config(data: Dict[str, Any]) -> Tuple[bool, List[str]]:

@@ -238,6 +238,11 @@ class WebhookPlugin:
         if not self._config:
             return {"error": "Webhook plugin not configured"}
 
+        # Re-resolve config so ${VAR} placeholders pick up .env values.
+        # At init time, .env values are not yet in os.environ; at tool
+        # execution time they are (via _with_session_env()).
+        self._reload_config()
+
         # Start HTTP server lazily
         if not self._http_server or not self._http_server.is_running:
             try:

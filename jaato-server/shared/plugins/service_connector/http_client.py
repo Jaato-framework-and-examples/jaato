@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlencode, urljoin, urlparse
 
+from ..subagent.config import expand_variables
 from .auth import AuthError, AuthManager
 from .types import (
     AuthConfig,
@@ -166,7 +167,7 @@ class ServiceHttpClient:
                 )
                 query = {**existing_query, **(query or {})}
         elif service_config:
-            base_url = service_config.base_url.rstrip("/")
+            base_url = expand_variables(service_config.base_url).rstrip("/")
             if endpoint_schema:
                 request_path = endpoint_schema.path
             elif path:
@@ -205,9 +206,10 @@ class ServiceHttpClient:
             "Accept": "application/json",
         }
 
-        # Add service default headers
+        # Add service default headers (expand ${VAR} placeholders at request time
+        # so .env values are available via _with_session_env())
         if service_config and service_config.default_headers:
-            request_headers.update(service_config.default_headers)
+            request_headers.update(expand_variables(service_config.default_headers))
 
         # Add custom headers
         if headers:
@@ -334,7 +336,7 @@ class ServiceHttpClient:
         }
 
         if service_config and service_config.default_headers:
-            request_headers.update(service_config.default_headers)
+            request_headers.update(expand_variables(service_config.default_headers))
 
         if headers:
             request_headers.update(headers)

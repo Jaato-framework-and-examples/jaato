@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+from ..subagent.config import expand_variables
 from .types import AuthConfig, AuthType, ParameterLocation
 
 
@@ -185,6 +186,9 @@ class AuthManager:
         if not auth_config.token_url:
             raise AuthError("OAuth2 token URL not configured")
 
+        # Expand ${VAR} in token_url at request time so .env values are available
+        token_url = expand_variables(auth_config.token_url)
+
         if not auth_config.client_id_env or not auth_config.client_secret_env:
             raise AuthError("OAuth2 client credentials env vars not configured")
 
@@ -218,9 +222,9 @@ class AuthManager:
                 import requests
                 from shared.http import get_requests_kwargs
 
-                proxy_kwargs = get_requests_kwargs(auth_config.token_url)
+                proxy_kwargs = get_requests_kwargs(token_url)
                 response = requests.post(
-                    auth_config.token_url,
+                    token_url,
                     data=data,
                     timeout=30,
                     **proxy_kwargs
@@ -237,11 +241,11 @@ class AuthManager:
         else:
             from shared.http import get_httpx_kwargs
 
-            proxy_kwargs = get_httpx_kwargs(auth_config.token_url)
+            proxy_kwargs = get_httpx_kwargs(token_url)
 
             try:
                 with httpx.Client(timeout=30, **proxy_kwargs) as client:
-                    response = client.post(auth_config.token_url, data=data)
+                    response = client.post(token_url, data=data)
                     response.raise_for_status()
                     token_data = response.json()
             except httpx.HTTPError as e:

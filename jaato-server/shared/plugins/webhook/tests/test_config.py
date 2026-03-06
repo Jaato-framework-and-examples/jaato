@@ -13,10 +13,10 @@ from shared.plugins.webhook.config import (
     TLSConfig,
     WebhookConfig,
     _deep_merge,
-    _expand_env_vars,
     load_config,
     validate_config,
 )
+from shared.plugins.subagent.config import expand_variables
 
 
 class TestRouteConfig:
@@ -119,33 +119,38 @@ class TestDeepMerge:
 
 
 class TestExpandEnvVars:
-    """Tests for _expand_env_vars helper."""
+    """Tests for expand_variables (shared utility from subagent.config).
+
+    Webhook config uses expand_variables for ${VAR} expansion.
+    These tests verify the integration works for webhook-relevant cases.
+    Exhaustive expand_variables tests live in subagent/tests/test_config.py.
+    """
 
     def test_expand_string(self):
         with mock.patch.dict(os.environ, {"MY_SECRET": "s3cret"}):
-            assert _expand_env_vars("${MY_SECRET}") == "s3cret"
+            assert expand_variables("${MY_SECRET}") == "s3cret"
 
     def test_expand_in_dict(self):
         with mock.patch.dict(os.environ, {"PORT": "8080"}):
-            result = _expand_env_vars({"port": "${PORT}"})
+            result = expand_variables({"port": "${PORT}"})
             assert result == {"port": "8080"}
 
     def test_expand_in_list(self):
         with mock.patch.dict(os.environ, {"X": "hello"}):
-            result = _expand_env_vars(["${X}", "world"])
+            result = expand_variables(["${X}", "world"])
             assert result == ["hello", "world"]
 
     def test_no_expansion_needed(self):
-        assert _expand_env_vars("plain text") == "plain text"
+        assert expand_variables("plain text") == "plain text"
 
     def test_unknown_var_kept(self):
-        result = _expand_env_vars("${UNLIKELY_VAR_NAME_12345}")
+        result = expand_variables("${UNLIKELY_VAR_NAME_12345}")
         assert result == "${UNLIKELY_VAR_NAME_12345}"
 
     def test_non_string_passthrough(self):
-        assert _expand_env_vars(42) == 42
-        assert _expand_env_vars(True) is True
-        assert _expand_env_vars(None) is None
+        assert expand_variables(42) == 42
+        assert expand_variables(True) is True
+        assert expand_variables(None) is None
 
 
 class TestLoadConfig:
