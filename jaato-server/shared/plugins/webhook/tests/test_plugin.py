@@ -317,3 +317,129 @@ class TestWebhookPluginLifecycle:
         # set_workspace_path triggers reload but explicit config still wins
         plugin.set_workspace_path("/tmp/test_workspace")
         assert plugin._config.port == 9999
+
+
+class TestEventBusBridge:
+    """Tests for webhook → TaskEventBus bridge."""
+
+    def _get_bus(self):
+        from shared.plugins.todo.event_bus import get_event_bus
+        bus = get_event_bus()
+        bus._event_history.clear()
+        return bus
+
+    def test_webhook_publishes_to_bus(self):
+        from jaato_sdk.plugins.todo.models import TaskEventType
+        bus = self._get_bus()
+        port = _find_free_port()
+        plugin = create_plugin()
+        plugin.initialize({"port": port})
+        try:
+            plugin._execute_subscribe({})
+            _post(port, "/webhook", {"action": "test"})
+            time.sleep(0.1)
+
+            events = bus.get_recent_events(
+                event_types=[TaskEventType.EXTERNAL_EVENT]
+            )
+            assert len(events) == 1
+            assert events[0].event_type == TaskEventType.EXTERNAL_EVENT
+            assert events[0].payload["payload"] == {"action": "test"}
+        finally:
+            plugin.shutdown()
+
+    def test_bus_event_carries_route_and_type(self):
+        from jaato_sdk.plugins.todo.models import TaskEventType
+        bus = self._get_bus()
+        port = _find_free_port()
+        plugin = create_plugin()
+        plugin.initialize({
+            "port": port,
+            "routes": {
+                "github": {
+                    "path": "/webhook/github",
+                    "event_type_header": "X-GitHub-Event",
+                },
+            },
+        })
+        try:
+            plugin._execute_subscribe({})
+            _post(port, "/webhook/github", {"ref": "main"},
+                  headers={"X-GitHub-Event": "push"})
+            time.sleep(0.1)
+
+            events = bus.get_recent_events(
+                event_types=[TaskEventType.EXTERNAL_EVENT]
+            )
+            assert len(events) == 1
+            assert events[0].source_agent == "webhook:github"
+            assert events[0].payload["source"] == "github"
+            assert events[0].payload["event_type"] == "push"
+        finally:
+            plugin.shutdown()
+
+    def test_bus_events_retrievable_via_wait(self):
+        from jaato_sdk.plugins.todo.models import TaskEventType
+        bus = self._get_bus()
+        port = _find_free_port()
+        plugin = create_plugin()
+        plugin.initialize({"port": port})
+        try:
+            plugin._execute_subscribe({})
+            _post(port, "/webhook", {"n": 1})
+            time.sleep(0.1)
+
+            events = bus.wait_for_events(
+                timeout=1.0,
+                event_types=[TaskEventType.EXTERNAL_EVENT],
+            )
+            assert len(events) >= 1
+        finally:
+            plugin.shutdown()
+
+    def test_bus_events_filterable_by_agent(self):
+        from jaato_sdk.plugins.todo.models import TaskEventType
+        bus = self._get_bus()
+        port = _find_free_port()
+        plugin = create_plugin()
+        plugin.initialize({
+            "port": port,
+            "routes": {
+                "github": {"path": "/webhook/github"},
+                "slack": {"path": "/webhook/slack"},
+            },
+        })
+        try:
+            plugin._execute_subscribe({})
+            _post(port, "/webhook/github", {"from": "gh"})
+            _post(port, "/webhook/slack", {"from": "sl"})
+            time.sleep(0.1)
+
+            gh_events = bus.get_recent_events(agent_id="webhook:github")
+            sl_events = bus.get_recent_events(agent_id="webhook:slack")
+            assert len(gh_events) == 1
+            assert len(sl_events) == 1
+            assert gh_events[0].payload["source"] == "github"
+            assert sl_events[0].payload["source"] == "slack"
+        finally:
+            plugin.shutdown()
+
+    def test_multiple_webhooks_publish_multiple_events(self):
+        from jaato_sdk.plugins.todo.models import TaskEventType
+        bus = self._get_bus()
+        port = _find_free_port()
+        plugin = create_plugin()
+        plugin.initialize({"port": port})
+        try:
+            plugin._execute_subscribe({})
+            _post(port, "/webhook", {"n": 1})
+            _post(port, "/webhook", {"n": 2})
+            _post(port, "/webhook", {"n": 3})
+            time.sleep(0.1)
+
+            events = bus.get_recent_events(
+                event_types=[TaskEventType.EXTERNAL_EVENT]
+            )
+            assert len(events) == 3
+        finally:
+            plugin.shutdown()
