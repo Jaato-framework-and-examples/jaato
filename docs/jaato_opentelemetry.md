@@ -363,6 +363,107 @@ JAATO exports standard OTel traces, compatible with any OTel-capable backend:
 
 ---
 
+## Part 9b: Quickstart — Arize Phoenix as Collector
+
+Phoenix is the recommended collector for local and cluster deployments. It runs
+as a standalone service with SQLite storage (zero configuration), provides a
+full trace-visualization UI, and accepts standard OTLP traces from any jaato
+server — local or remote.
+
+### 1. Install and launch Phoenix (collector host only)
+
+```bash
+pip install arize-phoenix
+PHOENIX_PORT=6006 python -c "import phoenix; phoenix.launch_app()" &
+```
+
+Phoenix starts on `http://0.0.0.0:6006` with:
+- Trace visualization UI at `/`
+- OTLP HTTP receiver at `/v1/traces`
+- GraphQL API at `/graphql`
+- SQLite storage in a temp directory (persistent storage via `PHOENIX_WORKING_DIR`)
+
+For persistent storage across restarts:
+
+```bash
+export PHOENIX_WORKING_DIR=~/.jaato/phoenix
+PHOENIX_PORT=6006 python -c "import phoenix; phoenix.launch_app()" &
+```
+
+### 2. Point jaato servers at Phoenix
+
+On **each** jaato server (local or remote), set two environment variables in
+`.env` or the shell:
+
+```bash
+JAATO_TELEMETRY_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<phoenix-host>:6006/v1/traces
+```
+
+That's it. The `OTelPlugin` picks up these variables automatically. All servers
+in the cluster can point at the same Phoenix instance — traces from every
+server land in one place, tagged by `OTEL_SERVICE_NAME` (defaults to `jaato`).
+
+#### Optional tuning
+
+```bash
+# Identify this server in traces (useful for multi-server clusters)
+OTEL_SERVICE_NAME=server-alpha
+
+# Reduce trace volume (e.g. sample 50% of turns)
+JAATO_TELEMETRY_SAMPLE_RATE=0.5
+
+# Include full prompts/responses in traces (default: redacted)
+JAATO_TELEMETRY_REDACT_CONTENT=false
+```
+
+### 3. Verify traces are flowing
+
+Open `http://<phoenix-host>:6006` in a browser. Send a message to any
+connected jaato server. Within seconds, a trace should appear in the Phoenix UI
+showing the full span hierarchy: `jaato.turn` → `gen_ai.chat` → `jaato.tool`.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Cluster Telemetry                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐               │
+│  │ server-a   │  │ server-b   │  │ server-c   │  ... any      │
+│  │            │  │            │  │            │  number of     │
+│  │ OTelPlugin │  │ OTelPlugin │  │ OTelPlugin │  servers       │
+│  └──────┬─────┘  └──────┬─────┘  └──────┬─────┘               │
+│         │               │               │                      │
+│         └───── OTLP/HTTP ───────────────┘                      │
+│                         │                                      │
+│                         ▼                                      │
+│              ┌─────────────────────┐                           │
+│              │   Arize Phoenix     │                           │
+│              │   (standalone)      │                           │
+│              │                     │                           │
+│              │  • SQLite storage   │                           │
+│              │  • Trace UI :6006   │                           │
+│              │  • GraphQL API      │                           │
+│              └─────────────────────┘                           │
+│                                                                 │
+│  Dependencies:                                                  │
+│  • Servers: arize-phoenix-otel (13 MB, 23 packages)            │
+│  • Collector: arize-phoenix (366 MB, 89 packages)              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Dependency note
+
+Only the **collector host** needs the full `arize-phoenix` package. Each jaato
+server only needs the OTEL client libraries (`arize-phoenix-otel`, ~13 MB),
+which are already satisfied if `opentelemetry-sdk` and
+`opentelemetry-exporter-otlp` are installed.
+
+---
+
 ## Part 10: Relationship to Token Ledger
 
 The `TokenLedger` and telemetry serve complementary but distinct purposes:
