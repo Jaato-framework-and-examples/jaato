@@ -311,6 +311,47 @@ The `interactive_shell` plugin lets the model drive any user-interactive command
 
 **Use cases:** Database REPLs (`psql`, `mysql`), SSH sessions, debuggers (`gdb`, `pdb`), package manager wizards (`npm init`), interactive installers, language REPLs (`python`, `node`), container shells (`docker exec -it`).
 
+### Webhook Plugin (`shared/plugins/webhook/`)
+
+The webhook plugin provides an inbound HTTP listener for receiving external webhooks (GitHub, Slack, Jira, etc.) and delivering them to agent sessions via subscribe/poll tools. Enables long-running daemon sessions that react to external events.
+
+**Tools** (all `discoverability="discoverable"`):
+
+| Tool | Purpose |
+|------|---------|
+| `webhook_subscribe` | Subscribe to webhook events, starts HTTP listener lazily. Returns subscription ID + endpoints. |
+| `webhook_poll` | Long-poll for events on a subscription. Blocks up to timeout seconds. |
+| `webhook_status` | Check listener status, routes, and event statistics. Auto-approved. |
+
+**Configuration** (`.jaato/webhook.json`):
+```json
+{
+  "port": 9100,
+  "host": "127.0.0.1",
+  "secret": "${WEBHOOK_SECRET}",
+  "tls": { "enabled": true, "certfile": "...", "keyfile": "...", "ca_certfile": "..." },
+  "allowed_ips": ["10.0.0.0/8"],
+  "rate_limit_per_second": 50,
+  "routes": {
+    "github": {
+      "path": "/webhook/github",
+      "secret_header": "X-Hub-Signature-256",
+      "secret_algo": "hmac-sha256",
+      "event_type_header": "X-GitHub-Event"
+    }
+  }
+}
+```
+
+**Corporate hardening** (all stdlib, no external deps):
+- **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
+- **IP allowlisting**: CIDR-aware, IPv4/IPv6, IPv4-mapped-IPv6 normalization
+- **Rate limiting**: Per-IP token-bucket algorithm
+
+**Architecture:** HTTP server runs in a daemon thread using `http.server.HTTPServer`. Per-subscription event buffers (`deque(maxlen=1000)`) with `threading.Event`-based long-poll wakeup. Server starts lazily on first subscribe call.
+
+See [Webhook Plugin Design](docs/design/webhook-plugin.md) for full design doc.
+
 ### UI Rendering Architecture (Separation of Concerns)
 
 The UI rendering follows a strict separation between data production and presentation:
