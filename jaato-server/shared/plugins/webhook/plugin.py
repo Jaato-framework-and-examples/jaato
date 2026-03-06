@@ -152,8 +152,9 @@ class WebhookPlugin:
             ToolSchema(
                 name='webhook_poll',
                 description=(
-                    'Poll for new webhook events. Blocks up to timeout seconds '
-                    'waiting for events. Call this in a loop after subscribing.'
+                    'Fallback: poll for webhook events directly. Prefer '
+                    'pollForTasks(event_types=["external_event"]) for event '
+                    'delivery via the shared bus. Blocks up to timeout seconds.'
                 ),
                 parameters={
                     "type": "object",
@@ -199,10 +200,14 @@ class WebhookPlugin:
         """Return system instructions describing webhook tools."""
         return (
             "You have access to webhook tools for receiving external HTTP events.\n\n"
+            "Webhook events are published to the shared TaskEventBus as "
+            "`external_event` events with `source_agent=\"webhook:<route>\"`.\n\n"
             "To start processing webhooks:\n"
-            "1. Call `webhook_subscribe` to subscribe (starts the HTTP listener)\n"
-            "2. Loop forever calling `webhook_poll` to receive events\n"
-            "3. Process each event and immediately poll again\n\n"
+            "1. Call `webhook_subscribe` to start the HTTP listener\n"
+            "2. Use `pollForTasks(event_types=[\"external_event\"])` to receive "
+            "events via the shared event bus\n"
+            "3. Process each event and poll again\n\n"
+            "`webhook_poll` is available as a fallback for direct polling.\n"
             "Use `webhook_status` to check listener health and statistics."
         )
 
@@ -355,17 +360,26 @@ class WebhookPlugin:
             headers: Request headers dict.
             payload: Parsed JSON payload.
         """
+        event_id = f"evt_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.now(timezone.utc).isoformat() + "Z"
+
         event = {
-            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event_id": event_id,
             "source": route_name,
             "event_type": event_type,
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "timestamp": timestamp,
             "headers": headers,
             "payload": payload,
         }
 
         self._total_events_published += 1
 
+        # Publish to shared TaskEventBus (primary delivery mechanism)
+        self._publish_to_event_bus(
+            event_id, route_name, event_type, timestamp, headers, payload
+        )
+
+        # Also buffer for direct webhook_poll (fallback mechanism)
         with self._sub_lock:
             for sub_id, buffer in self._subscriptions.items():
                 sources = self._subscription_filters.get(sub_id, set())
@@ -375,6 +389,55 @@ class WebhookPlugin:
                     wake_event = self._subscription_events.get(sub_id)
                     if wake_event:
                         wake_event.set()
+
+    def _publish_to_event_bus(
+        self,
+        event_id: str,
+        route_name: str,
+        event_type: str,
+        timestamp: str,
+        headers: Dict[str, str],
+        payload: Any,
+    ) -> None:
+        """Publish a webhook event to the shared TaskEventBus.
+
+        This is the primary delivery mechanism. Events appear as
+        ``EXTERNAL_EVENT`` with ``source_agent="webhook:<route>"``,
+        retrievable via ``pollForTasks(event_types=["external_event"])``.
+
+        Args:
+            event_id: Unique event identifier.
+            route_name: Name of the matched route (e.g., 'github').
+            event_type: Event type from header (e.g., 'push').
+            timestamp: ISO 8601 timestamp string.
+            headers: Request headers dict.
+            payload: Parsed JSON payload.
+        """
+        try:
+            from shared.plugins.todo.event_bus import get_event_bus
+            from jaato_sdk.plugins.todo.models import TaskEvent, TaskEventType
+        except Exception:
+            logger.debug("TaskEventBus not available, skipping bus publish")
+            return
+
+        bus = get_event_bus()
+        task_event = TaskEvent(
+            event_id=event_id,
+            event_type=TaskEventType.EXTERNAL_EVENT,
+            timestamp=timestamp,
+            source_agent=f"webhook:{route_name}",
+            source_plan_id=route_name,
+            source_plan_title=f"webhook:{route_name}",
+            source_step_id=event_id,
+            source_step_description=event_type,
+            payload={
+                "source": route_name,
+                "event_type": event_type,
+                "headers": headers,
+                "payload": payload,
+            },
+        )
+        bus.publish(task_event)
 
     @staticmethod
     def _drain_buffer(buffer: Deque[Dict[str, Any]]) -> List[Dict[str, Any]]:

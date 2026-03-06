@@ -44,6 +44,9 @@ class TaskEventType(Enum):
     STEP_BLOCKED = "step_blocked"      # Step waiting on dependencies
     STEP_UNBLOCKED = "step_unblocked"  # All dependencies satisfied
 
+    # External events (published by plugins, not plan/step lifecycle)
+    EXTERNAL_EVENT = "external_event"  # Webhook or other external ingress
+
 
 class PlanStatus(Enum):
     """Possible statuses for an overall plan."""
