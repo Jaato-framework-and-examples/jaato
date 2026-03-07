@@ -1108,16 +1108,17 @@ class JaatoServer:
             style="info",
         ))
 
-        # Emit bootstrap timing report if enabled
+        # Emit bootstrap timing report to session trace log
         _timer.finish()
         if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):
-            import sys as _sys
-            _timer.report()
+            import io as _io
+            _buf = _io.StringIO()
+            _timer.report(file=_buf)
             # Append per-plugin breakdown
             plugin_timings = self.registry.get_bootstrap_timings()
             if plugin_timings:
-                _sys.stderr.write("\n  PER-PLUGIN BREAKDOWN (sorted by total time):\n")
-                _sys.stderr.write("  " + "-" * 68 + "\n")
+                _buf.write("\n  PER-PLUGIN BREAKDOWN (sorted by total time):\n")
+                _buf.write("  " + "-" * 68 + "\n")
                 sorted_plugins = sorted(
                     plugin_timings.items(),
                     key=lambda x: x[1].get("total_ms", 0),
@@ -1130,11 +1131,13 @@ class JaatoServer:
                     imp = ptiming.get("import_ms", 0)
                     create = ptiming.get("create_ms", 0)
                     init = ptiming.get("init_ms", 0)
-                    _sys.stderr.write(
+                    _buf.write(
                         f"    {pname:<30} total={total:>7.1f}ms  "
                         f"import={imp:>6.1f}  create={create:>6.1f}  init={init:>7.1f}\n"
                     )
-                _sys.stderr.write("\n")
+                _buf.write("\n")
+            # Route to session trace log (not stderr, which would break the TUI)
+            logger.info("Bootstrap timing report:\n%s", _buf.getvalue())
         else:
             # Always log at DEBUG level
             logger.debug("Bootstrap completed in %.0f ms", _timer.total_elapsed * 1000)

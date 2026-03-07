@@ -182,7 +182,16 @@ class MCPToolPlugin:
     This plugin connects to MCP servers defined in .mcp.json and exposes
     their tools to the AI model. It runs a background thread with an
     asyncio event loop to handle the async MCP protocol.
+
+    Declares ``PARALLEL_INIT = True`` so that ``PluginRegistry.expose_all()``
+    starts MCP server connections in a background thread, overlapping the
+    network I/O with the initialization of other (fast) plugins.
     """
+
+    # Opt into parallel initialization in expose_all() — MCP init involves
+    # network I/O (connecting to MCP servers) that benefits from overlapping
+    # with other plugin init.
+    PARALLEL_INIT = True
 
     def __init__(self):
         # Instance state instead of module globals
@@ -202,6 +211,8 @@ class MCPToolPlugin:
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
         self._streaming_servers: set = set()  # servers with streaming: true in config
+        # Event signalling that background tool discovery has finished (or timed out)
+        self._ready_event = threading.Event()
         # Interaction log
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
@@ -1523,18 +1534,31 @@ class MCPToolPlugin:
             errlog = LogCapture(self._log_event)
             manager = MCPClientManager(errlog=errlog)
             async with manager:
-                # Initial connection to all configured servers
+                # Connect to all configured servers in parallel for faster bootstrap
                 server_list = list(servers.items())
-                for idx, (name, spec) in enumerate(server_list, 1):
-                    self._log_event(LOG_DEBUG, f"Processing server {idx}/{len(server_list)}", server=name)
+
+                async def _connect_and_track(name: str, spec: dict):
+                    """Connect a single server and track streaming flag."""
                     await connect_server(manager, name, spec)
-                    # Track servers with streaming enabled
                     if spec.get('streaming', False):
                         self._streaming_servers.add(name)
+
+                if len(server_list) > 1:
+                    self._log_event(LOG_DEBUG,
+                                    f"Connecting to {len(server_list)} servers in parallel")
+                    await asyncio.gather(
+                        *(_connect_and_track(name, spec) for name, spec in server_list),
+                        return_exceptions=True,
+                    )
+                elif server_list:
+                    name, spec = server_list[0]
+                    await _connect_and_track(name, spec)
 
                 # Cache tools and log summary
                 update_tool_cache(manager)
                 self._manager = manager
+                # Signal the main thread that tool discovery is done
+                self._ready_event.set()
 
                 total_tools = sum(len(tools) for tools in self._tool_cache.values())
                 self._log_event(LOG_INFO, f"Initialization complete: {len(self._connected_servers)} connected, "
@@ -1747,6 +1771,8 @@ class MCPToolPlugin:
         except Exception as exc:
             self._log_event(LOG_ERROR, "MCP thread crashed", details=str(exc), include_traceback=True)
         finally:
+            # Unblock any thread waiting on tool discovery (even on failure)
+            self._ready_event.set()
             # Cleanup: cancel all remaining tasks
             try:
                 # Get all pending tasks
@@ -1771,20 +1797,24 @@ class MCPToolPlugin:
                 logger.debug(f"Ignoring error when closing MCP event loop: {exc}")
 
     def _ensure_thread(self):
-        """Start the MCP background thread if not already running."""
+        """Start the MCP background thread if not already running.
+
+        Launches the background event loop and waits up to 10 seconds for
+        tool discovery to complete.  Uses a threading.Event instead of a
+        polling loop so the wait is nearly zero-cost when servers respond
+        quickly.
+        """
         if self._thread is not None and self._thread.is_alive():
             return
 
         self._request_queue = queue.Queue()
         self._response_queue = queue.Queue()
+        self._ready_event.clear()
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
 
-        # Wait for tools to be discovered
-        for _ in range(100):  # 10 second timeout
-            if self._tool_cache:
-                break
-            time.sleep(0.1)
+        # Block until tool discovery finishes (or 10 s timeout).
+        self._ready_event.wait(timeout=10.0)
 
     def _execute(self, toolname: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute an MCP tool via the background connection.

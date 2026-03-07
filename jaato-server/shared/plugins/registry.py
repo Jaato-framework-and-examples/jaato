@@ -760,14 +760,54 @@ class PluginRegistry:
     ) -> None:
         """Expose all discovered plugins' tools.
 
+        Plugins that declare ``PARALLEL_INIT = True`` have their
+        ``initialize()`` started in background threads so their I/O
+        (e.g. MCP server connections) overlaps with the sequential
+        initialization of other plugins.
+
         Args:
             config: Optional dict mapping plugin names to their configs.
             on_progress: Optional callback invoked with each plugin name
                 before it is exposed.  Used by the server to emit
                 per-plugin init progress events.
         """
+        import concurrent.futures
+
         config = config or {}
+
+        # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
+        parallel_names = [
+            name for name, plugin in self._plugins.items()
+            if getattr(plugin, 'PARALLEL_INIT', False)
+            and name not in self._exposed
+        ]
+
+        # Pre-initialize I/O-heavy plugins in background threads so their
+        # network I/O overlaps with the sequential init of other plugins.
+        futures: Dict[str, concurrent.futures.Future] = {}
+        if parallel_names:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(parallel_names),
+                thread_name_prefix="plugin-init",
+            )
+            for name in parallel_names:
+                plugin = self._plugins[name]
+                cfg = config.get(name)
+                _trace(f"Starting parallel init for plugin '{name}'")
+                futures[name] = executor.submit(plugin.initialize, cfg)
+            executor.shutdown(wait=False)
+
+        # Run the normal sequential expose loop.  For plugins that were
+        # pre-initialized above, expose_tool() will find them already
+        # initialized (their initialize() is idempotent) and skip the
+        # initialization step.
         for name in self._plugins:
+            # If this plugin is being pre-initialized, wait for it first
+            if name in futures:
+                try:
+                    futures[name].result(timeout=30.0)
+                except Exception as exc:
+                    _trace(f"Parallel init for '{name}' failed: {exc}")
             if on_progress:
                 on_progress(name)
             self.expose_tool(name, config.get(name))

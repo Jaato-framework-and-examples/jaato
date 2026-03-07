@@ -14,7 +14,7 @@ Usage in JaatoServer.initialize()::
         ...
     with timer.stage("connect_provider"):
         ...
-    timer.report()  # prints to stderr
+    timer.report()  # writes to provided file or sys.stderr
 
 Sub-stages::
 
