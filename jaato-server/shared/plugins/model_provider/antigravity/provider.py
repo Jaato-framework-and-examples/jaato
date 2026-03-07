@@ -270,11 +270,13 @@ class AntigravityProvider:
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
         """Connect to a specific model.
 
         Args:
             model: Model ID (e.g., 'antigravity-gemini-3-flash', 'gemini-2.5-flash').
+            skip_model_test: Accepted for protocol compatibility; this provider
+                does not perform network validation during connect.
 
         Raises:
             ModelNotFoundError: Model not found.

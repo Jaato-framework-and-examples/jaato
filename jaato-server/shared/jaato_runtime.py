@@ -9,6 +9,7 @@ import importlib.metadata
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -627,13 +628,17 @@ class JaatoRuntime:
         if not self._registry:
             return
 
+        t_start = time.perf_counter()
+
         # Get tool schemas based on deferred loading setting
+        t0 = time.perf_counter()
         if _is_deferred_tools_enabled():
             # Deferred loading: only core tools in initial context
             self._all_tool_schemas = self._registry.get_core_tool_schemas()
         else:
             # Traditional: all enabled tools in initial context
             self._all_tool_schemas = self._registry.get_enabled_tool_schemas()
+        schema_ms = (time.perf_counter() - t0) * 1000
 
         # Add permission plugin schemas if available (but avoid duplicates)
         # Permission plugin may already be exposed via registry.expose_tool("permission")
@@ -700,6 +705,13 @@ class JaatoRuntime:
         if self._permission_plugin and self._auto_approved_tools:
             self._permission_plugin.add_whitelist_tools(self._auto_approved_tools)
 
+        total_ms = (time.perf_counter() - t_start) * 1000
+        if total_ms > 10.0:
+            logger.debug(
+                "_cache_tool_configuration: %.1fms (schemas=%.1fms)",
+                total_ms, schema_ms,
+            )
+
     def refresh_tool_cache(self) -> None:
         """Refresh the cached tool configuration.
 
@@ -754,7 +766,8 @@ class JaatoRuntime:
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         provider_name: Optional[str] = None,
-        preloaded_plugins: Optional[set] = None
+        preloaded_plugins: Optional[set] = None,
+        skip_model_test: bool = False,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -776,6 +789,8 @@ class JaatoRuntime:
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading. All their tools (including
                               discoverable) are loaded into the initial context.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during provider creation.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -792,15 +807,27 @@ class JaatoRuntime:
         from .jaato_session import JaatoSession
 
         # Create session with runtime reference and optional provider override
+        t0 = time.perf_counter()
         session = JaatoSession(self, model, provider_name=provider_name)
+        session_create_ms = (time.perf_counter() - t0) * 1000
 
         # Configure session tools
+        t1 = time.perf_counter()
         session.configure(
             tools=tools,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
-            preloaded_plugins=preloaded_plugins
+            preloaded_plugins=preloaded_plugins,
+            skip_model_test=skip_model_test,
         )
+        session_configure_ms = (time.perf_counter() - t1) * 1000
+
+        total_ms = session_create_ms + session_configure_ms
+        if total_ms > 10.0:
+            logger.debug(
+                "create_session: %.1fms (construct=%.1fms, configure=%.1fms)",
+                total_ms, session_create_ms, session_configure_ms,
+            )
 
         return session
 
@@ -846,7 +873,8 @@ class JaatoRuntime:
     def create_provider(
         self,
         model: str,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        skip_model_test: bool = False,
     ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
@@ -859,6 +887,10 @@ class JaatoRuntime:
                           uses a different provider than the runtime's default.
                           The provider must be registered via register_provider()
                           or will be auto-registered with default config.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during ``provider.connect()``.  The model will
+                be validated on the first real message instead.  Used during
+                bootstrap to reduce startup latency.
 
         Returns:
             Initialized and connected ModelProviderPlugin.
@@ -895,8 +927,20 @@ class JaatoRuntime:
                 extra_with_workspace = {**config.extra, 'workspace_path': workspace_path}
                 config = replace(config, extra=extra_with_workspace)
 
+        t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)
-        provider.connect(model)
+        load_ms = (time.perf_counter() - t0) * 1000
+
+        t1 = time.perf_counter()
+        provider.connect(model, skip_model_test=skip_model_test)
+        connect_ms = (time.perf_counter() - t1) * 1000
+
+        total_ms = load_ms + connect_ms
+        if total_ms > 10.0:
+            logger.debug(
+                "create_provider(%s): %.1fms (load=%.1fms, connect=%.1fms)",
+                effective_provider, total_ms, load_ms, connect_ms,
+            )
         return provider
 
     def _get_core_plugins(self) -> List[str]:

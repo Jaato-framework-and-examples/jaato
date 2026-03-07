@@ -1015,7 +1015,8 @@ class JaatoSession:
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         skip_provider: bool = False,
-        preloaded_plugins: Optional[set] = None
+        preloaded_plugins: Optional[set] = None,
+        skip_model_test: bool = False,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1030,7 +1031,12 @@ class JaatoSession:
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading. All their tools (including
                               discoverable) are loaded into the initial context.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during provider creation.
         """
+        import time as _time
+        _t_configure_start = _time.perf_counter()
+
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
         # Store tool plugin names
@@ -1054,7 +1060,8 @@ class JaatoSession:
         if not skip_provider:
             self._provider = self._runtime.create_provider(
                 self._model_name,
-                provider_name=self._provider_name_override
+                provider_name=self._provider_name_override,
+                skip_model_test=skip_model_test,
             )
 
             # Propagate agent context to provider for trace identification
@@ -1195,6 +1202,10 @@ class JaatoSession:
 
         # Wire cache plugin (after budget is populated so we can set it)
         self._wire_cache_plugin()
+
+        _configure_ms = (_time.perf_counter() - _t_configure_start) * 1000
+        if _configure_ms > 10.0:
+            self._trace(f"configure: completed in {_configure_ms:.1f}ms")
 
     def _wire_cache_plugin(self) -> None:
         """Discover and attach the cache plugin matching the active provider.

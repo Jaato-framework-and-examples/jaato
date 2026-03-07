@@ -200,11 +200,15 @@ class ModelProviderPlugin(Protocol):
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
         """Set the model to use for this provider.
 
         Args:
             model: Model name/ID (e.g., 'gemini-2.5-flash', 'claude-sonnet-4-5-20250929').
+            skip_model_test: If True, skip the ``_verify_model_responds()``
+                network call during connect.  The model will be validated on
+                the first real message instead.  Used during bootstrap to
+                reduce startup latency.
         """
         ...
 

@@ -7,6 +7,7 @@ import os
 import pkgutil
 import sys
 import tempfile
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -139,6 +140,9 @@ class PluginRegistry:
         self._workspace_path: Optional[str] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
+        # Bootstrap timing: plugin name -> timing data
+        self._discovery_timings: Dict[str, dict] = {}
+        self._init_timings: Dict[str, dict] = {}
 
     def set_output_callback(
         self,
@@ -495,7 +499,9 @@ class PluginRegistry:
                 continue
 
             try:
+                t0 = time.perf_counter()
                 module = importlib.import_module(f".{name}", package="shared.plugins")
+                import_ms = (time.perf_counter() - t0) * 1000
 
                 # Check plugin kind - only load plugins matching requested kind
                 module_kind = getattr(module, 'PLUGIN_KIND', None)
@@ -503,7 +509,9 @@ class PluginRegistry:
                     continue
 
                 if hasattr(module, 'create_plugin'):
+                    t1 = time.perf_counter()
                     plugin = module.create_plugin()
+                    create_ms = (time.perf_counter() - t1) * 1000
 
                     # Verify protocol implementation
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
@@ -519,6 +527,15 @@ class PluginRegistry:
                     # Enrichment plugins are always enrichment-only
                     if plugin_kind == "enrichment":
                         self._enrichment_only.add(plugin.name)
+
+                    total_ms = import_ms + create_ms
+                    if total_ms > 5.0:  # Log plugins taking >5ms
+                        _trace(f" Plugin '{name}' discovery: import={import_ms:.1f}ms "
+                               f"create={create_ms:.1f}ms total={total_ms:.1f}ms")
+                    self._discovery_timings[name] = {
+                        "import_ms": round(import_ms, 2),
+                        "create_ms": round(create_ms, 2),
+                    }
 
             except Exception as exc:
                 _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
@@ -668,7 +685,12 @@ class PluginRegistry:
 
         # Initialize if not already exposed, or if new config provided
         if name not in self._exposed:
+            t0 = time.perf_counter()
             plugin.initialize(config)
+            init_ms = (time.perf_counter() - t0) * 1000
+            self._init_timings[name] = {"init_ms": round(init_ms, 2)}
+            if init_ms > 5.0:  # Log plugins taking >5ms to initialize
+                _trace(f" Plugin '{name}' initialize: {init_ms:.1f}ms")
             if config:
                 self._configs[name] = config
             self._exposed.add(name)
@@ -738,14 +760,54 @@ class PluginRegistry:
     ) -> None:
         """Expose all discovered plugins' tools.
 
+        Plugins that declare ``PARALLEL_INIT = True`` have their
+        ``initialize()`` started in background threads so their I/O
+        (e.g. MCP server connections) overlaps with the sequential
+        initialization of other plugins.
+
         Args:
             config: Optional dict mapping plugin names to their configs.
             on_progress: Optional callback invoked with each plugin name
                 before it is exposed.  Used by the server to emit
                 per-plugin init progress events.
         """
+        import concurrent.futures
+
         config = config or {}
+
+        # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
+        parallel_names = [
+            name for name, plugin in self._plugins.items()
+            if getattr(plugin, 'PARALLEL_INIT', False)
+            and name not in self._exposed
+        ]
+
+        # Pre-initialize I/O-heavy plugins in background threads so their
+        # network I/O overlaps with the sequential init of other plugins.
+        futures: Dict[str, concurrent.futures.Future] = {}
+        if parallel_names:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(parallel_names),
+                thread_name_prefix="plugin-init",
+            )
+            for name in parallel_names:
+                plugin = self._plugins[name]
+                cfg = config.get(name)
+                _trace(f"Starting parallel init for plugin '{name}'")
+                futures[name] = executor.submit(plugin.initialize, cfg)
+            executor.shutdown(wait=False)
+
+        # Run the normal sequential expose loop.  For plugins that were
+        # pre-initialized above, expose_tool() will find them already
+        # initialized (their initialize() is idempotent) and skip the
+        # initialization step.
         for name in self._plugins:
+            # If this plugin is being pre-initialized, wait for it first
+            if name in futures:
+                try:
+                    futures[name].result(timeout=30.0)
+                except Exception as exc:
+                    _trace(f"Parallel init for '{name}' failed: {exc}")
             if on_progress:
                 on_progress(name)
             self.expose_tool(name, config.get(name))
@@ -817,6 +879,29 @@ class PluginRegistry:
             The workspace path, or None if not set.
         """
         return self._workspace_path
+
+    def get_bootstrap_timings(self) -> Dict[str, dict]:
+        """Get per-plugin bootstrap timing data.
+
+        Returns:
+            Dict mapping plugin names to timing dicts with keys:
+            ``import_ms``, ``create_ms`` (from discovery) and
+            ``init_ms`` (from expose_tool/initialize).
+        """
+        result = {}
+        for name in sorted(self._plugins.keys()):
+            entry: dict = {}
+            if name in self._discovery_timings:
+                entry.update(self._discovery_timings[name])
+            if name in self._init_timings:
+                entry.update(self._init_timings[name])
+            if entry:
+                entry["total_ms"] = round(
+                    entry.get("import_ms", 0) + entry.get("create_ms", 0) + entry.get("init_ms", 0),
+                    2,
+                )
+                result[name] = entry
+        return result
 
     def get_exposed_tool_schemas(self) -> List[ToolSchema]:
         """Get ToolSchemas from all exposed plugins and core tools."""

@@ -311,13 +311,15 @@ class NIMProvider:
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
         """Set the model to use.
 
         Model validation is deferred to the first API call.
 
         Args:
             model: Model ID (e.g., 'meta/llama-3.1-70b-instruct').
+            skip_model_test: Accepted for protocol compatibility; this provider
+                already defers validation to the first API call.
         """
         self._model_name = model
 
