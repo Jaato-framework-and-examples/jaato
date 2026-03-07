@@ -100,13 +100,19 @@ The framework uses a server-first architecture where the server runs as a daemon
 
 ### Plugin System (`jaato-server/shared/plugins/`)
 
-Three plugin types:
+Four plugin types:
 
-**Tool Plugins** - Provide tools the model can invoke:
+**Tool Plugins** - Provide tools the model can invoke (`PLUGIN_KIND = "tool"`, implements `ToolPlugin`):
 - `PluginRegistry`: Discovers and manages tool plugins
 - `cli/`: Shell commands | `mcp/`: MCP servers | `permission/`: Permission control
 - `interactive_shell/`: Interactive PTY sessions (REPLs, password prompts, wizards, debuggers)
 - `file_edit/`, `todo/`, `web_search/`, `filesystem_query/`, etc.
+
+**Enrichment Plugins** - Enrich prompts/instructions/results without providing tools (`PLUGIN_KIND = "enrichment"`, implements `EnrichmentPlugin`):
+- Lightweight alternative to `ToolPlugin` for plugins that only participate in the enrichment pipeline
+- No `get_tool_schemas()`, `get_executors()`, or command methods needed
+- Automatically registered as enrichment-only by the registry
+- Discovered alongside tool plugins during `registry.discover()`
 
 **GC Plugins** - Context garbage collection strategies:
 - `gc_truncate/`: Simple truncation
