@@ -766,7 +766,8 @@ class JaatoRuntime:
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         provider_name: Optional[str] = None,
-        preloaded_plugins: Optional[set] = None
+        preloaded_plugins: Optional[set] = None,
+        skip_model_test: bool = False,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -788,6 +789,8 @@ class JaatoRuntime:
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading. All their tools (including
                               discoverable) are loaded into the initial context.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during provider creation.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -814,7 +817,8 @@ class JaatoRuntime:
             tools=tools,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
-            preloaded_plugins=preloaded_plugins
+            preloaded_plugins=preloaded_plugins,
+            skip_model_test=skip_model_test,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 
@@ -869,7 +873,8 @@ class JaatoRuntime:
     def create_provider(
         self,
         model: str,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        skip_model_test: bool = False,
     ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
@@ -882,6 +887,10 @@ class JaatoRuntime:
                           uses a different provider than the runtime's default.
                           The provider must be registered via register_provider()
                           or will be auto-registered with default config.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during ``provider.connect()``.  The model will
+                be validated on the first real message instead.  Used during
+                bootstrap to reduce startup latency.
 
         Returns:
             Initialized and connected ModelProviderPlugin.
@@ -923,7 +932,7 @@ class JaatoRuntime:
         load_ms = (time.perf_counter() - t0) * 1000
 
         t1 = time.perf_counter()
-        provider.connect(model)
+        provider.connect(model, skip_model_test=skip_model_test)
         connect_ms = (time.perf_counter() - t1) * 1000
 
         total_ms = load_ms + connect_ms

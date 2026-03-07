@@ -782,20 +782,157 @@ class JaatoServer:
             location = get_config("LOCATION")
             self._emit_init_progress("Loading configuration", "done", 1, total_steps)
 
-            # Step 2: Connect to model provider
-            # Credential validation is handled by each provider during connect()
-            # Use session env context so provider can access session-specific API keys
-            self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
-            with _timer.stage("connect_provider") as _s2:
-                with self._with_session_env():
-                    with _s2.sub("create_client"):
-                        self._jaato = JaatoClient(provider_name=provider_to_use,
-                                                  workspace_path=self._workspace_path,
-                                                  instruction_token_cache=self._instruction_token_cache)
-                    # Pass project/location for providers that need them (Google/Vertex)
-                    # Other providers ignore these and use their own env vars
-                    with _s2.sub("client_connect"):
-                        self._jaato.connect(project_id, location, model_name)
+            # Steps 2 & 3 run in parallel: connecting to the model provider
+            # and discovering/loading plugins are independent operations.
+            # Running them concurrently saves ~100-200ms during bootstrap.
+            from concurrent.futures import ThreadPoolExecutor
+
+            _connect_error: Optional[Exception] = None
+            _plugins_error: Optional[Exception] = None
+
+            def _run_connect_provider() -> None:
+                """Stage 2: Create JaatoClient and connect to provider."""
+                nonlocal _connect_error
+                try:
+                    self._emit_init_progress(
+                        "Connecting to model provider", "running", 2, total_steps
+                    )
+                    with _timer.stage("connect_provider") as _s2:
+                        with self._with_session_env():
+                            with _s2.sub("create_client"):
+                                self._jaato = JaatoClient(
+                                    provider_name=provider_to_use,
+                                    workspace_path=self._workspace_path,
+                                    instruction_token_cache=self._instruction_token_cache,
+                                )
+                            with _s2.sub("client_connect"):
+                                self._jaato.connect(project_id, location, model_name)
+                except Exception as e:
+                    _connect_error = e
+
+            def _run_load_plugins() -> None:
+                """Stage 3: Discover and configure plugins."""
+                nonlocal _plugins_error
+                try:
+                    self._emit_init_progress(
+                        "Loading plugins", "running", 3, total_steps
+                    )
+                    with _timer.stage("load_plugins") as _s3:
+                        with _s3.sub("create_registry"):
+                            self.registry = PluginRegistry(model_name=model_name)
+                        with _s3.sub("discover"):
+                            self.registry.discover()
+
+                        plugin_configs = {
+                            "todo": {
+                                "reporter_type": "memory",
+                                "storage_type": "memory",
+                            },
+                            "references": {
+                                "channel_type": "queue",
+                                "workspace_path": self._workspace_path,
+                            },
+                            "clarification": {
+                                "channel_type": "queue",
+                            },
+                            "lsp": {
+                                "workspace_path": self._workspace_path,
+                                "session_id": self._session_id,
+                            },
+                            "mcp": {
+                                "workspace_path": self._workspace_path,
+                                "session_id": self._session_id,
+                            },
+                            "file_edit": {
+                                "session_id": self._session_id,
+                            },
+                            "waypoint": {
+                                "session_id": self._session_id,
+                            },
+                            "sandbox_manager": {
+                                "session_id": self._session_id,
+                            },
+                        }
+                        if self._profile and self._profile.plugin_configs:
+                            profile_sandbox_config = self._profile.plugin_configs.get(
+                                "sandbox_manager"
+                            )
+                            if profile_sandbox_config:
+                                plugin_configs["sandbox_manager"].update(
+                                    profile_sandbox_config
+                                )
+
+                        def _on_plugin_progress(plugin_name: str) -> None:
+                            self._emit_init_progress(
+                                "Loading plugins",
+                                "running",
+                                3,
+                                total_steps,
+                                message=plugin_name,
+                            )
+
+                        with _s3.sub("expose_all"):
+                            self.registry.expose_all(
+                                plugin_configs, on_progress=_on_plugin_progress
+                            )
+                        self.todo_plugin = self.registry.get_plugin("todo")
+
+                        with _s3.sub("set_workspace_path"):
+                            if self._workspace_path:
+                                self.registry.set_workspace_path(self._workspace_path)
+
+                        with _s3.sub("permission_init"):
+                            self.permission_plugin = PermissionPlugin()
+                            permission_init_config: Dict[str, Any] = {
+                                "channel_type": "queue",
+                                "channel_config": {"use_colors": False},
+                                "policy": {
+                                    "defaultPolicy": "ask",
+                                    "whitelist": {"tools": [], "patterns": []},
+                                    "blacklist": {"tools": [], "patterns": []},
+                                },
+                            }
+                            if self._profile and self._profile.plugin_configs:
+                                profile_perm_config = (
+                                    self._profile.plugin_configs.get("permission")
+                                )
+                                if profile_perm_config:
+                                    permission_init_config.update(profile_perm_config)
+                            self.permission_plugin.initialize(permission_init_config)
+                except Exception as e:
+                    _plugins_error = e
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pool.submit(_run_connect_provider)
+                pool.submit(_run_load_plugins)
+                # ThreadPoolExecutor.__exit__ waits for all futures
+
+            # Check for errors from either stage
+            if _connect_error is not None:
+                e = _connect_error
+                self._emit_init_progress(
+                    "Connecting to model provider", "error", 2, total_steps,
+                    str(e),
+                )
+                self.emit(ErrorEvent(
+                    error=f"Failed to connect: {e}",
+                    error_type=type(e).__name__,
+                    recoverable=False,
+                ))
+                return False
+
+            if _plugins_error is not None:
+                e = _plugins_error
+                self._emit_init_progress(
+                    "Loading plugins", "error", 3, total_steps, str(e),
+                )
+                self.emit(ErrorEvent(
+                    error=f"Failed to load plugins: {e}",
+                    error_type=type(e).__name__,
+                    recoverable=False,
+                ))
+                return False
+
         except Exception as e:
             self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
                                      str(e))
@@ -810,91 +947,6 @@ class JaatoServer:
         self._model_provider = self._jaato.provider_name
         self._jaato.set_terminal_width(self._terminal_width)
         self._emit_init_progress("Connecting to model provider", "done", 2, total_steps)
-
-        # Step 3: Discover and configure plugins
-        self._emit_init_progress("Loading plugins", "running", 3, total_steps)
-        with _timer.stage("load_plugins") as _s3:
-            with _s3.sub("create_registry"):
-                self.registry = PluginRegistry(model_name=model_name)
-            with _s3.sub("discover"):
-                self.registry.discover()
-
-            plugin_configs = {
-                "todo": {
-                    "reporter_type": "memory",
-                    "storage_type": "memory",
-                },
-                "references": {
-                    "channel_type": "queue",
-                    "workspace_path": self._workspace_path,
-                },
-                "clarification": {
-                    "channel_type": "queue",
-                },
-                # LSP and MCP need workspace_path during initialize() to find config files
-                # Also include session_id for log disambiguation in multi-session mode
-                "lsp": {
-                    "workspace_path": self._workspace_path,
-                    "session_id": self._session_id,
-                },
-                "mcp": {
-                    "workspace_path": self._workspace_path,
-                    "session_id": self._session_id,
-                },
-                # Pass session_id to file_edit for session-scoped backup storage
-                # workspace_root is handled by set_workspace_path() broadcast
-                "file_edit": {
-                    "session_id": self._session_id,
-                },
-                # Pass session_id to waypoint plugin for session-scoped waypoint storage
-                "waypoint": {
-                    "session_id": self._session_id,
-                },
-                # Pass session_id to sandbox_manager; profile may add allowed_paths/denied_paths
-                "sandbox_manager": {
-                    "session_id": self._session_id,
-                },
-            }
-            # Apply agent profile's sandbox_manager config (allowed_paths, denied_paths)
-            if self._profile and self._profile.plugin_configs:
-                profile_sandbox_config = self._profile.plugin_configs.get("sandbox_manager")
-                if profile_sandbox_config:
-                    plugin_configs["sandbox_manager"].update(profile_sandbox_config)
-            def _on_plugin_progress(plugin_name: str) -> None:
-                self._emit_init_progress(
-                    "Loading plugins", "running", 3, total_steps, message=plugin_name
-                )
-
-            with _s3.sub("expose_all"):
-                self.registry.expose_all(plugin_configs, on_progress=_on_plugin_progress)
-            self.todo_plugin = self.registry.get_plugin("todo")
-
-            # Broadcast workspace path to all plugins implementing set_workspace_path()
-            # This covers: file_edit, cli, filesystem_query, lsp, mcp, and any future plugins
-            with _s3.sub("set_workspace_path"):
-                if self._workspace_path:
-                    self.registry.set_workspace_path(self._workspace_path)
-
-            # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
-            # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
-
-            with _s3.sub("permission_init"):
-                self.permission_plugin = PermissionPlugin()
-                permission_init_config: Dict[str, Any] = {
-                    "channel_type": "queue",
-                    "channel_config": {"use_colors": False},
-                    "policy": {
-                        "defaultPolicy": "ask",
-                        "whitelist": {"tools": [], "patterns": []},
-                        "blacklist": {"tools": [], "patterns": []},
-                    }
-                }
-                # Apply agent profile's permission config (policy, channel overrides)
-                if self._profile and self._profile.plugin_configs:
-                    profile_perm_config = self._profile.plugin_configs.get("permission")
-                    if profile_perm_config:
-                        permission_init_config.update(profile_perm_config)
-                self.permission_plugin.initialize(permission_init_config)
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
         # Set up formatter pipeline for server-side output formatting
@@ -989,10 +1041,17 @@ class JaatoServer:
             with self._with_session_env(), self._in_workspace():
                 # Build session creation kwargs from agent profile (if any)
                 session_kwargs = self._build_profile_session_kwargs()
+                # Skip the model-test network call during bootstrap to reduce
+                # startup latency.  The model will be validated on the first
+                # real message from the user.
+                _skip_test = os.environ.get(
+                    "JAATO_SKIP_MODEL_TEST", "true"
+                ).lower() in ("1", "true", "yes")
                 with _s5.sub("configure_tools_call"):
                     self._jaato.configure_tools(
                         self.registry, self.permission_plugin, self.ledger,
                         session_kwargs=session_kwargs,
+                        skip_model_test=_skip_test,
                     )
 
                 # Wire formatter pipeline into runtime so output formatters can

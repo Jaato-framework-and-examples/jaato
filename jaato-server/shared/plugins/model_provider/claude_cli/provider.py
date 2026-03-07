@@ -270,13 +270,15 @@ class ClaudeCLIProvider:
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
         """Set the model to use.
 
         Args:
             model: Model name/alias. Can be:
                 - "sonnet", "opus", "haiku" (aliases)
                 - Full model name like "claude-sonnet-4-20250514"
+            skip_model_test: Accepted for protocol compatibility; this provider
+                does not perform model validation during connect.
         """
         self._model_name = model
         logger.info(f"Connected to model: {model}")

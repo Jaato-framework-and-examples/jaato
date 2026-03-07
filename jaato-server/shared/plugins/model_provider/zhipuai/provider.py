@@ -332,11 +332,13 @@ class ZhipuAIProvider(AnthropicProvider):
             on_message("No Zhipu AI credentials found")
         return False
 
-    def connect(self, model_name: str) -> None:
+    def connect(self, model_name: str, *, skip_model_test: bool = False) -> None:
         """Connect to a specific model.
 
         Args:
             model_name: Model name (e.g., 'glm-5', 'glm-4.7', 'glm-4.7-flash').
+            skip_model_test: Accepted for protocol compatibility; this provider
+                defers validation to the first API call.
         """
         # For Zhipu AI, we don't have a model listing API via the Anthropic endpoint,
         # so we just accept the model name and let the API validate it

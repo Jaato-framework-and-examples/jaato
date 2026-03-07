@@ -223,17 +223,20 @@ class OllamaProvider(AnthropicProvider):
                 on_message(f"Cannot connect to Ollama at {self._host}")
             return False
 
-    def connect(self, model_name: str) -> None:
+    def connect(self, model_name: str, *, skip_model_test: bool = False) -> None:
         """Connect to a specific model.
 
         Args:
             model_name: Model name (e.g., 'qwen3:32b', 'llama3.3:70b').
+            skip_model_test: If True, skip the network call to verify the model
+                responds.  The model will be validated on the first real
+                message instead.
 
         Raises:
             OllamaModelNotFoundError: Model not available in Ollama.
             RuntimeError: Model cannot be loaded (memory, etc.).
         """
-        # Verify model exists in Ollama
+        # Verify model exists in Ollama (local check, not a network call)
         available = self._get_local_models()
         # Check both exact match and with default tag
         if model_name not in available:
@@ -243,8 +246,9 @@ class OllamaProvider(AnthropicProvider):
 
         self._model_name = model_name
 
-        # Verify model can actually respond (catches memory issues, etc.)
-        self._verify_model_responds()
+        if not skip_model_test:
+            # Verify model can actually respond (catches memory issues, etc.)
+            self._verify_model_responds()
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models available in Ollama.

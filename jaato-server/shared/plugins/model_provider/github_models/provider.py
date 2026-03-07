@@ -487,7 +487,7 @@ class GitHubModelsProvider:
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
         """Set the model to use.
 
         Model validation is deferred to the first API call to avoid
@@ -495,6 +495,8 @@ class GitHubModelsProvider:
 
         Args:
             model: Model ID (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet').
+            skip_model_test: Accepted for protocol compatibility; this provider
+                already defers validation to the first API call.
         """
         self._model_name = model
 

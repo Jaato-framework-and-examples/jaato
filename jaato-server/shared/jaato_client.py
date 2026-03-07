@@ -430,6 +430,7 @@ class JaatoClient:
         permission_plugin: Optional['PermissionPlugin'] = None,
         ledger: Optional[TokenLedger] = None,
         session_kwargs: Optional[Dict[str, Any]] = None,
+        skip_model_test: bool = False,
     ) -> None:
         """Configure tools from plugin registry.
 
@@ -442,6 +443,8 @@ class JaatoClient:
                 to inject ``tools``, ``system_instructions``,
                 ``plugin_configs``, ``provider_name``, and
                 ``preloaded_plugins`` into the main session.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during provider creation.
         """
         if not self._runtime:
             raise RuntimeError("Client not connected. Call connect() first.")
@@ -453,6 +456,8 @@ class JaatoClient:
         kwargs: Dict[str, Any] = {"model": self._model_name}
         if session_kwargs:
             kwargs.update(session_kwargs)
+        if skip_model_test:
+            kwargs["skip_model_test"] = True
         self._session = self._runtime.create_session(**kwargs)
 
         # Pass UI hooks to session if they were set before configure_tools

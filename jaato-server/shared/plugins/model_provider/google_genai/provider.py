@@ -583,19 +583,23 @@ class GoogleGenAIProvider:
 
     # ==================== Connection ====================
 
-    def connect(self, model: str) -> None:
-        """Set the model to use and verify it responds.
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
+        """Set the model to use and optionally verify it responds.
 
         Args:
             model: Model name (e.g., 'gemini-2.5-flash').
+            skip_model_test: If True, skip the network call to verify the model
+                responds.  The model will be validated on the first real
+                message instead.
 
         Raises:
             RuntimeError: Model doesn't exist or cannot be used.
         """
         self._model_name = model
 
-        # Verify model can actually respond
-        self._verify_model_responds()
+        if not skip_model_test:
+            # Verify model can actually respond
+            self._verify_model_responds()
 
     def _verify_model_responds(self) -> None:
         """Verify the model can actually respond.

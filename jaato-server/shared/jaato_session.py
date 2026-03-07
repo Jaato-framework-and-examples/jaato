@@ -1015,7 +1015,8 @@ class JaatoSession:
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         skip_provider: bool = False,
-        preloaded_plugins: Optional[set] = None
+        preloaded_plugins: Optional[set] = None,
+        skip_model_test: bool = False,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1030,6 +1031,8 @@ class JaatoSession:
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading. All their tools (including
                               discoverable) are loaded into the initial context.
+            skip_model_test: If True, skip the network call that verifies the
+                model responds during provider creation.
         """
         import time as _time
         _t_configure_start = _time.perf_counter()
@@ -1057,7 +1060,8 @@ class JaatoSession:
         if not skip_provider:
             self._provider = self._runtime.create_provider(
                 self._model_name,
-                provider_name=self._provider_name_override
+                provider_name=self._provider_name_override,
+                skip_model_test=skip_model_test,
             )
 
             # Propagate agent context to provider for trace identification

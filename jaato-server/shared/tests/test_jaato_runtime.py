@@ -187,7 +187,7 @@ class TestJaatoRuntimeCreateProvider:
         provider = runtime.create_provider("gemini-2.5-flash")
 
         assert provider == mock_provider
-        mock_provider.connect.assert_called_once_with("gemini-2.5-flash")
+        mock_provider.connect.assert_called_once_with("gemini-2.5-flash", skip_model_test=False)
 
 
 class TestJaatoRuntimeGetToolSchemas:
