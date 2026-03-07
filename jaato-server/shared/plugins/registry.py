@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import (
     ToolPlugin,
+    EnrichmentPlugin,
+    AnyPlugin,
     UserCommand,
     PromptEnrichmentResult,
     SystemInstructionEnrichmentResult,
@@ -34,6 +36,7 @@ from shared.trace import trace as _trace_write
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
+    "enrichment": "jaato.enrichment_plugins",
     "gc": "jaato.gc_plugins",
     "cache": "jaato.cache_plugins",
 }
@@ -114,7 +117,7 @@ class PluginRegistry:
                        If provided, plugins with model_requirements that don't
                        match will be skipped during expose_tool().
         """
-        self._plugins: Dict[str, ToolPlugin] = {}
+        self._plugins: Dict[str, AnyPlugin] = {}
         self._exposed: Set[str] = set()
         self._enrichment_only: Set[str] = set()  # Plugins for prompt enrichment only
         self._configs: Dict[str, Dict[str, Any]] = {}
@@ -364,13 +367,15 @@ class PluginRegistry:
         Discovery order:
         1. Entry points (group based on plugin_kind) - for installed packages
         2. Directory scanning (optional) - for development/local plugins
+        3. If plugin_kind is "tool", also discovers "enrichment" plugins
+           (they are registered as enrichment-only automatically)
 
         Entry points allow external packages to register plugins:
             [project.entry-points."jaato.plugins"]
             my_plugin = "my_package.plugins:create_plugin"
 
         Args:
-            plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
+            plugin_kind: Kind of plugin to discover ('tool', 'enrichment', 'gc', etc.).
                         Only plugins with matching PLUGIN_KIND are loaded.
             include_directory: Also scan the plugins directory for local plugins.
                              Useful during development when package isn't installed.
@@ -386,6 +391,13 @@ class PluginRegistry:
         # Then, optionally scan the plugins directory (development mode)
         if include_directory:
             discovered.extend(self._discover_via_directory(plugin_kind))
+
+        # When discovering tool plugins, also discover enrichment plugins
+        # so callers don't need to make a separate discover("enrichment") call
+        if plugin_kind == "tool":
+            discovered.extend(self._discover_via_entry_points("enrichment"))
+            if include_directory:
+                discovered.extend(self._discover_via_directory("enrichment"))
 
         return discovered
 
@@ -425,14 +437,22 @@ class PluginRegistry:
                     create_plugin = ep.load()
                     plugin = create_plugin()
 
-                    # For tool plugins, verify protocol implementation
+                    # Verify protocol implementation
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
                         _trace(f" Entry point '{ep.name}': "
                               f"plugin does not implement ToolPlugin protocol")
                         continue
+                    if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
+                        _trace(f" Entry point '{ep.name}': "
+                              f"plugin does not implement EnrichmentPlugin protocol")
+                        continue
 
                     self._plugins[plugin.name] = plugin
                     discovered.append(plugin.name)
+
+                    # Enrichment plugins are always enrichment-only
+                    if plugin_kind == "enrichment":
+                        self._enrichment_only.add(plugin.name)
 
                 except Exception as exc:
                     _trace(f" Error loading entry point '{ep.name}': {exc}", include_traceback=True)
@@ -485,13 +505,20 @@ class PluginRegistry:
                 if hasattr(module, 'create_plugin'):
                     plugin = module.create_plugin()
 
-                    # For tool plugins, verify protocol implementation
+                    # Verify protocol implementation
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
                         _trace(f" {name}: plugin does not implement ToolPlugin protocol")
+                        continue
+                    if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
+                        _trace(f" {name}: plugin does not implement EnrichmentPlugin protocol")
                         continue
 
                     self._plugins[plugin.name] = plugin
                     discovered.append(plugin.name)
+
+                    # Enrichment plugins are always enrichment-only
+                    if plugin_kind == "enrichment":
+                        self._enrichment_only.add(plugin.name)
 
             except Exception as exc:
                 _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
@@ -524,13 +551,16 @@ class PluginRegistry:
         """Check if a plugin's tools are currently exposed to the model."""
         return name in self._exposed
 
-    def get_plugin(self, name: str) -> Optional[ToolPlugin]:
-        """Get a plugin by name, or None if not found."""
+    def get_plugin(self, name: str) -> Optional[AnyPlugin]:
+        """Get a plugin by name, or None if not found.
+
+        Returns either a ToolPlugin or EnrichmentPlugin instance.
+        """
         return self._plugins.get(name)
 
     def register_plugin(
         self,
-        plugin: ToolPlugin,
+        plugin: AnyPlugin,
         expose: bool = False,
         enrichment_only: bool = False,
         config: Optional[Dict[str, Any]] = None
@@ -543,20 +573,32 @@ class PluginRegistry:
         This allows the plugin to participate in prompt enrichment and other
         registry-managed features without being discovered.
 
+        Accepts both ``ToolPlugin`` and ``EnrichmentPlugin`` instances.
+        ``EnrichmentPlugin`` instances are automatically registered as
+        enrichment-only regardless of the ``enrichment_only`` parameter.
+
         Args:
-            plugin: The plugin instance to register.
+            plugin: The plugin instance to register (ToolPlugin or EnrichmentPlugin).
             expose: If True, also expose the plugin's tools (calls initialize).
+                   Ignored for EnrichmentPlugin instances.
             enrichment_only: If True, only participate in prompt enrichment
                            (not included in get_exposed_tool_schemas/executors).
+                           Automatically True for EnrichmentPlugin instances.
             config: Optional configuration dict if exposing.
 
         Example:
-            # Register session plugin for prompt enrichment only
+            # Register a ToolPlugin for prompt enrichment only
             registry.register_plugin(session_plugin, enrichment_only=True)
+
+            # Register an EnrichmentPlugin (always enrichment-only)
+            registry.register_plugin(my_enrichment_plugin)
         """
         self._plugins[plugin.name] = plugin
 
-        if enrichment_only:
+        # EnrichmentPlugin instances are always enrichment-only
+        if isinstance(plugin, EnrichmentPlugin) and not isinstance(plugin, ToolPlugin):
+            self._enrichment_only.add(plugin.name)
+        elif enrichment_only:
             self._enrichment_only.add(plugin.name)
         elif expose:
             self.expose_tool(plugin.name, config)
@@ -1644,7 +1686,7 @@ class PluginRegistry:
 
     # ==================== Prompt Enrichment ====================
 
-    def _get_enrichment_priority(self, plugin: ToolPlugin) -> int:
+    def _get_enrichment_priority(self, plugin: AnyPlugin) -> int:
         """Get the enrichment priority for a plugin.
 
         Lower values run first. Default is 50.
@@ -1665,7 +1707,7 @@ class PluginRegistry:
             return plugin.get_enrichment_priority()
         return 50  # Default priority
 
-    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
+    def get_prompt_enrichment_subscribers(self) -> List[AnyPlugin]:
         """Get plugins that subscribe to prompt enrichment, sorted by priority.
 
         Includes both exposed plugins and enrichment-only plugins.
@@ -1735,7 +1777,7 @@ class PluginRegistry:
 
         return PromptEnrichmentResult(prompt=current_prompt, metadata=combined_metadata)
 
-    def _get_system_instruction_enrichment_priority(self, plugin: ToolPlugin) -> int:
+    def _get_system_instruction_enrichment_priority(self, plugin: AnyPlugin) -> int:
         """Get the system instruction enrichment priority for a plugin.
 
         Lower values run first. Default is 50.
@@ -1750,7 +1792,7 @@ class PluginRegistry:
             return plugin.get_system_instruction_enrichment_priority()
         return 50  # Default priority
 
-    def get_system_instruction_enrichment_subscribers(self) -> List[ToolPlugin]:
+    def get_system_instruction_enrichment_subscribers(self) -> List[AnyPlugin]:
         """Get plugins that subscribe to system instruction enrichment.
 
         Includes both exposed plugins and enrichment-only plugins.
@@ -1824,7 +1866,7 @@ class PluginRegistry:
             metadata=combined_metadata
         )
 
-    def _get_tool_result_enrichment_priority(self, plugin: ToolPlugin) -> int:
+    def _get_tool_result_enrichment_priority(self, plugin: AnyPlugin) -> int:
         """Get the tool result enrichment priority for a plugin.
 
         Lower values run first. Default is 50.
@@ -1839,7 +1881,7 @@ class PluginRegistry:
             return plugin.get_tool_result_enrichment_priority()
         return 50  # Default priority
 
-    def get_tool_result_enrichment_subscribers(self) -> List[ToolPlugin]:
+    def get_tool_result_enrichment_subscribers(self) -> List[AnyPlugin]:
         """Get plugins that subscribe to tool result enrichment.
 
         Includes both exposed plugins and enrichment-only plugins.

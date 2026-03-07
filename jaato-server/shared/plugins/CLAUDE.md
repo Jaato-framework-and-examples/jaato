@@ -8,7 +8,7 @@ plugin is **silently skipped** during directory discovery and never loaded.
 ```python
 # shared/plugins/my_plugin/__init__.py
 
-PLUGIN_KIND = "tool"  # REQUIRED - "tool", "gc", "session", or "model_provider"
+PLUGIN_KIND = "tool"  # REQUIRED - "tool", "enrichment", "gc", "session", or "model_provider"
 
 from .plugin import MyPlugin, create_plugin
 
@@ -54,7 +54,7 @@ Missing `PLUGIN_KIND` means `None != "tool"` → plugin never loads → its user
 commands never register → clients send the input to the model as prompt text
 instead of executing it as a command. No autocompletion either.
 
-## Two Plugin Patterns
+## Three Plugin Patterns
 
 ### Pattern 1: Model Tools (e.g., `cli/`, `todo/`, `file_edit/`)
 
@@ -155,6 +155,65 @@ class MyAuthPlugin:
         ])
 ```
 
+### Pattern 3: Enrichment Only (e.g., auto-steering, context cleanup)
+
+Plugins that only enrich prompts, system instructions, or tool results — no tools, no commands.
+These implement the `EnrichmentPlugin` protocol instead of `ToolPlugin`.
+
+```python
+# __init__.py
+PLUGIN_KIND = "enrichment"  # NOT "tool" — discovered as enrichment-only
+
+from .plugin import MyEnrichmentPlugin, create_plugin
+
+__all__ = ["MyEnrichmentPlugin", "create_plugin", "PLUGIN_KIND"]
+```
+
+```python
+# plugin.py
+from jaato_sdk.plugins.base import EnrichmentPlugin, PromptEnrichmentResult
+
+class MyEnrichmentPlugin:
+    """Enrichment-only plugin that injects context hints into prompts.
+
+    Implements EnrichmentPlugin protocol — no tools or commands needed.
+    Discovered via PLUGIN_KIND = "enrichment" and automatically registered
+    as enrichment-only by the registry.
+    """
+
+    @property
+    def name(self) -> str:
+        return "my_enrichment"
+
+    def initialize(self, config=None) -> None:
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        # Inject hints based on prompt content
+        enhanced = prompt + "\n\n[Context hint from my_enrichment]"
+        return PromptEnrichmentResult(prompt=enhanced, metadata={"injected": True})
+
+    def get_enrichment_priority(self) -> int:
+        return 60  # Optional, default is 50
+
+
+def create_plugin():
+    return MyEnrichmentPlugin()
+```
+
+**Key differences from Pattern 1/2:**
+- `PLUGIN_KIND = "enrichment"` (not `"tool"`)
+- Implements `EnrichmentPlugin` protocol (not `ToolPlugin`)
+- No `get_tool_schemas()`, `get_executors()`, `get_user_commands()`, etc.
+- Automatically registered as enrichment-only — participates in enrichment pipeline only
+- Discovered alongside tool plugins during `registry.discover()`
+
 ## Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field
@@ -198,10 +257,10 @@ ToolSchema(
 
 ## Checklist for New Plugins
 
-1. `__init__.py` has `PLUGIN_KIND = "tool"` (or appropriate kind)
+1. `__init__.py` has `PLUGIN_KIND = "tool"` or `"enrichment"` (or other appropriate kind)
 2. `__init__.py` exports `PLUGIN_KIND` in `__all__`
 3. `plugin.py` has `create_plugin()` factory function
-4. Plugin class implements `ToolPlugin` protocol (see `base.py`)
+4. Plugin class implements `ToolPlugin` or `EnrichmentPlugin` protocol (see `base.py`)
 5. User commands listed in `get_auto_approved_tools()` (prevents permission prompts)
 6. `get_command_completions()` implemented for subcommand autocompletion
 7. Help command returns `HelpLines` (not `str`) for pager display

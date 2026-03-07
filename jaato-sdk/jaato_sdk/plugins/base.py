@@ -271,6 +271,81 @@ def parse_command_args(
 
 
 @runtime_checkable
+class EnrichmentPlugin(Protocol):
+    """Interface for plugins that only enrich prompts, system instructions, or tool results.
+
+    EnrichmentPlugin is the lightweight alternative to ToolPlugin for plugins that
+    don't provide any model tools or user commands — they only participate in the
+    enrichment pipeline (prompt enrichment, system instruction enrichment, and/or
+    tool result enrichment).
+
+    Examples of enrichment-only plugins:
+    - Auto-steering: injects behavioral hints into prompts based on context
+    - Session metadata: appends session state reminders to prompts
+    - Context cleanup: strips stale references from system instructions
+
+    Enrichment-only plugins:
+    - Are registered with ``registry.register_plugin(plugin, enrichment_only=True)``
+    - Are discovered via ``PLUGIN_KIND = "enrichment"`` in ``__init__.py``
+    - Participate in ``get_prompt_enrichment_subscribers()`` etc.
+    - Are NOT included in ``get_exposed_tool_schemas()`` or ``get_exposed_executors()``
+    - Do NOT need to implement ``get_tool_schemas()``, ``get_executors()``, or
+      any other tool/command methods
+
+    At least one enrichment subscription must be implemented:
+    - ``subscribes_to_prompt_enrichment()`` + ``enrich_prompt()``
+    - ``subscribes_to_system_instruction_enrichment()`` + ``enrich_system_instructions()``
+    - ``subscribes_to_tool_result_enrichment()`` + ``enrich_tool_result()``
+
+    The enrichment methods follow the same signatures and semantics as the
+    optional enrichment extensions on ToolPlugin — see the ToolPlugin docstrings
+    for details.
+    """
+
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        ...
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Called once when the plugin is registered.
+
+        Args:
+            config: Optional configuration dict for plugin-specific settings.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Called when the plugin is disabled. Clean up resources here."""
+        ...
+
+    # ==================== Enrichment Methods ====================
+    #
+    # At least one enrichment subscription set should be implemented.
+    # The methods use the same duck-typing pattern as ToolPlugin —
+    # the registry checks for their presence via hasattr().
+    #
+    # Prompt Enrichment:
+    #   subscribes_to_prompt_enrichment() -> bool
+    #   enrich_prompt(prompt: str) -> PromptEnrichmentResult
+    #   get_enrichment_priority() -> int  (optional, default 50)
+    #
+    # System Instruction Enrichment:
+    #   subscribes_to_system_instruction_enrichment() -> bool
+    #   enrich_system_instructions(instructions: str) -> SystemInstructionEnrichmentResult
+    #   get_system_instruction_enrichment_priority() -> int  (optional, default 50)
+    #
+    # Tool Result Enrichment:
+    #   subscribes_to_tool_result_enrichment() -> bool
+    #   enrich_tool_result(tool_name: str, result: str) -> ToolResultEnrichmentResult
+    #   get_tool_result_enrichment_priority() -> int  (optional, default 50)
+
+
+# Type alias for any plugin accepted by the registry
+AnyPlugin = Any  # Union[ToolPlugin, EnrichmentPlugin] — using Any for duck-typing compat
+
+
+@runtime_checkable
 class ToolPlugin(Protocol):
     """Interface that all tool plugins must implement.
 
