@@ -1031,6 +1031,9 @@ class JaatoSession:
                               deferred tool loading. All their tools (including
                               discoverable) are loaded into the initial context.
         """
+        import time as _time
+        _t_configure_start = _time.perf_counter()
+
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
         # Store tool plugin names
@@ -1195,6 +1198,10 @@ class JaatoSession:
 
         # Wire cache plugin (after budget is populated so we can set it)
         self._wire_cache_plugin()
+
+        _configure_ms = (_time.perf_counter() - _t_configure_start) * 1000
+        if _configure_ms > 10.0:
+            self._trace(f"configure: completed in {_configure_ms:.1f}ms")
 
     def _wire_cache_plugin(self) -> None:
         """Discover and attach the cache plugin matching the active provider.

@@ -48,6 +48,7 @@ from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
+from shared.bootstrap_timing import BootstrapTimer
 
 # Formatter pipeline for server-side output formatting
 from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
@@ -726,30 +727,37 @@ class JaatoServer:
         Returns:
             True if initialization succeeded, False otherwise.
         """
+        self._bootstrap_timer = BootstrapTimer()
         total_steps = 6
 
         # Step 1: Load configuration
         self._emit_init_progress("Loading configuration", "running", 1, total_steps)
 
+        _timer = self._bootstrap_timer
+
         # Read session's env file into session-specific storage (NOT global os.environ)
         # This keeps each session's configuration isolated from other sessions.
-        from dotenv import dotenv_values
-        raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
-        # Filter out None values and store as session env
-        self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
+        with _timer.stage("load_config") as _s1:
+            from dotenv import dotenv_values
+            with _s1.sub("dotenv_values"):
+                raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
+            # Filter out None values and store as session env
+            self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
 
-        # Apply overrides (e.g., provider/model from post-auth wizard)
-        if self._env_overrides:
-            self._session_env.update(self._env_overrides)
+            # Apply overrides (e.g., provider/model from post-auth wizard)
+            if self._env_overrides:
+                self._session_env.update(self._env_overrides)
 
-        def get_config(key: str) -> Optional[str]:
-            """Get config value from session env only (no os.environ fallback)."""
-            return self._session_env.get(key)
+            def get_config(key: str) -> Optional[str]:
+                """Get config value from session env only (no os.environ fallback)."""
+                return self._session_env.get(key)
 
-        try:
-            active_bundle = active_cert_bundle(verbose=False)
+            with _s1.sub("ssl_cert_bundle"):
+                active_bundle = active_cert_bundle(verbose=False)
 
             model_name = get_config("MODEL_NAME")
+
+        try:
             if not model_name and not (self._profile and self._profile.model):
                 self.emit(ErrorEvent(
                     error="Missing required environment variables: JAATO_PROVIDER and MODEL_NAME",
@@ -778,13 +786,16 @@ class JaatoServer:
             # Credential validation is handled by each provider during connect()
             # Use session env context so provider can access session-specific API keys
             self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
-            with self._with_session_env():
-                self._jaato = JaatoClient(provider_name=provider_to_use,
-                                          workspace_path=self._workspace_path,
-                                          instruction_token_cache=self._instruction_token_cache)
-                # Pass project/location for providers that need them (Google/Vertex)
-                # Other providers ignore these and use their own env vars
-                self._jaato.connect(project_id, location, model_name)
+            with _timer.stage("connect_provider") as _s2:
+                with self._with_session_env():
+                    with _s2.sub("create_client"):
+                        self._jaato = JaatoClient(provider_name=provider_to_use,
+                                                  workspace_path=self._workspace_path,
+                                                  instruction_token_cache=self._instruction_token_cache)
+                    # Pass project/location for providers that need them (Google/Vertex)
+                    # Other providers ignore these and use their own env vars
+                    with _s2.sub("client_connect"):
+                        self._jaato.connect(project_id, location, model_name)
         except Exception as e:
             self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
                                      str(e))
@@ -802,86 +813,93 @@ class JaatoServer:
 
         # Step 3: Discover and configure plugins
         self._emit_init_progress("Loading plugins", "running", 3, total_steps)
-        self.registry = PluginRegistry(model_name=model_name)
-        self.registry.discover()
+        with _timer.stage("load_plugins") as _s3:
+            with _s3.sub("create_registry"):
+                self.registry = PluginRegistry(model_name=model_name)
+            with _s3.sub("discover"):
+                self.registry.discover()
 
-        plugin_configs = {
-            "todo": {
-                "reporter_type": "memory",
-                "storage_type": "memory",
-            },
-            "references": {
-                "channel_type": "queue",
-                "workspace_path": self._workspace_path,
-            },
-            "clarification": {
-                "channel_type": "queue",
-            },
-            # LSP and MCP need workspace_path during initialize() to find config files
-            # Also include session_id for log disambiguation in multi-session mode
-            "lsp": {
-                "workspace_path": self._workspace_path,
-                "session_id": self._session_id,
-            },
-            "mcp": {
-                "workspace_path": self._workspace_path,
-                "session_id": self._session_id,
-            },
-            # Pass session_id to file_edit for session-scoped backup storage
-            # workspace_root is handled by set_workspace_path() broadcast
-            "file_edit": {
-                "session_id": self._session_id,
-            },
-            # Pass session_id to waypoint plugin for session-scoped waypoint storage
-            "waypoint": {
-                "session_id": self._session_id,
-            },
-            # Pass session_id to sandbox_manager; profile may add allowed_paths/denied_paths
-            "sandbox_manager": {
-                "session_id": self._session_id,
-            },
-        }
-        # Apply agent profile's sandbox_manager config (allowed_paths, denied_paths)
-        if self._profile and self._profile.plugin_configs:
-            profile_sandbox_config = self._profile.plugin_configs.get("sandbox_manager")
-            if profile_sandbox_config:
-                plugin_configs["sandbox_manager"].update(profile_sandbox_config)
-        def _on_plugin_progress(plugin_name: str) -> None:
-            self._emit_init_progress(
-                "Loading plugins", "running", 3, total_steps, message=plugin_name
-            )
-
-        self.registry.expose_all(plugin_configs, on_progress=_on_plugin_progress)
-        self.todo_plugin = self.registry.get_plugin("todo")
-
-        # Broadcast workspace path to all plugins implementing set_workspace_path()
-        # This covers: file_edit, cli, filesystem_query, lsp, mcp, and any future plugins
-        if self._workspace_path:
-            self.registry.set_workspace_path(self._workspace_path)
-
-        # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
-        # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
-
-        self.permission_plugin = PermissionPlugin()
-        permission_init_config: Dict[str, Any] = {
-            "channel_type": "queue",
-            "channel_config": {"use_colors": False},
-            "policy": {
-                "defaultPolicy": "ask",
-                "whitelist": {"tools": [], "patterns": []},
-                "blacklist": {"tools": [], "patterns": []},
+            plugin_configs = {
+                "todo": {
+                    "reporter_type": "memory",
+                    "storage_type": "memory",
+                },
+                "references": {
+                    "channel_type": "queue",
+                    "workspace_path": self._workspace_path,
+                },
+                "clarification": {
+                    "channel_type": "queue",
+                },
+                # LSP and MCP need workspace_path during initialize() to find config files
+                # Also include session_id for log disambiguation in multi-session mode
+                "lsp": {
+                    "workspace_path": self._workspace_path,
+                    "session_id": self._session_id,
+                },
+                "mcp": {
+                    "workspace_path": self._workspace_path,
+                    "session_id": self._session_id,
+                },
+                # Pass session_id to file_edit for session-scoped backup storage
+                # workspace_root is handled by set_workspace_path() broadcast
+                "file_edit": {
+                    "session_id": self._session_id,
+                },
+                # Pass session_id to waypoint plugin for session-scoped waypoint storage
+                "waypoint": {
+                    "session_id": self._session_id,
+                },
+                # Pass session_id to sandbox_manager; profile may add allowed_paths/denied_paths
+                "sandbox_manager": {
+                    "session_id": self._session_id,
+                },
             }
-        }
-        # Apply agent profile's permission config (policy, channel overrides)
-        if self._profile and self._profile.plugin_configs:
-            profile_perm_config = self._profile.plugin_configs.get("permission")
-            if profile_perm_config:
-                permission_init_config.update(profile_perm_config)
-        self.permission_plugin.initialize(permission_init_config)
+            # Apply agent profile's sandbox_manager config (allowed_paths, denied_paths)
+            if self._profile and self._profile.plugin_configs:
+                profile_sandbox_config = self._profile.plugin_configs.get("sandbox_manager")
+                if profile_sandbox_config:
+                    plugin_configs["sandbox_manager"].update(profile_sandbox_config)
+            def _on_plugin_progress(plugin_name: str) -> None:
+                self._emit_init_progress(
+                    "Loading plugins", "running", 3, total_steps, message=plugin_name
+                )
+
+            with _s3.sub("expose_all"):
+                self.registry.expose_all(plugin_configs, on_progress=_on_plugin_progress)
+            self.todo_plugin = self.registry.get_plugin("todo")
+
+            # Broadcast workspace path to all plugins implementing set_workspace_path()
+            # This covers: file_edit, cli, filesystem_query, lsp, mcp, and any future plugins
+            with _s3.sub("set_workspace_path"):
+                if self._workspace_path:
+                    self.registry.set_workspace_path(self._workspace_path)
+
+            # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
+            # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
+
+            with _s3.sub("permission_init"):
+                self.permission_plugin = PermissionPlugin()
+                permission_init_config: Dict[str, Any] = {
+                    "channel_type": "queue",
+                    "channel_config": {"use_colors": False},
+                    "policy": {
+                        "defaultPolicy": "ask",
+                        "whitelist": {"tools": [], "patterns": []},
+                        "blacklist": {"tools": [], "patterns": []},
+                    }
+                }
+                # Apply agent profile's permission config (policy, channel overrides)
+                if self._profile and self._profile.plugin_configs:
+                    profile_perm_config = self._profile.plugin_configs.get("permission")
+                    if profile_perm_config:
+                        permission_init_config.update(profile_perm_config)
+                self.permission_plugin.initialize(permission_init_config)
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
         # Set up formatter pipeline for server-side output formatting
-        self._setup_formatter_pipeline()
+        with _timer.stage("formatter_pipeline"):
+            self._setup_formatter_pipeline()
 
         # Step 4: Verify authentication (may trigger interactive login via plugin)
         self._emit_init_progress("Verifying authentication", "running", 4, total_steps)
@@ -898,8 +916,9 @@ class JaatoServer:
         try:
             # Use session env context and workspace directory so auth can access
             # session-specific credentials and save tokens to the right location
-            with self._with_session_env(), self._in_workspace():
-                auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
+            with _timer.stage("verify_auth") as _s4:
+                with self._with_session_env(), self._in_workspace():
+                    auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
 
             if not auth_ok:
                 # Credentials not found - try to use provider-specific auth plugin
@@ -966,76 +985,89 @@ class JaatoServer:
         # Use session env and workspace context so plugins can access session-specific
         # config and tokens are loaded from the correct location
         self._emit_init_progress("Configuring tools", "running", 5, total_steps)
-        with self._with_session_env(), self._in_workspace():
-            # Build session creation kwargs from agent profile (if any)
-            session_kwargs = self._build_profile_session_kwargs()
-            self._jaato.configure_tools(
-                self.registry, self.permission_plugin, self.ledger,
-                session_kwargs=session_kwargs,
-            )
+        with _timer.stage("configure_tools") as _s5:
+            with self._with_session_env(), self._in_workspace():
+                # Build session creation kwargs from agent profile (if any)
+                session_kwargs = self._build_profile_session_kwargs()
+                with _s5.sub("configure_tools_call"):
+                    self._jaato.configure_tools(
+                        self.registry, self.permission_plugin, self.ledger,
+                        session_kwargs=session_kwargs,
+                    )
 
-            # Wire formatter pipeline into runtime so output formatters can
-            # contribute system instructions (e.g., mermaid rendering hints)
-            if self._formatter_pipeline:
-                runtime = self._jaato.get_runtime()
-                if runtime:
-                    runtime.set_formatter_pipeline(self._formatter_pipeline)
+                # Wire formatter pipeline into runtime so output formatters can
+                # contribute system instructions (e.g., mermaid rendering hints)
+                if self._formatter_pipeline:
+                    runtime = self._jaato.get_runtime()
+                    if runtime:
+                        runtime.set_formatter_pipeline(self._formatter_pipeline)
 
-            # Agent profile GC takes precedence over file-based GC
-            gc_result = None
-            if self._profile and self._profile.gc:
-                from shared.plugins.subagent.config import gc_profile_to_plugin_config
-                gc_result = gc_profile_to_plugin_config(self._profile.gc)
-            if not gc_result:
-                gc_result = load_gc_from_file()
+                # Agent profile GC takes precedence over file-based GC
+                with _s5.sub("gc_config"):
+                    gc_result = None
+                    if self._profile and self._profile.gc:
+                        from shared.plugins.subagent.config import gc_profile_to_plugin_config
+                        gc_result = gc_profile_to_plugin_config(self._profile.gc)
+                    if not gc_result:
+                        gc_result = load_gc_from_file()
 
-        gc_threshold = None
-        gc_strategy = None
-        gc_target_percent = None
-        gc_continuous_mode = False
-        if gc_result:
-            gc_plugin, gc_config = gc_result
-            self._jaato.set_gc_plugin(gc_plugin, gc_config)
-            gc_threshold = gc_config.threshold_percent
-            gc_target_percent = gc_config.target_percent
-            gc_continuous_mode = gc_config.continuous_mode
-            gc_strategy = getattr(gc_plugin, 'name', 'gc')
-            if gc_strategy.startswith('gc_'):
-                gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
+            gc_threshold = None
+            gc_strategy = None
+            gc_target_percent = None
+            gc_continuous_mode = False
+            if gc_result:
+                gc_plugin, gc_config = gc_result
+                self._jaato.set_gc_plugin(gc_plugin, gc_config)
+                gc_threshold = gc_config.threshold_percent
+                gc_target_percent = gc_config.target_percent
+                gc_continuous_mode = gc_config.continuous_mode
+                gc_strategy = getattr(gc_plugin, 'name', 'gc')
+                if gc_strategy.startswith('gc_'):
+                    gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
 
-        # Set up instruction budget callback and emit initial budget
-        # This must happen after configure_tools() which populates the budget
-        session = self._jaato.get_session()
-        if session:
-            server = self
+            # Set up instruction budget callback and emit initial budget
+            # This must happen after configure_tools() which populates the budget
+            with _s5.sub("instruction_budget"):
+                session = self._jaato.get_session()
+                if session:
+                    server = self
 
-            def instruction_budget_callback(snapshot: dict):
-                server.emit(InstructionBudgetEvent(
-                    agent_id=snapshot.get('agent_id', 'main'),
-                    budget_snapshot=snapshot,
-                ))
+                    def instruction_budget_callback(snapshot: dict):
+                        server.emit(InstructionBudgetEvent(
+                            agent_id=snapshot.get('agent_id', 'main'),
+                            budget_snapshot=snapshot,
+                        ))
 
-            session.set_instruction_budget_callback(instruction_budget_callback)
+                    session.set_instruction_budget_callback(instruction_budget_callback)
 
-            # Emit initial budget snapshot
-            if session.instruction_budget:
-                self.emit(InstructionBudgetEvent(
-                    agent_id=session.agent_id,
-                    budget_snapshot=session.instruction_budget.snapshot(),
-                ))
+                    # Emit initial budget snapshot
+                    if session.instruction_budget:
+                        self.emit(InstructionBudgetEvent(
+                            agent_id=session.agent_id,
+                            budget_snapshot=session.instruction_budget.snapshot(),
+                        ))
 
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
 
         # Step 6: Set up session
         self._emit_init_progress("Setting up session", "running", 6, total_steps)
-        self._setup_session_plugin()
-        self._setup_agent_hooks()
-        self._setup_permission_hooks()
-        self._setup_clarification_hooks()
-        self._setup_reference_selection_hooks()
-        self._setup_plan_hooks()
-        self._setup_queue_channels()
-        self._create_main_agent()
+        with _timer.stage("setup_session") as _s6:
+            with _s6.sub("session_plugin"):
+                self._setup_session_plugin()
+            with _s6.sub("agent_hooks"):
+                self._setup_agent_hooks()
+            with _s6.sub("permission_hooks"):
+                self._setup_permission_hooks()
+            with _s6.sub("clarification_hooks"):
+                self._setup_clarification_hooks()
+            with _s6.sub("reference_selection_hooks"):
+                self._setup_reference_selection_hooks()
+            with _s6.sub("plan_hooks"):
+                self._setup_plan_hooks()
+            with _s6.sub("queue_channels"):
+                self._setup_queue_channels()
+            with _s6.sub("create_main_agent"):
+                self._create_main_agent()
         # Store GC config in main agent state
         if "main" in self._agents and gc_threshold is not None:
             self._agents["main"].gc_threshold = gc_threshold
@@ -1075,6 +1107,37 @@ class JaatoServer:
             message=f"Connected to {self._model_provider}/{self._model_name}{auth_suffix}",
             style="info",
         ))
+
+        # Emit bootstrap timing report if enabled
+        _timer.finish()
+        if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):
+            import sys as _sys
+            _timer.report()
+            # Append per-plugin breakdown
+            plugin_timings = self.registry.get_bootstrap_timings()
+            if plugin_timings:
+                _sys.stderr.write("\n  PER-PLUGIN BREAKDOWN (sorted by total time):\n")
+                _sys.stderr.write("  " + "-" * 68 + "\n")
+                sorted_plugins = sorted(
+                    plugin_timings.items(),
+                    key=lambda x: x[1].get("total_ms", 0),
+                    reverse=True,
+                )
+                for pname, ptiming in sorted_plugins:
+                    total = ptiming.get("total_ms", 0)
+                    if total < 1.0:
+                        continue
+                    imp = ptiming.get("import_ms", 0)
+                    create = ptiming.get("create_ms", 0)
+                    init = ptiming.get("init_ms", 0)
+                    _sys.stderr.write(
+                        f"    {pname:<30} total={total:>7.1f}ms  "
+                        f"import={imp:>6.1f}  create={create:>6.1f}  init={init:>7.1f}\n"
+                    )
+                _sys.stderr.write("\n")
+        else:
+            # Always log at DEBUG level
+            logger.debug("Bootstrap completed in %.0f ms", _timer.total_elapsed * 1000)
 
         return True
 
