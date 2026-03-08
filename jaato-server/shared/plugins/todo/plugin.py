@@ -432,54 +432,9 @@ class TodoPlugin:
                 discoverability="core",
             ),
             # === Cross-agent collaboration tools ===
-            ToolSchema(
-                name="subscribeToTasks",
-                description=(
-                    "Subscribe to task events from other agents. "
-                    "CALL THIS BEFORE spawning subagents to enable coordination.\n\n"
-                    "RECOMMENDED: Subscribe early in your workflow:\n"
-                    "  subscribeToTasks(event_types=['plan_created', 'step_completed'])\n\n"
-                    "This enables you to:\n"
-                    "- See subagent plan structures when they call createPlan\n"
-                    "- React when subagents complete steps with outputs\n"
-                    "- Add dependent steps that link to their work\n\n"
-                    "Events arrive as [SUBAGENT event=X] messages. Don't poll - just wait."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Agent to subscribe to. Use '*' for any agent. Omit for any."
-                        },
-                        "plan_id": {
-                            "type": "string",
-                            "description": "Specific plan ID to filter (optional)"
-                        },
-                        "step_id": {
-                            "type": "string",
-                            "description": "Specific step ID to filter (optional)"
-                        },
-                        "event_types": {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "enum": [
-                                    "plan_created", "plan_started", "plan_completed",
-                                    "plan_failed", "plan_cancelled",
-                                    "step_added", "step_started", "step_completed",
-                                    "step_failed", "step_skipped",
-                                    "step_blocked", "step_unblocked"
-                                ]
-                            },
-                            "description": "Event types to subscribe to"
-                        }
-                    },
-                    "required": ["event_types"]
-                },
-                category="coordination",
-                discoverability="core",
-            ),
+            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
+            # have been moved to session-level core tools (shared/event_bus_tools.py).
+            # They are registered as core tools during JaatoSession.configure().
             ToolSchema(
                 name="addDependentStep",
                 description=(
@@ -490,7 +445,7 @@ class TodoPlugin:
                     "showing subagent step IDs, call this to link an existing step in "
                     "your plan to their work.\n\n"
                     "WORKFLOW:\n"
-                    "1. Subscribe to events (subscribeToTasks)\n"
+                    "1. Subscribe to events (subscribeToEvents)\n"
                     "2. Create your plan with steps including one for awaiting results\n"
                     "3. Spawn subagents\n"
                     "4. When you see plan_created events with step IDs, call "
@@ -629,91 +584,6 @@ class TodoPlugin:
                 category="coordination",
                 discoverability="core",
             ),
-            ToolSchema(
-                name="getTaskEvents",
-                description=(
-                    "Review recent cross-agent activity. Shows plan/step events from all agents.\n\n"
-                    "USE THIS to:\n"
-                    "- See subagent progress after spawning them\n"
-                    "- Debug why a dependency hasn't resolved\n"
-                    "- Review what happened while you were working\n\n"
-                    "If subscribed to events, you'll see them inline - this is for history review.\n\n"
-                    "LONG-POLL: Set timeout (1-30) to avoid busy-polling. The tool "
-                    "blocks until events matching your filters (agent_id, event_types) "
-                    "appear after the after_event cursor, or the timeout expires. "
-                    "Combine with after_event to only receive events newer than your last read.\n\n"
-                    "IMPORTANT: timeout requires at least one of agent_id, event_types, "
-                    "or after_event. Without narrowing, every event from any agent would "
-                    "satisfy the query and the wait would return immediately, making it useless."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Filter by source agent (optional)"
-                        },
-                        "event_types": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Filter by event types (optional)"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum events to return (default: 20)"
-                        },
-                        "timeout": {
-                            "type": "number",
-                            "description": (
-                                "Long-poll timeout in seconds (0-30). When set, the tool "
-                                "blocks until events matching your filters (agent_id, "
-                                "event_types) appear after the after_event cursor, or "
-                                "the timeout expires — whichever comes first. "
-                                "Requires at least one of agent_id, event_types, or "
-                                "after_event to be set. Default: 0 (no wait)."
-                            )
-                        },
-                        "after_event": {
-                            "type": "string",
-                            "description": (
-                                "Only return events published after this event ID. "
-                                "Pass the last event_id you received to incrementally "
-                                "consume new events without re-reading old ones."
-                            )
-                        }
-                    },
-                    "required": []
-                },
-                category="coordination",
-                discoverability="core",
-            ),
-            ToolSchema(
-                name="listSubscriptions",
-                description="List your active event subscriptions. Shows what events you're listening for.",
-                parameters={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                },
-                category="coordination",
-                discoverability="core",
-            ),
-            ToolSchema(
-                name="unsubscribe",
-                description="Remove an event subscription.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "subscription_id": {
-                            "type": "string",
-                            "description": "ID of the subscription to remove"
-                        }
-                    },
-                    "required": ["subscription_id"]
-                },
-                category="coordination",
-                discoverability="core",
-            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -727,14 +597,12 @@ class TodoPlugin:
             "addStep": self._execute_add_step,
             # User command alias for getPlanStatus
             "plan": self._execute_get_plan_status,
-            # Cross-agent collaboration tools
-            "subscribeToTasks": self._execute_subscribe_to_tasks,
+            # Cross-agent collaboration tools (dependency-specific)
+            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
+            # are now session-level core tools (shared/event_bus_tools.py).
             "addDependentStep": self._execute_add_dependent_step,
             "completeStepWithOutput": self._execute_complete_step_with_output,
             "getBlockedSteps": self._execute_get_blocked_steps,
-            "getTaskEvents": self._execute_get_task_events,
-            "listSubscriptions": self._execute_list_subscriptions,
-            "unsubscribe": self._execute_unsubscribe,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -754,7 +622,7 @@ class TodoPlugin:
             "When delegating work to subagents, use this pattern:\n\n"
             "**Step 1: Subscribe to events BEFORE spawning subagents**\n"
             "```\n"
-            "subscribeToTasks(event_types=['plan_created', 'step_completed'])\n"
+            "subscribeToEvents(event_types=['plan_created', 'step_completed'])\n"
             "```\n"
             "This lets you see subagent plans and react when they complete work.\n\n"
             "**Step 2: Create your master plan with steps for awaiting results**\n"
@@ -812,7 +680,7 @@ class TodoPlugin:
             "- **Don't poll** - blocked steps auto-unblock when dependencies complete\n"
             "- **Use structured outputs** - completeStepWithOutput passes typed data\n"
             "- **Check getBlockedSteps()** to see what's waiting on what\n"
-            "- **Check getTaskEvents()** to review cross-agent activity\n"
+            "- **Check getEvents()** to review cross-agent activity\n"
             "- **Subagents see each other's events** - they can coordinate peer-to-peer\n\n"
             "# MODIFYING PLANS DURING EXECUTION\n\n"
             "- NEVER recreate a plan from scratch while one is active. Use addStep instead.\n"
@@ -864,9 +732,10 @@ class TodoPlugin:
         return [
             # Core plan management (createPlan excluded - user reviews the plan)
             "setStepStatus", "getPlanStatus", "completePlan", "addStep", "plan",
-            # Cross-agent collaboration (read/write plan state, no side effects)
-            "subscribeToTasks", "addDependentStep", "completeStepWithOutput",
-            "getBlockedSteps", "getTaskEvents", "listSubscriptions", "unsubscribe",
+            # Cross-agent collaboration (dependency-specific, no side effects)
+            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
+            # are now session-level core tools with their own auto-approval.
+            "addDependentStep", "completeStepWithOutput", "getBlockedSteps",
         ]
 
     def get_user_commands(self) -> List[UserCommand]:

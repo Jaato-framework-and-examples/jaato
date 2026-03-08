@@ -1101,6 +1101,25 @@ class JaatoSession:
                     is_auto_approved = schema.name in auto_approved
                     self._runtime.registry.register_core_tool(schema, executor, is_auto_approved)
 
+            # Register event bus subscription tools as core tools.
+            # These allow the model to subscribe to events (task lifecycle,
+            # external ingress) and receive them via inject_prompt().
+            from .event_bus_tools import EventBusTools
+            self._event_bus_tools = EventBusTools(self)
+            ebt_auto = self._event_bus_tools.get_auto_approved_tools()
+            ebt_executors = self._event_bus_tools.get_executors()
+            for schema in self._event_bus_tools.get_tool_schemas():
+                executor = ebt_executors.get(schema.name)
+                if executor:
+                    is_auto = schema.name in ebt_auto
+                    self._runtime.registry.register_core_tool(schema, executor, is_auto)
+            # Also register backward-compat aliases (subscribeToTasks, getTaskEvents)
+            # These map to the same executors but aren't in get_tool_schemas()
+            # (no separate schema — the model uses them by name from old prompts).
+            for alias_name, executor in ebt_executors.items():
+                if alias_name not in [s.name for s in self._event_bus_tools.get_tool_schemas()]:
+                    self._executor.register(alias_name, executor)
+
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
 
