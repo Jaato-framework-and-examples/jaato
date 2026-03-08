@@ -76,7 +76,7 @@ and maintain a persistent connection.
 | **Bidirectional** | No (receive only) | Yes (send and receive) |
 | **Connection lifecycle** | Per-request | Long-lived, needs reconnection logic |
 | **Endpoint requirement** | Agent needs a public/reachable URL | Agent only needs outbound access |
-| **Delivery model** | Event bus (`pollForTasks`) + `webhook_poll` fallback | Push via `StreamManager` (idle-time delivery) |
+| **Delivery model** | Event bus (`subscribeToTasks` push / `pollForTasks` poll) + `webhook_poll` fallback | Push via `inject_prompt()` |
 | **Dependency** | stdlib only (`http.server`) | `websockets` (optional) |
 
 The two plugins together cover the vast majority of real-time integration
@@ -131,16 +131,23 @@ messages (e.g., a Slack bot waiting for mentions). The delivery mechanism must:
 3. **Batch naturally** — if messages arrive in bursts while the model is busy,
    deliver them together.
 
-### Why Not Pure Polling?
+### Why Not the Event Bus Subscription Model?
 
-The webhook plugin's `pollForTasks` / `webhook_poll` model requires the model
-to actively poll in a loop. This works for periodic event checks but has
-drawbacks for persistent connections:
+The `TaskEventBus` already supports push delivery via `subscribeToTasks` —
+the todo plugin's subscription callback uses `inject_prompt()` to push events
+into the subscriber's session (see `todo/plugin.py:1616`). The webhook plugin
+publishes to this bus, so a model *could* use `subscribeToTasks` to receive
+webhook events via push.
 
-- **Wasted turns.** Empty polls consume model turns and tokens for nothing.
-- **Latency.** Messages wait in a buffer until the model's next poll call.
-- **Fragile loop.** If the model forgets to poll (e.g., after a GC cycle that
-  summarizes away the loop instructions), messages pile up silently.
+However, for the WebSocket plugin, going through the event bus adds unnecessary
+indirection. The plugin already has a reader thread per connection — it can
+call `inject_prompt()` directly without publishing to an intermediate bus and
+requiring the model to set up a subscription. The event bus is still used as
+a **secondary** delivery channel for cross-agent fan-out, but primary delivery
+is direct `inject_prompt()`.
+
+This also avoids coupling to the todo plugin's `subscribeToTasks` tool — the
+WebSocket plugin works even if the todo plugin is not loaded.
 
 ### Why Not `StreamManager`?
 
@@ -1116,13 +1123,13 @@ Key differences:
 
 There is no overlap — they serve completely different integration patterns.
 
-**Note:** The push delivery model used here could retroactively benefit the
-Webhook plugin as well. Currently the webhook plugin delivers via
-`TaskEventBus` + `pollForTasks` (with `webhook_poll` as fallback) — both
-require the model to actively poll. A future enhancement could add an
-`inject_prompt()` delivery option to `webhook_subscribe`, allowing webhook
-events to wake idle sessions automatically — eliminating the need for poll
-loops entirely.
+**Note:** The webhook plugin already supports push delivery via
+`subscribeToTasks(event_types=["external_event"])`, which uses
+`inject_prompt()` under the hood. However, the webhook plugin's own system
+instructions still direct the model to use `pollForTasks`. A future
+enhancement could update the webhook plugin to recommend `subscribeToTasks`
+as the primary delivery mechanism (or add direct `inject_prompt()` delivery
+like this plugin does), fully unifying the push model across both plugins.
 
 ## Dependency Choice: `websockets`
 
@@ -1245,9 +1252,9 @@ with serve(echo_handler, "127.0.0.1", 0) as server:
   Buffers, MessagePack) with schema registration.
 - **Connection groups** — connect to multiple related endpoints with a single
   merged delivery stream.
-- **Webhook plugin push mode** — port the `inject_prompt()` delivery model
-  back to the Webhook plugin as an alternative to `pollForTasks`/`webhook_poll`,
-  unifying the delivery model across both plugins.
+- **Webhook plugin direct push** — add direct `inject_prompt()` delivery to
+  the webhook plugin (like this plugin), bypassing the event bus indirection
+  for single-session use cases.
 - **Shared connections** — multiple sessions sharing a single WebSocket
   connection (via event bus fan-out) to avoid duplicate connections to the same
   endpoint.
