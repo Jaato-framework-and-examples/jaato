@@ -104,8 +104,6 @@ class TodoPlugin:
 
         # Event bus for cross-agent task collaboration
         self._event_bus: Optional[TaskEventBus] = None
-        # Track subscriptions created by this agent (for cleanup)
-        self._agent_subscriptions: Dict[Optional[str], List[str]] = {}
 
     @property
     def _agent_name(self) -> Optional[str]:
@@ -432,9 +430,6 @@ class TodoPlugin:
                 discoverability="core",
             ),
             # === Cross-agent collaboration tools ===
-            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
-            # have been moved to session-level core tools (shared/event_bus_tools.py).
-            # They are registered as core tools during JaatoSession.configure().
             ToolSchema(
                 name="addDependentStep",
                 description=(
@@ -598,8 +593,6 @@ class TodoPlugin:
             # User command alias for getPlanStatus
             "plan": self._execute_get_plan_status,
             # Cross-agent collaboration tools (dependency-specific)
-            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
-            # are now session-level core tools (shared/event_bus_tools.py).
             "addDependentStep": self._execute_add_dependent_step,
             "completeStepWithOutput": self._execute_complete_step_with_output,
             "getBlockedSteps": self._execute_get_blocked_steps,
@@ -733,8 +726,6 @@ class TodoPlugin:
             # Core plan management (createPlan excluded - user reviews the plan)
             "setStepStatus", "getPlanStatus", "completePlan", "addStep", "plan",
             # Cross-agent collaboration (dependency-specific, no side effects)
-            # NOTE: subscribeToTasks/getTaskEvents/listSubscriptions/unsubscribe
-            # are now session-level core tools with their own auto-approval.
             "addDependentStep", "completeStepWithOutput", "getBlockedSteps",
         ]
 
@@ -1371,153 +1362,6 @@ class TodoPlugin:
 
     # === Cross-agent collaboration executors ===
 
-    def _format_event_notification(self, event: TaskEvent) -> str:
-        """Format an event as a notification message for injection.
-
-        Args:
-            event: The TaskEvent to format.
-
-        Returns:
-            Formatted string suitable for injection into agent conversation.
-        """
-        parts = [f"[SUBAGENT event={event.event_type.value}]"]
-        parts.append(f"From: {event.source_agent}")
-
-        if event.source_plan_title:
-            parts.append(f"Plan: {event.source_plan_title}")
-
-        # Add event-specific details
-        if event.event_type == TaskEventType.PLAN_CREATED:
-            steps = event.payload.get("steps", [])
-            if steps:
-                parts.append("Steps:")
-                for s in steps:
-                    parts.append(f"  - {s.get('step_id')}: {s.get('description')}")
-
-        elif event.event_type == TaskEventType.STEP_COMPLETED:
-            if event.source_step_id:
-                parts.append(f"Step: {event.source_step_id}")
-            output = event.payload.get("output")
-            if output:
-                import json
-                parts.append(f"Output: {json.dumps(output)}")
-            result = event.payload.get("result")
-            if result:
-                parts.append(f"Result: {result}")
-
-        elif event.event_type in (TaskEventType.PLAN_COMPLETED, TaskEventType.PLAN_FAILED):
-            summary = event.payload.get("summary")
-            if summary:
-                parts.append(f"Summary: {summary}")
-            progress = event.payload.get("progress")
-            if progress:
-                parts.append(f"Progress: {progress.get('completed', 0)}/{progress.get('total', 0)} steps")
-
-        return "\n".join(parts)
-
-    def _execute_subscribe_to_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the subscribeToTasks tool."""
-        event_types_raw = args.get("event_types", [])
-        agent_id = args.get("agent_id")
-        plan_id = args.get("plan_id")
-        step_id = args.get("step_id")
-
-        self._trace(f"subscribeToTasks: events={event_types_raw}, agent={agent_id}")
-
-        if not event_types_raw:
-            return {"error": "event_types is required"}
-
-        # Parse event types
-        event_types = []
-        for et in event_types_raw:
-            try:
-                event_types.append(TaskEventType(et))
-            except ValueError:
-                return {"error": f"Invalid event type: {et}"}
-
-        if not self._event_bus:
-            return {"error": "Event bus not initialized"}
-
-        # Capture the subscribing agent's session at subscription time
-        # This is critical because the callback may be invoked from a different thread
-        # (e.g., when subagent publishes an event), and thread-local storage would
-        # contain the subagent's session, not the parent's
-        import threading
-        subscriber_session = getattr(_thread_local, 'session', None)
-        subscriber_agent_name = self._get_agent_name()
-        thread_id = threading.current_thread().ident
-
-        self._trace(
-            f"subscribeToTasks: capturing session for {subscriber_agent_name}, "
-            f"session_exists={subscriber_session is not None}, thread_id={thread_id}"
-        )
-
-        # Create filter
-        filter = EventFilter(
-            agent_id=agent_id,
-            plan_id=plan_id,
-            step_id=step_id,
-            event_types=event_types
-        )
-
-        # Create callback that injects events into the subscriber's session
-        def on_event(event: TaskEvent) -> None:
-            self._trace(
-                f"Event callback: {event.event_type.value} from {event.source_agent} "
-                f"for subscriber {subscriber_agent_name}"
-            )
-
-            # Don't deliver events from self (avoid infinite loops)
-            if event.source_agent == subscriber_agent_name:
-                self._trace(f"Skipping self-event from {event.source_agent}")
-                return
-
-            # If we have a captured session, inject the event notification
-            if subscriber_session is not None:
-                # Format event as a message the model can process
-                event_message = self._format_event_notification(event)
-
-                # Import SourceType for injection
-                from shared.message_queue import SourceType
-
-                # Inject into the subscriber's session
-                try:
-                    subscriber_session.inject_prompt(
-                        text=event_message,
-                        source_id=event.source_agent,
-                        source_type=SourceType.CHILD
-                    )
-                    self._trace(
-                        f"Injected {event.event_type.value} notification into "
-                        f"{subscriber_agent_name}'s session"
-                    )
-                except Exception as e:
-                    self._trace(f"Failed to inject event: {e}")
-            else:
-                self._trace(
-                    f"No session captured for {subscriber_agent_name}, "
-                    f"event not injected (will be in history)"
-                )
-
-        # Subscribe
-        sub_id = self._event_bus.subscribe(
-            subscriber_agent=subscriber_agent_name,
-            filter=filter,
-            callback=on_event
-        )
-
-        # Track subscription for this agent
-        agent_name = self._get_agent_name()
-        if agent_name not in self._agent_subscriptions:
-            self._agent_subscriptions[agent_name] = []
-        self._agent_subscriptions[agent_name].append(sub_id)
-
-        return {
-            "subscription_id": sub_id,
-            "filter": filter.to_dict(),
-            "message": f"Subscribed to {len(event_types)} event type(s). Events will be delivered inline."
-        }
-
     def _execute_add_dependent_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the addDependentStep tool.
 
@@ -1720,131 +1564,6 @@ class TodoPlugin:
                 for s in blocked_steps
             ],
             "count": len(blocked_steps)
-        }
-
-    def _execute_get_task_events(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the getTaskEvents tool.
-
-        Supports long-polling via ``timeout``: when set, the tool blocks
-        until matching events arrive or the timeout expires, rather than
-        returning an empty result immediately. Combined with ``after_event``
-        (the last event_id the caller saw), this enables efficient incremental
-        monitoring without rapid polling loops.
-        """
-        agent_id = args.get("agent_id")
-        event_types_raw = args.get("event_types", [])
-        limit = args.get("limit", 20)
-        poll_timeout = args.get("timeout", 0)
-        after_event = args.get("after_event")
-
-        self._trace(
-            f"getTaskEvents: agent={agent_id}, types={event_types_raw}, "
-            f"limit={limit}, timeout={poll_timeout}, after={after_event}"
-        )
-
-        if not self._event_bus:
-            return {"error": "Event bus not initialized"}
-
-        # Parse event types
-        event_types = None
-        if event_types_raw:
-            event_types = []
-            for et in event_types_raw:
-                try:
-                    event_types.append(TaskEventType(et))
-                except ValueError:
-                    pass  # Skip invalid
-
-        # Clamp timeout to [0, 30]
-        try:
-            poll_timeout = float(poll_timeout)
-        except (TypeError, ValueError):
-            poll_timeout = 0
-        poll_timeout = min(max(poll_timeout, 0), 30)
-
-        # Guard: timeout without any narrowing is almost always a
-        # mistake — every published event matches, so the wait returns
-        # on the very first event from any agent.  Return an error that
-        # tells the model what to fix instead of silently doing nothing.
-        if poll_timeout > 0 and not agent_id and not event_types and not after_event:
-            return {
-                "error": (
-                    "timeout requires at least one of: agent_id, "
-                    "event_types, or after_event.  Without any narrowing "
-                    "the wait returns on the first event from any agent, "
-                    "making the timeout ineffective."
-                )
-            }
-
-        if poll_timeout > 0:
-            # Long-poll path: block until events arrive or timeout.
-            events = self._event_bus.wait_for_events(
-                timeout=poll_timeout,
-                agent_id=agent_id,
-                event_types=event_types,
-                after_event_id=after_event,
-                limit=limit,
-            )
-        else:
-            # Immediate path (original behavior).
-            events = self._event_bus.get_recent_events(
-                agent_id=agent_id,
-                event_types=event_types,
-                after_event_id=after_event,
-                limit=limit,
-            )
-
-        result: Dict[str, Any] = {
-            "events": [e.to_dict() for e in events],
-            "count": len(events),
-        }
-
-        # Include a cursor the model can pass back as after_event
-        # on the next call for incremental consumption.
-        if events:
-            result["last_event_id"] = events[-1].event_id
-
-        return result
-
-    def _execute_list_subscriptions(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the listSubscriptions tool."""
-        self._trace("listSubscriptions")
-
-        if not self._event_bus:
-            return {"error": "Event bus not initialized"}
-
-        subs = self._event_bus.get_subscriptions(agent_id=self._get_agent_name())
-
-        return {
-            "subscriptions": [s.to_dict() for s in subs],
-            "count": len(subs)
-        }
-
-    def _execute_unsubscribe(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the unsubscribe tool."""
-        sub_id = args.get("subscription_id", "")
-
-        self._trace(f"unsubscribe: sub_id={sub_id}")
-
-        if not sub_id:
-            return {"error": "subscription_id is required"}
-
-        if not self._event_bus:
-            return {"error": "Event bus not initialized"}
-
-        success = self._event_bus.unsubscribe(sub_id)
-
-        if success:
-            # Remove from agent's tracked subscriptions
-            agent_name = self._get_agent_name()
-            if agent_name in self._agent_subscriptions:
-                if sub_id in self._agent_subscriptions[agent_name]:
-                    self._agent_subscriptions[agent_name].remove(sub_id)
-
-        return {
-            "success": success,
-            "subscription_id": sub_id,
-            "message": "Subscription removed" if success else "Subscription not found"
         }
 
     def _on_dependency_resolved(
