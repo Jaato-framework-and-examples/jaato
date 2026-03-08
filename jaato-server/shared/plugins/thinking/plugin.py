@@ -9,6 +9,7 @@ Supported providers:
 - Google Gemini: Thinking mode (Gemini 2.0+)
 """
 
+import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from jaato_sdk.plugins.base import (
@@ -28,6 +29,11 @@ from .config import (
 
 if TYPE_CHECKING:
     from ...jaato_session import JaatoSession
+
+# Thread-local storage for per-session state.
+# Plugin instances are shared across sessions in the same runtime;
+# thread-local ensures each session's model thread gets its own references.
+_thread_local = threading.local()
 
 
 class ThinkingPlugin:
@@ -52,11 +58,23 @@ class ThinkingPlugin:
     """
 
     def __init__(self):
-        """Initialize the plugin."""
+        """Initialize the plugin.
+
+        Session and output callback are stored in thread-local storage
+        because this plugin instance is shared across sessions.
+        """
         self._config: ThinkingPluginConfig = ThinkingPluginConfig.default()
         self._current_config: ThinkingConfig = ThinkingConfig()
-        self._session: Optional['JaatoSession'] = None
-        self._output_callback: Optional[OutputCallback] = None
+
+    @property
+    def _session(self) -> Optional['JaatoSession']:
+        """Get the session for the current thread context."""
+        return getattr(_thread_local, 'session', None)
+
+    @property
+    def _output_callback(self) -> Optional[OutputCallback]:
+        """Get the output callback for the current thread context."""
+        return getattr(_thread_local, 'output_callback', None)
 
     @property
     def name(self) -> str:
@@ -83,19 +101,22 @@ class ThinkingPlugin:
 
     def shutdown(self) -> None:
         """Clean up resources."""
-        self._session = None
-        self._output_callback = None
+        _thread_local.session = None
+        _thread_local.output_callback = None
 
     def set_session(self, session: 'JaatoSession') -> None:
         """Set the session for applying thinking configuration.
 
+        Stored in thread-local storage so each session's thread gets
+        its own reference without overwriting other sessions.
+
         Args:
             session: The JaatoSession to configure.
         """
-        self._session = session
+        _thread_local.session = session
 
         # Apply current config to session if already configured
-        if self._current_config and self._session:
+        if self._current_config and session:
             self._apply_config_to_session()
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
@@ -104,7 +125,7 @@ class ThinkingPlugin:
         Args:
             callback: Function to receive output.
         """
-        self._output_callback = callback
+        _thread_local.output_callback = callback
 
     def _apply_config_to_session(self) -> None:
         """Apply current thinking config to the session."""

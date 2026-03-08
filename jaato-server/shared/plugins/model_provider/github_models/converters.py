@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -49,9 +50,21 @@ from jaato_sdk.plugins.model_provider.types import (
 # (no dots, colons, or other special characters)
 _OPENAI_TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
-# Module-level mapping from sanitized names back to original names
-# This allows reverse lookup when receiving function calls from the API
-_tool_name_mapping: Dict[str, str] = {}
+# Thread-local storage for tool name mapping (sanitized -> original).
+# Each session's model thread gets its own isolated mapping, preventing
+# cross-session contamination when multiple sessions share the same process.
+_thread_local = threading.local()
+
+
+def _get_tool_name_mapping() -> Dict[str, str]:
+    """Get the thread-local tool name mapping dict.
+
+    Returns:
+        Per-thread dict mapping sanitized tool names to original names.
+    """
+    if not hasattr(_thread_local, 'tool_name_mapping'):
+        _thread_local.tool_name_mapping = {}
+    return _thread_local.tool_name_mapping
 
 
 def sanitize_tool_name(name: str) -> str:
@@ -83,12 +96,15 @@ def get_original_tool_name(sanitized_name: str) -> str:
     Returns:
         Original tool name if mapping exists, otherwise returns the input unchanged.
     """
-    return _tool_name_mapping.get(sanitized_name, sanitized_name)
+    return _get_tool_name_mapping().get(sanitized_name, sanitized_name)
 
 
 def clear_tool_name_mapping() -> None:
-    """Clear the tool name mapping. Call when tools are reconfigured."""
-    _tool_name_mapping.clear()
+    """Clear the tool name mapping for the current thread.
+
+    Call when tools are reconfigured.
+    """
+    _get_tool_name_mapping().clear()
 
 
 def register_tool_name_mapping(sanitized: str, original: str) -> None:
@@ -99,7 +115,7 @@ def register_tool_name_mapping(sanitized: str, original: str) -> None:
         original: The original tool name used internally.
     """
     if sanitized != original:
-        _tool_name_mapping[sanitized] = original
+        _get_tool_name_mapping()[sanitized] = original
 
 
 # ==================== Role Conversion ====================

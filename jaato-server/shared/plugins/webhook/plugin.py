@@ -26,6 +26,11 @@ from .http_server import WebhookHTTPServer
 
 logger = logging.getLogger(__name__)
 
+# Thread-local storage for per-session state.
+# Plugin instances are shared across subagents within a session;
+# thread-local ensures each subagent thread gets its own session reference.
+_thread_local = threading.local()
+
 # Maximum events buffered per subscription before FIFO eviction
 _MAX_BUFFER_SIZE = 1000
 
@@ -98,6 +103,17 @@ class WebhookPlugin:
         """
         self._workspace_path = path
         self._reload_config()
+
+    def set_session(self, session) -> None:
+        """Store session reference in thread-local for per-runtime EventBus access.
+
+        Called by JaatoSession during plugin wiring. Stored in thread-local
+        so subagent threads don't overwrite the parent's reference.
+
+        Args:
+            session: The JaatoSession this plugin instance is bound to.
+        """
+        _thread_local.session = session
 
     def _reload_config(self) -> None:
         """Reload config from all precedence layers."""
@@ -422,14 +438,18 @@ class WebhookPlugin:
             headers: Request headers dict.
             payload: Parsed JSON payload.
         """
+        session = getattr(_thread_local, 'session', None)
+        if not session:
+            logger.debug("No session set, skipping EventBus publish")
+            return
+
         try:
-            from shared.event_bus import get_event_bus
             from jaato_sdk.event_bus import Event, EventType
         except Exception:
             logger.debug("EventBus not available, skipping bus publish")
             return
 
-        bus = get_event_bus()
+        bus = session._runtime.event_bus
         task_event = Event(
             event_id=event_id,
             event_type=EventType.EXTERNAL_EVENT,

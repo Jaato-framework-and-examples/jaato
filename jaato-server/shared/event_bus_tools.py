@@ -122,10 +122,9 @@ class EventBusTools:
         self._bus: Optional[Any] = None  # lazy import to avoid circular deps
 
     def _get_bus(self):
-        """Get the shared EventBus instance (lazy import)."""
+        """Get the session's EventBus instance from the runtime."""
         if self._bus is None:
-            from shared.event_bus import get_event_bus
-            self._bus = get_event_bus()
+            self._bus = self._session._runtime.event_bus
         return self._bus
 
     def _get_agent_name(self) -> str:

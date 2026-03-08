@@ -5,44 +5,37 @@ import threading
 import time
 from unittest.mock import Mock, MagicMock
 
-from ..event_bus import TaskEventBus, get_event_bus
+from shared.event_bus import EventBus
+from ..event_bus import TaskEventBus
 from jaato_sdk.plugins.todo.models import (
     TaskEvent, TaskEventType, TaskRef, EventFilter, Subscription,
     TodoPlan, TodoStep, StepStatus
 )
 
 
+def _make_bus() -> TaskEventBus:
+    """Create a fresh TaskEventBus wrapping a new EventBus."""
+    return TaskEventBus(EventBus())
+
+
 class TestTaskEventBus:
-    """Tests for TaskEventBus singleton and basic operations."""
+    """Tests for TaskEventBus basic operations."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        TaskEventBus.reset()
+    def test_separate_instances_are_isolated(self):
+        """Two TaskEventBus instances don't share state."""
+        bus1 = _make_bus()
+        bus2 = _make_bus()
 
-    def teardown_method(self):
-        """Clean up after each test."""
-        TaskEventBus.reset()
+        plan = TodoPlan.create("P", ["S"])
+        event = TaskEvent.create(TaskEventType.PLAN_CREATED, "a", plan)
+        bus1.publish(event)
 
-    def test_singleton(self):
-        """Test that get_instance returns same instance."""
-        bus1 = TaskEventBus.get_instance()
-        bus2 = TaskEventBus.get_instance()
-        bus3 = get_event_bus()
-
-        assert bus1 is bus2
-        assert bus2 is bus3
-
-    def test_reset_singleton(self):
-        """Test that reset creates new instance."""
-        bus1 = TaskEventBus.get_instance()
-        TaskEventBus.reset()
-        bus2 = TaskEventBus.get_instance()
-
-        assert bus1 is not bus2
+        assert len(bus1.get_recent_events(limit=10)) == 1
+        assert len(bus2.get_recent_events(limit=10)) == 0
 
     def test_subscribe_basic(self):
         """Test basic subscription creation."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         sub_id = bus.subscribe(
             subscriber_agent="main",
@@ -58,7 +51,7 @@ class TestTaskEventBus:
 
     def test_unsubscribe(self):
         """Test subscription removal."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         sub_id = bus.subscribe(
             subscriber_agent="main",
@@ -73,7 +66,7 @@ class TestTaskEventBus:
 
     def test_publish_notifies_subscribers(self):
         """Test that publish notifies matching subscribers."""
-        bus = get_event_bus()
+        bus = _make_bus()
         received_events = []
 
         def callback(event: TaskEvent):
@@ -101,7 +94,7 @@ class TestTaskEventBus:
 
     def test_publish_filters_by_agent(self):
         """Test that events are filtered by agent_id."""
-        bus = get_event_bus()
+        bus = _make_bus()
         received_events = []
 
         def callback(event: TaskEvent):
@@ -144,7 +137,7 @@ class TestTaskEventBus:
 
     def test_publish_filters_by_event_type(self):
         """Test that events are filtered by event type."""
-        bus = get_event_bus()
+        bus = _make_bus()
         received_events = []
 
         def callback(event: TaskEvent):
@@ -183,7 +176,7 @@ class TestTaskEventBus:
 
     def test_subscription_expiration(self):
         """Test that subscriptions expire after N matches."""
-        bus = get_event_bus()
+        bus = _make_bus()
         received_events = []
 
         def callback(event: TaskEvent):
@@ -217,7 +210,7 @@ class TestTaskEventBus:
 
     def test_event_history(self):
         """Test that events are stored in history."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Test Plan", ["Step 1"])
 
@@ -240,7 +233,7 @@ class TestTaskEventBus:
 
     def test_thread_safety(self):
         """Test that bus operations are thread-safe."""
-        bus = get_event_bus()
+        bus = _make_bus()
         received_counts = {"total": 0}
         lock = threading.Lock()
 
@@ -282,17 +275,9 @@ class TestTaskEventBus:
 class TestWaitForEvents:
     """Tests for long-poll wait_for_events on TaskEventBus."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        """Clean up after each test."""
-        TaskEventBus.reset()
-
     def test_returns_immediately_when_events_exist(self):
         """wait_for_events returns right away if matching events are already present."""
-        bus = get_event_bus()
+        bus = _make_bus()
         plan = TodoPlan.create("P", ["S"])
 
         event = TaskEvent.create(
@@ -313,7 +298,7 @@ class TestWaitForEvents:
 
     def test_blocks_until_event_published(self):
         """wait_for_events blocks and wakes up when a matching event arrives."""
-        bus = get_event_bus()
+        bus = _make_bus()
         plan = TodoPlan.create("P", ["S"])
 
         result_holder: list = []
@@ -341,7 +326,7 @@ class TestWaitForEvents:
 
     def test_timeout_returns_empty(self):
         """wait_for_events returns empty list after timeout with no events."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         start = time.monotonic()
         events = bus.wait_for_events(timeout=0.3, limit=10)
@@ -353,7 +338,7 @@ class TestWaitForEvents:
 
     def test_after_event_id_filtering(self):
         """wait_for_events only returns events after the specified cursor."""
-        bus = get_event_bus()
+        bus = _make_bus()
         plan = TodoPlan.create("P", ["S"])
 
         event1 = TaskEvent.create(TaskEventType.PLAN_CREATED, "a", plan)
@@ -374,7 +359,7 @@ class TestWaitForEvents:
 
     def test_after_event_id_with_wait(self):
         """wait_for_events blocks when cursor is at the latest event, then wakes."""
-        bus = get_event_bus()
+        bus = _make_bus()
         plan = TodoPlan.create("P", ["S"])
 
         event1 = TaskEvent.create(TaskEventType.PLAN_CREATED, "a", plan)
@@ -402,7 +387,7 @@ class TestWaitForEvents:
 
     def test_agent_filter_with_wait(self):
         """wait_for_events respects agent_id filter during long-poll."""
-        bus = get_event_bus()
+        bus = _make_bus()
         plan = TodoPlan.create("P", ["S"])
 
         result_holder: list = []
@@ -434,7 +419,7 @@ class TestWaitForEvents:
 
     def test_timeout_clamped_to_30(self):
         """Timeout is capped at 30 seconds."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         start = time.monotonic()
         # Pass a huge timeout — it should be clamped to 30, but we test
@@ -449,17 +434,9 @@ class TestWaitForEvents:
 class TestDependencyResolution:
     """Tests for cross-agent dependency resolution."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        """Clean up after each test."""
-        TaskEventBus.reset()
-
     def test_register_dependency(self):
         """Test registering a dependency waiter."""
-        bus = get_event_bus()
+        bus = _make_bus()
 
         dep_ref = TaskRef(agent_id="researcher", step_id="analysis")
 
@@ -476,7 +453,7 @@ class TestDependencyResolution:
 
     def test_dependency_resolution_callback(self):
         """Test that dependency resolver is called on step completion."""
-        bus = get_event_bus()
+        bus = _make_bus()
         resolved_deps = []
 
         def resolver(waiting_agent, waiting_plan_id, waiting_step_id, event):
@@ -518,7 +495,7 @@ class TestDependencyResolution:
 
     def test_multiple_waiters(self):
         """Test that multiple waiters are all notified."""
-        bus = get_event_bus()
+        bus = _make_bus()
         resolved_deps = []
 
         def resolver(waiting_agent, waiting_plan_id, waiting_step_id, event):

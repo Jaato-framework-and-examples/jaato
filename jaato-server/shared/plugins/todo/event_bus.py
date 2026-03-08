@@ -1,18 +1,13 @@
 """Task-specific event bus wrapper with dependency tracking.
 
-This module provides ``TaskEventBus``, a backward-compatible wrapper
-around the shared ``EventBus`` (``shared.event_bus``) that adds
-task-specific dependency tracking and resolution.
+Wraps ``EventBus`` (from ``shared.event_bus``) with task-specific
+dependency tracking and resolution.
 
 The generic event infrastructure (subscribe, publish, long-poll,
-history) lives in ``shared.event_bus.EventBus``. This module only
-adds:
+history) lives in ``EventBus``. This module adds:
 - Dependency registration (``register_dependency``)
 - Automatic dependency resolution on ``step_completed`` events
 - Task-specific ``get_stats`` with dependency waiter counts
-
-Existing code that imports ``TaskEventBus`` and ``get_event_bus``
-from this module continues to work unchanged.
 """
 
 import logging
@@ -35,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 class TaskEventBus:
-    """Task-aware event bus that wraps the shared ``EventBus`` singleton.
+    """Task-aware event bus that wraps an ``EventBus`` instance.
 
     Delegates all generic event operations (subscribe, publish, poll,
-    history) to the shared ``EventBus``. Adds task-specific behavior:
+    history) to the wrapped ``EventBus``. Adds task-specific behavior:
 
     - **Dependency tracking**: ``register_dependency()`` records that a
       step is waiting on another agent's step.
@@ -46,12 +41,11 @@ class TaskEventBus:
       published, ``_resolve_dependencies()`` notifies all waiting steps
       via the dependency resolver callback.
 
-    The ``TaskEventBus`` is itself a singleton. It wraps the same
-    ``EventBus`` singleton — they share the same event history and
-    subscriptions.
+    Each session's TodoPlugin creates its own TaskEventBus wrapping the
+    per-runtime EventBus from ``JaatoRuntime.event_bus``.
 
     Usage:
-        bus = TaskEventBus.get_instance()
+        bus = TaskEventBus(event_bus=runtime.event_bus)
 
         # All EventBus methods are available:
         bus.subscribe(...)
@@ -63,36 +57,13 @@ class TaskEventBus:
         bus.set_dependency_resolver(callback)
     """
 
-    _instance: Optional['TaskEventBus'] = None
-    _lock = threading.Lock()
-
-    @classmethod
-    def get_instance(cls) -> 'TaskEventBus':
-        """Get or create the singleton instance."""
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-                    logger.debug("TaskEventBus singleton created")
-        return cls._instance
-
-    @classmethod
-    def reset(cls) -> None:
-        """Reset the singleton (for testing).
-
-        Also resets the underlying ``EventBus`` singleton.
-        """
-        with cls._lock:
-            cls._instance = None
-            EventBus.reset()
-            logger.debug("TaskEventBus singleton reset")
-
-    def __init__(self):
+    def __init__(self, event_bus: EventBus):
         """Initialize the task event bus wrapper.
 
-        Note: Use ``get_instance()`` instead of direct construction.
+        Args:
+            event_bus: The EventBus instance to wrap (from JaatoRuntime).
         """
-        self._bus = EventBus.get_instance()
+        self._bus = event_bus
 
         # Task-specific: dependency tracking
         self._dependency_waiters: Dict[str, List[tuple]] = {}
@@ -257,12 +228,3 @@ class TaskEventBus:
                 len(w) for w in self._dependency_waiters.values()
             )
         return stats
-
-
-def get_event_bus() -> TaskEventBus:
-    """Get the TaskEventBus singleton.
-
-    Returns the task-aware wrapper. For the raw shared bus without
-    dependency tracking, use ``shared.event_bus.get_event_bus()``.
-    """
-    return TaskEventBus.get_instance()

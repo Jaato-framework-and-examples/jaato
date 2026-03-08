@@ -26,7 +26,7 @@ from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
-from .event_bus import TaskEventBus, get_event_bus
+from .event_bus import TaskEventBus
 from jaato_sdk.plugins.base import UserCommand
 
 
@@ -102,8 +102,17 @@ class TodoPlugin:
         # Note: session is stored in thread-local storage via set_session()
         # This prevents subagent sessions from overwriting the parent's reference
 
-        # Event bus for cross-agent task collaboration
-        self._event_bus: Optional[TaskEventBus] = None
+        # Event bus for cross-agent task collaboration is stored in
+        # thread-local via property, so subagents get their own bus.
+
+    @property
+    def _event_bus(self) -> Optional[TaskEventBus]:
+        """Per-thread event bus for cross-agent collaboration."""
+        return getattr(_thread_local, 'event_bus', None)
+
+    @_event_bus.setter
+    def _event_bus(self, value):
+        _thread_local.event_bus = value
 
     @property
     def _agent_name(self) -> Optional[str]:
@@ -130,6 +139,9 @@ class TodoPlugin:
         ensures that when subagents (running in different threads) call this,
         they don't overwrite the parent agent's session reference.
 
+        Also switches the event bus to the per-runtime instance for proper
+        session isolation when multiple sessions share the same server process.
+
         Args:
             session: The JaatoSession instance.
         """
@@ -138,6 +150,13 @@ class TodoPlugin:
         thread_id = threading.current_thread().ident
         self._trace(f"set_session: agent_id={agent_id}, thread_id={thread_id}")
         _thread_local.session = session
+
+        # Switch to per-runtime event bus for session isolation
+        new_bus = session._runtime.event_bus
+        if new_bus is not self._event_bus:
+            _thread_local.event_bus = new_bus
+            new_bus.set_dependency_resolver(self._on_dependency_resolved)
+            self._trace(f"set_session: switched to per-runtime event bus")
 
     @property
     def name(self) -> str:
@@ -255,10 +274,8 @@ class TodoPlugin:
                 print("Falling back to console reporter")
                 self._reporter = ConsoleReporter()
 
-        # Initialize event bus for cross-agent collaboration
-        self._event_bus = get_event_bus()
-        # Register dependency resolver callback
-        self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
+        # Event bus is assigned in set_session() via thread-local.
+        # No initialization needed here.
 
         self._initialized = True
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
