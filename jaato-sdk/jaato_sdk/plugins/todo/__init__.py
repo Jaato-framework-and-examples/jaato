@@ -15,6 +15,7 @@ from .models import (
     EventFilter,
     Subscription,
     TaskEvent,
+    create_task_event,
 )
 from .channels import TodoReporter, LivePlanReporter, create_live_reporter
 
@@ -29,6 +30,7 @@ __all__ = [
     "EventFilter",
     "Subscription",
     "TaskEvent",
+    "create_task_event",
     "TodoReporter",
     "LivePlanReporter",
     "create_live_reporter",

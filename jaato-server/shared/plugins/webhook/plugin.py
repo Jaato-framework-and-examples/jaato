@@ -1,7 +1,7 @@
 """Webhook ingress plugin for daemon agent sessions.
 
 Starts a per-instance HTTP server that receives webhooks and publishes
-them to the TaskEventBus. Provides tools for the model to subscribe to
+them to the shared EventBus. Provides tools for the model to subscribe to
 and poll for events.
 
 Lifecycle:
@@ -202,7 +202,7 @@ class WebhookPlugin:
         """Return system instructions describing webhook tools."""
         return (
             "You have access to webhook tools for receiving external HTTP events.\n\n"
-            "Webhook events are published to the shared TaskEventBus as "
+            "Webhook events are published to the shared EventBus as "
             "`external_event` events with `source_agent=\"webhook:<route>\"`.\n\n"
             "To start processing webhooks:\n"
             "1. Call `webhook_subscribe` to start the HTTP listener\n"
@@ -407,12 +407,12 @@ class WebhookPlugin:
         headers: Dict[str, str],
         payload: Any,
     ) -> None:
-        """Publish a webhook event to the shared TaskEventBus.
+        """Publish a webhook event to the shared EventBus.
 
         This is the primary delivery mechanism. Events appear as
         ``EXTERNAL_EVENT`` with ``source_agent="webhook:<route>"``,
-        delivered via ``subscribeToTasks(event_types=["external_event"])``
-        or retrievable via ``pollForTasks`` as a fallback.
+        delivered via ``subscribeToEvents(event_types=["external_event"])``
+        or retrievable via ``getEvents`` as a fallback.
 
         Args:
             event_id: Unique event identifier.
@@ -423,16 +423,16 @@ class WebhookPlugin:
             payload: Parsed JSON payload.
         """
         try:
-            from shared.plugins.todo.event_bus import get_event_bus
-            from jaato_sdk.plugins.todo.models import TaskEvent, TaskEventType
+            from shared.event_bus import get_event_bus
+            from jaato_sdk.event_bus import Event, EventType
         except Exception:
-            logger.debug("TaskEventBus not available, skipping bus publish")
+            logger.debug("EventBus not available, skipping bus publish")
             return
 
         bus = get_event_bus()
-        task_event = TaskEvent(
+        task_event = Event(
             event_id=event_id,
-            event_type=TaskEventType.EXTERNAL_EVENT,
+            event_type=EventType.EXTERNAL_EVENT,
             timestamp=timestamp,
             source_agent=f"webhook:{route_name}",
             source_plan_id=route_name,
