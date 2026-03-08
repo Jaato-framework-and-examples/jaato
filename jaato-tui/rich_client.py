@@ -68,8 +68,14 @@ def _capture_vision(
     context: CaptureContext,
     turn_index: int,
     agent_id: Optional[str],
+    display=None,
 ):
     """Core vision capture logic shared between direct and IPC modes.
+
+    Captures the full client display (session bar, agent tabs, status bar,
+    output panel, input prompt) when a ``display`` (PTDisplay) is provided.
+    Falls back to capturing only the output buffer panel when ``display``
+    is ``None``.
 
     Args:
         buffer: Output buffer to render.
@@ -80,13 +86,18 @@ def _capture_vision(
         context: What triggered the capture.
         turn_index: Current turn index.
         agent_id: Selected agent ID.
+        display: Optional PTDisplay instance.  When provided, the full TUI
+            layout is rendered instead of just the output panel.
 
     Returns:
         CaptureResult on success, None on failure.
     """
-    panel = buffer.render_panel(height=display_height, width=display_width)
+    if display is not None and hasattr(display, 'render_full_display'):
+        renderable = display.render_full_display(output_buffer=buffer)
+    else:
+        renderable = buffer.render_panel(height=display_height, width=display_width)
     return vision_capture.capture(
-        panel,
+        renderable,
         context=context,
         turn_index=turn_index,
         agent_id=agent_id,
@@ -645,9 +656,20 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
 
 
 def _do_vision_capture_ipc(display, agent_registry, context):
-    """Perform a vision capture in IPC mode."""
+    """Perform a vision capture in IPC mode.
+
+    Captures the full client display (session bar, tabs, status bar, output
+    panel, input prompt) rather than just the output buffer panel.
+    """
     try:
         vision_capture, _ = _get_ipc_vision_state(display)
+
+        # Sync capture width/height with actual terminal dimensions so the
+        # Rich recording console matches the live display.
+        display_width = getattr(display, '_width', 120)
+        display_height = getattr(display, '_height', 50)
+        vision_capture._config.width = display_width
+        vision_capture._config.height = display_height
 
         # Get the selected agent's output buffer
         buffer = agent_registry.get_selected_buffer()
@@ -672,6 +694,7 @@ def _do_vision_capture_ipc(display, agent_registry, context):
             context=context,
             turn_index=0,
             agent_id=agent_registry.get_selected_agent_id(),
+            display=display,
         )
 
         # For auto/periodic captures, just show a brief message

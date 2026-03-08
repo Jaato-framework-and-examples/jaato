@@ -1188,6 +1188,150 @@ class PTDisplay:
         return self._output_buffer
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Full-display snapshot (for vision capture / screenshots)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _pt_fragments_to_rich_text(self, fragments, width: int) -> "Text":
+        """Convert prompt_toolkit formatted-text fragments to a Rich Text.
+
+        Maps ``class:foo.bar`` style classes to Rich style strings via the
+        theme's ``pt_mapping`` → ``get_rich_style()`` chain.  Fragments whose
+        class cannot be resolved are rendered unstyled.
+
+        Args:
+            fragments: List of ``(style_class, text)`` tuples produced by
+                prompt_toolkit content getters (e.g. ``_get_session_bar_content``).
+            width: Pad/truncate the resulting line to this many columns so
+                bars span the full terminal width.
+
+        Returns:
+            A single-line Rich ``Text`` object.
+        """
+        from rich.text import Text as RichText
+
+        # Build reverse map: pt class → semantic name (lazily, once)
+        if not hasattr(self, "_pt_to_semantic"):
+            self._pt_to_semantic: dict[str, str] = {}
+            if self._theme:
+                # Reuse the same mapping defined in ThemeConfig.get_prompt_toolkit_style
+                pt_mapping = {
+                    "session-bar": "session_bar_bg",
+                    "session-bar.label": "session_bar_label",
+                    "session-bar.id": "session_bar_id",
+                    "session-bar.separator": "session_bar_separator",
+                    "session-bar.description": "session_bar_description",
+                    "session-bar.workspace": "session_bar_workspace",
+                    "session-bar.value": "status_bar_value",
+                    "session-bar.dim": "agent_tab_dim",
+                    "session-bar.warning": "status_bar_warning",
+                    "status-bar": "status_bar_bg",
+                    "status-bar.label": "status_bar_label",
+                    "status-bar.value": "status_bar_value",
+                    "status-bar.separator": "status_bar_separator",
+                    "status-bar.warning": "status_bar_warning",
+                    "status-bar.error": "status_bar_error",
+                    "agent-tab-bar": "session_bar_bg",
+                    "agent-tab.selected": "agent_tab_selected",
+                    "agent-tab.dim": "agent_tab_dim",
+                    "agent-tab.separator": "agent_tab_separator",
+                    "agent-tab.hint": "agent_tab_hint",
+                    "prompt": "input_prompt",
+                }
+                self._pt_to_semantic = pt_mapping
+
+        line = RichText()
+        for style_class, text in fragments:
+            # Strip "class:" prefix
+            cls = style_class.replace("class:", "").strip()
+            # Also handle modifiers like "class:status-bar.value bold"
+            parts = cls.split()
+            base_cls = parts[0] if parts else ""
+            extra_modifiers = " ".join(parts[1:])
+
+            rich_style = ""
+            semantic = self._pt_to_semantic.get(base_cls)
+            if semantic and self._theme:
+                rich_style = self._theme.get_rich_style(semantic)
+            if extra_modifiers:
+                rich_style = f"{rich_style} {extra_modifiers}".strip()
+
+            line.append(text, style=rich_style or None)
+
+        # Pad to full width so the bar background spans the terminal
+        if line.cell_len < width:
+            line.append(" " * (width - line.cell_len))
+
+        return line
+
+    def render_full_display(
+        self,
+        output_buffer: "OutputBuffer",
+    ) -> "Group":
+        """Compose all visible TUI components into a single Rich renderable.
+
+        Produces a snapshot of the full client display — session bar, agent
+        tab bar, status bar, output panel, and input prompt — suitable for
+        vision capture.  Floating overlays (plan popup, budget popup, etc.)
+        are intentionally excluded because they are transient UI and would
+        obscure the main content in a screenshot.
+
+        Args:
+            output_buffer: The output buffer to render (typically the
+                selected agent's buffer).
+
+        Returns:
+            A Rich ``Group`` combining all visible rows of the display.
+        """
+        from rich.console import Group as RichGroup
+        from rich.text import Text as RichText
+
+        width = self._width
+        rows: list = []
+
+        # 1. Session bar
+        session_fragments = self._get_session_bar_content()
+        rows.append(self._pt_fragments_to_rich_text(session_fragments, width))
+
+        # 2. Agent tab bar (conditional)
+        if self._agent_tab_bar is not None:
+            tab_fragments = self._get_agent_tab_bar_content()
+            if tab_fragments:
+                rows.append(self._pt_fragments_to_rich_text(tab_fragments, width))
+
+        # 3. Status bar
+        status_fragments = self._get_status_bar_content()
+        rows.append(self._pt_fragments_to_rich_text(status_fragments, width))
+
+        # 4. Output panel (the main content area)
+        input_height = self._get_input_height()
+        tab_bar_height = 1 if self._agent_tab_bar else 0
+        session_bar_height = 1
+        status_bar_height = 1
+        prompt_height = 1  # input prompt row at bottom
+        available_height = (
+            self._height
+            - session_bar_height
+            - tab_bar_height
+            - status_bar_height
+            - prompt_height
+        )
+        panel = output_buffer.render_panel(
+            height=max(1, available_height),
+            width=width,
+        )
+        rows.append(panel)
+
+        # 5. Input prompt
+        prompt_line = RichText()
+        prompt_line.append("User> ", style="bold")
+        # Pad to width (input content is not meaningful for screenshot)
+        if prompt_line.cell_len < width:
+            prompt_line.append(" " * (width - prompt_line.cell_len))
+        rows.append(prompt_line)
+
+        return RichGroup(*rows)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Search mode
     # ─────────────────────────────────────────────────────────────────────────
 
