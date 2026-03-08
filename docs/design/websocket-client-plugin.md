@@ -196,6 +196,50 @@ plugin publishes to the bus either way. The question is only whether the
 *owning session* receives via bus subscription or via direct `inject_prompt()`.
 Using the bus for both keeps things uniform.
 
+### Prerequisite: Extract Event Bus from Todo Plugin
+
+Currently `TaskEventBus`, `subscribeToTasks`, `pollForTasks`, and the event
+types (`TaskEvent`, `TaskEventType`, `EventFilter`) all live inside the todo
+plugin. This is an architectural smell — the event bus is a cross-cutting
+concern used by webhook, WebSocket, and subagent coordination, not a todo
+feature.
+
+Before implementing the WebSocket plugin, the event bus should be extracted
+into a shared component:
+
+```
+# Current (coupled to todo)
+shared/plugins/todo/event_bus.py          → TaskEventBus
+jaato_sdk/plugins/todo/models.py          → TaskEvent, TaskEventType, EventFilter
+shared/plugins/todo/plugin.py             → subscribeToTasks, pollForTasks tools
+
+# Proposed (shared infrastructure)
+shared/event_bus.py                       → EventBus (renamed from TaskEventBus)
+jaato_sdk/events.py or jaato_sdk/event_bus_types.py → Event, EventType, EventFilter
+shared/plugins/event_bus/                 → subscribeToEvents, pollForEvents tools
+  ├── __init__.py                         # PLUGIN_KIND = "tool"
+  ├── plugin.py                           # EventBusPlugin with subscribe/poll tools
+  └── tests/
+```
+
+**What changes:**
+- `TaskEventBus` → `EventBus` (not task-specific)
+- `TaskEvent` → `Event` (generic)
+- `TaskEventType` gains `EXTERNAL_EVENT` as a first-class type (not bolted on)
+- `subscribeToTasks` → `subscribeToEvents` (generic name)
+- `pollForTasks` → `pollForEvents` (generic name)
+- Todo plugin imports from the shared event bus, not the reverse
+- Webhook and WebSocket plugins import from the shared event bus directly
+
+**Backward compatibility:** The todo plugin can re-export the old names
+(`subscribeToTasks` as an alias for `subscribeToEvents`) during a transition
+period. The event bus singleton is shared — all plugins see the same events
+regardless of which tool name the model uses.
+
+This extraction is a prerequisite for the WebSocket plugin — without it, the
+plugin would need to import from `shared/plugins/todo/event_bus.py`, creating
+a dependency on the todo plugin that makes no semantic sense.
+
 ### Why Not `StreamManager`?
 
 The framework's `StreamingCapable` + `StreamManager` infrastructure handles
