@@ -8,16 +8,18 @@ channels. Where the Webhook plugin is an inbound HTTP listener (external
 services push events *to* the agent), this plugin is an outbound connector
 (the agent reaches out *to* external services).
 
-Incoming messages are **pushed directly into the session** via
-`JaatoSession.inject_prompt()` — the model doesn't poll. It connects once,
-then goes fully idle. When a message arrives, `inject_prompt()` wakes the
-model for a new turn. Messages that arrive while the model is busy queue
-up naturally and are delivered together when the current turn completes.
+Incoming messages are published to `TaskEventBus` (same as the webhook
+plugin). The model subscribes via `subscribeToTasks` and receives messages
+as inline events — no polling. It connects once, subscribes once, then goes
+fully idle. When a message arrives, `subscribeToTasks`'s callback calls
+`inject_prompt()` to wake the model for a new turn.
 
 ```
 Agent Session                  WebSocket Client Plugin           External Service
-(daemon or interactive)        (outbound connections)            (Slack, Binance, K8s, ...)
+(daemon mode)                  (outbound connections)            (Slack, Binance, K8s, ...)
         │                                │                              │
+        │  subscribeToTasks(             │                              │
+        │    event_types=["external_event"])                            │
         │  ws_connect(url="wss://...")    │                              │
         ├───────────────────────────────►│                              │
         │                                │  TCP + TLS + WS handshake   │
@@ -28,12 +30,11 @@ Agent Session                  WebSocket Client Plugin           External Servic
         │◄───────────────────────────────┤                              │
         │                                │                              │
         │         (session is idle)      │◄────── message ─────────────┤
-        │                                │◄────── message ─────────────┤
-        │                                │                              │
-        │                    inject_prompt(batched messages)            │
-        │◄───────────────────────────────┤                              │
+        │                                │  → TaskEventBus.publish()   │
+        │                                │  → subscribeToTasks callback │
+        │◄───────────────────────────────┤  → inject_prompt()          │
         │  (new turn triggered)          │                              │
-        │  model processes messages      │                              │
+        │  model processes message       │                              │
         │                                │                              │
         │  ws_send(data={...})           │                              │
         ├───────────────────────────────►│  ────── message ────────────►│
@@ -41,7 +42,8 @@ Agent Session                  WebSocket Client Plugin           External Servic
         │         (session idle again)   │                              │
         │              ...sleeps...      │                              │
         │                                │◄────── message ─────────────┤
-        │◄───────────────────────────────┤  inject_prompt()            │
+        │                                │  → TaskEventBus → inject    │
+        │◄───────────────────────────────┤                              │
         │  (new turn triggered)          │                              │
 ```
 
@@ -76,7 +78,7 @@ and maintain a persistent connection.
 | **Bidirectional** | No (receive only) | Yes (send and receive) |
 | **Connection lifecycle** | Per-request | Long-lived, needs reconnection logic |
 | **Endpoint requirement** | Agent needs a public/reachable URL | Agent only needs outbound access |
-| **Delivery model** | Event bus (`subscribeToTasks` push / `pollForTasks` poll) + `webhook_poll` fallback | Push via `inject_prompt()` |
+| **Delivery model** | Event bus (`subscribeToTasks` push / `pollForTasks` poll) + `webhook_poll` fallback | Event bus (`subscribeToTasks` push) |
 | **Dependency** | stdlib only (`http.server`) | `websockets` (optional) |
 
 The two plugins together cover the vast majority of real-time integration
@@ -119,7 +121,7 @@ strategies for specific integrations:
    gracefully — importing the plugin without the dependency installed
    produces a clear error message, not a crash.
 
-## Message Delivery: `inject_prompt()` with Natural Batching
+## Message Delivery: Event Bus + `subscribeToTasks`
 
 ### The Core Problem: Waking an Idle Model
 
@@ -156,23 +158,43 @@ meaningful scenario for this plugin (users provide input directly).
 Note: `subscribeToTasks` (todo plugin) also relies on `inject_prompt()` for
 its push delivery — the same mechanism, same daemon-mode requirement.
 
-### Why Direct `inject_prompt()` Instead of the Event Bus?
+### Delivery Model: Event Bus or Direct `inject_prompt()`?
 
-The `TaskEventBus` already supports push delivery via `subscribeToTasks` —
-the todo plugin's subscription callback uses `inject_prompt()` to push events
-into the subscriber's session (see `todo/plugin.py:1616`). The webhook plugin
-publishes to this bus, so a model *could* use `subscribeToTasks` to receive
-webhook events via push.
+The webhook plugin follows a clean separation: it publishes events to the
+`TaskEventBus`, and `subscribeToTasks` handles the `inject_prompt()` delivery.
+The plugin doesn't need to know about session wakeup — it just publishes.
+Cross-agent fan-out comes for free (multiple sessions subscribe to the same
+events).
 
-However, for the WebSocket plugin, going through the event bus adds unnecessary
-indirection. The plugin already has a reader thread per connection — it can
-call `inject_prompt()` directly without publishing to an intermediate bus and
-requiring the model to set up a subscription. The event bus is still used as
-a **secondary** delivery channel for cross-agent fan-out, but primary delivery
-is direct `inject_prompt()`.
+The WebSocket plugin could follow the same pattern:
 
-This also avoids coupling to the todo plugin's `subscribeToTasks` tool — the
-WebSocket plugin works even if the todo plugin is not loaded.
+1. Reader thread publishes each message to `TaskEventBus` as an
+   `EXTERNAL_EVENT` with `source_agent="websocket:<connection_id>"`
+2. Model calls `subscribeToTasks(event_types=["external_event"])` to receive
+   them (same as webhook)
+3. `subscribeToTasks` handles `inject_prompt()` delivery
+
+**Advantages over direct `inject_prompt()`:**
+- Consistent with the webhook plugin's pattern
+- Cross-agent fan-out built-in (multiple sessions process the same stream)
+- Plugin doesn't own the delivery concern — cleaner separation
+- Model uses the same `subscribeToTasks` pattern for both webhook and
+  WebSocket events
+
+**Trade-off:**
+- Requires the model to call `subscribeToTasks` as a setup step after
+  `ws_connect` (one extra tool call)
+- Messages route through the bus before reaching the session (minimal overhead)
+
+**Recommendation:** Follow the webhook pattern. The one extra `subscribeToTasks`
+call is negligible, and consistency across event-driven plugins is worth more
+than saving one tool call. The `ws_connect` tool description and system
+instructions should guide the model to subscribe immediately after connecting.
+
+The event bus is also used for cross-agent fan-out regardless — so the
+plugin publishes to the bus either way. The question is only whether the
+*owning session* receives via bus subscription or via direct `inject_prompt()`.
+Using the bus for both keeps things uniform.
 
 ### Why Not `StreamManager`?
 
@@ -197,82 +219,46 @@ now truly idle — no active turn, nothing listening. If a Slack message arrives
 30 seconds later, the `StreamChunk` goes into `StreamManager` but **nobody
 picks it up**. There is no mechanism to wake the model from true idle.
 
-### The Right Tool: `inject_prompt()`
+### The Right Tool: `TaskEventBus` + `subscribeToTasks`
 
-`inject_prompt()` is designed exactly for this: waking a dormant session and
-starting a new turn from outside the normal chat loop. It's what subagents use
-to send results back to parent sessions, and it's what the WebSocket plugin
-uses to deliver messages:
+The combination of `TaskEventBus.publish()` (plugin side) and
+`subscribeToTasks` (model side) provides exactly what's needed:
 
-```python
-def _on_message_received(self, connection_id: str, message: IncomingMessage):
-    """Called by reader thread when a WebSocket message arrives.
+1. Plugin publishes → bus distributes → subscription callback calls
+   `inject_prompt()` → session wakes
+2. Multiple sessions can subscribe → fan-out for free
+3. Natural batching: messages that arrive during a busy turn queue up
+   in the session's message queue and are delivered together
 
-    If the session is idle, inject_prompt() triggers a new model turn
-    immediately. If the session is busy (mid-turn), the message is
-    queued and delivered when the current turn completes.
-
-    Messages that arrive in rapid succession while the session is busy
-    are naturally batched — they queue up and the model sees them all
-    together when the current turn finishes.
-    """
-    formatted = self._format_message(connection_id, message)
-    self._session.inject_prompt(
-        text=formatted,
-        source_id=f"ws_client:{connection_id}",
-        source_type=SourceType.SYSTEM,
-    )
-```
-
-**What the model sees** (injected as a system-like message):
+**What the model sees** (delivered as `[SUBAGENT event=external_event]` inline
+messages, same format as webhook events):
 
 ```
-[WebSocket ws-1 (wss://stream.binance.com)] 3 messages received:
-
-1. {"e":"trade","s":"BTCUSDT","p":"67420.50","q":"0.123","T":1709910600123}
-2. {"e":"trade","s":"BTCUSDT","p":"67421.00","q":"0.456","T":1709910600456}
-3. {"e":"trade","s":"ETHUSDT","p":"3421.80","q":"1.200","T":1709910600789}
+[SUBAGENT agent_id=websocket:ws-1 event=external_event]
+{"source": "websocket", "connection_id": "ws-1", "message_type": "text",
+ "data": "{\"e\":\"trade\",\"s\":\"BTCUSDT\",\"p\":\"67420.50\"}"}
 ```
 
-The model processes the messages and can respond with `ws_send` if needed.
-When it finishes its turn, the session goes idle. If more WebSocket messages
-arrive later, `inject_prompt()` wakes the model for a new turn.
+The model processes the message and can respond with `ws_send` if needed.
+When it finishes its turn, the session goes idle. When the next WebSocket
+message arrives, the cycle repeats.
 
-### Natural Batching (No Custom Batcher Needed)
+### Natural Batching
 
 High-volume streams (market data, log tails) could produce hundreds of
-messages per second. But `inject_prompt()` + the session's message queue
-provide natural batching without any custom timer logic:
+messages per second. The `subscribeToTasks` → `inject_prompt()` → session
+message queue chain provides natural batching:
 
 1. First message arrives → `inject_prompt()` → new turn starts.
-2. While model is processing, more messages arrive → each calls
+2. While model is processing, more messages arrive → each triggers
    `inject_prompt()` → messages queue up in the session's message queue.
-3. Model finishes its turn → drains the queue → sees all queued messages
-   together.
+3. Model finishes its turn → drains the queue → sees all queued messages.
 4. Model processes the batch → finishes → goes idle.
-5. Next message arrives → `inject_prompt()` → cycle repeats.
+5. Next message arrives → cycle repeats.
 
-**Behavior by stream velocity:**
-
-| Stream Type | Messages/sec | Behavior |
-|-------------|-------------|----------|
-| Chat (Slack) | 0.1–1 | Near-instant delivery (single messages) |
-| Moderate events | 1–10 | Small natural batches (2–5 messages) |
-| Market data | 10–100 | Larger batches accumulate during model processing |
-| Firehose (logs) | 100+ | Large batches, oldest dropped if queue exceeds `max_buffer_size` |
-
-The key insight: the model's own processing time acts as the batching window.
-Fast streams batch more, slow streams deliver individually. No debounce
-timers or batch size configs needed.
-
-### Why Not a Custom `MessageBatcher`?
-
-An earlier version of this design proposed a custom `MessageBatcher` with
-debounce timers, `max_batch_size`, and `max_wait_ms`. This is unnecessary
-because the session's message queue already provides the right batching
-behavior. Adding custom timers on top would just add latency to low-volume
-streams (the 200ms debounce delay) while providing no benefit for high-volume
-streams (where the model's processing time is already the batching window).
+The model's own processing time acts as the batching window. Fast streams
+batch more, slow streams deliver individually. No custom debounce timers
+or batch size configs needed.
 
 ### First-Message Auth Bootstrapping
 
@@ -280,7 +266,7 @@ Some protocols (Discord Gateway, GraphQL subscriptions) require the model to
 read the first message from the server and respond with an auth payload.
 
 The `ws_connect` tool result includes **initial messages** captured during a
-brief startup window before switching to `inject_prompt()` delivery:
+brief startup window before the reader thread starts publishing to the bus:
 
 ```python
 def _execute_connect(self, args):
@@ -292,8 +278,8 @@ def _execute_connect(self, args):
     returned directly in the tool result so the model can respond
     with ws_send in the same turn.
 
-    After the initial read, the reader thread switches to
-    inject_prompt() delivery for all subsequent messages.
+    After the initial read, the reader thread starts publishing
+    subsequent messages to TaskEventBus.
     """
     conn = self._create_connection(args)
     conn.connect()
@@ -301,7 +287,7 @@ def _execute_connect(self, args):
     # Capture initial messages (hello, auth challenge, etc.)
     initial_messages = conn.drain_initial(timeout=3.0)
 
-    # Start reader thread — messages delivered via inject_prompt()
+    # Start reader thread — messages published to TaskEventBus
     conn.start_reader(on_message=self._on_message_received)
 
     return {
@@ -310,20 +296,23 @@ def _execute_connect(self, args):
         "url": conn.url,
         "initial_messages": [self._format_message(m) for m in initial_messages],
         "message": f"Connected. {len(initial_messages)} initial message(s). "
-                   "Subsequent messages delivered automatically.",
+                   "Subsequent messages delivered via event subscription.",
     }
 ```
 
 **Discord example flow:**
 
 ```
+Agent: subscribeToTasks(event_types=["external_event"])
+→ {subscription_id: "sub-1", message: "Subscribed to 1 event type(s)."}
+
 Agent: ws_connect(url="wss://gateway.discord.gg/?v=10&encoding=json")
 → {
     connection_id: "ws-1",
     initial_messages: [
       {type: "text", data: '{"op":10,"d":{"heartbeat_interval":41250}}'}
     ],
-    message: "Connected. 1 initial message(s). Subsequent messages delivered automatically."
+    message: "Connected. 1 initial message(s). Subsequent messages delivered via event subscription."
   }
 
 Agent: ws_send(connection_id="ws-1", data='{"op":2,"d":{"token":"...","intents":513}}')
@@ -331,8 +320,8 @@ Agent: ws_send(connection_id="ws-1", data='{"op":2,"d":{"token":"...","intents":
 
     ... session goes idle ...
 
-    [WebSocket ws-1] 1 message received:    ← inject_prompt() triggers new turn
-    1. {"op":0,"t":"READY","d":{...}}
+    [SUBAGENT agent_id=websocket:ws-1 event=external_event]    ← subscribeToTasks callback
+    {"source":"websocket","connection_id":"ws-1","data":"{\"op\":0,\"t\":\"READY\",...}"}
 
 Agent: (processes READY event, session goes idle again)
 
@@ -419,7 +408,7 @@ Config values support `${VAR}` expansion (via existing `expand_variables()`):
 ```
 shared/plugins/ws_client/
 ├── __init__.py          # PLUGIN_KIND = "tool", create_plugin()
-├── plugin.py            # WebSocketClientPlugin — connection mgmt + inject_prompt() delivery
+├── plugin.py            # WebSocketClientPlugin — connection mgmt + event bus publishing
 ├── connection.py        # WebSocketConnection — per-connection state + reader thread
 ├── config.py            # WebSocketClientConfig dataclass, config loading/merging
 └── tests/
@@ -435,24 +424,26 @@ class WebSocketClientPlugin:
     """Outbound WebSocket client plugin for real-time bidirectional communication.
 
     Manages persistent WebSocket connections to external services. Each
-    connection runs a reader thread that delivers incoming messages to the
-    session via inject_prompt(). The model can send messages through open
-    connections using ws_send.
+    connection runs a reader thread that publishes incoming messages to
+    TaskEventBus. The model subscribes via subscribeToTasks to receive
+    them as inline events (pushed via inject_prompt by the subscription
+    callback).
 
     Delivery model:
-        - Inbound: push via inject_prompt() — model wakes on message arrival
+        - Inbound: reader thread → TaskEventBus → subscribeToTasks →
+          inject_prompt() → model wakes on message arrival
         - Outbound: explicit via ws_send tool calls
         - The model never polls — it goes fully idle between messages
-        - Natural batching: messages that arrive during a busy turn queue up
-          and are delivered together when the turn completes
+        - Natural batching: messages that arrive during a busy turn queue
+          up in the session's message queue and are delivered together
 
     Lifecycle:
         1. initialize(config) — load and merge config
-        2. set_session(session) — receive session reference for inject_prompt()
-        3. ws_connect tool call — establish connection, return initial messages,
-           start reader thread in inject_prompt() delivery mode
-        4. Reader thread calls inject_prompt() on each message
-        5. Session wakes (if idle) or queues (if busy) → model processes
+        2. Model calls subscribeToTasks(event_types=["external_event"])
+        3. ws_connect tool call — establish connection, return initial
+           messages, start reader thread publishing to TaskEventBus
+        4. Reader thread publishes each message as EXTERNAL_EVENT
+        5. subscribeToTasks callback → inject_prompt() → model processes
         6. Model responds with ws_send if needed → goes idle → waits
         7. ws_close or shutdown() — close connections, stop reader threads
 
@@ -468,16 +459,6 @@ class WebSocketClientPlugin:
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Load config with standard precedence."""
         ...
-
-    def set_session(self, session: "JaatoSession") -> None:
-        """Receive session reference for inject_prompt() delivery.
-
-        Called automatically by plugin auto-wiring during configure().
-        The session reference is required for push delivery — without it,
-        the plugin falls back to buffer-only mode (messages accumulate
-        but are never delivered).
-        """
-        self._session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for WebSocket operations."""
@@ -533,13 +514,13 @@ The plugin exposes four tools, all `discoverability="discoverable"`:
 ### `ws_connect`
 
 Connect to a WebSocket endpoint. Returns a connection ID and any initial
-server messages (hello, auth challenge). All subsequent messages are
-delivered automatically via `inject_prompt()`.
+server messages (hello, auth challenge). Subsequent messages are published
+to `TaskEventBus` — use `subscribeToTasks` before connecting to receive them.
 
 ```json
 {
   "name": "ws_connect",
-  "description": "Connect to a WebSocket endpoint. Returns a connection_id and any initial server messages. After this call, incoming messages are delivered to you automatically — no polling needed. Use ws_send to send messages back.",
+  "description": "Connect to a WebSocket endpoint. Returns a connection_id and any initial server messages. Incoming messages are published to TaskEventBus as external_event — use subscribeToTasks before connecting to receive them. Use ws_send to send messages back.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -590,7 +571,7 @@ delivered automatically via `inject_prompt()`.
   "status": "connected",
   "url": "wss://stream.binance.com:9443/ws",
   "initial_messages": [],
-  "message": "Connected. Incoming messages will arrive as streaming updates."
+  "message": "Connected. Incoming messages published to event bus as external_event."
 }
 ```
 
@@ -825,36 +806,34 @@ notifies the plugin for system message injection into the session.
 
 ### System Messages
 
-Connection lifecycle events are delivered to the session via
-`inject_prompt()` as system messages, so the model sees them as new turns:
+Connection lifecycle events are published to `TaskEventBus` as
+`EXTERNAL_EVENT`s with a `"system"` message type, so they arrive through the
+same `subscribeToTasks` channel as regular messages:
 
-| Event | Injected Message |
-|-------|-----------------|
-| Disconnected | `[WebSocket ws-1] Connection closed by remote (code=1006). Reconnecting...` |
-| Reconnected | `[WebSocket ws-1] Reconnected successfully (was disconnected for 8.2s)` |
-| Reconnect failed | `[WebSocket ws-1] Reconnection failed after 5 attempts. Use ws_connect to reconnect.` |
-| Ping timeout | `[WebSocket ws-1] Connection appears dead (ping timeout). Closing.` |
+| Event | Event Data |
+|-------|-----------|
+| Disconnected | `{"source":"websocket","connection_id":"ws-1","message_type":"system","data":"Connection closed by remote (code=1006). Reconnecting..."}` |
+| Reconnected | `{"source":"websocket","connection_id":"ws-1","message_type":"system","data":"Reconnected successfully (was disconnected for 8.2s)"}` |
+| Reconnect failed | `{"source":"websocket","connection_id":"ws-1","message_type":"system","data":"Reconnection failed after 5 attempts. Use ws_connect to reconnect."}` |
+| Ping timeout | `{"source":"websocket","connection_id":"ws-1","message_type":"system","data":"Connection appears dead (ping timeout). Closing."}` |
 
-These are injected with `SourceType.SYSTEM` — they're queued if the session is
-busy and delivered when the session becomes idle.
+These flow through the same event bus pipeline — no special delivery path for
+system messages.
 
 ## Event Bus Integration
 
-Like the Webhook plugin, WebSocket events are published to `TaskEventBus` for
-cross-agent consumption. The reader thread does both in the message callback:
+Following the webhook plugin's pattern, the reader thread publishes each
+incoming WebSocket message to `TaskEventBus`. The owning session (and any
+other sessions) receive events via `subscribeToTasks`:
 
 ```python
 def _on_message_received(self, connection_id: str, message: IncomingMessage):
-    """Called by reader thread when a WebSocket message arrives."""
-    # 1. Inject into owning session (primary delivery — wakes idle model)
-    formatted = self._format_message(connection_id, message)
-    self._session.inject_prompt(
-        text=formatted,
-        source_id=f"ws_client:{connection_id}",
-        source_type=SourceType.SYSTEM,
-    )
+    """Called by reader thread when a WebSocket message arrives.
 
-    # 2. Publish to event bus (secondary — for cross-agent fan-out)
+    Publishes to TaskEventBus as an EXTERNAL_EVENT. The owning session
+    receives it via subscribeToTasks → inject_prompt() (set up during
+    ws_connect). Other sessions can also subscribe for fan-out.
+    """
     try:
         bus = TaskEventBus.get_instance()
         event = TaskEvent.create(
@@ -865,16 +844,36 @@ def _on_message_received(self, connection_id: str, message: IncomingMessage):
                 "connection_id": connection_id,
                 "message_type": message.type,
                 "data": message.data,
+                "formatted": self._format_message(connection_id, message),
             }
         )
         bus.publish(event)
     except Exception:
-        logger.debug("TaskEventBus unavailable, skipping cross-agent delivery")
+        logger.debug("TaskEventBus unavailable, message not delivered")
 ```
 
-This means other sessions can subscribe to WebSocket events via the event bus
-(using `pollForTasks`), enabling fan-out patterns (e.g., one connection shared
-across multiple agent sessions that each process different message types).
+**Delivery flow:**
+
+```
+Reader thread → TaskEventBus.publish()
+                    │
+                    ├─→ subscribeToTasks callback (owning session)
+                    │       └─→ inject_prompt() → new turn
+                    │
+                    └─→ subscribeToTasks callback (other sessions)
+                            └─→ inject_prompt() → new turn
+```
+
+**Model setup** (guided by system instructions and `ws_connect` tool result):
+
+```
+1. subscribeToTasks(event_types=["external_event"])   ← receive events
+2. ws_connect(url="wss://...")                         ← start connection
+3. Messages arrive as [SUBAGENT event=external_event] inline messages
+```
+
+This is the same pattern the webhook plugin uses — consistent across all
+event-driven plugins.
 
 ## Reconnection Strategy
 
@@ -890,8 +889,8 @@ def _attempt_reconnect(self):
     Attempts: delay = min(base_delay * 2^attempt, max_delay) + jitter
     Jitter: ±25% to prevent thundering herd on shared endpoints.
 
-    System messages about reconnection progress are injected into the
-    session via inject_prompt() so the model stays informed.
+    System messages about reconnection progress are published to the
+    event bus so the model stays informed via its subscription.
     """
     for attempt in range(self._config.reconnect_max_attempts):
         if self._stop_requested:
@@ -1044,7 +1043,7 @@ plugin doesn't need to know about Slack's API.
       }
     }
   },
-  "system_instructions": "You are a Slack bot connected via RTM WebSocket.\n\nOn startup:\n1. Call ws_connect(name=\"slack\") to connect.\n2. If the initial_messages contain a hello, you're ready.\n3. Incoming Slack messages will be delivered to you automatically.\n4. Parse each message JSON and respond using ws_send.\n5. If you receive a disconnect system message, wait — auto-reconnect is enabled.\n\nYou do not need to poll. Messages arrive as new turns.",
+  "system_instructions": "You are a Slack bot connected via RTM WebSocket.\n\nOn startup:\n1. Call subscribeToTasks(event_types=['external_event']) to receive events.\n2. Call ws_connect(name=\"slack\") to connect.\n3. If the initial_messages contain a hello, you're ready.\n4. Incoming Slack messages arrive as inline event notifications.\n5. Parse each message JSON and respond using ws_send.\n6. If you receive a disconnect event, wait — auto-reconnect is enabled.\n\nYou do not need to poll. Messages arrive as event notifications.",
   "max_turns": 0,
   "gc": {
     "type": "budget",
@@ -1076,7 +1075,7 @@ plugin doesn't need to know about Slack's API.
       }
     }
   },
-  "system_instructions": "You are a market data monitor.\n\nOn startup:\n1. ws_connect(name=\"binance\")\n2. ws_send to subscribe: {\"method\":\"SUBSCRIBE\",\"params\":[\"btcusdt@trade\",\"ethusdt@trade\"],\"id\":1}\n3. Trade data will be delivered to you in batches automatically.\n4. Analyze price movements and maintain a running summary.\n5. Alert on significant moves (>2% in 5 minutes).\n\nYou do not need to poll. Batches of trades arrive as new turns.",
+  "system_instructions": "You are a market data monitor.\n\nOn startup:\n1. subscribeToTasks(event_types=['external_event'])\n2. ws_connect(name=\"binance\")\n3. ws_send to subscribe: {\"method\":\"SUBSCRIBE\",\"params\":[\"btcusdt@trade\",\"ethusdt@trade\"],\"id\":1}\n4. Trade data arrives as event notifications — no polling needed.\n5. Analyze price movements and maintain a running summary.\n6. Alert on significant moves (>2% in 5 minutes).",
   "max_turns": 0,
   "gc": {
     "type": "budget",
@@ -1120,16 +1119,17 @@ The plugin validates WebSocket URLs before connecting:
 - Reconnection attempts are bounded (`reconnect_max_attempts`)
 - Ping timeouts detect dead connections
 
-### Injection Safety
+### Message Identification
 
-Messages injected via `inject_prompt()` are prefixed with
-`[WebSocket <connection_id>]` to clearly identify their source. The model
-can distinguish WebSocket messages from user messages or subagent results.
+WebSocket events published to the event bus include
+`source_agent="websocket:<connection_id>"`, which `subscribeToTasks` renders
+as `[SUBAGENT agent_id=websocket:ws-1 event=external_event]`. The model can
+distinguish WebSocket messages from webhook events, subagent results, and
+other event sources by the `source_agent` prefix.
 
-The formatted injection includes the raw message data as-is — no escaping or
-sanitization of the WebSocket payload content. This is intentional: the model
-needs to see the exact data to parse protocol-specific formats. The
-`[WebSocket ...]` prefix prevents confusion with other message sources.
+The event data includes the raw WebSocket message content as-is — no escaping
+or sanitization. This is intentional: the model needs to see the exact data
+to parse protocol-specific formats (JSON APIs, binary-encoded payloads).
 
 ## Comparison: WebSocket Client vs Interactive Shell
 
@@ -1141,20 +1141,17 @@ Key differences:
 | **Target** | Local processes (PTY) | Remote services (network) |
 | **Transport** | Pseudo-terminal (stdin/stdout) | WebSocket (TCP + TLS) |
 | **Output format** | Raw terminal output (ANSI stripped) | Structured messages (JSON, text) |
-| **Delivery** | Must use `shell_read`/`shell_input` | Push via `inject_prompt()` |
+| **Delivery** | Must use `shell_read`/`shell_input` | Push via event bus (`subscribeToTasks`) |
 | **Auth** | OS-level (user permissions) | Application-level (tokens, headers) |
 | **Reconnection** | N/A (process is dead) | Auto-reconnect with backoff |
 | **Use case** | REPLs, debuggers, SSH | APIs, event streams, chat bots |
 
 There is no overlap — they serve completely different integration patterns.
 
-**Note:** The webhook plugin already supports push delivery via
-`subscribeToTasks(event_types=["external_event"])`, which uses
-`inject_prompt()` under the hood. However, the webhook plugin's own system
-instructions still direct the model to use `pollForTasks`. A future
-enhancement could update the webhook plugin to recommend `subscribeToTasks`
-as the primary delivery mechanism (or add direct `inject_prompt()` delivery
-like this plugin does), fully unifying the push model across both plugins.
+**Note:** Both plugins use the same delivery model: publish to `TaskEventBus`,
+receive via `subscribeToTasks`. The webhook plugin's system instructions have
+been updated to recommend `subscribeToTasks` over `pollForTasks` (see commit
+in this branch), aligning both plugins on a consistent push-based pattern.
 
 ## Dependency Choice: `websockets`
 
@@ -1203,17 +1200,18 @@ and Interactive Shell plugins.
 | Buffer overflow | Oldest messages evicted (FIFO), `messages_dropped` counter incremented |
 | Max connections reached | `ws_connect` returns error listing active connections |
 | Reader thread crashes | Logged, status changes to `"error"`, system message injected |
-| Session reference missing | Messages buffer but are never delivered (logged as warning) |
-| inject_prompt() during busy turn | Queued by session's message queue, delivered after current turn |
+| TaskEventBus unavailable | Messages lost, logged as warning |
+| Busy turn during delivery | subscribeToTasks → inject_prompt() queues in session message queue, delivered after current turn |
 
 ## Lifecycle & Cleanup
 
 1. **Plugin initialize** — config loaded and merged, no connections opened.
-2. **set_session()** — session reference stored for `inject_prompt()` delivery.
+2. **Model subscribes** — `subscribeToTasks(event_types=["external_event"])`.
 3. **`ws_connect` call** — connection established, initial messages captured and
-   returned, reader thread started in `inject_prompt()` delivery mode.
-4. **Session active** — connections running, messages pushed via `inject_prompt()`,
-   model responding with `ws_send` as needed.
+   returned, reader thread started publishing to `TaskEventBus`.
+4. **Session active** — connections running, messages published to event bus,
+   delivered via `subscribeToTasks` → `inject_prompt()`, model responding
+   with `ws_send` as needed.
 5. **Session GC** — old turns with processed messages are garbage-collected;
    connections persist and continue delivering new messages.
 6. **`ws_close` call** — individual connection closed gracefully.
@@ -1238,12 +1236,12 @@ session crashes without calling `shutdown()`.
 
 - **Echo server** — start a local WebSocket echo server (using `websockets`
   `serve`), connect, verify initial messages returned.
-- **Push delivery** — connect to echo server, send message, verify it's
-  delivered via mock `inject_prompt()` call.
+- **Event bus delivery** — connect to echo server, send message, verify it's
+  published to `TaskEventBus` as `EXTERNAL_EVENT`.
 - **Natural batching** — send 100 rapid messages while session is busy,
   verify they queue up and arrive together when turn completes.
 - **Idle wakeup** — session is idle, message arrives, verify
-  `inject_prompt()` triggers a new turn.
+  `subscribeToTasks` callback triggers a new turn via `inject_prompt()`.
 - **Reconnection** — connect, kill server, verify reconnect with backoff,
   restart server, verify push delivery resumes.
 - **Concurrent connections** — open multiple connections, verify independent
@@ -1277,9 +1275,9 @@ with serve(echo_handler, "127.0.0.1", 0) as server:
   Buffers, MessagePack) with schema registration.
 - **Connection groups** — connect to multiple related endpoints with a single
   merged delivery stream.
-- **Webhook plugin direct push** — add direct `inject_prompt()` delivery to
-  the webhook plugin (like this plugin), bypassing the event bus indirection
-  for single-session use cases.
+- **Shared event bus tools** — extract `subscribeToTasks` / `pollForTasks`
+  from the todo plugin into a standalone event bus plugin, so any plugin
+  can use them without depending on the todo plugin.
 - **Shared connections** — multiple sessions sharing a single WebSocket
   connection (via event bus fan-out) to avoid duplicate connections to the same
   endpoint.
