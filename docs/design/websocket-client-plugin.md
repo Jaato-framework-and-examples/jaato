@@ -80,7 +80,7 @@ and maintain a persistent connection.
 | **Bidirectional** | No (receive only) | Yes (send and receive) |
 | **Connection lifecycle** | Per-request | Long-lived, needs reconnection logic |
 | **Endpoint requirement** | Agent needs a public/reachable URL | Agent only needs outbound access |
-| **Delivery model** | Poll-based (`webhook_poll`) | Push via `StreamManager` (idle-time delivery) |
+| **Delivery model** | Event bus (`pollForTasks`) + `webhook_poll` fallback | Push via `StreamManager` (idle-time delivery) |
 | **Dependency** | stdlib only (`http.server`) | `websockets` (optional) |
 
 The two plugins together cover the vast majority of real-time integration
@@ -126,17 +126,21 @@ strategies for specific integrations:
 
 ## Streaming Delivery via `StreamManager`
 
-### Why Not Poll?
+### Why Not the Webhook Plugin's Delivery Model?
 
-The webhook plugin uses a poll loop: the model calls `webhook_poll` in a loop,
-blocking up to N seconds each time. This works but has drawbacks:
+The webhook plugin delivers events via `webhook_subscribe` → `TaskEventBus` →
+`pollForTasks` (with `webhook_poll` as a direct fallback). Both paths require
+the model to actively poll — either the event bus or the subscription buffer.
+This works for discrete HTTP events but has drawbacks for high-frequency
+persistent streams:
 
 - **Wasted turns.** Empty polls consume model turns and tokens for nothing.
 - **Latency.** Messages wait in a buffer until the model's next poll call.
 - **Fragile loop.** If the model forgets to poll (e.g., after a GC cycle that
   summarizes away the loop instructions), messages pile up silently.
-- **Unnatural.** The model is doing infrastructure work (polling) instead of
-  application work (processing messages).
+- **Unnatural for streams.** WebSocket connections are continuous — the model
+  should be doing application work (processing messages), not infrastructure
+  work (polling in a loop).
 
 ### Why Not a Custom Batcher?
 
@@ -1163,9 +1167,12 @@ Key differences:
 There is no overlap — they serve completely different integration patterns.
 
 **Note:** The streaming delivery model used here could retroactively benefit
-the Webhook plugin as well. A future enhancement could make the Webhook plugin
-implement `StreamingCapable`, replacing `webhook_poll` with `StreamManager`
-delivery — unifying the delivery model across both plugins.
+the Webhook plugin as well. Currently the webhook plugin delivers via
+`TaskEventBus` + `pollForTasks` (with `webhook_poll` as fallback) — both
+require the model to actively poll. A future enhancement could make the
+Webhook plugin implement `StreamingCapable`, adding `StreamManager` delivery
+as a third option — unifying the delivery model across both plugins and
+eliminating the need for poll loops entirely.
 
 ## Dependency Choice: `websockets`
 
