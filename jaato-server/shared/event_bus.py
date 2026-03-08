@@ -1,22 +1,19 @@
-"""Shared event bus for cross-agent and cross-plugin event coordination.
+"""Per-runtime event bus for cross-agent and cross-plugin event coordination.
 
-This module provides the ``EventBus`` singleton that enables:
+Each ``JaatoRuntime`` creates its own ``EventBus`` instance, ensuring
+session isolation. Agents within a single runtime (main + subagents)
+share the same bus for plan coordination and event delivery.
+
+The event bus enables:
 - Cross-agent task coordination (plan/step lifecycle events)
 - External event ingestion (webhooks, WebSocket streams)
 - Plugin-to-plugin communication
 
-The event bus is cross-cutting infrastructure shared by all agents
-in a runtime. It was extracted from ``shared.plugins.todo.event_bus``
-because event coordination is not a todo-specific concern.
-
 Task-specific features (dependency tracking, resolution callbacks)
-remain in the todo plugin's ``TaskEventBusMixin`` which wraps this
-bus with additional behavior.
+remain in the todo plugin's ``TaskEventBus`` which wraps this bus.
 
 Usage:
-    from shared.event_bus import EventBus, get_event_bus
-
-    bus = get_event_bus()
+    bus = runtime.event_bus  # from JaatoRuntime
     sub_id = bus.subscribe(
         subscriber_agent="main",
         filter=EventFilter(event_types=[EventType.EXTERNAL_EVENT]),
@@ -63,45 +60,11 @@ class EventBus:
 
     Lifecycle:
         Created by JaatoRuntime during initialization. Lives for
-        the lifetime of the runtime. Use ``get_event_bus()`` only
-        as a fallback for code that doesn't have access to the runtime.
+        the lifetime of the runtime.
     """
 
-    # Fallback singleton for backward compatibility (used by code that
-    # cannot access a runtime reference, e.g. webhook plugin).
-    _instance: Optional['EventBus'] = None
-    _lock = threading.Lock()
-
-    @classmethod
-    def get_instance(cls) -> 'EventBus':
-        """Get or create the fallback singleton instance.
-
-        Prefer accessing the EventBus via ``JaatoRuntime.event_bus``
-        for proper session isolation. This fallback exists for code
-        that cannot reach the runtime (e.g. webhook HTTP handler threads).
-        """
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-                    logger.debug("EventBus fallback singleton created")
-        return cls._instance
-
-    @classmethod
-    def reset(cls) -> None:
-        """Reset the fallback singleton (for testing).
-
-        Clears all subscriptions, event history, and callbacks.
-        """
-        with cls._lock:
-            cls._instance = None
-            logger.debug("EventBus singleton reset")
-
     def __init__(self):
-        """Initialize the event bus.
-
-        Note: Use ``get_instance()`` instead of direct construction.
-        """
+        """Initialize the event bus."""
         # Subscription storage: subscription_id -> Subscription
         self._subscriptions: Dict[str, Subscription] = {}
 
@@ -411,7 +374,3 @@ class EventBus:
                 "events_in_history": len(self._event_history),
             }
 
-
-def get_event_bus() -> EventBus:
-    """Convenience function to get the EventBus singleton."""
-    return EventBus.get_instance()

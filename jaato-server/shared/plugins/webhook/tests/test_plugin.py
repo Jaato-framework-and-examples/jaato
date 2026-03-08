@@ -322,17 +322,25 @@ class TestWebhookPluginLifecycle:
 class TestEventBusBridge:
     """Tests for webhook → TaskEventBus bridge."""
 
-    def _get_bus(self):
-        from shared.plugins.todo.event_bus import TaskEventBus, get_event_bus
-        TaskEventBus.reset()
-        return get_event_bus()
+    def _make_bus_and_session(self):
+        """Create a fresh EventBus, TaskEventBus, and mock session."""
+        from shared.event_bus import EventBus
+        from shared.plugins.todo.event_bus import TaskEventBus
+        from unittest.mock import Mock
+        event_bus = EventBus()
+        task_bus = TaskEventBus(event_bus)
+        session = Mock()
+        session._runtime = Mock()
+        session._runtime.event_bus = event_bus
+        return task_bus, session
 
     def test_webhook_publishes_to_bus(self):
         from jaato_sdk.plugins.todo.models import TaskEventType
-        bus = self._get_bus()
+        bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
         plugin.initialize({"port": port})
+        plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook", {"action": "test"})
@@ -349,7 +357,7 @@ class TestEventBusBridge:
 
     def test_bus_event_carries_route_and_type(self):
         from jaato_sdk.plugins.todo.models import TaskEventType
-        bus = self._get_bus()
+        bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
         plugin.initialize({
@@ -361,6 +369,7 @@ class TestEventBusBridge:
                 },
             },
         })
+        plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook/github", {"ref": "main"},
@@ -379,10 +388,11 @@ class TestEventBusBridge:
 
     def test_bus_events_retrievable_via_wait(self):
         from jaato_sdk.plugins.todo.models import TaskEventType
-        bus = self._get_bus()
+        bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
         plugin.initialize({"port": port})
+        plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook", {"n": 1})
@@ -398,7 +408,7 @@ class TestEventBusBridge:
 
     def test_bus_events_filterable_by_agent(self):
         from jaato_sdk.plugins.todo.models import TaskEventType
-        bus = self._get_bus()
+        bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
         plugin.initialize({
@@ -408,6 +418,7 @@ class TestEventBusBridge:
                 "slack": {"path": "/webhook/slack"},
             },
         })
+        plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook/github", {"from": "gh"})
@@ -425,10 +436,11 @@ class TestEventBusBridge:
 
     def test_multiple_webhooks_publish_multiple_events(self):
         from jaato_sdk.plugins.todo.models import TaskEventType
-        bus = self._get_bus()
+        bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
         plugin.initialize({"port": port})
+        plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook", {"n": 1})

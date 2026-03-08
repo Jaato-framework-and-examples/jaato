@@ -26,7 +26,7 @@ from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
-from .event_bus import TaskEventBus, get_event_bus
+from .event_bus import TaskEventBus
 from jaato_sdk.plugins.base import UserCommand
 
 
@@ -143,13 +143,11 @@ class TodoPlugin:
         _thread_local.session = session
 
         # Switch to per-runtime event bus for session isolation
-        runtime = getattr(session, '_runtime', None) if session else None
-        if runtime and hasattr(runtime, 'event_bus'):
-            new_bus = runtime.event_bus
-            if new_bus is not self._event_bus:
-                self._event_bus = new_bus
-                self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
-                self._trace(f"set_session: switched to per-runtime event bus")
+        new_bus = session._runtime.event_bus
+        if new_bus is not self._event_bus:
+            self._event_bus = new_bus
+            self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
+            self._trace(f"set_session: switched to per-runtime event bus")
 
     @property
     def name(self) -> str:
@@ -267,11 +265,9 @@ class TodoPlugin:
                 print("Falling back to console reporter")
                 self._reporter = ConsoleReporter()
 
-        # Initialize event bus for cross-agent collaboration.
-        # Actual bus assignment is deferred to set_session() where we can
-        # use the per-runtime bus for session isolation. Use fallback
-        # singleton only if set_session() is never called.
-        self._event_bus = get_event_bus()
+        # Initialize event bus placeholder for cross-agent collaboration.
+        # The real per-runtime bus is assigned in set_session().
+        self._event_bus = None
         # Register dependency resolver callback
         self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
 

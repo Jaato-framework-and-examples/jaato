@@ -122,19 +122,9 @@ class EventBusTools:
         self._bus: Optional[Any] = None  # lazy import to avoid circular deps
 
     def _get_bus(self):
-        """Get the session's EventBus instance.
-
-        Uses the per-runtime bus for proper session isolation. Falls
-        back to the process-wide singleton only if the session has no
-        runtime reference (should not happen in normal operation).
-        """
+        """Get the session's EventBus instance from the runtime."""
         if self._bus is None:
-            runtime = getattr(self._session, '_runtime', None)
-            if runtime and hasattr(runtime, 'event_bus'):
-                self._bus = runtime.event_bus
-            else:
-                from shared.event_bus import get_event_bus
-                self._bus = get_event_bus()
+            self._bus = self._session._runtime.event_bus
         return self._bus
 
     def _get_agent_name(self) -> str:

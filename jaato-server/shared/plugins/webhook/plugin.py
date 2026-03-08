@@ -435,22 +435,17 @@ class WebhookPlugin:
             headers: Request headers dict.
             payload: Parsed JSON payload.
         """
+        if not self._session:
+            logger.debug("No session set, skipping EventBus publish")
+            return
+
         try:
-            from shared.event_bus import get_event_bus
             from jaato_sdk.event_bus import Event, EventType
         except Exception:
             logger.debug("EventBus not available, skipping bus publish")
             return
 
-        # Prefer per-runtime EventBus for session isolation; fall back to
-        # the process-wide singleton for backward compatibility.
-        bus = None
-        if self._session:
-            runtime = getattr(self._session, '_runtime', None)
-            if runtime and hasattr(runtime, 'event_bus'):
-                bus = runtime.event_bus
-        if bus is None:
-            bus = get_event_bus()
+        bus = self._session._runtime.event_bus
         task_event = Event(
             event_id=event_id,
             event_type=EventType.EXTERNAL_EVENT,
