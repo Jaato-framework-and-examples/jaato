@@ -129,8 +129,10 @@ class WebhookPlugin:
             ToolSchema(
                 name='webhook_subscribe',
                 description=(
-                    'Subscribe to incoming webhook events. Returns a '
-                    'subscription ID for polling. Call this once at session start.'
+                    'Subscribe to incoming webhook events and start the HTTP '
+                    'listener. Call this once at session start, then use '
+                    'subscribeToTasks(event_types=["external_event"]) to '
+                    'receive events automatically.'
                 ),
                 parameters={
                     "type": "object",
@@ -153,8 +155,8 @@ class WebhookPlugin:
                 name='webhook_poll',
                 description=(
                     'Fallback: poll for webhook events directly. Prefer '
-                    'pollForTasks(event_types=["external_event"]) for event '
-                    'delivery via the shared bus. Blocks up to timeout seconds.'
+                    'subscribeToTasks(event_types=["external_event"]) for '
+                    'push delivery. Blocks up to timeout seconds.'
                 ),
                 parameters={
                     "type": "object",
@@ -204,9 +206,10 @@ class WebhookPlugin:
             "`external_event` events with `source_agent=\"webhook:<route>\"`.\n\n"
             "To start processing webhooks:\n"
             "1. Call `webhook_subscribe` to start the HTTP listener\n"
-            "2. Use `pollForTasks(event_types=[\"external_event\"])` to receive "
-            "events via the shared event bus\n"
-            "3. Process each event and poll again\n\n"
+            "2. Call `subscribeToTasks(event_types=[\"external_event\"])` to "
+            "receive events automatically — they arrive as inline messages, "
+            "no polling needed\n"
+            "3. Process each event as it arrives\n\n"
             "`webhook_poll` is available as a fallback for direct polling.\n"
             "Use `webhook_status` to check listener health and statistics."
         )
@@ -408,7 +411,8 @@ class WebhookPlugin:
 
         This is the primary delivery mechanism. Events appear as
         ``EXTERNAL_EVENT`` with ``source_agent="webhook:<route>"``,
-        retrievable via ``pollForTasks(event_types=["external_event"])``.
+        delivered via ``subscribeToTasks(event_types=["external_event"])``
+        or retrievable via ``pollForTasks`` as a fallback.
 
         Args:
             event_id: Unique event identifier.

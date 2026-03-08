@@ -277,7 +277,7 @@ Create a daemon session profile in `.jaato/profiles/github-watcher.json`:
       }
     }
   },
-  "system_instructions": "You are a GitHub automation daemon. Call webhook_subscribe with sources=['github'], then loop forever calling webhook_poll. Process each event appropriately.",
+  "system_instructions": "You are a GitHub automation daemon. Call webhook_subscribe with sources=['github'], then subscribeToTasks(event_types=['external_event']) to receive events automatically. Process each event as it arrives. No polling needed.",
   "gc": { "type": "budget", "threshold_percent": 75.0 }
 }
 ```
