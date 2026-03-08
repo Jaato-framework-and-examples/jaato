@@ -131,7 +131,32 @@ messages (e.g., a Slack bot waiting for mentions). The delivery mechanism must:
 3. **Batch naturally** — if messages arrive in bursts while the model is busy,
    deliver them together.
 
-### Why Not the Event Bus Subscription Model?
+### How `inject_prompt()` Wakes Idle Sessions
+
+`inject_prompt()` can start a new model turn on an idle session — but only
+when the **continuation callback** is set. This callback is configured by
+`JaatoServer.initialize()` (`server/core.py:2284`) and calls
+`_start_model_thread()` to kick off a new turn:
+
+```python
+# jaato_session.py:680-689 — inject_prompt() on idle session
+if (
+    self._activity_phase == ActivityPhase.IDLE
+    and not self._is_running
+    and self._on_continuation_needed    # ← set by server only
+):
+    self._on_continuation_needed(text)  # → _start_model_thread()
+```
+
+In **daemon mode** (the primary use case for WebSocket connections), this
+callback is always set. In standalone/interactive mode, `inject_prompt()`
+on an idle session just queues the message — but standalone mode is not a
+meaningful scenario for this plugin (users provide input directly).
+
+Note: `subscribeToTasks` (todo plugin) also relies on `inject_prompt()` for
+its push delivery — the same mechanism, same daemon-mode requirement.
+
+### Why Direct `inject_prompt()` Instead of the Event Bus?
 
 The `TaskEventBus` already supports push delivery via `subscribeToTasks` —
 the todo plugin's subscription callback uses `inject_prompt()` to push events
