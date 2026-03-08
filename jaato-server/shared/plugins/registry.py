@@ -657,6 +657,19 @@ class PluginRegistry:
 
         plugin = self._plugins[name]
 
+        # Enrichment-only plugins don't provide tools — initialize them and
+        # track in _enrichment_only instead of _exposed so that
+        # get_exposed_tool_schemas / get_plugin_for_tool never call
+        # get_tool_schemas() / get_executors() on them.
+        if name in self._enrichment_only:
+            if not hasattr(plugin, '_initialized'):
+                plugin.initialize(config)
+                plugin._initialized = True
+                if config:
+                    self._configs[name] = config
+                _trace(f" Enrichment-only plugin '{name}' initialized (not exposed)")
+            return True
+
         # Check model requirements if model_name is set
         if self._model_name and hasattr(plugin, 'get_model_requirements'):
             requirements = plugin.get_model_requirements()

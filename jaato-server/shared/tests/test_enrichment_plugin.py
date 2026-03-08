@@ -340,3 +340,29 @@ class TestRegistryEnrichmentPlugin:
 
         result = registry.enrich_prompt("Hello")
         assert result.prompt == "Hello [enrichment] [tool]"
+
+    def test_expose_all_skips_enrichment_plugins(self):
+        """expose_all() must not add enrichment-only plugins to _exposed.
+
+        Enrichment plugins don't implement get_tool_schemas()/get_executors(),
+        so if they end up in _exposed, get_exposed_tool_schemas() and
+        get_plugin_for_tool() will raise AttributeError.
+        """
+        registry = PluginRegistry()
+
+        # Register an enrichment-only plugin
+        enrichment_plugin = PromptEnrichmentOnly()
+        registry.register_plugin(enrichment_plugin)
+
+        # expose_all iterates _plugins and calls expose_tool on each
+        registry.expose_all()
+
+        # Enrichment plugin must NOT be in _exposed
+        assert enrichment_plugin.name not in registry._exposed
+        assert enrichment_plugin.name in registry._enrichment_only
+
+        # These must not raise AttributeError
+        schemas = registry.get_exposed_tool_schemas()
+        executors = registry.get_exposed_executors()
+        assert isinstance(schemas, list)
+        assert isinstance(executors, dict)
