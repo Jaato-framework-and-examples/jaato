@@ -323,10 +323,9 @@ class TestEventBusBridge:
     """Tests for webhook → TaskEventBus bridge."""
 
     def _get_bus(self):
-        from shared.plugins.todo.event_bus import get_event_bus
-        bus = get_event_bus()
-        bus._event_history.clear()
-        return bus
+        from shared.plugins.todo.event_bus import TaskEventBus, get_event_bus
+        TaskEventBus.reset()
+        return get_event_bus()
 
     def test_webhook_publishes_to_bus(self):
         from jaato_sdk.plugins.todo.models import TaskEventType

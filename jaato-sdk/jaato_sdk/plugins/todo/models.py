@@ -1,6 +1,11 @@
 """Data models for the TODO plugin.
 
 Defines the core data structures for plans, steps, and progress tracking.
+
+Event bus types (``TaskEventType``, ``TaskEvent``, ``EventFilter``,
+``Subscription``) are re-exported from ``jaato_sdk.event_bus`` for
+backward compatibility. New code should import directly from
+``jaato_sdk.event_bus``.
 """
 
 import uuid
@@ -8,6 +13,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+# Re-export event bus types for backward compatibility.
+# These were originally defined here but have been extracted to
+# jaato_sdk.event_bus since the event bus is cross-cutting infrastructure.
+from jaato_sdk.event_bus import (  # noqa: F401
+    EventType as TaskEventType,
+    Event,
+    EventFilter,
+    Subscription,
+)
 
 
 class StepStatus(Enum):
@@ -18,34 +33,6 @@ class StepStatus(Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     BLOCKED = "blocked"  # Waiting on cross-agent dependencies
-
-
-class TaskEventType(Enum):
-    """Types of task events for cross-agent collaboration.
-
-    These events are published to the TaskEventBus when plan/step
-    state changes, enabling other agents to react and coordinate.
-    """
-    # Plan lifecycle events
-    PLAN_CREATED = "plan_created"
-    PLAN_STARTED = "plan_started"
-    PLAN_COMPLETED = "plan_completed"
-    PLAN_FAILED = "plan_failed"
-    PLAN_CANCELLED = "plan_cancelled"
-
-    # Step lifecycle events
-    STEP_ADDED = "step_added"
-    STEP_STARTED = "step_started"
-    STEP_COMPLETED = "step_completed"
-    STEP_FAILED = "step_failed"
-    STEP_SKIPPED = "step_skipped"
-
-    # Collaboration events
-    STEP_BLOCKED = "step_blocked"      # Step waiting on dependencies
-    STEP_UNBLOCKED = "step_unblocked"  # All dependencies satisfied
-
-    # External events (published by plugins, not plan/step lifecycle)
-    EXTERNAL_EVENT = "external_event"  # Webhook or other external ingress
 
 
 class PlanStatus(Enum):
@@ -153,131 +140,21 @@ class TaskRef:
                 self.step_id == other.step_id)
 
 
-@dataclass
-class EventFilter:
-    """Filter for subscribing to specific task events.
+    # NOTE: EventFilter, Subscription, and TaskEvent are imported from
+    # jaato_sdk.event_bus at the top of this module.
+    # TaskEventType is an alias for jaato_sdk.event_bus.EventType.
 
-    All fields are optional - None means "match any".
-    Empty event_types list means "match all event types".
+
+class TaskEvent(Event):
+    """Backward-compatible alias for ``Event`` with a todo-specific ``create()`` classmethod.
+
+    The generic ``Event.create()`` takes raw fields (``source_agent``, etc.).
+    This subclass overrides ``create()`` to accept ``TodoPlan``/``TodoStep``
+    objects, preserving the original call pattern used throughout the todo
+    plugin and its tests.
+
+    ``TaskEvent`` instances are ``Event`` instances (``isinstance`` check passes).
     """
-    agent_id: Optional[str] = None       # None or "*" = any agent
-    plan_id: Optional[str] = None        # None = any plan
-    step_id: Optional[str] = None        # None = any step
-    event_types: List[TaskEventType] = field(default_factory=list)  # Empty = all
-
-    def matches(self, event: 'TaskEvent') -> bool:
-        """Check if an event matches this filter.
-
-        Args:
-            event: The TaskEvent to check.
-
-        Returns:
-            True if the event matches all specified filter criteria.
-        """
-        # Agent filter
-        if self.agent_id and self.agent_id != "*":
-            if event.source_agent != self.agent_id:
-                return False
-
-        # Plan filter
-        if self.plan_id and event.source_plan_id != self.plan_id:
-            return False
-
-        # Step filter
-        if self.step_id and event.source_step_id != self.step_id:
-            return False
-
-        # Event type filter
-        if self.event_types and event.event_type not in self.event_types:
-            return False
-
-        return True
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "agent_id": self.agent_id,
-            "plan_id": self.plan_id,
-            "step_id": self.step_id,
-            "event_types": [e.value for e in self.event_types],
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'EventFilter':
-        """Create from dictionary."""
-        event_types = []
-        for et in data.get("event_types", []):
-            try:
-                event_types.append(TaskEventType(et))
-            except ValueError:
-                pass  # Skip invalid event types
-        return cls(
-            agent_id=data.get("agent_id"),
-            plan_id=data.get("plan_id"),
-            step_id=data.get("step_id"),
-            event_types=event_types,
-        )
-
-
-@dataclass
-class Subscription:
-    """A subscription to task events.
-
-    When events matching the filter are published, the subscription's
-    action is executed.
-    """
-    subscription_id: str
-    subscriber_agent: str    # Agent that created the subscription
-    filter: EventFilter
-
-    # Action when event matches
-    action_type: str = "callback"  # "callback", "unblock_step", "inject_message"
-    action_target: Optional[str] = None  # step_id to unblock, callback name, etc.
-
-    # Lifecycle
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat() + "Z")
-    expires_after: Optional[int] = None   # Auto-remove after N matches (None = persistent)
-    match_count: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "subscription_id": self.subscription_id,
-            "subscriber_agent": self.subscriber_agent,
-            "filter": self.filter.to_dict(),
-            "action_type": self.action_type,
-            "action_target": self.action_target,
-            "created_at": self.created_at,
-            "expires_after": self.expires_after,
-            "match_count": self.match_count,
-        }
-
-
-@dataclass
-class TaskEvent:
-    """Event published when task state changes.
-
-    These events are published to the TaskEventBus and delivered to
-    matching subscribers. They enable cross-agent coordination.
-    """
-    event_id: str
-    event_type: TaskEventType
-    timestamp: str  # ISO8601
-
-    # Source identification
-    source_agent: str
-    source_plan_id: str
-    source_plan_title: str
-    source_step_id: Optional[str] = None
-    source_step_description: Optional[str] = None
-    source_step_sequence: Optional[int] = None
-
-    # Event payload - varies by event type:
-    # - plan_created: {steps: [{step_id, description, sequence}, ...]}
-    # - step_completed: {output: {...}, result: "..."}
-    # - step_blocked: {blocked_by: [{agent_id, step_id}, ...]}
-    # - step_unblocked: {received_outputs: {...}}
-    payload: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -286,9 +163,9 @@ class TaskEvent:
         agent_id: str,
         plan: 'TodoPlan',
         step: Optional['TodoStep'] = None,
-        payload: Optional[Dict[str, Any]] = None
+        payload: Optional[Dict[str, Any]] = None,
     ) -> 'TaskEvent':
-        """Create a new TaskEvent.
+        """Create a TaskEvent from a plan and optional step.
 
         Args:
             event_type: Type of event.
@@ -310,44 +187,22 @@ class TaskEvent:
             source_step_id=step.step_id if step else None,
             source_step_description=step.description if step else None,
             source_step_sequence=step.sequence if step else None,
-            payload=payload or {}
+            payload=payload or {},
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "event_id": self.event_id,
-            "event_type": self.event_type.value,
-            "timestamp": self.timestamp,
-            "source_agent": self.source_agent,
-            "source_plan_id": self.source_plan_id,
-            "source_plan_title": self.source_plan_title,
-            "source_step_id": self.source_step_id,
-            "source_step_description": self.source_step_description,
-            "source_step_sequence": self.source_step_sequence,
-            "payload": self.payload,
-        }
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TaskEvent':
-        """Create from dictionary."""
-        try:
-            event_type = TaskEventType(data.get("event_type", "step_completed"))
-        except ValueError:
-            event_type = TaskEventType.STEP_COMPLETED
+def create_task_event(
+    event_type: TaskEventType,
+    agent_id: str,
+    plan: 'TodoPlan',
+    step: Optional['TodoStep'] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> TaskEvent:
+    """Create a TaskEvent from a plan and optional step.
 
-        return cls(
-            event_id=data.get("event_id", str(uuid.uuid4())),
-            event_type=event_type,
-            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
-            source_agent=data.get("source_agent", ""),
-            source_plan_id=data.get("source_plan_id", ""),
-            source_plan_title=data.get("source_plan_title", ""),
-            source_step_id=data.get("source_step_id"),
-            source_step_description=data.get("source_step_description"),
-            source_step_sequence=data.get("source_step_sequence"),
-            payload=data.get("payload", {}),
-        )
+    Convenience function equivalent to ``TaskEvent.create()``.
+    """
+    return TaskEvent.create(event_type, agent_id, plan, step, payload)
 
 
 @dataclass
