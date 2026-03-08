@@ -8,10 +8,12 @@ channels. Where the Webhook plugin is an inbound HTTP listener (external
 services push events *to* the agent), this plugin is an outbound connector
 (the agent reaches out *to* external services).
 
-Incoming messages are **pushed directly into the session** via
-`JaatoSession.inject_prompt()` — the model doesn't poll. It connects once,
-then simply receives messages as new turns, processes them, and waits for
-the next one.
+Incoming messages are delivered through the framework's existing **streaming
+tool infrastructure** (`StreamingCapable` + `StreamManager`). The model calls
+`ws_connect` which starts an infinite stream — incoming WebSocket messages
+become `StreamChunk`s that the `StreamManager` delivers when the model is idle.
+No polling, no custom batching — just the same mechanism that `grep_content:stream`
+and `glob_files:stream` already use.
 
 ```
 Agent Session                  WebSocket Client Plugin           External Service
@@ -23,25 +25,28 @@ Agent Session                  WebSocket Client Plugin           External Servic
         │                                ├─────────────────────────────►│
         │                                │  101 Switching Protocols     │
         │                                │◄─────────────────────────────┤
-        │  {connection_id: "ws-1"}       │                              │
+        │  {connection_id, initial_msgs} │                              │
         │◄───────────────────────────────┤                              │
+        │                                │  register stream with        │
+        │                                │  StreamManager               │
         │                                │                              │
-        │         (session is idle)      │◄────── message ─────────────┤
+        │         (model idle)           │◄────── message ─────────────┤
         │                                │◄────── message ─────────────┤
+        │                                │  → StreamChunk → StreamManager
         │                                │                              │
-        │                    inject_prompt(batched messages)            │
-        │◄───────────────────────────────┤                              │
-        │  (new turn triggered)          │                              │
+        │  <streaming_updates>           │                              │
+        │  [ws-1] 2 messages             │                              │
+        │◄───────────────────────────────┤  (idle-time delivery)       │
         │  model processes messages      │                              │
         │                                │                              │
         │  ws_send(data={...})           │                              │
         ├───────────────────────────────►│  ────── message ────────────►│
         │                                │                              │
-        │         (session idle again)   │                              │
-        │              ...waits...       │                              │
-        │                                │◄────── message ─────────────┤
-        │◄───────────────────────────────┤  inject_prompt()            │
-        │  (new turn triggered)          │                              │
+        │         (model idle again)     │◄────── message ─────────────┤
+        │                                │  → StreamChunk               │
+        │  <streaming_updates>           │                              │
+        │◄───────────────────────────────┤  (idle-time delivery)       │
+        │  (model processes)             │                              │
 ```
 
 ## Motivation
@@ -75,7 +80,7 @@ and maintain a persistent connection.
 | **Bidirectional** | No (receive only) | Yes (send and receive) |
 | **Connection lifecycle** | Per-request | Long-lived, needs reconnection logic |
 | **Endpoint requirement** | Agent needs a public/reachable URL | Agent only needs outbound access |
-| **Delivery model** | Poll-based (`webhook_poll`) | Push-based (`inject_prompt`) |
+| **Delivery model** | Poll-based (`webhook_poll`) | Push via `StreamManager` (idle-time delivery) |
 | **Dependency** | stdlib only (`http.server`) | `websockets` (optional) |
 
 The two plugins together cover the vast majority of real-time integration
@@ -101,23 +106,25 @@ strategies for specific integrations:
 
 ## Design Principles
 
-1. **Push, don't poll.** Incoming messages are delivered to the model via
-   `inject_prompt()`. The model doesn't waste turns on empty poll loops —
-   it wakes up only when there's something to process.
+1. **Reuse the streaming infrastructure.** The framework's `StreamingCapable`
+   protocol and `StreamManager` already solve incremental delivery to the
+   model — idle-time chunk batching, background collection, `dismiss_stream`.
+   A WebSocket connection is just an infinite stream. No custom delivery
+   layer needed.
 2. **Model drives outbound.** The model calls `ws_connect` and `ws_send`.
    The plugin never sends data without the model's explicit instruction.
    Inbound delivery is the only automatic behavior.
 3. **Connections are explicit.** The model connects to specific URLs with
    specific parameters. No magic auto-connections. Pre-configured named
    connections in config are a convenience, not a requirement.
-4. **Reconnection is opt-in.** Dropped connections surface as injected
-   system messages. Auto-reconnect is configurable per-connection but
-   defaults to off — the model should understand when connections drop.
+4. **Reconnection is opt-in.** Dropped connections surface as stream
+   chunks. Auto-reconnect is configurable per-connection but defaults to
+   off — the model should understand when connections drop.
 5. **Optional dependency.** The plugin requires `websockets` but degrades
    gracefully — importing the plugin without the dependency installed
    produces a clear error message, not a crash.
 
-## Push-Based Delivery Architecture
+## Streaming Delivery via `StreamManager`
 
 ### Why Not Poll?
 
@@ -131,112 +138,149 @@ blocking up to N seconds each time. This works but has drawbacks:
 - **Unnatural.** The model is doing infrastructure work (polling) instead of
   application work (processing messages).
 
-### How Push Works
+### Why Not a Custom Batcher?
 
-The WebSocket client plugin uses `JaatoSession.inject_prompt()` — the same
-mechanism that subagents use to send results back to parent sessions:
+An earlier version of this design proposed a custom `MessageBatcher` with
+debounce timers and `inject_prompt()`. But the framework already has
+`StreamManager` + `StreamingCapable` — the same infrastructure that powers
+`grep_content:stream` and `glob_files:stream`. A WebSocket connection is just
+an infinite stream of chunks. Building a custom delivery layer would duplicate:
+
+- Idle-time chunk delivery (already in `StreamManager`)
+- Background collection in a daemon thread (already in `StreamManager`)
+- Batching of multiple chunks per delivery (already in `StreamManager`)
+- A dismiss mechanism for the model to stop receiving (already `dismiss_stream`)
+- Thread-safe chunk tracking (`StreamState.chunks_delivered`)
+
+### How It Works
+
+The WebSocket client plugin implements `StreamingCapable`. When the model calls
+`ws_connect`, the plugin:
+
+1. Establishes the WebSocket connection
+2. Captures initial server messages (hello, auth challenge) and returns them
+   directly in the tool result
+3. Registers an **infinite stream** with `StreamManager`
+4. The reader thread yields `StreamChunk`s as WebSocket messages arrive
+
+The `StreamManager` handles the rest — collecting chunks in the background,
+delivering them when the model is idle via `<hidden><streaming_updates>`,
+and supporting `dismiss_stream` to stop.
 
 ```python
-def _on_messages_ready(self, connection_id: str, messages: List[IncomingMessage]):
-    """Called by reader thread when messages are ready for delivery.
+class WebSocketClientPlugin(StreamingCapable):
+    """Implements StreamingCapable for WebSocket message delivery.
 
-    Formats messages into a structured prompt and injects it into the
-    session. If the session is idle, this triggers a new model turn
-    immediately. If the session is busy, the message is queued and
-    delivered when the current turn completes.
+    Each active connection registers as a named stream with StreamManager.
+    The stream's async generator bridges the synchronous WebSocket recv
+    loop to async chunk yields via a threading-to-asyncio queue.
     """
-    formatted = self._format_messages_for_injection(connection_id, messages)
-    self._session.inject_prompt(
-        text=formatted,
-        source_id=f"ws_client:{connection_id}",
-        source_type=SourceType.SYSTEM,
-    )
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        return tool_name == "ws_connect"
+
+    async def execute_streaming(
+        self, tool_name: str, arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None
+    ) -> AsyncIterator[StreamChunk]:
+        """Async generator that yields WebSocket messages as StreamChunks.
+
+        This generator runs for the lifetime of the connection. It bridges
+        the synchronous reader thread (which calls ws.recv()) to the async
+        StreamManager via an asyncio.Queue.
+
+        Lifecycle:
+            1. Handshake + initial messages returned via tool result
+            2. Reader thread starts, puts messages into async queue
+            3. This generator awaits queue.get() and yields StreamChunks
+            4. On disconnect: yields a system chunk, then returns (or
+               waits for reconnect and resumes yielding)
+            5. On dismiss_stream or ws_close: generator returns
+        """
+        conn = self._connections[arguments["connection_id"]]
+        queue = conn._async_queue  # asyncio.Queue bridging reader thread
+
+        while conn.status in ("connected", "reconnecting"):
+            try:
+                msg = await asyncio.wait_for(queue.get(), timeout=1.0)
+                yield StreamChunk(
+                    content=self._format_ws_message(conn.connection_id, msg),
+                    chunk_type="ws_message",
+                    metadata={
+                        "connection_id": conn.connection_id,
+                        "message_type": msg.type,
+                    },
+                )
+            except asyncio.TimeoutError:
+                continue  # Check connection status
+            except asyncio.CancelledError:
+                break  # dismiss_stream or shutdown
+
+    def get_streaming_tool_names(self) -> List[str]:
+        return ["ws_connect"]
 ```
 
-**What the model sees** (injected as a system-like message):
+**What the model sees** (delivered by `StreamManager` when idle):
 
-```
-[WebSocket ws-1 (wss://stream.binance.com)] 3 messages received:
-
-1. {"e":"trade","s":"BTCUSDT","p":"67420.50","q":"0.123","T":1709910600123}
-2. {"e":"trade","s":"BTCUSDT","p":"67421.00","q":"0.456","T":1709910600456}
-3. {"e":"trade","s":"ETHUSDT","p":"3421.80","q":"1.200","T":1709910600789}
+```xml
+<hidden><streaming_updates>
+<stream id="ws-1" tool="ws_connect" status="streaming" new_chunks="3">
+[ws-1] {"e":"trade","s":"BTCUSDT","p":"67420.50","q":"0.123"}
+[ws-1] {"e":"trade","s":"BTCUSDT","p":"67421.00","q":"0.456"}
+[ws-1] {"e":"trade","s":"ETHUSDT","p":"3421.80","q":"1.200"}
+</stream>
+</streaming_updates></hidden>
 ```
 
 The model processes the messages and can respond with `ws_send` if needed.
 When it finishes its turn, the session goes idle. If more WebSocket messages
-arrive, `inject_prompt()` triggers a new turn.
+have arrived, `StreamManager` delivers the next batch.
 
-### Batching and Debouncing
+### Streaming Lifecycle for WebSocket
 
-High-volume streams (market data, log tails) can produce hundreds of messages
-per second. Injecting each one as a separate turn would be catastrophic — the
-model would never catch up. The plugin uses **time-based batching**:
+The key difference from finite streams (grep, glob) is that a WebSocket stream
+**never completes on its own**. It continues yielding chunks until:
 
-```python
-class MessageBatcher:
-    """Collects messages and delivers them in batches.
+| Trigger | Stream Status | What Happens |
+|---------|--------------|--------------|
+| Remote close | `COMPLETED` | Final system chunk, generator returns |
+| `ws_close()` by model | `COMPLETED` | Generator returns |
+| `dismiss_stream` by model | `DISMISSED` | Generator cancelled, connection stays open |
+| Plugin `shutdown()` | `FAILED` | Generator cancelled, connection closed |
+| Reconnect failure | `FAILED` | Final system chunk with error |
 
-    When a message arrives, the batcher starts a debounce timer. If more
-    messages arrive within the debounce window, they're added to the
-    current batch. When the window expires with no new messages (or the
-    batch reaches max_batch_size), the batch is delivered.
+**`dismiss_stream` vs `ws_close`:** The model can dismiss the stream (stop
+receiving updates) while keeping the connection open for sending. This is
+useful for connections where the model only needs to send, not receive (e.g.,
+after initial setup). To fully disconnect, use `ws_close`.
 
-    This ensures:
-    - Low-volume streams: near-instant delivery (debounce_ms latency)
-    - High-volume streams: efficient batched delivery
-    - No message loss: batch is always delivered eventually
-    """
+### Natural Batching via `StreamManager`
 
-    def __init__(self, debounce_ms=200, max_batch_size=50, max_wait_ms=2000):
-        self.debounce_ms = debounce_ms      # Wait this long for more messages
-        self.max_batch_size = max_batch_size # Force delivery at this size
-        self.max_wait_ms = max_wait_ms       # Never wait longer than this
-```
+`StreamManager` already handles batching naturally through its idle-time
+delivery model:
 
-| Config | Default | Description |
-|--------|---------|-------------|
-| `debounce_ms` | `200` | Quiet period before delivering a batch |
-| `max_batch_size` | `50` | Force delivery when batch reaches this size |
-| `max_wait_ms` | `2000` | Maximum delay before forced delivery |
+1. Chunks accumulate while the model is busy (processing a turn, calling tools)
+2. When the model goes idle, `StreamManager` delivers all pending chunks at once
+3. The streaming continuation loop runs up to 20 iterations per idle period
+4. For daemon sessions (`max_turns=0`), this creates a natural
+   process → idle → receive → process cycle
 
-**Behavior by stream velocity:**
-
-| Stream Type | Messages/sec | Behavior |
-|-------------|-------------|----------|
-| Chat (Slack) | 0.1–1 | Near-instant delivery (~200ms latency) |
-| Moderate events | 1–10 | Small batches of 1–5 messages |
-| Market data | 10–100 | Batches of ~20–50 messages every 200ms–2s |
-| Firehose (logs) | 100+ | Max-size batches every 2s, oldest dropped if buffer full |
-
-### Busy Session Handling
-
-When the model is already processing a turn (e.g., responding to a previous
-batch of WebSocket messages), `inject_prompt()` queues the message. The
-session's message queue handles priority:
-
-- `SourceType.SYSTEM` — WebSocket messages are delivered when the current
-  turn completes. They don't interrupt mid-turn (unlike `PARENT` messages
-  from a parent agent, which can interrupt streaming).
-- Multiple batches arriving during a busy turn are queued independently.
-  When the session drains the queue, it processes them in order.
-
-This means the model never misses messages — they just queue up naturally.
+This means high-volume streams (market data, logs) are automatically batched —
+if 50 messages arrive while the model processes the previous batch, they're
+all delivered together in the next idle window. No custom debounce timers
+needed.
 
 ### First-Message Auth Bootstrapping
 
 Some protocols (Discord Gateway, GraphQL subscriptions) require the model to
-read the first message from the server and respond with an auth payload. This
-creates a bootstrapping challenge with push delivery: the model needs to see
-the server's hello message before it can send credentials.
+read the first message from the server and respond with an auth payload.
 
-The solution is natural: `ws_connect` returns the **initial handshake messages**
-directly in its tool result (the reader thread captures them during a brief
-startup window before switching to push delivery):
+The `ws_connect` tool result includes **initial messages** captured during a
+brief startup window before the stream is registered with `StreamManager`:
 
 ```python
 def _execute_connect(self, args):
-    """Connect and return initial messages from the server.
+    """Connect, capture initial messages, then register stream.
 
     After the WebSocket handshake completes, waits up to
     initial_read_timeout (default 3s) for any server-initiated
@@ -244,8 +288,8 @@ def _execute_connect(self, args):
     returned directly in the tool result so the model can respond
     with ws_send in the same turn.
 
-    After the initial read, the reader thread switches to push
-    mode — all subsequent messages are delivered via inject_prompt().
+    After the initial read, registers the connection as a stream
+    with StreamManager for ongoing delivery.
     """
     conn = self._create_connection(args)
     conn.connect()
@@ -253,8 +297,15 @@ def _execute_connect(self, args):
     # Capture initial messages (hello, auth challenge, etc.)
     initial_messages = conn.drain_initial(timeout=3.0)
 
-    # Switch to push delivery for all subsequent messages
-    conn.start_push_delivery(callback=self._on_messages_ready)
+    # Start reader thread — messages go to async queue
+    conn.start_reader()
+
+    # Register infinite stream with StreamManager
+    self._stream_manager.start_stream(
+        stream_id=conn.connection_id,
+        tool_name="ws_connect",
+        generator=self._create_stream_generator(conn),
+    )
 
     return {
         "connection_id": conn.connection_id,
@@ -262,7 +313,7 @@ def _execute_connect(self, args):
         "url": conn.url,
         "initial_messages": [self._format_message(m) for m in initial_messages],
         "message": f"Connected. {len(initial_messages)} initial message(s). "
-                   "Subsequent messages will be delivered automatically.",
+                   "Subsequent messages delivered via streaming updates.",
     }
 ```
 
@@ -272,24 +323,26 @@ def _execute_connect(self, args):
 Agent: ws_connect(url="wss://gateway.discord.gg/?v=10&encoding=json")
 → {
     connection_id: "ws-1",
-    status: "connected",
     initial_messages: [
       {type: "text", data: '{"op":10,"d":{"heartbeat_interval":41250}}'}
     ],
-    message: "Connected. 1 initial message(s). Subsequent messages will be delivered automatically."
+    message: "Connected. 1 initial message(s). Subsequent messages delivered via streaming updates."
   }
 
 Agent: ws_send(connection_id="ws-1", data='{"op":2,"d":{"token":"...","intents":513}}')
 → {status: "sent"}
 
-    ... session goes idle ...
+    ... model goes idle, StreamManager delivers next batch ...
 
-    [WebSocket ws-1] 1 message received:    ← inject_prompt() triggers new turn
-    1. {"op":0,"t":"READY","d":{...}}
+    <streaming_updates>
+    <stream id="ws-1" tool="ws_connect" status="streaming" new_chunks="1">
+    [ws-1] {"op":0,"t":"READY","d":{...}}
+    </stream>
+    </streaming_updates>
 
-Agent: (processes READY event, session goes idle again)
+Agent: (processes READY event, goes idle again)
 
-    ... waits for next message ...
+    ... StreamManager delivers when next messages arrive ...
 ```
 
 ## Configuration
@@ -299,9 +352,6 @@ Agent: (processes READY event, session goes idle again)
 ```json
 {
   "max_connections": 4,
-  "debounce_ms": 200,
-  "max_batch_size": 50,
-  "max_wait_ms": 2000,
   "connections": {
     "slack": {
       "url": "wss://wss-primary.slack.com/link/${SLACK_WS_URL_TOKEN}",
@@ -319,9 +369,7 @@ Agent: (processes READY event, session goes idle again)
     "binance": {
       "url": "wss://stream.binance.com:9443/ws",
       "reconnect": true,
-      "ping_interval": 180,
-      "debounce_ms": 500,
-      "max_batch_size": 100
+      "ping_interval": 180
     }
   }
 }
@@ -344,10 +392,7 @@ Each layer is merged, not replaced — a profile can override just
 | Key | Default | Description |
 |-----|---------|-------------|
 | `max_connections` | `4` | Maximum concurrent WebSocket connections per session |
-| `debounce_ms` | `200` | Quiet period (ms) before delivering a message batch |
-| `max_batch_size` | `50` | Maximum messages per injected batch |
-| `max_wait_ms` | `2000` | Maximum delay (ms) before forced batch delivery |
-| `max_buffer_size` | `1000` | Per-connection message buffer (FIFO eviction) |
+| `max_buffer_size` | `1000` | Per-connection async queue depth (FIFO eviction) |
 | `connections` | `{}` | Named pre-configured connections |
 
 ### Per-Connection Config Defaults
@@ -364,8 +409,6 @@ Each layer is merged, not replaced — a profile can override just
 | `ping_interval` | `20` | Seconds between keepalive pings (`0` = disabled) |
 | `ping_timeout` | `20` | Seconds to wait for pong before considering connection dead |
 | `initial_read_timeout` | `3.0` | Seconds to wait for server hello after handshake |
-| `debounce_ms` | *(global)* | Per-connection override for batch debounce |
-| `max_batch_size` | *(global)* | Per-connection override for batch size |
 
 ### Environment Variable Support
 
@@ -382,41 +425,41 @@ Config values support `${VAR}` expansion (via existing `expand_variables()`):
 ```
 shared/plugins/ws_client/
 ├── __init__.py          # PLUGIN_KIND = "tool", create_plugin()
-├── plugin.py            # WebSocketClientPlugin — tool plugin with connection mgmt
+├── plugin.py            # WebSocketClientPlugin (StreamingCapable) — connection mgmt + streaming
 ├── connection.py        # WebSocketConnection — per-connection state + reader thread
-├── batcher.py           # MessageBatcher — debounce + batch delivery
 ├── config.py            # WebSocketClientConfig dataclass, config loading/merging
 └── tests/
     ├── test_plugin.py
     ├── test_connection.py
-    ├── test_batcher.py
     └── test_config.py
 ```
 
 ### Plugin Class
 
 ```python
-class WebSocketClientPlugin:
+class WebSocketClientPlugin(StreamingCapable):
     """Outbound WebSocket client plugin for real-time bidirectional communication.
 
     Manages persistent WebSocket connections to external services. Each
-    connection runs a reader thread that delivers incoming messages to the
-    session via inject_prompt(). The model can send messages through open
-    connections using ws_send.
+    connection runs a reader thread that feeds messages into an async queue.
+    The plugin implements StreamingCapable, so StreamManager collects chunks
+    from the async queue and delivers them to the model during idle windows.
 
     Delivery model:
-        - Inbound: push via inject_prompt() with batching/debouncing
+        - Inbound: StreamManager delivers chunks when model is idle
         - Outbound: explicit via ws_send tool calls
-        - The model never polls — it receives messages as new turns
+        - The model never polls — chunks arrive as streaming updates
+        - Model can call dismiss_stream to stop receiving from a connection
 
     Lifecycle:
         1. initialize(config) — load and merge config
-        2. set_session(session) — receive session reference for inject_prompt()
+        2. set_session(session) — receive session reference (auto-wired)
         3. ws_connect tool call — establish connection, return initial messages,
-           start reader thread in push mode
-        4. Reader thread delivers batched messages via inject_prompt()
-        5. Model processes messages, optionally calls ws_send
-        6. ws_close or shutdown() — close connections, stop reader threads
+           register infinite stream with StreamManager
+        4. Reader thread yields StreamChunks via async queue → StreamManager
+        5. StreamManager delivers chunks when model is idle
+        6. Model processes messages, optionally calls ws_send
+        7. ws_close or shutdown() — close connections, cancel streams
 
     Requires: `websockets` package (optional dependency).
     """
@@ -432,14 +475,26 @@ class WebSocketClientPlugin:
         ...
 
     def set_session(self, session: "JaatoSession") -> None:
-        """Receive session reference for inject_prompt() delivery.
-
-        Called automatically by plugin auto-wiring during configure().
-        The session reference is required for push delivery — without it,
-        the plugin falls back to buffer-only mode (messages accumulate
-        but are never delivered).
-        """
+        """Receive session reference (auto-wired during configure())."""
         self._session = session
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        """ws_connect is the only streaming tool."""
+        return tool_name == "ws_connect"
+
+    def get_streaming_tool_names(self) -> List[str]:
+        return ["ws_connect"]
+
+    async def execute_streaming(
+        self, tool_name: str, arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None
+    ) -> AsyncIterator[StreamChunk]:
+        """Async generator yielding WebSocket messages as StreamChunks.
+
+        Bridges the synchronous reader thread to the async StreamManager
+        via an asyncio.Queue. Runs for the lifetime of the connection.
+        """
+        ...
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for WebSocket operations."""
@@ -450,7 +505,7 @@ class WebSocketClientPlugin:
         ...
 
     def shutdown(self) -> None:
-        """Close all connections, stop reader threads, clean up."""
+        """Close all connections, cancel streams, stop reader threads."""
         ...
 ```
 
@@ -501,7 +556,7 @@ delivered automatically via `inject_prompt()`.
 ```json
 {
   "name": "ws_connect",
-  "description": "Connect to a WebSocket endpoint. Returns a connection_id and any initial server messages. After this call, incoming messages are delivered to you automatically — no polling needed. Use ws_send to send messages back.",
+  "description": "Connect to a WebSocket endpoint. Returns a connection_id and any initial server messages. After this call, incoming messages are delivered as streaming updates — no polling needed. Use ws_send to send messages back. Use dismiss_stream to stop receiving.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -541,7 +596,7 @@ delivered automatically via `inject_prompt()`.
       "data": "{\"op\":10,\"d\":{\"heartbeat_interval\":41250}}"
     }
   ],
-  "message": "Connected. 1 initial message(s). Subsequent messages will be delivered automatically."
+  "message": "Connected. 1 initial message(s). Subsequent messages delivered via streaming updates."
 }
 ```
 
@@ -552,7 +607,7 @@ delivered automatically via `inject_prompt()`.
   "status": "connected",
   "url": "wss://stream.binance.com:9443/ws",
   "initial_messages": [],
-  "message": "Connected. Incoming messages will be delivered automatically."
+  "message": "Connected. Incoming messages will arrive as streaming updates."
 }
 ```
 
@@ -683,7 +738,7 @@ List active connections and their state. Auto-approved (read-only).
 ### WebSocketConnection Class
 
 Each connection is represented by a `WebSocketConnection` object that owns a
-reader thread and a message batcher:
+reader thread and an async queue for bridging to `StreamManager`:
 
 ```python
 class WebSocketConnection:
@@ -692,29 +747,29 @@ class WebSocketConnection:
     Lifecycle:
         1. connect(url, headers, subprotocols) — handshake, start reader
         2. drain_initial(timeout) — capture server hello messages
-        3. start_push_delivery(callback) — switch to push mode
-        4. Reader thread runs recv loop, delivers via batcher → callback
+        3. start_reader() — begin recv loop, push to async queue
+        4. StreamManager's async generator awaits queue.get() → StreamChunk
         5. send(data) — send message through the connection
         6. close() — send close frame, stop reader, clean up
 
-    The reader thread runs until the connection closes (remotely or locally).
-    On unexpected close, it injects a system message and optionally
-    triggers reconnection.
+    The reader thread puts messages into an asyncio.Queue. The plugin's
+    execute_streaming() async generator awaits that queue and yields
+    StreamChunks to StreamManager. This bridges sync (WebSocket recv)
+    to async (StreamManager collection).
 
     Thread safety:
-        - _batcher is internally synchronized (timer thread + delivery lock)
+        - _async_queue (asyncio.Queue) is thread-safe for put_nowait/get
         - _lock (threading.Lock) protects status transitions
         - _send_lock (threading.Lock) serializes writes
     """
 
-    def __init__(self, connection_id, config, on_status_change=None):
+    def __init__(self, connection_id, config, async_queue, on_status_change=None):
         self.connection_id = connection_id
         self.url = None
         self.status = "idle"            # idle → connecting → connected → disconnected → closed
         self._ws = None                 # websockets.sync.client.ClientConnection
         self._reader_thread = None
-        self._batcher = None            # MessageBatcher, set in start_push_delivery()
-        self._delivery_callback = None  # Set in start_push_delivery()
+        self._async_queue = async_queue # asyncio.Queue — bridge to StreamManager
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._stats = ConnectionStats()
@@ -727,16 +782,16 @@ class WebSocketConnection:
 ### Reader Thread
 
 Each connection runs a daemon reader thread that loops on `recv()` and
-delivers messages via the batcher:
+pushes messages into the async queue:
 
 ```python
 def _reader_loop(self):
-    """Background thread: read messages and deliver via batcher.
+    """Background thread: read messages and push to async queue.
 
     Runs until connection closes or stop is requested. Messages are
-    fed to the MessageBatcher, which handles debouncing and batch
-    delivery. On unexpected close with reconnect enabled, attempts
-    to re-establish the connection with exponential backoff.
+    put into the asyncio.Queue where the plugin's execute_streaming()
+    generator awaits them. On unexpected close with reconnect enabled,
+    attempts to re-establish the connection with exponential backoff.
     """
     while not self._stop_requested:
         try:
@@ -747,7 +802,10 @@ def _reader_loop(self):
                 type="binary" if isinstance(raw, bytes) else "text",
                 data=raw if isinstance(raw, str) else base64.b64encode(raw).decode(),
             )
-            self._batcher.add(msg)
+            try:
+                self._async_queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                self._stats.messages_dropped += 1  # Buffer overflow
             self._stats.messages_received += 1
 
         except websockets.exceptions.ConnectionClosed as exc:
@@ -788,52 +846,45 @@ notifies the plugin for system message injection into the session.
 
 ### System Messages
 
-Connection lifecycle events are delivered to the session via
-`inject_prompt()` as system messages, so the model sees them as new turns:
+Connection lifecycle events are pushed into the async queue as system-type
+messages, so they appear alongside regular WebSocket messages in the
+streaming updates:
 
-| Event | Injected Message |
-|-------|-----------------|
-| Disconnected | `[WebSocket ws-1] Connection closed by remote (code=1006). Reconnecting...` |
-| Reconnected | `[WebSocket ws-1] Reconnected successfully (was disconnected for 8.2s)` |
-| Reconnect failed | `[WebSocket ws-1] Reconnection failed after 5 attempts. Use ws_connect to reconnect.` |
-| Ping timeout | `[WebSocket ws-1] Connection appears dead (ping timeout). Closing.` |
+| Event | StreamChunk Content |
+|-------|-------------------|
+| Disconnected | `[ws-1] ⚠ Connection closed by remote (code=1006). Reconnecting...` |
+| Reconnected | `[ws-1] ✓ Reconnected successfully (was disconnected for 8.2s)` |
+| Reconnect failed | `[ws-1] ✗ Reconnection failed after 5 attempts. Use ws_connect to reconnect.` |
+| Ping timeout | `[ws-1] ⚠ Connection appears dead (ping timeout). Closing.` |
 
-These are injected with `SourceType.SYSTEM` — they're queued if the session is
-busy and delivered when the session becomes idle.
+These are delivered through the same `StreamManager` pipeline as regular
+messages — the model sees them in `<streaming_updates>` blocks.
 
 ## Event Bus Integration
 
-Like the Webhook plugin, WebSocket events are published to `TaskEventBus` for
-cross-agent consumption:
+In addition to `StreamManager` delivery to the owning session, WebSocket
+messages are published to `TaskEventBus` for cross-agent consumption. This
+happens in the `execute_streaming()` generator as each chunk is yielded:
 
 ```python
-def _on_messages_ready(self, connection_id: str, messages: List[IncomingMessage]):
-    """Called by batcher when a batch is ready for delivery."""
-    # 1. Inject into owning session (primary delivery)
-    formatted = self._format_messages_for_injection(connection_id, messages)
-    self._session.inject_prompt(
-        text=formatted,
-        source_id=f"ws_client:{connection_id}",
-        source_type=SourceType.SYSTEM,
-    )
+async def execute_streaming(self, tool_name, arguments, on_chunk=None):
+    conn = self._connections[arguments["connection_id"]]
 
-    # 2. Publish to event bus (secondary — for cross-agent fan-out)
-    try:
-        bus = TaskEventBus.get_instance()
-        for msg in messages:
-            event = TaskEvent.create(
-                event_type=TaskEventType.EXTERNAL_EVENT,
-                source_agent=f"websocket:{connection_id}",
-                data={
-                    "source": "websocket",
-                    "connection_id": connection_id,
-                    "message_type": msg.type,
-                    "data": msg.data,
-                }
+    while conn.status in ("connected", "reconnecting"):
+        try:
+            msg = await asyncio.wait_for(conn._async_queue.get(), timeout=1.0)
+
+            # Publish to event bus for cross-agent fan-out
+            self._publish_to_event_bus(conn.connection_id, msg)
+
+            yield StreamChunk(
+                content=self._format_ws_message(conn.connection_id, msg),
+                chunk_type="ws_message",
             )
-            bus.publish(event)
-    except Exception:
-        logger.debug("TaskEventBus unavailable, skipping cross-agent delivery")
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            break
 ```
 
 This means other sessions can subscribe to WebSocket events via the event bus,
@@ -854,8 +905,8 @@ def _attempt_reconnect(self):
     Attempts: delay = min(base_delay * 2^attempt, max_delay) + jitter
     Jitter: ±25% to prevent thundering herd on shared endpoints.
 
-    System messages about reconnection progress are injected into the
-    session via the delivery callback so the model stays informed.
+    System messages about reconnection progress are pushed into the
+    async queue so they appear in streaming updates.
     """
     for attempt in range(self._config.reconnect_max_attempts):
         if self._stop_requested:
@@ -868,7 +919,7 @@ def _attempt_reconnect(self):
         jitter = delay * 0.25 * (2 * random.random() - 1)
         actual_delay = max(0.1, delay + jitter)
 
-        self._deliver_system_message(
+        self._push_system_message(
             f"Reconnecting (attempt {attempt + 1}/{self._config.reconnect_max_attempts}, "
             f"next retry in {actual_delay:.1f}s)..."
         )
@@ -877,14 +928,14 @@ def _attempt_reconnect(self):
         try:
             self._do_connect()
             self._reconnect_count += 1
-            self._deliver_system_message(
+            self._push_system_message(
                 f"Reconnected successfully (attempt {attempt + 1})"
             )
             return  # Success — resume reader loop
         except Exception as exc:
             logger.warning("Reconnect attempt %d failed: %s", attempt + 1, exc)
 
-    self._deliver_system_message(
+    self._push_system_message(
         f"Reconnection failed after {self._config.reconnect_max_attempts} attempts. "
         "Use ws_connect to reconnect manually."
     )
@@ -997,7 +1048,6 @@ plugin doesn't need to know about Slack's API.
   "plugin_configs": {
     "ws_client": {
       "max_connections": 2,
-      "debounce_ms": 100,
       "connections": {
         "slack": {
           "url": "${SLACK_RTM_URL}",
@@ -1009,7 +1059,7 @@ plugin doesn't need to know about Slack's API.
       }
     }
   },
-  "system_instructions": "You are a Slack bot connected via RTM WebSocket.\n\nOn startup:\n1. Call ws_connect(name=\"slack\") to connect.\n2. If the initial_messages contain a hello, you're ready.\n3. Incoming Slack messages will be delivered to you automatically.\n4. Parse each message JSON and respond using ws_send.\n5. If you receive a disconnect system message, wait — auto-reconnect is enabled.\n\nYou do not need to poll. Messages arrive as new turns.",
+  "system_instructions": "You are a Slack bot connected via RTM WebSocket.\n\nOn startup:\n1. Call ws_connect(name=\"slack\") to connect.\n2. If the initial_messages contain a hello, you're ready.\n3. Incoming Slack messages arrive as streaming updates — no polling needed.\n4. Parse each message JSON and respond using ws_send.\n5. If you see a disconnect system message in streaming updates, wait — auto-reconnect is enabled.",
   "max_turns": 0,
   "gc": {
     "type": "budget",
@@ -1041,7 +1091,7 @@ plugin doesn't need to know about Slack's API.
       }
     }
   },
-  "system_instructions": "You are a market data monitor.\n\nOn startup:\n1. ws_connect(name=\"binance\")\n2. ws_send to subscribe: {\"method\":\"SUBSCRIBE\",\"params\":[\"btcusdt@trade\",\"ethusdt@trade\"],\"id\":1}\n3. Trade data will be delivered to you in batches automatically.\n4. Analyze price movements and maintain a running summary.\n5. Alert on significant moves (>2% in 5 minutes).\n\nYou do not need to poll. Batches of trades arrive as new turns.",
+  "system_instructions": "You are a market data monitor.\n\nOn startup:\n1. ws_connect(name=\"binance\")\n2. ws_send to subscribe: {\"method\":\"SUBSCRIBE\",\"params\":[\"btcusdt@trade\",\"ethusdt@trade\"],\"id\":1}\n3. Trade data arrives as streaming updates — no polling needed.\n4. Analyze price movements and maintain a running summary.\n5. Alert on significant moves (>2% in 5 minutes).",
   "max_turns": 0,
   "gc": {
     "type": "budget",
@@ -1079,21 +1129,21 @@ The plugin validates WebSocket URLs before connecting:
 ### Resource Limits
 
 - `max_connections` prevents connection sprawl (default 4)
-- `max_buffer_size` prevents memory growth per connection (default 1000, FIFO)
-- `max_batch_size` prevents giant injections overwhelming the model
+- `max_buffer_size` limits async queue depth per connection (default 1000, FIFO)
+- `StreamManager` naturally batches chunks — no single delivery overwhelms the model
 - Reconnection attempts are bounded (`reconnect_max_attempts`)
 - Ping timeouts detect dead connections
+- `dismiss_stream` lets the model stop receiving without closing the connection
 
 ### Injection Safety
 
-Messages injected via `inject_prompt()` are prefixed with
-`[WebSocket <connection_id>]` to clearly identify their source. The model
-can distinguish WebSocket messages from user messages or subagent results.
+Streaming updates are delivered inside `<hidden><streaming_updates>` tags
+with a `<stream>` wrapper identifying the connection. The `[ws-<id>]` prefix
+on each chunk clearly identifies the message source.
 
-The formatted injection includes the raw message data as-is — no escaping or
-sanitization of the WebSocket payload content. This is intentional: the model
-needs to see the exact data to parse protocol-specific formats. The
-`[WebSocket ...]` prefix prevents confusion with other message sources.
+The chunk content includes the raw WebSocket message data as-is — no escaping
+or sanitization. This is intentional: the model needs to see the exact data
+to parse protocol-specific formats (JSON APIs, binary-encoded payloads).
 
 ## Comparison: WebSocket Client vs Interactive Shell
 
@@ -1105,17 +1155,17 @@ Key differences:
 | **Target** | Local processes (PTY) | Remote services (network) |
 | **Transport** | Pseudo-terminal (stdin/stdout) | WebSocket (TCP + TLS) |
 | **Output format** | Raw terminal output (ANSI stripped) | Structured messages (JSON, text) |
-| **Delivery** | Must use `shell_read`/`shell_input` | Push via `inject_prompt()` |
+| **Delivery** | Must use `shell_read`/`shell_input` | Push via `StreamManager` |
 | **Auth** | OS-level (user permissions) | Application-level (tokens, headers) |
 | **Reconnection** | N/A (process is dead) | Auto-reconnect with backoff |
 | **Use case** | REPLs, debuggers, SSH | APIs, event streams, chat bots |
 
 There is no overlap — they serve completely different integration patterns.
 
-**Note:** The push delivery model used here could retroactively benefit the
-Webhook plugin as well. A future enhancement could add an `inject_prompt()`
-delivery option to `webhook_subscribe` as an alternative to `webhook_poll`,
-unifying the delivery model across both plugins.
+**Note:** The streaming delivery model used here could retroactively benefit
+the Webhook plugin as well. A future enhancement could make the Webhook plugin
+implement `StreamingCapable`, replacing `webhook_poll` with `StreamManager`
+delivery — unifying the delivery model across both plugins.
 
 ## Dependency Choice: `websockets`
 
@@ -1158,28 +1208,30 @@ and Interactive Shell plugins.
 | Handshake failure (bad URL) | `ws_connect` returns error with diagnostic |
 | Handshake failure (auth rejected) | `ws_connect` returns 401/403 details |
 | Connection timeout on handshake | `ws_connect` returns timeout error |
-| Remote close during operation | System message injected, auto-reconnect if enabled |
+| Remote close during operation | System chunk pushed to queue, auto-reconnect if enabled |
 | Send on closed connection | `ws_send` returns error suggesting reconnect |
 | Unknown connection_id | Error result listing valid connection IDs |
-| Buffer overflow | Oldest messages evicted (FIFO), `messages_dropped` counter incremented |
+| Async queue full | Oldest messages dropped (FIFO), `messages_dropped` counter incremented |
 | Max connections reached | `ws_connect` returns error listing active connections |
-| Reader thread crashes | Logged, status changes to `"error"`, system message injected |
-| Session reference missing | Messages buffer but are never delivered (logged as warning) |
-| inject_prompt() during busy turn | Queued by session's message queue, delivered after current turn |
+| Reader thread crashes | Logged, status changes to `"error"`, system chunk pushed |
+| Model busy during delivery | `StreamManager` holds chunks until model is idle (built-in) |
+| `dismiss_stream` called | Stream generator cancelled, connection stays open for `ws_send` |
 
 ## Lifecycle & Cleanup
 
 1. **Plugin initialize** — config loaded and merged, no connections opened.
-2. **set_session()** — session reference stored for `inject_prompt()` delivery.
-3. **`ws_connect` call** — connection established, initial messages captured and
-   returned, reader thread started in push delivery mode.
-4. **Session active** — connections running, messages pushed via `inject_prompt()`,
-   model responding with `ws_send` as needed.
-5. **Session GC** — old turns with processed messages are garbage-collected;
-   connections persist and continue delivering new messages.
-6. **`ws_close` call** — individual connection closed gracefully.
-7. **Session stop / shutdown** — `shutdown()` closes all connections, stops all
-   reader threads, flushes pending batches.
+2. **set_session()** — session reference stored (auto-wired).
+3. **`ws_connect` call** — connection established, initial messages returned,
+   reader thread started, infinite stream registered with `StreamManager`.
+4. **Session active** — reader thread pushes to async queue, `StreamManager`
+   delivers chunks when model is idle, model responds with `ws_send`.
+5. **Session GC** — old turns with processed streaming updates are garbage-collected;
+   connections and streams persist.
+6. **`dismiss_stream`** — model stops receiving from a connection (connection
+   stays open for `ws_send`).
+7. **`ws_close` call** — connection closed, stream completed.
+8. **Session stop / shutdown** — `shutdown()` closes all connections, cancels
+   all streams, stops reader threads.
 
 Reader threads are daemon threads — they don't prevent process exit if the
 session crashes without calling `shutdown()`.
@@ -1190,28 +1242,29 @@ session crashes without calling `shutdown()`.
 
 - **Config loading** — precedence merging, variable expansion, named connections.
 - **Connection state machine** — status transitions, lock safety.
-- **MessageBatcher** — debounce timing, max_batch_size triggers, max_wait_ms
-  forced delivery, thread safety.
+- **Async queue bridge** — sync put_nowait from reader thread, async get from
+  streaming generator.
+- **StreamChunk formatting** — connection prefix, binary base64, system messages.
 - **Tool executors** — connect/send/close/status return correct structures.
 - **Dependency gating** — correct error when `websockets` is not installed.
-- **Message formatting** — injected prompt format, multi-message batches,
-  binary message base64 encoding.
 
 ### Integration Tests
 
 - **Echo server** — start a local WebSocket echo server (using `websockets`
   `serve`), connect, verify initial messages returned.
-- **Push delivery** — connect to echo server, send message, verify it's
-  delivered via mock `inject_prompt()` call.
-- **Batching** — send 100 rapid messages, verify they arrive in batches
-  not individually.
+- **Streaming delivery** — connect to echo server, send message, verify
+  `StreamChunk` yielded by `execute_streaming()`.
+- **Natural batching** — send 100 rapid messages, verify `StreamManager`
+  delivers them in batches when model goes idle (no custom batcher needed).
 - **Reconnection** — connect, kill server, verify reconnect with backoff,
-  restart server, verify reconnect succeeds and push resumes.
+  restart server, verify stream resumes yielding chunks.
 - **Concurrent connections** — open multiple connections, verify independent
-  delivery.
+  streams.
 - **Binary messages** — send/receive binary frames, verify base64 encoding.
 - **Subprotocol negotiation** — verify `graphql-ws` negotiation.
 - **Connection limit** — attempt to exceed `max_connections`, verify error.
+- **dismiss_stream** — dismiss stream, verify generator cancelled, verify
+  connection still open for `ws_send`.
 
 ### Test Echo Server
 
@@ -1237,13 +1290,13 @@ with serve(echo_handler, "127.0.0.1", 0) as server:
 - **Binary protocol support** — structured binary message parsing (Protocol
   Buffers, MessagePack) with schema registration.
 - **Connection groups** — connect to multiple related endpoints with a single
-  merged delivery stream.
-- **Webhook plugin push mode** — port the `inject_prompt()` delivery model
-  back to the Webhook plugin as an alternative to `webhook_poll`.
+  merged stream.
+- **Webhook plugin streaming mode** — make the Webhook plugin implement
+  `StreamingCapable` to replace `webhook_poll` with `StreamManager` delivery.
 - **Shared connections** — multiple sessions sharing a single WebSocket
   connection (via event bus fan-out) to avoid duplicate connections to the same
   endpoint.
 - **Rate-limited sending** — configurable send rate limits to avoid being
   banned by external services.
-- **Adaptive batching** — dynamically adjust `debounce_ms` and
-  `max_batch_size` based on stream velocity and model processing speed.
+- **Adaptive streaming** — dynamically adjust `StreamManager` delivery
+  frequency based on stream velocity and model processing speed.
