@@ -30,6 +30,11 @@ from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, g
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.trace import trace as _trace_write
 
+# Thread-local storage for per-session tool bindings state.
+# Plugin instances are shared across subagents within a session;
+# thread-local ensures each subagent thread gets its own executor/bindings.
+_thread_local = threading.local()
+
 
 class SandboxMode(Enum):
     """Sandbox enforcement mode for notebook execution."""
@@ -84,14 +89,41 @@ class NotebookPlugin(StreamingCapable):
         self._last_analysis: Optional[AnalysisResult] = None
         # Notebook Tool Bindings state
         self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")
-        self._tool_bindings_bridge: Optional[ToolBridge] = None
-        self._tool_bindings_module: Optional[types.ModuleType] = None
-        self._tool_executor = None  # Set via set_session() for tool bindings bridge
+        # Tool bindings state (_tool_executor, _tool_bindings_bridge,
+        # _tool_bindings_module) is stored in thread-local via properties
+        # so subagent threads don't overwrite the parent's bindings.
         # Tools to exclude from bindings (notebook tools themselves to prevent recursion)
         self._tool_bindings_exclude: FrozenSet[str] = frozenset({
             "notebook_execute", "notebook_create", "notebook_variables",
             "notebook_reset", "notebook_list", "notebook_backends",
         })
+
+    @property
+    def _tool_executor(self):
+        """Per-thread tool executor from set_session()."""
+        return getattr(_thread_local, 'tool_executor', None)
+
+    @_tool_executor.setter
+    def _tool_executor(self, value):
+        _thread_local.tool_executor = value
+
+    @property
+    def _tool_bindings_bridge(self) -> Optional[ToolBridge]:
+        """Per-thread tool bindings bridge."""
+        return getattr(_thread_local, 'tool_bindings_bridge', None)
+
+    @_tool_bindings_bridge.setter
+    def _tool_bindings_bridge(self, value):
+        _thread_local.tool_bindings_bridge = value
+
+    @property
+    def _tool_bindings_module(self) -> Optional[types.ModuleType]:
+        """Per-thread tool bindings module."""
+        return getattr(_thread_local, 'tool_bindings_module', None)
+
+    @_tool_bindings_module.setter
+    def _tool_bindings_module(self, value):
+        _thread_local.tool_bindings_module = value
 
     @property
     def name(self) -> str:
