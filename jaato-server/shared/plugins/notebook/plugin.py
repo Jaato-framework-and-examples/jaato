@@ -262,7 +262,7 @@ class NotebookPlugin(StreamingCapable):
         """
         executor = getattr(session, '_executor', None)
         if executor is not None:
-            self._tool_executor = executor
+            _thread_local.tool_executor = executor
             self._maybe_build_tool_bindings()
             self._trace("set_session: executor captured for tool bindings")
         else:

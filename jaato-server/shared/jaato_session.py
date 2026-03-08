@@ -22,6 +22,7 @@ from .session_history import SessionHistory
 logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
+from .session_context import set_current_session
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
 from jaato_sdk.plugins.base import HelpLines, UserCommand, OutputCallback
@@ -1174,6 +1175,7 @@ class JaatoSession:
         if self._runtime.registry:
             import threading
             self._trace(f"configure: wiring plugins with session, thread_id={threading.current_thread().ident}")
+            set_current_session(self)
             wire_set = None
             if tools is not None:
                 wire_set = set(tools)
@@ -4006,9 +4008,10 @@ NOTES
 
         self._trace(f"_execute_single_tool: name={name}, thread_id={threading.current_thread().ident}")
 
-        # Ensure session is set in thread-local for plugins that need it
+        # Ensure session is set in thread-local and ContextVar for plugins
         # This handles cases where tool execution might be in a different thread
         # context than where configure() was called
+        set_current_session(self)
         if self._runtime.registry:
             for plugin_name in self._runtime.registry.list_exposed():
                 plugin = self._runtime.registry.get_plugin(plugin_name)
@@ -4254,10 +4257,11 @@ NOTES
 
         fc_start = datetime.now()
 
-        # Propagate session to this worker thread's thread-local storage
+        # Propagate session to this worker thread's ContextVar and thread-local
         # This is critical for plugins (like TODO) that use thread-local to
         # identify the current agent context. Without this, parallel tools
         # would see agent_name=None and fail to find the correct plan.
+        set_current_session(self)
         if self._runtime.registry:
             for plugin_name in self._runtime.registry.list_exposed():
                 plugin = self._runtime.registry.get_plugin(plugin_name)
