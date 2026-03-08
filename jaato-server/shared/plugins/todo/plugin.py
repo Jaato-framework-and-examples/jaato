@@ -130,6 +130,9 @@ class TodoPlugin:
         ensures that when subagents (running in different threads) call this,
         they don't overwrite the parent agent's session reference.
 
+        Also switches the event bus to the per-runtime instance for proper
+        session isolation when multiple sessions share the same server process.
+
         Args:
             session: The JaatoSession instance.
         """
@@ -138,6 +141,15 @@ class TodoPlugin:
         thread_id = threading.current_thread().ident
         self._trace(f"set_session: agent_id={agent_id}, thread_id={thread_id}")
         _thread_local.session = session
+
+        # Switch to per-runtime event bus for session isolation
+        runtime = getattr(session, '_runtime', None) if session else None
+        if runtime and hasattr(runtime, 'event_bus'):
+            new_bus = runtime.event_bus
+            if new_bus is not self._event_bus:
+                self._event_bus = new_bus
+                self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
+                self._trace(f"set_session: switched to per-runtime event bus")
 
     @property
     def name(self) -> str:
@@ -255,7 +267,10 @@ class TodoPlugin:
                 print("Falling back to console reporter")
                 self._reporter = ConsoleReporter()
 
-        # Initialize event bus for cross-agent collaboration
+        # Initialize event bus for cross-agent collaboration.
+        # Actual bus assignment is deferred to set_session() where we can
+        # use the per-runtime bus for session isolation. Use fallback
+        # singleton only if set_session() is never called.
         self._event_bus = get_event_bus()
         # Register dependency resolver callback
         self._event_bus.set_dependency_resolver(self._on_dependency_resolved)

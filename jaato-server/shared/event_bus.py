@@ -48,7 +48,11 @@ logger = logging.getLogger(__name__)
 class EventBus:
     """Central event bus for cross-agent and cross-plugin coordination.
 
-    This is a singleton shared across all agents in the runtime.
+    Each JaatoRuntime owns its own EventBus instance, ensuring session
+    isolation when multiple sessions share the same server process.
+    Agents within a single runtime (main agent + subagents) share the
+    same bus for plan coordination and event delivery.
+
     It enables:
     - Publishing events (plan state changes, external ingress, etc.)
     - Subscribing to events with filters
@@ -58,27 +62,34 @@ class EventBus:
     in different threads.
 
     Lifecycle:
-        The singleton is created on first access via ``get_instance()``
-        and persists for the lifetime of the process. Call ``reset()``
-        only in tests to clear all state.
+        Created by JaatoRuntime during initialization. Lives for
+        the lifetime of the runtime. Use ``get_event_bus()`` only
+        as a fallback for code that doesn't have access to the runtime.
     """
 
+    # Fallback singleton for backward compatibility (used by code that
+    # cannot access a runtime reference, e.g. webhook plugin).
     _instance: Optional['EventBus'] = None
     _lock = threading.Lock()
 
     @classmethod
     def get_instance(cls) -> 'EventBus':
-        """Get or create the singleton instance."""
+        """Get or create the fallback singleton instance.
+
+        Prefer accessing the EventBus via ``JaatoRuntime.event_bus``
+        for proper session isolation. This fallback exists for code
+        that cannot reach the runtime (e.g. webhook HTTP handler threads).
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = cls()
-                    logger.debug("EventBus singleton created")
+                    logger.debug("EventBus fallback singleton created")
         return cls._instance
 
     @classmethod
     def reset(cls) -> None:
-        """Reset the singleton (for testing).
+        """Reset the fallback singleton (for testing).
 
         Clears all subscriptions, event history, and callbacks.
         """

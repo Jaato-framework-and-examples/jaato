@@ -278,6 +278,12 @@ class JaatoRuntime:
         # Telemetry plugin (created lazily, opt-in)
         self._telemetry: TelemetryPlugin = create_telemetry_plugin()
 
+        # Per-runtime event bus for session-isolated event coordination.
+        # Subagents within this runtime share the bus; different runtimes
+        # (and thus different sessions) get separate bus instances.
+        from shared.event_bus import EventBus
+        self._event_bus: EventBus = EventBus()
+
     def _load_base_system_instructions(self) -> None:
         """Load base system instructions from .jaato/instructions/ folder.
 
@@ -413,6 +419,15 @@ class JaatoRuntime:
     def telemetry(self) -> TelemetryPlugin:
         """Get the telemetry plugin."""
         return self._telemetry
+
+    @property
+    def event_bus(self) -> 'EventBus':
+        """Get the per-runtime event bus.
+
+        Each runtime has its own EventBus instance, ensuring session
+        isolation. Subagents within the same runtime share this bus.
+        """
+        return self._event_bus
 
     @property
     def instruction_token_cache(self) -> InstructionTokenCache:

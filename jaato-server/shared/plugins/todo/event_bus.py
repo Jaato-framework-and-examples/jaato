@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 class TaskEventBus:
-    """Task-aware event bus that wraps the shared ``EventBus`` singleton.
+    """Task-aware event bus that wraps an ``EventBus`` instance.
 
     Delegates all generic event operations (subscribe, publish, poll,
-    history) to the shared ``EventBus``. Adds task-specific behavior:
+    history) to the wrapped ``EventBus``. Adds task-specific behavior:
 
     - **Dependency tracking**: ``register_dependency()`` records that a
       step is waiting on another agent's step.
@@ -46,12 +46,13 @@ class TaskEventBus:
       published, ``_resolve_dependencies()`` notifies all waiting steps
       via the dependency resolver callback.
 
-    The ``TaskEventBus`` is itself a singleton. It wraps the same
-    ``EventBus`` singleton — they share the same event history and
-    subscriptions.
+    When constructed with an explicit ``EventBus`` (e.g., from
+    ``JaatoRuntime.event_bus``), events are properly isolated per-session.
+    The fallback singleton uses ``EventBus.get_instance()`` for backward
+    compatibility.
 
     Usage:
-        bus = TaskEventBus.get_instance()
+        bus = TaskEventBus(event_bus=runtime.event_bus)
 
         # All EventBus methods are available:
         bus.subscribe(...)
@@ -68,12 +69,16 @@ class TaskEventBus:
 
     @classmethod
     def get_instance(cls) -> 'TaskEventBus':
-        """Get or create the singleton instance."""
+        """Get or create the fallback singleton instance.
+
+        Prefer constructing with an explicit ``EventBus`` for session
+        isolation. This fallback exists for backward compatibility.
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = cls()
-                    logger.debug("TaskEventBus singleton created")
+                    logger.debug("TaskEventBus fallback singleton created")
         return cls._instance
 
     @classmethod
@@ -87,12 +92,14 @@ class TaskEventBus:
             EventBus.reset()
             logger.debug("TaskEventBus singleton reset")
 
-    def __init__(self):
+    def __init__(self, event_bus: Optional[EventBus] = None):
         """Initialize the task event bus wrapper.
 
-        Note: Use ``get_instance()`` instead of direct construction.
+        Args:
+            event_bus: Optional EventBus to wrap. If None, uses the
+                fallback singleton ``EventBus.get_instance()``.
         """
-        self._bus = EventBus.get_instance()
+        self._bus = event_bus or EventBus.get_instance()
 
         # Task-specific: dependency tracking
         self._dependency_waiters: Dict[str, List[tuple]] = {}

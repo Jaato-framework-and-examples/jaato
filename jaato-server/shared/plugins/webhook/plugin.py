@@ -58,6 +58,7 @@ class WebhookPlugin:
         self._explicit_config: Optional[Dict[str, Any]] = None
         self._workspace_path: Optional[str] = None
         self._http_server: Optional[WebhookHTTPServer] = None
+        self._session = None  # Set via set_session() for per-runtime EventBus access
         self._initialized = False
 
         # Per-subscription event buffers: sub_id → deque of event dicts
@@ -98,6 +99,18 @@ class WebhookPlugin:
         """
         self._workspace_path = path
         self._reload_config()
+
+    def set_session(self, session) -> None:
+        """Store session reference for per-runtime EventBus access.
+
+        Called by JaatoSession during plugin wiring. Used by
+        ``_publish_to_event_bus()`` to publish to the session's own
+        EventBus instead of the process-wide singleton.
+
+        Args:
+            session: The JaatoSession this plugin instance is bound to.
+        """
+        self._session = session
 
     def _reload_config(self) -> None:
         """Reload config from all precedence layers."""
@@ -429,7 +442,15 @@ class WebhookPlugin:
             logger.debug("EventBus not available, skipping bus publish")
             return
 
-        bus = get_event_bus()
+        # Prefer per-runtime EventBus for session isolation; fall back to
+        # the process-wide singleton for backward compatibility.
+        bus = None
+        if self._session:
+            runtime = getattr(self._session, '_runtime', None)
+            if runtime and hasattr(runtime, 'event_bus'):
+                bus = runtime.event_bus
+        if bus is None:
+            bus = get_event_bus()
         task_event = Event(
             event_id=event_id,
             event_type=EventType.EXTERNAL_EVENT,
