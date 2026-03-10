@@ -455,15 +455,15 @@ class WebhookPlugin:
             event_type=EventType.EXTERNAL_EVENT,
             timestamp=timestamp,
             source_agent=f"webhook:{route_name}",
-            source_plan_id=route_name,
-            source_plan_title=f"webhook:{route_name}",
-            source_step_id=event_id,
-            source_step_description=event_type,
             payload={
                 "source": route_name,
                 "event_type": event_type,
                 "headers": headers,
                 "payload": payload,
+                "plan_id": route_name,
+                "plan_title": f"webhook:{route_name}",
+                "step_id": event_id,
+                "step_description": event_type,
             },
         )
         bus.publish(task_event)

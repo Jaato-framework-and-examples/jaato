@@ -211,8 +211,8 @@ class TestDependencyResolverRetry:
             plan=TodoPlan.create("Sub Plan", ["s1"]),
             step=None,
         )
-        event1.source_step_id = "step-4"
-        event1.source_plan_id = "sub-plan"
+        event1.payload["step_id"] = "step-4"
+        event1.payload["plan_id"] = "sub-plan"
         bus.publish(event1)
 
         assert call_count[0] == 1, "Resolver should have been called once"
@@ -253,8 +253,8 @@ class TestDependencyResolverRetry:
             plan=TodoPlan.create("Plan", ["x"]),
             step=None,
         )
-        event.source_step_id = "s1"
-        event.source_plan_id = "p1"
+        event.payload["step_id"] = "s1"
+        event.payload["plan_id"] = "p1"
         bus.publish(event)
 
         assert resolved == ["waiting-step"]
@@ -323,8 +323,8 @@ class TestDependencyRegistrationOrder:
             plan=TodoPlan.create("Plan", ["x"]),
             step=None,
         )
-        event.source_step_id = "some-step"
-        event.source_plan_id = "some-plan"
+        event.payload["step_id"] = "some-step"
+        event.payload["plan_id"] = "some-plan"
 
         with pytest.raises(RuntimeError, match="Plan.*not found"):
             plugin._on_dependency_resolved(
@@ -345,8 +345,8 @@ class TestDependencyRegistrationOrder:
             plan=TodoPlan.create("Plan", ["x"]),
             step=None,
         )
-        event.source_step_id = "some-step"
-        event.source_plan_id = "some-plan"
+        event.payload["step_id"] = "some-step"
+        event.payload["plan_id"] = "some-plan"
 
         with pytest.raises(RuntimeError, match="Step.*not found"):
             plugin._on_dependency_resolved(

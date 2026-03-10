@@ -1212,9 +1212,9 @@ class TodoPlugin:
             if self._storage:
                 self._storage.save_plan(plan)
 
-        # Report the addition (outside lock — read-only on plan)
+        # Report the addition as a full snapshot (structural change — new step added)
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
+            self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())
 
         # Publish step_added event
         self._publish_event(TaskEventType.STEP_ADDED, plan, new_step)
@@ -1607,7 +1607,7 @@ class TodoPlugin:
         """
         self._trace(
             f"Dependency resolved: {waiting_agent}:{waiting_step_id} <- "
-            f"{completion_event.source_agent}:{completion_event.source_step_id}"
+            f"{completion_event.source_agent}:{completion_event.payload.get('step_id')}"
         )
 
         # Get the waiting plan
@@ -1621,8 +1621,8 @@ class TodoPlugin:
         # Create ref for the completed step
         completed_ref = TaskRef(
             agent_id=completion_event.source_agent,
-            plan_id=completion_event.source_plan_id,
-            step_id=completion_event.source_step_id or ""
+            plan_id=completion_event.payload.get("plan_id", ""),
+            step_id=completion_event.payload.get("step_id", "")
         )
 
         with self._get_plan_lock(waiting_plan_id):

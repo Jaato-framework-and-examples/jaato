@@ -65,6 +65,7 @@ class EventType(str, Enum):
 
     # Plan updates (Server -> Client)
     PLAN_UPDATED = "plan.updated"
+    PLAN_STEP_UPDATED = "plan.step_updated"  # Lean delta for a single step status change
     PLAN_CLEARED = "plan.cleared"
 
     # Context/token updates (Server -> Client)
@@ -500,6 +501,31 @@ class PlanUpdatedEvent(Event):
     plan_name: str = ""
     steps: List[Dict[str, Any]] = field(default_factory=list)
     # ^ List of {content, status, active_form?, blocked_by?, depends_on?, received_outputs?}
+
+
+@dataclass
+class PlanStepUpdatedEvent(Event):
+    """Single step status change within a plan.
+
+    Lean delta event — carries only the changed step's data, not the
+    full plan snapshot. The client maintains local plan state and applies
+    this delta to update the specific step.
+
+    Sent for status-only changes (started, completed, failed, skipped,
+    blocked, unblocked). Structural changes (plan created, steps added,
+    plan completed) use ``PlanUpdatedEvent`` with the full snapshot.
+    """
+    type: EventType = field(default=EventType.PLAN_STEP_UPDATED)
+    agent_id: str = ""
+    step_id: str = ""
+    sequence: int = 0
+    content: str = ""  # Step description
+    status: str = ""   # "pending", "in_progress", "completed", "failed", "skipped", "blocked"
+    result: Optional[str] = None
+    error: Optional[str] = None
+    blocked_by: Optional[List[Dict[str, Any]]] = None
+    depends_on: Optional[List[Dict[str, Any]]] = None
+    received_outputs: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1468,6 +1494,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.POST_AUTH_SETUP.value: PostAuthSetupEvent,
     EventType.POST_AUTH_SETUP_RESPONSE.value: PostAuthSetupResponse,
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
+    EventType.PLAN_STEP_UPDATED.value: PlanStepUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
     EventType.INSTRUCTION_BUDGET_UPDATED.value: InstructionBudgetEvent,

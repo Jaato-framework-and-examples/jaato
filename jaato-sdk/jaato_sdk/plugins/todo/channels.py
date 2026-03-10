@@ -83,6 +83,7 @@ class LivePlanReporter(TodoReporter):
 
     def __init__(self):
         self._update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None
+        self._step_update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None
         self._clear_callback: Optional[Callable[[Optional[str]], None]] = None
         self._output_callback: Optional[Callable[[str, str, str], None]] = None
 
@@ -94,12 +95,14 @@ class LivePlanReporter(TodoReporter):
         """Initialize with callbacks.
 
         Config keys:
-            update_callback: Callable[[Dict, Optional[str]], None]
+            update_callback: Callable[[Dict, Optional[str]], None] — full plan snapshot
+            step_update_callback: Callable[[Dict, Optional[str]], None] — lean step delta
             clear_callback: Callable[[Optional[str]], None]
             output_callback: Callable[[str, str, str], None]
         """
         if config:
             self._update_callback = config.get("update_callback")
+            self._step_update_callback = config.get("step_update_callback")
             self._clear_callback = config.get("clear_callback")
             self._output_callback = config.get("output_callback")
 
@@ -143,6 +146,26 @@ class LivePlanReporter(TodoReporter):
             "summary": plan.summary,
         }
 
+    def _step_to_delta_dict(self, step: TodoStep) -> Dict[str, Any]:
+        """Convert a single step to a lean delta dict for client updates."""
+        data: Dict[str, Any] = {
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "content": step.description,
+            "status": step.status.value,
+        }
+        if step.result:
+            data["result"] = step.result
+        if step.error:
+            data["error"] = step.error
+        if step.blocked_by:
+            data["blocked_by"] = [ref.to_dict() for ref in step.blocked_by]
+        if step.depends_on:
+            data["depends_on"] = [ref.to_dict() for ref in step.depends_on]
+        if step.received_outputs:
+            data["received_outputs"] = step.received_outputs
+        return data
+
     def _emit_output(self, source: str, text: str, mode: str = "write") -> None:
         """Emit supplementary output to the scrolling panel."""
         if self._output_callback:
@@ -154,8 +177,14 @@ class LivePlanReporter(TodoReporter):
         self._emit_output("plan", f"Plan created: {plan.title}", "write")
 
     def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
-        """Report step status change - update the sticky panel."""
-        self._emit_plan_update(plan, agent_id)
+        """Report step status change — emit lean delta for the changed step.
+
+        Sends only the changed step's data, not the full plan snapshot.
+        The client applies this delta to its local plan state.
+        """
+        if self._step_update_callback:
+            step_data = self._step_to_delta_dict(step)
+            self._step_update_callback(step_data, agent_id)
 
         if step.status == StepStatus.COMPLETED and step.result:
             self._emit_output(
@@ -201,13 +230,17 @@ class LivePlanReporter(TodoReporter):
 
 def create_live_reporter(
     update_callback: Callable[[Dict[str, Any], Optional[str]], None],
+    step_update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None,
     clear_callback: Optional[Callable[[Optional[str]], None]] = None,
     output_callback: Optional[Callable[[str, str, str], None]] = None,
 ) -> LivePlanReporter:
     """Factory to create a configured LivePlanReporter.
 
     Args:
-        update_callback: Called with (plan_data, agent_id) to update the panel.
+        update_callback: Called with (plan_data, agent_id) for full plan snapshots
+            (plan created, steps added, plan completed).
+        step_update_callback: Called with (step_data, agent_id) for lean step
+            status deltas. If None, falls back to update_callback with full snapshot.
         clear_callback: Called with agent_id to clear the panel.
         output_callback: Called with (source, text, mode) for output.
 
@@ -217,6 +250,7 @@ def create_live_reporter(
     reporter = LivePlanReporter()
     reporter.initialize({
         "update_callback": update_callback,
+        "step_update_callback": step_update_callback,
         "clear_callback": clear_callback,
         "output_callback": output_callback,
     })
