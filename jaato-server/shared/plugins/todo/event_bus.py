@@ -155,12 +155,14 @@ class TaskEventBus:
         Waiters are only removed after the resolver callback succeeds.
         If the resolver raises, the waiter is re-added for retry.
         """
-        if not event.source_step_id:
+        step_id = event.payload.get("step_id")
+        if not step_id:
             return
 
+        plan_id = event.payload.get("plan_id", "")
         keys_to_check = [
-            f"{event.source_agent}:{event.source_plan_id}/{event.source_step_id}",
-            f"{event.source_agent}:*/{event.source_step_id}",
+            f"{event.source_agent}:{plan_id}/{step_id}",
+            f"{event.source_agent}:*/{step_id}",
         ]
 
         waiters_with_keys: list = []
@@ -175,7 +177,7 @@ class TaskEventBus:
 
         logger.debug(
             "Resolving dependencies for %s:%s - %d waiters",
-            event.source_agent, event.source_step_id, len(waiters_with_keys),
+            event.source_agent, step_id, len(waiters_with_keys),
         )
 
         if self._dependency_resolver:

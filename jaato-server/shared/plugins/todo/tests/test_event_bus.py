@@ -462,7 +462,7 @@ class TestDependencyResolution:
                 "waiting_plan_id": waiting_plan_id,
                 "waiting_step_id": waiting_step_id,
                 "completed_agent": event.source_agent,
-                "completed_step": event.source_step_id
+                "completed_step": event.payload.get("step_id")
             })
 
         bus.set_dependency_resolver(resolver)
@@ -688,9 +688,9 @@ class TestTaskEvent:
 
         assert event.event_type == TaskEventType.PLAN_CREATED
         assert event.source_agent == "main"
-        assert event.source_plan_id == plan.plan_id
-        assert event.source_plan_title == "Test Plan"
-        assert event.source_step_id is None
+        assert event.payload.get("plan_id") == plan.plan_id
+        assert event.payload.get("plan_title") == "Test Plan"
+        assert "step_id" not in event.payload
         assert event.event_id is not None
         assert event.timestamp is not None
 
@@ -708,8 +708,8 @@ class TestTaskEvent:
         )
 
         assert event.event_type == TaskEventType.STEP_COMPLETED
-        assert event.source_step_id == step.step_id
-        assert event.source_step_description == step.description
+        assert event.payload.get("step_id") == step.step_id
+        assert event.payload.get("step_description") == step.description
         assert event.payload["output"]["result"] == "success"
 
     def test_to_dict(self):
@@ -740,9 +740,7 @@ class TestTaskEvent:
             "event_type": "plan_created",
             "timestamp": "2024-01-01T00:00:00Z",
             "source_agent": "main",
-            "source_plan_id": "plan_456",
-            "source_plan_title": "My Plan",
-            "payload": {"steps": []}
+            "payload": {"steps": [], "plan_id": "plan_456", "plan_title": "My Plan"}
         }
 
         event = TaskEvent.from_dict(data)
@@ -750,4 +748,4 @@ class TestTaskEvent:
         assert event.event_id == "evt_123"
         assert event.event_type == TaskEventType.PLAN_CREATED
         assert event.source_agent == "main"
-        assert event.source_plan_id == "plan_456"
+        assert event.payload.get("plan_id") == "plan_456"

@@ -57,6 +57,10 @@ from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
 from jaato_sdk.plugins.todo.channels import create_live_reporter
 
 # Import events from SDK
+from jaato_sdk.event_bus import (
+    EventType as BusEventType,
+    Event as BusEvent,
+)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -77,6 +81,7 @@ from jaato_sdk.events import (
     ReferenceSelectionResolvedEvent,
     ReferenceSelectionResponseRequest,
     PlanUpdatedEvent,
+    PlanStepUpdatedEvent,
     PlanClearedEvent,
     ContextUpdatedEvent,
     InstructionBudgetEvent,
@@ -107,6 +112,48 @@ from jaato_sdk.events import (
 
 # Type alias for event callback
 EventCallback = Callable[[Event], None]
+
+# Mapping from server EventType to bus EventType.
+# Events not in this mapping bypass the bus and go directly to clients
+# (init progress, errors, session list, help text, etc.).
+_SERVER_TO_BUS: Dict[EventType, BusEventType] = {
+    EventType.AGENT_CREATED: BusEventType.AGENT_CREATED,
+    EventType.AGENT_OUTPUT: BusEventType.AGENT_OUTPUT,
+    EventType.AGENT_STATUS_CHANGED: BusEventType.AGENT_STATUS_CHANGED,
+    EventType.AGENT_COMPLETED: BusEventType.AGENT_COMPLETED,
+    EventType.TOOL_CALL_START: BusEventType.TOOL_CALL_STARTED,
+    EventType.TOOL_CALL_END: BusEventType.TOOL_CALL_COMPLETED,
+    EventType.TOOL_OUTPUT: BusEventType.TOOL_OUTPUT,
+    EventType.PLAN_STEP_UPDATED: BusEventType.PLAN_STEP_UPDATED,
+    EventType.TURN_COMPLETED: BusEventType.TURN_COMPLETED,
+    EventType.TURN_PROGRESS: BusEventType.TURN_PROGRESS,
+    EventType.CONTEXT_UPDATED: BusEventType.CONTEXT_UPDATED,
+    EventType.PERMISSION_INPUT_MODE: BusEventType.PERMISSION_REQUESTED,
+    EventType.PERMISSION_RESOLVED: BusEventType.PERMISSION_RESOLVED,
+}
+
+
+def _server_event_to_bus_event(server_event: Event) -> Optional[BusEvent]:
+    """Convert a server event to a bus event.
+
+    Extracts the server event's dataclass fields into the bus event payload.
+    Returns None for unmapped event types (those go directly to clients).
+    """
+    bus_type = _SERVER_TO_BUS.get(server_event.type)
+    if bus_type is None:
+        return None
+
+    # Flatten dataclass fields to payload dict, excluding base Event fields
+    payload = {
+        k: v for k, v in server_event.to_dict().items()
+        if k not in ("type", "timestamp")
+    }
+
+    return BusEvent.create(
+        event_type=bus_type,
+        source_agent=payload.get("agent_id", "server"),
+        payload=payload,
+    )
 
 
 class AgentState:
@@ -416,8 +463,33 @@ class JaatoServer:
     # =========================================================================
 
     def emit(self, event: Event) -> None:
-        """Emit an event to all subscribed clients."""
+        """Emit an event to all subscribed clients and to the EventBus.
+
+        Mapped events are published to the EventBus first, then forwarded
+        to clients via the callback. Unmapped events (init, error, help,
+        session list, etc.) go directly to clients without touching the bus.
+        """
+        # Publish to EventBus for internal subscribers (plugins, activity detector)
+        bus = self._get_event_bus()
+        if bus:
+            bus_event = _server_event_to_bus_event(event)
+            if bus_event:
+                bus.publish(bus_event)
+
+        # Forward to clients (IPC/WebSocket)
         self._on_event(event)
+
+    def _get_event_bus(self):
+        """Get the EventBus from the runtime, if available.
+
+        Returns None during early init before the runtime is created,
+        or if no JaatoClient is connected yet.
+        """
+        if self._jaato:
+            runtime = self._jaato.get_runtime()
+            if runtime:
+                return runtime.event_bus
+        return None
 
     def set_event_callback(self, callback: EventCallback) -> None:
         """Set the event callback for clients."""
@@ -2087,6 +2159,22 @@ class JaatoServer:
             agent_id = _get_agent_id(agent_name)
             server.emit(PlanClearedEvent(agent_id=agent_id))
 
+        def step_update_callback(step_data: dict, agent_name: Optional[str] = None):
+            """Emit PlanStepUpdatedEvent for lean step status deltas."""
+            agent_id = _get_agent_id(agent_name)
+            server.emit(PlanStepUpdatedEvent(
+                agent_id=agent_id,
+                step_id=step_data.get('step_id', ''),
+                sequence=step_data.get('sequence', 0),
+                content=step_data.get('content', ''),
+                status=step_data.get('status', 'pending'),
+                result=step_data.get('result'),
+                error=step_data.get('error'),
+                blocked_by=step_data.get('blocked_by'),
+                depends_on=step_data.get('depends_on'),
+                received_outputs=step_data.get('received_outputs'),
+            ))
+
         def output_callback(source: str, text: str, mode: str):
             """Emit AgentOutputEvent for plan messages."""
             server.emit(AgentOutputEvent(
@@ -2099,6 +2187,7 @@ class JaatoServer:
         # Reuse LivePlanReporter from jaato-tui with event-emitting callbacks
         reporter = create_live_reporter(
             update_callback=update_callback,
+            step_update_callback=step_update_callback,
             clear_callback=clear_callback,
             output_callback=output_callback,
         )

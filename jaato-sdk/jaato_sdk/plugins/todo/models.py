@@ -167,6 +167,9 @@ class TaskEvent(Event):
     ) -> 'TaskEvent':
         """Create a TaskEvent from a plan and optional step.
 
+        Plan and step fields are stored in ``payload`` (not as top-level
+        Event fields), keeping the Event envelope minimal.
+
         Args:
             event_type: Type of event.
             agent_id: ID of the agent that owns the plan.
@@ -177,17 +180,19 @@ class TaskEvent(Event):
         Returns:
             A new TaskEvent instance.
         """
+        p = payload.copy() if payload else {}
+        p["plan_id"] = plan.plan_id
+        p["plan_title"] = plan.title
+        if step:
+            p["step_id"] = step.step_id
+            p["step_description"] = step.description
+            p["step_sequence"] = step.sequence
         return cls(
             event_id=str(uuid.uuid4()),
             event_type=event_type,
             timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             source_agent=agent_id,
-            source_plan_id=plan.plan_id,
-            source_plan_title=plan.title,
-            source_step_id=step.step_id if step else None,
-            source_step_description=step.description if step else None,
-            source_step_sequence=step.sequence if step else None,
-            payload=payload or {},
+            payload=p,
         )
 
 

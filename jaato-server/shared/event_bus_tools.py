@@ -47,8 +47,8 @@ def _format_event_notification(event: Event) -> str:
     parts = [f"[SUBAGENT event={event.event_type.value}]"]
     parts.append(f"From: {event.source_agent}")
 
-    if event.source_plan_title:
-        parts.append(f"Plan: {event.source_plan_title}")
+    if event.payload.get("plan_title", ""):
+        parts.append(f"Plan: {event.payload.get('plan_title', '')}")
 
     # Event-specific details
     if event.event_type == EventType.PLAN_CREATED:
@@ -59,8 +59,8 @@ def _format_event_notification(event: Event) -> str:
                 parts.append(f"  - {s.get('step_id')}: {s.get('description')}")
 
     elif event.event_type == EventType.STEP_COMPLETED:
-        if event.source_step_id:
-            parts.append(f"Step: {event.source_step_id}")
+        if event.payload.get("step_id"):
+            parts.append(f"Step: {event.payload.get('step_id')}")
         output = event.payload.get("output")
         if output:
             parts.append(f"Output: {json.dumps(output)}")

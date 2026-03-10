@@ -842,6 +842,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ReferenceSelectionRequestedEvent,
         ReferenceSelectionResolvedEvent,
         PlanUpdatedEvent,
+        PlanStepUpdatedEvent,
         PlanClearedEvent,
         ToolCallStartEvent,
         ToolCallEndEvent,
@@ -1494,6 +1495,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 plan_steps = []
                 for i, step in enumerate(event.steps):
                     step_data = {
+                        "step_id": step.get("step_id", ""),
                         "description": step.get("content", ""),
                         "status": step.get("status", "pending"),
                         "active_form": step.get("active_form"),
@@ -1533,6 +1535,50 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     buffer.update_step_id_map(step_id_map)
 
                 display.update_plan(plan_data, agent_id)
+
+            elif isinstance(event, PlanStepUpdatedEvent):
+                # Lean delta — update a single step in local plan state
+                agent_id = getattr(event, 'agent_id', None) or "main"
+                current_plan = None
+                if agent_registry:
+                    agent_info = agent_registry.get_agent(agent_id)
+                    if agent_info:
+                        current_plan = agent_info.plan_data
+
+                if current_plan and current_plan.get("steps"):
+                    # Find and update the step by step_id or sequence
+                    updated = False
+                    for step in current_plan["steps"]:
+                        if step.get("step_id") == event.step_id:
+                            step["status"] = event.status
+                            step["description"] = event.content
+                            if event.result is not None:
+                                step["result"] = event.result
+                            if event.error is not None:
+                                step["error"] = event.error
+                            if event.blocked_by is not None:
+                                step["blocked_by"] = event.blocked_by
+                            if event.depends_on is not None:
+                                step["depends_on"] = event.depends_on
+                            if event.received_outputs is not None:
+                                step["received_outputs"] = event.received_outputs
+                            updated = True
+                            break
+
+                    if updated:
+                        # Recalculate progress
+                        total = len(current_plan["steps"])
+                        completed = sum(
+                            1 for s in current_plan["steps"]
+                            if s.get("status") == "completed"
+                        )
+                        percent = (completed / total * 100) if total > 0 else 0
+                        current_plan["progress"] = {
+                            "total": total,
+                            "completed": completed,
+                            "percent": round(percent, 1),
+                        }
+                        display.update_plan(current_plan, agent_id)
 
             elif isinstance(event, PlanClearedEvent):
                 agent_id = getattr(event, 'agent_id', None)

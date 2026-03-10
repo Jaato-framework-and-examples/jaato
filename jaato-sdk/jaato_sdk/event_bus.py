@@ -46,6 +46,32 @@ class EventType(Enum):
     STEP_BLOCKED = "step_blocked"      # Step waiting on dependencies
     STEP_UNBLOCKED = "step_unblocked"  # All dependencies satisfied
 
+    # Agent lifecycle events (bridged from server events)
+    AGENT_CREATED = "agent.created"
+    AGENT_STATUS_CHANGED = "agent.status_changed"
+    AGENT_COMPLETED = "agent.completed"
+    AGENT_OUTPUT = "agent.output"          # Model text, system text, plugin text
+
+    # Tool execution events (bridged from server events)
+    TOOL_CALL_STARTED = "tool.call_started"
+    TOOL_CALL_COMPLETED = "tool.call_completed"
+    TOOL_OUTPUT = "tool.output"
+
+    # Context & turn events (bridged from server events)
+    TURN_COMPLETED = "turn.completed"
+    TURN_PROGRESS = "turn.progress"
+    CONTEXT_UPDATED = "context.updated"
+
+    # Plan display events (bridged from server events)
+    PLAN_STEP_UPDATED = "plan.step_updated"
+
+    # Permission events (bridged from server events)
+    PERMISSION_REQUESTED = "permission.requested"
+    PERMISSION_RESOLVED = "permission.resolved"
+
+    # Drift monitor events (published by drift monitor plugin)
+    DRIFT_MEASURED = "drift.measured"
+
     # External events (published by plugins, not plan/step lifecycle)
     EXTERNAL_EVENT = "external_event"  # Webhook, WebSocket, or other external ingress
 
@@ -65,26 +91,25 @@ class EventFilter:
     def matches(self, event: 'Event') -> bool:
         """Check if an event matches this filter.
 
+        Plan and step IDs are read from ``event.payload`` (not top-level
+        fields), since those are domain-specific data.
+
         Args:
             event: The Event to check.
 
         Returns:
             True if the event matches all specified filter criteria.
         """
-        # Agent filter
         if self.agent_id and self.agent_id != "*":
             if event.source_agent != self.agent_id:
                 return False
 
-        # Plan filter
-        if self.plan_id and event.source_plan_id != self.plan_id:
+        if self.plan_id and event.payload.get("plan_id") != self.plan_id:
             return False
 
-        # Step filter
-        if self.step_id and event.source_step_id != self.step_id:
+        if self.step_id and event.payload.get("step_id") != self.step_id:
             return False
 
-        # Event type filter
         if self.event_types and event.event_type not in self.event_types:
             return False
 
@@ -153,30 +178,16 @@ class Subscription:
 
 @dataclass
 class Event:
-    """An event published to the shared event bus.
+    """Universal event on the bus.
 
-    These events enable cross-agent coordination and external event
-    delivery. They are published by plugins (todo, webhook, ws_client)
-    and delivered to subscribers via callbacks.
+    Minimal envelope carrying event identity and source. All domain-specific
+    data (plan context, tool args, text content, token counts) lives in
+    ``payload``. This keeps the envelope stable as new event types are added.
     """
     event_id: str
     event_type: EventType
     timestamp: str  # ISO8601
-
-    # Source identification
     source_agent: str
-    source_plan_id: str
-    source_plan_title: str
-    source_step_id: Optional[str] = None
-    source_step_description: Optional[str] = None
-    source_step_sequence: Optional[int] = None
-
-    # Event payload - varies by event type:
-    # - plan_created: {steps: [{step_id, description, sequence}, ...]}
-    # - step_completed: {output: {...}, result: "..."}
-    # - step_blocked: {blocked_by: [{agent_id, step_id}, ...]}
-    # - step_unblocked: {received_outputs: {...}}
-    # - external_event: {source: "...", event_type: "...", ...}
     payload: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -184,11 +195,6 @@ class Event:
         cls,
         event_type: EventType,
         source_agent: str,
-        source_plan_id: str = "",
-        source_plan_title: str = "",
-        source_step_id: Optional[str] = None,
-        source_step_description: Optional[str] = None,
-        source_step_sequence: Optional[int] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> 'Event':
         """Create a new Event with auto-generated ID and timestamp.
@@ -196,12 +202,8 @@ class Event:
         Args:
             event_type: Type of event.
             source_agent: ID of the agent or plugin publishing the event.
-            source_plan_id: Plan ID (empty string if not plan-related).
-            source_plan_title: Plan title (empty string if not plan-related).
-            source_step_id: Optional step ID.
-            source_step_description: Optional step description.
-            source_step_sequence: Optional step sequence number.
-            payload: Additional event-specific data.
+            payload: Event-specific data. For plan/step events, include
+                plan_id, plan_title, step_id, etc. here.
 
         Returns:
             A new Event instance.
@@ -211,11 +213,6 @@ class Event:
             event_type=event_type,
             timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             source_agent=source_agent,
-            source_plan_id=source_plan_id,
-            source_plan_title=source_plan_title,
-            source_step_id=source_step_id,
-            source_step_description=source_step_description,
-            source_step_sequence=source_step_sequence,
             payload=payload or {},
         )
 
@@ -226,11 +223,6 @@ class Event:
             "event_type": self.event_type.value,
             "timestamp": self.timestamp,
             "source_agent": self.source_agent,
-            "source_plan_id": self.source_plan_id,
-            "source_plan_title": self.source_plan_title,
-            "source_step_id": self.source_step_id,
-            "source_step_description": self.source_step_description,
-            "source_step_sequence": self.source_step_sequence,
             "payload": self.payload,
         }
 
@@ -247,11 +239,6 @@ class Event:
             event_type=event_type,
             timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z"),
             source_agent=data.get("source_agent", ""),
-            source_plan_id=data.get("source_plan_id", ""),
-            source_plan_title=data.get("source_plan_title", ""),
-            source_step_id=data.get("source_step_id"),
-            source_step_description=data.get("source_step_description"),
-            source_step_sequence=data.get("source_step_sequence"),
             payload=data.get("payload", {}),
         )
 
