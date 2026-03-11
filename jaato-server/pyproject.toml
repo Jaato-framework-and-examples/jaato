@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.3.16"
+version = "0.3.17"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -73,8 +73,14 @@ kaggle = [
 kerberos = [
     "pyspnego[kerberos]>=0.10.0",  # Kerberos/SPNEGO proxy authentication (includes gssapi on Linux/macOS)
 ]
+telemetry = [
+    "opentelemetry-api>=1.20.0",  # OTel API: tracer/meter interfaces for distributed tracing
+    "opentelemetry-sdk>=1.20.0",  # OTel SDK: TracerProvider, span processors, samplers
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",  # OTLP gRPC exporter: primary export path for collectors (Phoenix, Jaeger, OTel Collector)
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",  # OTLP HTTP exporter: fallback when gRPC is unavailable
+]
 all = [
-    "jaato-server[dev,kaggle,kerberos]",
+    "jaato-server[dev,kaggle,kerberos,telemetry]",
 ]
 
 [project.scripts]
