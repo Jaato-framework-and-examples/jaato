@@ -690,7 +690,7 @@ class JaatoSession:
             self._on_continuation_needed(text)
         else:
             # Session is busy - queue the message for later processing
-            # High-priority (PARENT/USER/SYSTEM) → processed mid-turn
+            # High-priority (PARENT/USER/SYSTEM/EVENT) → processed mid-turn
             # Low-priority (CHILD) → processed when becoming idle
             self._message_queue.put(text, actual_source_id, actual_source_type)
             self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
@@ -4983,9 +4983,10 @@ NOTES
         - User input (SourceType.USER)
         - Parent agent guidance (SourceType.PARENT)
         - System messages (SourceType.SYSTEM)
+        - Subscribed events (SourceType.EVENT)
 
-        Child messages (SourceType.CHILD) - subagent status updates - are
-        left in the queue and processed when the agent becomes idle via
+        Child messages (SourceType.CHILD) - passive subagent status updates -
+        are left in the queue and processed when the agent becomes idle via
         _drain_child_messages().
 
         If a high-priority prompt is pending, this method:

@@ -325,7 +325,11 @@ class EventBusTools:
             event_types=event_types,
         )
 
-        # Callback that injects events into the subscriber's session
+        # Callback that injects events into the subscriber's session.
+        # Uses SourceType.EVENT so subscribed events are delivered mid-turn
+        # (high priority), unlike passive CHILD status updates which wait
+        # until idle.  The agent explicitly asked for these events, so they
+        # should arrive at the next natural pause point (between tool calls).
         def on_event(event: Event) -> None:
             # Don't deliver events from self
             if event.source_agent == subscriber_name:
@@ -338,7 +342,7 @@ class EventBusTools:
                 session.inject_prompt(
                     text=event_message,
                     source_id=event.source_agent,
-                    source_type=SourceType.CHILD,
+                    source_type=SourceType.EVENT,
                 )
             except Exception as e:
                 logger.debug("Failed to inject event: %s", e)

@@ -14,11 +14,17 @@ from typing import Optional, Iterator
 
 
 class SourceType(Enum):
-    """Type of agent that sent the message."""
+    """Type of agent that sent the message.
+
+    Priority groups:
+    - High priority (mid-turn): PARENT, USER, SYSTEM, EVENT
+    - Low priority (idle-only): CHILD
+    """
     PARENT = "parent"   # Controller messages - high priority, mid-turn processing
     CHILD = "child"     # Status updates - lower priority, process when idle
     USER = "user"       # User input - treated like parent (high priority)
     SYSTEM = "system"   # System messages - treated like parent (high priority)
+    EVENT = "event"     # Explicitly subscribed events - high priority, mid-turn processing
 
 
 @dataclass
@@ -135,7 +141,7 @@ class MessageQueue:
         with self._lock:
             current = self._head
             while current:
-                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM):
+                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM, SourceType.EVENT):
                     self._remove(current)
                     return current
                 current = current._next
@@ -180,7 +186,7 @@ class MessageQueue:
         with self._lock:
             current = self._head
             while current:
-                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM):
+                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM, SourceType.EVENT):
                     return True
                 current = current._next
         return False
