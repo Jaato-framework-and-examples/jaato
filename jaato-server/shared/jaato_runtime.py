@@ -1120,6 +1120,10 @@ class JaatoRuntime:
         if self._permission_plugin:
             executors.update(self._permission_plugin.get_executors())
 
+        # Add core tool executors (framework infrastructure, not plugin-specific)
+        if self._registry:
+            executors.update(self._registry.get_core_executors())
+
         return executors
 
     def get_system_instructions(

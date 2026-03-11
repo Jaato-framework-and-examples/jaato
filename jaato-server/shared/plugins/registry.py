@@ -650,6 +650,14 @@ class PluginRegistry:
             self._core_auto_approved.add(schema.name)
         _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
 
+    def get_core_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Get executors for all registered core framework tools.
+
+        Returns:
+            Dict mapping tool names to executor callables.
+        """
+        return dict(self._core_executors)
+
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
