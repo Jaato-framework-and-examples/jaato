@@ -59,8 +59,18 @@ class ZhipuAICachePlugin:
 
     @property
     def provider_name(self) -> str:
-        """Serves the ZhipuAI provider."""
+        """Serves the ZhipuAI provider (primary)."""
         return "zhipuai"
+
+    @property
+    def provider_names(self) -> List[str]:
+        """All provider names this plugin serves.
+
+        Both the Anthropic-compat (``zhipuai``) and OpenAI-compat
+        (``zhipuai-openai``) providers use the same Z.AI server-side
+        implicit caching, so this plugin monitors both.
+        """
+        return ["zhipuai", "zhipuai-openai"]
 
     @property
     def compatible_models(self) -> List[str]:

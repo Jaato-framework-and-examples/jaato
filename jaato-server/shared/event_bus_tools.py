@@ -294,6 +294,16 @@ class EventBusTools:
         if not event_types_raw:
             return {"error": "event_types is required"}
 
+        # Some providers pass array parameters as JSON strings rather
+        # than parsed lists.  Deserialize if needed so iteration yields
+        # individual event type strings, not characters.
+        if isinstance(event_types_raw, str):
+            try:
+                event_types_raw = json.loads(event_types_raw)
+            except json.JSONDecodeError:
+                # Single event type as a plain string
+                event_types_raw = [event_types_raw]
+
         # Parse event types
         event_types = []
         for et in event_types_raw:
@@ -355,6 +365,13 @@ class EventBusTools:
         after_event = args.get("after_event")
 
         bus = self._get_bus()
+
+        # Handle event_types passed as JSON string (see _execute_subscribe)
+        if isinstance(event_types_raw, str):
+            try:
+                event_types_raw = json.loads(event_types_raw)
+            except json.JSONDecodeError:
+                event_types_raw = [event_types_raw]
 
         # Parse event types
         event_types = None

@@ -108,7 +108,13 @@ def load_cache_plugin_for_provider(
     for _name, factory in plugins.items():
         try:
             plugin = factory()
-            if plugin.provider_name == provider_name:
+            # Check provider_names (list) first, then fall back to
+            # single provider_name for backwards compatibility.
+            names = getattr(plugin, "provider_names", None)
+            if names and provider_name in names:
+                plugin.initialize(config)
+                return plugin
+            elif plugin.provider_name == provider_name:
                 plugin.initialize(config)
                 return plugin
         except Exception:
