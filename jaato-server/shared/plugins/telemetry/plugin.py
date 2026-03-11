@@ -236,6 +236,18 @@ class TelemetryPlugin(Protocol):
         """
         ...
 
+    def subscribe_to_bus(self, bus) -> None:
+        """Subscribe to EventBus for plan/step lifecycle context.
+
+        When subscribed, STEP_STARTED events set plan_id/step_id on the
+        current thread so all subsequent spans carry them.  STEP_COMPLETED,
+        STEP_FAILED, and STEP_SKIPPED clear the context.
+
+        Args:
+            bus: A TaskEventBus instance to subscribe to.
+        """
+        ...
+
     def get_current_trace_id(self) -> Optional[str]:
         """Get the current trace ID if available.
 

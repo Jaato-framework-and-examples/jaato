@@ -348,7 +348,7 @@ class EventBusTools:
                 logger.debug("Failed to inject event: %s", e)
 
         sub_id = bus.subscribe(
-            subscriber_agent=subscriber_name,
+            subscriber_name=subscriber_name,
             filter=filter,
             callback=on_event,
         )

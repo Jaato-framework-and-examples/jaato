@@ -284,6 +284,119 @@ class TestOTelPlugin:
 
         plugin.shutdown()
 
+    def test_agent_context_propagates_to_child_spans(self):
+        """Test that agent identity set in turn_span propagates to child spans."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        exporter = InMemorySpanExporter()
+
+        plugin = OTelPlugin()
+        plugin.initialize({"enabled": True, "exporter": "none"})
+        plugin._provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        with plugin.turn_span("agent_42", "subagent", agent_name="researcher") as turn:
+            with plugin.llm_span("claude-sonnet", "anthropic") as llm:
+                pass
+            with plugin.tool_span("web_search", "call_1", plugin_type="tool") as tool:
+                pass
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 3
+
+        # All child spans should carry agent identity
+        for span in spans:
+            assert span.attributes["jaato.session_id"] == "agent_42"
+            assert span.attributes["jaato.agent_type"] == "subagent"
+            assert span.attributes["jaato.agent_name"] == "researcher"
+
+        plugin.shutdown()
+
+    def test_agent_context_cleared_after_turn_span(self):
+        """Test that agent context is cleaned up after turn_span exits."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        exporter = InMemorySpanExporter()
+
+        plugin = OTelPlugin()
+        plugin.initialize({"enabled": True, "exporter": "none"})
+        plugin._provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        with plugin.turn_span("agent_1", "main", agent_name="planner"):
+            pass
+
+        # After turn_span exits, context should be cleared
+        assert getattr(plugin._agent_context, "agent_id", None) is None
+        assert getattr(plugin._agent_context, "agent_name", None) is None
+
+        # A child span created outside a turn_span should not carry stale context
+        with plugin.llm_span("model", "provider") as llm:
+            pass
+
+        spans = exporter.get_finished_spans()
+        llm_span = spans[-1]
+        assert "jaato.session_id" not in dict(llm_span.attributes)
+        assert "jaato.agent_name" not in dict(llm_span.attributes)
+
+        plugin.shutdown()
+
+    def test_plan_step_context_from_bus_events(self):
+        """Test that bus STEP_STARTED/STEP_COMPLETED events set plan/step context on spans."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from shared.event_bus import EventBus
+        from jaato_sdk.event_bus import EventType as BusEventType, Event as BusEvent
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        exporter = InMemorySpanExporter()
+        bus = EventBus()
+
+        plugin = OTelPlugin()
+        plugin.initialize({"enabled": True, "exporter": "none"})
+        plugin._provider.add_span_processor(SimpleSpanProcessor(exporter))
+        plugin.subscribe_to_bus(bus)
+
+        # Simulate STEP_STARTED event
+        bus.publish(BusEvent(
+            event_id="evt1",
+            event_type=BusEventType.STEP_STARTED,
+            timestamp="2026-01-01T00:00:00Z",
+            source_agent="main",
+            payload={"plan_id": "plan_42", "step_id": "step_7"},
+        ))
+
+        # Spans created after STEP_STARTED should carry plan/step context
+        with plugin.turn_span("sess_1", "main") as turn:
+            with plugin.tool_span("web_search", "call_1") as tool:
+                pass
+
+        spans = exporter.get_finished_spans()
+        for span in spans:
+            assert span.attributes["jaato.plan_id"] == "plan_42"
+            assert span.attributes["jaato.step_id"] == "step_7"
+
+        # Simulate STEP_COMPLETED — should clear context
+        exporter.clear()
+        bus.publish(BusEvent(
+            event_id="evt2",
+            event_type=BusEventType.STEP_COMPLETED,
+            timestamp="2026-01-01T00:01:00Z",
+            source_agent="main",
+            payload={"plan_id": "plan_42", "step_id": "step_7"},
+        ))
+
+        with plugin.llm_span("model", "provider") as llm:
+            pass
+
+        spans = exporter.get_finished_spans()
+        assert "jaato.plan_id" not in dict(spans[0].attributes)
+        assert "jaato.step_id" not in dict(spans[0].attributes)
+
+        plugin.shutdown()
+
     def test_otel_plugin_llm_span_attributes(self):
         """Test llm_span sets correct attributes."""
         from shared.plugins.telemetry.otel_plugin import OTelPlugin

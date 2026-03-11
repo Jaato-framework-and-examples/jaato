@@ -38,7 +38,7 @@ class TestTaskEventBus:
         bus = _make_bus()
 
         sub_id = bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED])
         )
 
@@ -54,7 +54,7 @@ class TestTaskEventBus:
         bus = _make_bus()
 
         sub_id = bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED])
         )
 
@@ -73,7 +73,7 @@ class TestTaskEventBus:
             received_events.append(event)
 
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
             callback=callback
         )
@@ -102,7 +102,7 @@ class TestTaskEventBus:
 
         # Subscribe only to events from "researcher"
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(
                 agent_id="researcher",
                 event_types=[TaskEventType.STEP_COMPLETED]
@@ -144,7 +144,7 @@ class TestTaskEventBus:
             received_events.append(event)
 
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.STEP_COMPLETED]),
             callback=callback
         )
@@ -183,7 +183,7 @@ class TestTaskEventBus:
             received_events.append(event)
 
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.STEP_COMPLETED]),
             callback=callback,
             expires_after=2
@@ -242,7 +242,7 @@ class TestTaskEventBus:
                 received_counts["total"] += 1
 
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.STEP_COMPLETED]),
             callback=callback
         )

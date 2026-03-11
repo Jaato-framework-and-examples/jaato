@@ -478,7 +478,7 @@ class TestLateSubscriberReplay:
         # Parent subscribes AFTER the event was published
         received = []
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
             callback=lambda e: received.append(e),
         )
@@ -511,7 +511,7 @@ class TestLateSubscriberReplay:
         # Subscribe only to plan_created
         received = []
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
             callback=lambda e: received.append(e),
         )
@@ -539,7 +539,7 @@ class TestLateSubscriberReplay:
         # Subscribe only to events from sub1
         received = []
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(
                 agent_id="sub1",
                 event_types=[TaskEventType.PLAN_CREATED],
@@ -563,7 +563,7 @@ class TestLateSubscriberReplay:
 
         received = []
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
             callback=lambda e: received.append(e),
             replay_history=False,
@@ -609,7 +609,7 @@ class TestLateSubscriberReplay:
                 barrier.wait(timeout=5)
                 time.sleep(0.01)  # Let some events publish first
                 bus.subscribe(
-                    subscriber_agent="main",
+                    subscriber_name="main",
                     filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
                     callback=on_event,
                 )
@@ -653,7 +653,7 @@ class TestLateSubscriberReplay:
 
         received = []
         bus.subscribe(
-            subscriber_agent="main",
+            subscriber_name="main",
             filter=EventFilter(event_types=[TaskEventType.PLAN_CREATED]),
             callback=lambda e: received.append(e),
             expires_after=2,  # Only want 2 events total

@@ -116,6 +116,10 @@ class NullTelemetryPlugin:
     ) -> Generator[_NoOpSpan, None, None]:
         yield _NOOP_SPAN
 
+    def subscribe_to_bus(self, bus) -> None:
+        """No-op bus subscription."""
+        pass
+
     def get_current_trace_id(self) -> Optional[str]:
         return None
 

@@ -281,7 +281,7 @@ def _setup_client_forwarder(self) -> None:
             self._forward_to_clients(server_event)
 
     bus.subscribe(
-        subscriber_agent="server.client_forwarder",
+        subscriber_name="server.client_forwarder",
         filter=EventFilter(),  # All events
         callback=forward_to_clients,
         replay_history=False,
@@ -372,7 +372,7 @@ class ActivityDetectorPlugin:
         self._session = session
         bus = session.get_runtime().event_bus
         self._subscription_id = bus.subscribe(
-            subscriber_agent="activity_detector",
+            subscriber_name="activity_detector",
             filter=EventFilter(event_types=OBSERVED_EVENTS),
             callback=self._on_event,
             replay_history=False,

@@ -15,7 +15,7 @@ remain in the todo plugin's ``TaskEventBus`` which wraps this bus.
 Usage:
     bus = runtime.event_bus  # from JaatoRuntime
     sub_id = bus.subscribe(
-        subscriber_agent="main",
+        subscriber_name="main",
         filter=EventFilter(event_types=[EventType.EXTERNAL_EVENT]),
         callback=lambda event: print(event),
     )
@@ -85,7 +85,7 @@ class EventBus:
 
     def subscribe(
         self,
-        subscriber_agent: str,
+        subscriber_name: str,
         filter: EventFilter,
         callback: Optional[Callable[[Event], None]] = None,
         action_type: str = "callback",
@@ -96,7 +96,7 @@ class EventBus:
         """Subscribe to events matching the filter.
 
         Args:
-            subscriber_agent: Agent ID of the subscriber.
+            subscriber_name: Identifier of the subscriber (agent, plugin, etc.).
             filter: EventFilter specifying which events to receive.
             callback: Function called when matching event is published.
                       Required if action_type is "callback".
@@ -118,7 +118,7 @@ class EventBus:
 
         subscription = Subscription(
             subscription_id=sub_id,
-            subscriber_agent=subscriber_agent,
+            subscriber_name=subscriber_name,
             filter=filter,
             action_type=action_type,
             action_target=action_target,
@@ -146,7 +146,7 @@ class EventBus:
 
         logger.debug(
             "Subscription created: %s by %s for %s from %s (replay=%d events)",
-            sub_id[:8], subscriber_agent,
+            sub_id[:8], subscriber_name,
             [e.value for e in filter.event_types] or "all",
             filter.agent_id or "any",
             len(events_to_replay),
@@ -255,7 +255,7 @@ class EventBus:
         with self._sub_lock:
             subs = list(self._subscriptions.values())
         if agent_id:
-            subs = [s for s in subs if s.subscriber_agent == agent_id]
+            subs = [s for s in subs if s.subscriber_name == agent_id]
         return subs
 
     def get_recent_events(

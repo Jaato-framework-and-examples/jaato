@@ -11,6 +11,7 @@ Requires:
 """
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Optional
 
@@ -210,13 +211,15 @@ class OTelPlugin:
     for OTLP and console exporters. Follows GenAI semantic conventions.
     """
 
-    __slots__ = ("_enabled", "_tracer", "_redact_content", "_provider")
+    __slots__ = ("_enabled", "_tracer", "_redact_content", "_provider",
+                 "_agent_context")
 
     def __init__(self):
         self._enabled = False
         self._tracer = None
         self._redact_content = True
         self._provider = None
+        self._agent_context = threading.local()
 
     def initialize(self, config: Dict[str, Any]) -> None:
         """Initialize OpenTelemetry with the given configuration.
@@ -361,6 +364,72 @@ class OTelPlugin:
         """Check if telemetry is enabled and initialized."""
         return self._enabled and self._tracer is not None
 
+    def _get_agent_attrs(self) -> Dict[str, Any]:
+        """Return all thread-local context attributes (agent + plan/step).
+
+        Agent identity is set by ``turn_span``.  Plan/step scope is
+        maintained by the EventBus subscription (``_on_bus_event``) which
+        listens for step lifecycle events — no coupling to the todo plugin.
+        """
+        ctx = self._agent_context
+        attrs: Dict[str, Any] = {}
+        agent_id = getattr(ctx, "agent_id", None)
+        if agent_id:
+            attrs["jaato.session_id"] = agent_id
+        agent_type = getattr(ctx, "agent_type", None)
+        if agent_type:
+            attrs["jaato.agent_type"] = agent_type
+        agent_name = getattr(ctx, "agent_name", None)
+        if agent_name:
+            attrs["jaato.agent_name"] = agent_name
+        plan_id = getattr(ctx, "plan_id", None)
+        if plan_id:
+            attrs["jaato.plan_id"] = plan_id
+        step_id = getattr(ctx, "step_id", None)
+        if step_id:
+            attrs["jaato.step_id"] = step_id
+        return attrs
+
+    def subscribe_to_bus(self, bus) -> None:
+        """Subscribe to EventBus step lifecycle events for plan/step context.
+
+        Listens for STEP_STARTED (sets plan_id + step_id on the thread-local)
+        and STEP_COMPLETED / STEP_FAILED / STEP_SKIPPED (clears them).
+        This keeps spans tagged with the active plan/step without any
+        coupling to the todo plugin.
+
+        Args:
+            bus: A TaskEventBus instance to subscribe to.
+        """
+        from jaato_sdk.event_bus import EventType as BusEventType, EventFilter
+
+        def on_step_started(event):
+            ctx = self._agent_context
+            ctx.plan_id = event.payload.get("plan_id")
+            ctx.step_id = event.payload.get("step_id")
+
+        def on_step_ended(event):
+            ctx = self._agent_context
+            ctx.plan_id = None
+            ctx.step_id = None
+
+        bus.subscribe(
+            subscriber_name="telemetry",
+            filter=EventFilter(event_types=[BusEventType.STEP_STARTED]),
+            callback=on_step_started,
+            replay_history=False,
+        )
+        bus.subscribe(
+            subscriber_name="telemetry",
+            filter=EventFilter(event_types=[
+                BusEventType.STEP_COMPLETED,
+                BusEventType.STEP_FAILED,
+                BusEventType.STEP_SKIPPED,
+            ]),
+            callback=on_step_ended,
+            replay_history=False,
+        )
+
     @contextmanager
     def turn_span(
         self,
@@ -370,16 +439,32 @@ class OTelPlugin:
         turn_index: Optional[int] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create root span for a turn."""
+        """Create root span for a turn.
+
+        Stores agent identity (session_id, agent_type, agent_name) in a
+        thread-local so that all child spans created within this turn
+        automatically inherit the same attributes.
+        """
         if not self.enabled:
             from .null_plugin import _NoOpSpan, _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        # Store agent context for child spans on this thread
+        ctx = self._agent_context
+        prev_id = getattr(ctx, "agent_id", None)
+        prev_type = getattr(ctx, "agent_type", None)
+        prev_name = getattr(ctx, "agent_name", None)
+        ctx.agent_id = session_id
+        ctx.agent_type = agent_type
+        ctx.agent_name = agent_name
+
+        # Start from any existing plan/step context set by bus events
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "jaato.session_id": session_id,
             "jaato.agent_type": agent_type,
-        }
+        })
         if agent_name:
             attrs["jaato.agent_name"] = agent_name
         if turn_index is not None:
@@ -387,8 +472,13 @@ class OTelPlugin:
         if attributes:
             attrs.update(attributes)
 
-        with self._tracer.start_as_current_span("jaato.turn", attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+        try:
+            with self._tracer.start_as_current_span("jaato.turn", attributes=attrs) as span:
+                yield _SpanWrapper(span, self._redact_content)
+        finally:
+            ctx.agent_id = prev_id
+            ctx.agent_type = prev_type
+            ctx.agent_name = prev_name
 
     @contextmanager
     def llm_span(
@@ -404,11 +494,12 @@ class OTelPlugin:
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "gen_ai.system": provider,
             "gen_ai.request.model": model,
             "jaato.streaming": streaming,
-        }
+        })
         if attributes:
             attrs.update(attributes)
 
@@ -429,11 +520,12 @@ class OTelPlugin:
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "jaato.tool.name": tool_name,
             "jaato.tool.call_id": call_id,
             "jaato.tool.plugin_type": plugin_type,
-        }
+        })
         if attributes:
             attrs.update(attributes)
 
@@ -454,11 +546,12 @@ class OTelPlugin:
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "jaato.retry.attempt": attempt,
             "jaato.retry.max_attempts": max_attempts,
             "jaato.retry.context": context,
-        }
+        })
         if attributes:
             attrs.update(attributes)
 
@@ -478,10 +571,11 @@ class OTelPlugin:
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "jaato.gc.trigger_reason": trigger_reason,
             "jaato.gc.strategy": strategy,
-        }
+        })
         if attributes:
             attrs.update(attributes)
 
@@ -500,9 +594,10 @@ class OTelPlugin:
             yield _NOOP_SPAN
             return
 
-        attrs = {
+        attrs = self._get_agent_attrs()
+        attrs.update({
             "jaato.permission.tool_name": tool_name,
-        }
+        })
         if attributes:
             attrs.update(attributes)
 

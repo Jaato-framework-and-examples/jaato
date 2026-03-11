@@ -284,6 +284,9 @@ class JaatoRuntime:
         from shared.event_bus import EventBus
         self._event_bus: EventBus = EventBus()
 
+        # Subscribe telemetry to bus for plan/step context propagation
+        self._telemetry.subscribe_to_bus(self._event_bus)
+
     def _load_base_system_instructions(self) -> None:
         """Load base system instructions from .jaato/instructions/ folder.
 
@@ -485,6 +488,9 @@ class JaatoRuntime:
             runtime.set_telemetry_plugin(telemetry)
         """
         self._telemetry = plugin
+        # Subscribe to the event bus so plan/step lifecycle events
+        # automatically tag spans with plan_id/step_id.
+        plugin.subscribe_to_bus(self._event_bus)
 
     def connect(self, project: str, location: str) -> None:
         """Connect to the AI provider.

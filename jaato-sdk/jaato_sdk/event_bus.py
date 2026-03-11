@@ -150,7 +150,7 @@ class Subscription:
     into the subscriber's session).
     """
     subscription_id: str
-    subscriber_agent: str    # Agent that created the subscription
+    subscriber_name: str    # Identifier of the subscriber (agent, plugin, etc.)
     filter: EventFilter
 
     # Action when event matches
@@ -166,7 +166,7 @@ class Subscription:
         """Convert to dictionary for serialization."""
         return {
             "subscription_id": self.subscription_id,
-            "subscriber_agent": self.subscriber_agent,
+            "subscriber_name": self.subscriber_name,
             "filter": self.filter.to_dict(),
             "action_type": self.action_type,
             "action_target": self.action_target,

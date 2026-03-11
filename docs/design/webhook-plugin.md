@@ -389,7 +389,7 @@ def _execute_subscribe(self, args):
     sources = args.get("sources", [])
 
     sub_id = bus.subscribe(
-        subscriber_agent=self._session_agent_id,
+        subscriber_name=self._session_agent_id,
         filter=EventFilter(
             event_types=[TaskEventType.CUSTOM],
             agent_id_prefix="webhook:",
