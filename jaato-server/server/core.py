@@ -485,7 +485,7 @@ class JaatoServer:
         Returns None during early init before the runtime is created,
         or if no JaatoClient is connected yet.
         """
-        if self._jaato:
+        if self._jaato and self._jaato.is_connected:
             runtime = self._jaato.get_runtime()
             if runtime:
                 return runtime.event_bus
