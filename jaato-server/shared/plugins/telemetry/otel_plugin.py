@@ -272,11 +272,9 @@ class OTelPlugin:
                 processor = SimpleSpanProcessor(exporter)
             self._provider.add_span_processor(processor)
 
-        # Set as global tracer provider
-        _trace.set_tracer_provider(self._provider)
-
-        # Get tracer for jaato
-        self._tracer = _trace.get_tracer(
+        # Get tracer from this instance's provider (not the global one)
+        # so each session has its own isolated TracerProvider and exporter.
+        self._tracer = self._provider.get_tracer(
             "jaato",
             schema_url="https://opentelemetry.io/schemas/1.21.0"
         )
