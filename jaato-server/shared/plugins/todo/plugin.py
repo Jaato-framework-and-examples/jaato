@@ -151,11 +151,14 @@ class TodoPlugin:
         self._trace(f"set_session: agent_id={agent_id}, thread_id={thread_id}")
         _thread_local.session = session
 
-        # Switch to per-runtime event bus for session isolation
-        new_bus = session._runtime.event_bus
-        if new_bus is not self._event_bus:
-            _thread_local.event_bus = new_bus
+        # Switch to per-runtime event bus for session isolation.
+        # Wrap the raw EventBus in a TaskEventBus for dependency tracking.
+        raw_bus = session._runtime.event_bus
+        current = self._event_bus
+        if current is None or getattr(current, '_bus', None) is not raw_bus:
+            new_bus = TaskEventBus(raw_bus)
             new_bus.set_dependency_resolver(self._on_dependency_resolved)
+            _thread_local.event_bus = new_bus
             self._trace(f"set_session: switched to per-runtime event bus")
 
     @property

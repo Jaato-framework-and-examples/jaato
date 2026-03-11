@@ -20,11 +20,17 @@ from jaato_sdk.plugins.todo.models import (
 )
 from ..event_bus import TaskEventBus
 from ..storage import FileStorage, InMemoryStorage
+from shared.event_bus import EventBus
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _make_bus():
+    """Create a fresh TaskEventBus wrapping a new EventBus."""
+    return TaskEventBus(EventBus())
+
 
 def _make_plugin(storage_type="memory", storage_path=None):
     """Create and initialize a TodoPlugin with the given storage backend."""
@@ -51,12 +57,6 @@ def _create_started_plan(plugin, title="Test Plan", steps=None):
 
 class TestPlanLockingConcurrency:
     """Test that per-plan locking prevents lost updates under parallel tool execution."""
-
-    def setup_method(self):
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        TaskEventBus.reset()
 
     def test_concurrent_add_step_and_set_step_status_with_file_storage(self):
         """Regression: parallel addDependentStep + setStepStatus should not lose the added step.
@@ -175,15 +175,9 @@ class TestPlanLockingConcurrency:
 class TestDependencyResolverRetry:
     """Test that failed dependency resolution retains waiters for retry."""
 
-    def setup_method(self):
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        TaskEventBus.reset()
-
     def test_failed_resolver_retains_waiter(self):
         """If the resolver callback raises, the waiter should be re-added."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         call_count = [0]
 
@@ -230,7 +224,7 @@ class TestDependencyResolverRetry:
 
     def test_successful_resolver_removes_waiter(self):
         """If the resolver succeeds, the waiter should not be re-added."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         resolved = []
 
@@ -269,12 +263,6 @@ class TestDependencyResolverRetry:
 class TestDependencyRegistrationOrder:
     """Test that dependencies are registered after the plan is saved."""
 
-    def setup_method(self):
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        TaskEventBus.reset()
-
     def test_add_dependent_step_saves_before_registering(self):
         """addDependentStep must save the plan before registering the dependency waiter.
 
@@ -285,8 +273,12 @@ class TestDependencyRegistrationOrder:
         plan = _create_started_plan(plugin, steps=["Step 1", "Step 2"])
         target_step_id = plan.steps[1].step_id  # "Step 2"
 
+        # Give the plugin a TaskEventBus so _event_bus is available
+        bus = _make_bus()
+        plugin._event_bus = bus
+
         # Patch register_dependency to verify plan state at call time
-        original_register = plugin._event_bus.register_dependency
+        original_register = bus.register_dependency
         step_in_storage_at_register_time = [None]
 
         def checking_register(dependency_ref, waiting_agent, waiting_plan_id, waiting_step_id):
@@ -296,7 +288,7 @@ class TestDependencyRegistrationOrder:
             step_in_storage_at_register_time[0] = step is not None and len(step.depends_on) > 0
             return original_register(dependency_ref, waiting_agent, waiting_plan_id, waiting_step_id)
 
-        plugin._event_bus.register_dependency = checking_register
+        bus.register_dependency = checking_register
 
         # Add a dependency to an existing step
         dep_ref = {"agent_id": "sub", "step_id": "sub-step-1"}
@@ -365,15 +357,12 @@ class TestAddDependentStepVisibility:
     """End-to-end test for the original bug: addDependentStep step should
     be visible in getPlanStatus."""
 
-    def setup_method(self):
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        TaskEventBus.reset()
-
     def test_dependent_step_visible_in_plan_status(self):
         """A step with dependencies added by addDependentStep must show as blocked in getPlanStatus."""
         plugin = _make_plugin()
+        bus = _make_bus()
+        plugin._event_bus = bus
+
         plan = _create_started_plan(plugin, steps=[
             "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6"
         ])
@@ -400,6 +389,9 @@ class TestAddDependentStepVisibility:
         """The dependency added to an existing step must survive a concurrent step completion."""
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin = _make_plugin("file", f"{tmpdir}/plans")
+            bus = _make_bus()
+            plugin._event_bus = bus
+
             plan = _create_started_plan(plugin, steps=[
                 "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6"
             ])
@@ -470,15 +462,9 @@ class TestLateSubscriberReplay:
     The event bus must replay matching historical events to late subscribers.
     """
 
-    def setup_method(self):
-        TaskEventBus.reset()
-
-    def teardown_method(self):
-        TaskEventBus.reset()
-
     def test_subscribe_after_publish_replays_history(self):
         """Events published before subscribe() should be replayed to the callback."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         # Subagent publishes plan_created BEFORE parent subscribes
         plan = TodoPlan.create("Subagent Plan", ["step1", "step2"])
@@ -506,7 +492,7 @@ class TestLateSubscriberReplay:
 
     def test_replay_respects_filter(self):
         """Only events matching the filter should be replayed."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Plan", ["s1"])
 
@@ -535,7 +521,7 @@ class TestLateSubscriberReplay:
 
     def test_replay_respects_agent_filter(self):
         """Only events from the specified agent should be replayed."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Plan", ["s1"])
 
@@ -566,7 +552,7 @@ class TestLateSubscriberReplay:
 
     def test_replay_disabled_skips_history(self):
         """replay_history=False should not replay anything."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Plan", ["s1"])
         bus.publish(TaskEvent.create(
@@ -592,7 +578,7 @@ class TestLateSubscriberReplay:
         that an event is either in the history snapshot (replayed by subscribe)
         OR delivered via the live subscription, never both.
         """
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Plan", ["s1"])
         received = []
@@ -653,7 +639,7 @@ class TestLateSubscriberReplay:
 
     def test_replay_counts_toward_expires_after(self):
         """Replayed events should count toward expires_after limit."""
-        bus = TaskEventBus.get_instance()
+        bus = _make_bus()
 
         plan = TodoPlan.create("Plan", ["s1"])
 

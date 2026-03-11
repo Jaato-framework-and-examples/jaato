@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.3.12"
+version = "0.3.13"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -22,43 +22,40 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "jaato-sdk",
-    "click",
-    "requests",
-    "google-genai",
-    "mcp[cli]",
-    "google-api-core",
-    "google-auth",
-    "certifi",
-    "python-dotenv",
-    "pyreadline3",
-    "reportlab",
-    "ddgs>=7.0.0",
-    "pyyaml",
-    "azure-ai-inference>=1.0.0b7",
-    "websockets>=12.0",
-    "anthropic>=0.40.0",
-    "pybars3>=0.9.7",
-    "httpx>=0.27.0",
-    "trafilatura>=1.6.0",
-    "html2text>=2024.2.26",
-    "beautifulsoup4>=4.12.0",
-    "lxml>=5.0.0",
-    "ipython-pygments-lexers>=1.0.0",
-    "Pillow>=10.0.0",
-    "pexpect>=4.8.0; sys_platform != 'win32'",
-    "wexpect>=4.0.0; sys_platform == 'win32'",
-    "pywin32>=220; sys_platform == 'win32'",  # wexpect undeclared dep
-    "psutil>=5.0.0",  # Cross-platform: health metrics (CPU/memory) + wexpect dep on Windows
-    "setuptools; sys_platform == 'win32'",  # wexpect requires pkg_resources
-    "pyte>=0.8.0",
-    "watchdog>=4.0.0",
-    "rich>=13.0.0",  # Used by shared plugins for formatting
-    "ast-grep-py>=0.30.0",  # AST-based code search
-    "pymupdf4llm>=0.2.0",  # PDF to markdown conversion for web_fetch
-    "sentence-transformers>=2.2.0",  # Local embedding provider for semantic reference matching
-    "numpy>=1.24.0",  # Embedding sidecar matrix operations
-    "openai>=1.0",  # NVIDIA NIM provider (OpenAI-compatible API)
+    "jaato-sdk",  # SDK protocol: base plugin classes, type system (Message, ToolSchema, ProviderResponse), event definitions
+    "requests",  # HTTP fallback client: OAuth token flows (Anthropic/Antigravity/GitHub), permission/reference/todo channels, Kerberos proxy support
+    "google-genai",  # Google GenAI/Vertex AI model provider plugin (Gemini models)
+    "mcp[cli]",  # MCP plugin: stdio-based MCP client for connecting to external MCP tool servers
+    "google-api-core",  # GCP error handling: retry_utils.py rate-limit detection, token_accounting.py, Google GenAI provider exceptions
+    "google-auth",  # GCP authentication: Application Default Credentials (ADC), service account keys, credential impersonation for Vertex AI
+    "certifi",  # Mozilla CA certificate bundle: pinned explicitly for corporate environments where users append internal root CAs (ssl_helper.py guidance); also a transitive dep of httpx and requests
+    "python-dotenv",  # Environment loading: server/core.py and workspace_manager.py load .env files during initialization
+    "pyreadline3",  # Windows readline support: permission and reference channel plugins use `import readline` for interactive input (pyreadline3 provides this on Windows)
+    "ddgs>=7.0.0",  # web_search plugin: DuckDuckGo search results via DDGS API
+    "pyyaml",  # service_connector plugin: YAML OpenAPI specification parsing (openapi_parser.py, schema_store.py)
+    "azure-ai-inference>=1.0.0b7",  # GitHub Models provider plugin: Azure AI Inference SDK for GitHub Copilot model access
+    "websockets>=12.0",  # server/websocket.py: WebSocket server for remote client connections (TUI, web, external integrations)
+    "anthropic>=0.40.0",  # Anthropic Claude model provider plugin: API key + OAuth auth, prompt caching, extended thinking
+    "pybars3>=0.9.7",  # template plugin: Handlebars/Mustache template rendering engine (template_render tool)
+    "httpx>=0.27.0",  # Primary async HTTP client: all model providers, web_fetch, OAuth flows, service_connector, proxy/Kerberos support
+    "trafilatura>=1.6.0",  # web_fetch plugin: HTML article extraction with boilerplate removal (best for news/blog content)
+    "html2text>=2024.2.26",  # web_fetch plugin: HTML-to-markdown conversion fallback when trafilatura is insufficient
+    "beautifulsoup4>=4.12.0",  # web_fetch plugin: CSS selector support, structured HTML data extraction (links, tables, meta tags)
+    "lxml>=5.0.0",  # Fast C-based HTML/XML parsing backend for beautifulsoup4 and trafilatura
+    "ipython-pygments-lexers>=1.0.0",  # notebook plugin: IPython-aware syntax highlighting for cells with magic commands (%time, !shell)
+    "Pillow>=10.0.0",  # mermaid_formatter plugin: PNG image resizing and color quantization for terminal diagram rendering (sixel, kitty, iterm2 backends)
+    "pexpect>=4.8.0; sys_platform != 'win32'",  # interactive_shell plugin (Unix/macOS): PTY-based interactive sessions with idle-based output detection
+    "wexpect>=4.0.0; sys_platform == 'win32'",  # interactive_shell plugin (Windows): Windows console API wrapper for interactive sessions
+    "pywin32>=220; sys_platform == 'win32'",  # wexpect undeclared dependency: Windows console APIs
+    "psutil>=5.0.0",  # Cross-platform: server health metrics (CPU/memory monitoring) + wexpect dependency on Windows
+    "setuptools; sys_platform == 'win32'",  # wexpect dependency: requires pkg_resources at runtime
+    "watchdog>=4.0.0",  # server/workspace_monitor.py: real-time filesystem monitoring with debounce buffering for workspace file change tracking
+    "rich>=13.0.0",  # Shared plugins: terminal formatting (tables, panels, syntax highlighting) across multiple plugins
+    "ast-grep-py>=0.30.0",  # ast_search plugin: multi-language AST-based code pattern search (Python, JS, TS, Go, Rust, Java, C/C++, etc.)
+    "pymupdf4llm>=0.2.0",  # web_fetch plugin: PDF-to-markdown conversion for fetched PDF documents
+    "sentence-transformers>=2.2.0",  # references plugin: local semantic embedding provider for reference matching (no API calls needed)
+    "numpy>=1.24.0",  # references plugin: vector operations for embedding similarity + notebook plugin image processing
+    "openai>=1.0",  # NIM and ZhipuAI model provider plugins: OpenAI-compatible SDK for NVIDIA NIM and Zhipu AI APIs
 ]
 
 [project.urls]

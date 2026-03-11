@@ -22,12 +22,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "jaato-sdk",
-    "prompt_toolkit>=3.0.0",
-    "rich>=13.0.0",
-    "python-dotenv",
-    "pyte>=0.8.0",  # Terminal emulator for tool output processing
-    "wcwidth",  # For display_width module
+    "jaato-sdk",  # SDK protocol: IPC client, event types, server communication
+    "prompt_toolkit>=3.0.0",  # Interactive terminal UI: input handling, keybindings, command history, multi-line editing
+    "rich>=13.0.0",  # Terminal rendering: syntax highlighting, tables, panels, markdown, themed output formatting
+    "python-dotenv",  # Environment loading: .env file support for client configuration
+    "pyte>=0.8.0",  # VT100 terminal emulator: processes tool output ANSI sequences for clean rendering in output_buffer
+    "wcwidth",  # display_width module: accurate character width calculation for CJK and wide Unicode in table/panel layout
 ]
 
 [project.urls]

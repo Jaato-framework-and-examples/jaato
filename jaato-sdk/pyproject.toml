@@ -22,7 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "python-dotenv",
+    "python-dotenv",  # Environment loading: .env file support for SDK configuration (IPC socket paths, server settings)
 ]
 
 [project.urls]

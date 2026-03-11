@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from ..plugin import TodoPlugin, create_plugin
-from ..event_bus import TaskEventBus, get_event_bus
+from ..event_bus import TaskEventBus
 from jaato_sdk.plugins.todo.models import (
     StepStatus, PlanStatus, TaskEvent, TaskEventType, TodoPlan,
 )
