@@ -1499,6 +1499,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         "description": step.get("content", ""),
                         "status": step.get("status", "pending"),
                         "active_form": step.get("active_form"),
+                        "result": step.get("result"),
+                        "error": step.get("error"),
                         "sequence": i + 1,  # 1-based for display
                     }
                     # Include cross-agent dependency fields if present
