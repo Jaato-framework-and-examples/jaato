@@ -15,10 +15,14 @@ Requires:
 """
 
 import json
+import logging
 import os
 import threading
 from contextlib import contextmanager
+from importlib.metadata import entry_points
 from typing import Any, Dict, Generator, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Lazy imports - only loaded when plugin is initialized
 _trace = None
@@ -327,12 +331,29 @@ class OTelPlugin:
 
         self._redact_content = config.get("redact_content", True)
 
-        # Build resource with service name
+        # Build resource attributes starting with service name
         service_name = config.get(
             "service_name",
             os.environ.get("OTEL_SERVICE_NAME", "jaato")
         )
-        resource = Resource.create({SERVICE_NAME: service_name})
+        resource_attrs = {SERVICE_NAME: service_name}
+
+        # Discover telemetry resource providers from entry points.
+        # This allows external packages (e.g. jaato-premium) to contribute
+        # server identity attributes (service.instance.id, host.name, etc.)
+        # so each server instance is uniquely identifiable in OTLP backends.
+        for ep in entry_points(group="jaato.telemetry_resource"):
+            try:
+                provider = ep.load()
+                extra = provider()
+                if isinstance(extra, dict):
+                    resource_attrs.update(extra)
+            except Exception:
+                logger.warning(
+                    "Failed to load telemetry resource provider %s", ep.name
+                )
+
+        resource = Resource.create(resource_attrs)
 
         # Configure sampler if sample_rate specified
         sampler = None

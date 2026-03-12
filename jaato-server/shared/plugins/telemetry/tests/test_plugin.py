@@ -765,3 +765,119 @@ class TestOpenInferenceMessages:
         assert metadata["parallel"] is True
 
         plugin.shutdown()
+
+    def test_telemetry_resource_entry_points_merged(self):
+        """Test that jaato.telemetry_resource entry points are discovered
+        and merged into the OTel Resource during initialize().
+
+        This is the extension point that allows jaato-premium (or any
+        external package) to contribute server identity attributes like
+        service.instance.id and host.name to the OTel Resource.
+        """
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from unittest.mock import MagicMock
+
+        # Simulate an entry point that returns server identity attrs
+        mock_ep = MagicMock()
+        mock_ep.name = "gossip_identity"
+        mock_ep.load.return_value = lambda: {
+            "service.name": "server-a",
+            "service.instance.id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "service.version": "0.2.59",
+            "service.namespace": "production",
+            "host.name": "192.168.1.42",
+        }
+
+        with patch(
+            "shared.plugins.telemetry.otel_plugin.entry_points",
+            return_value=[mock_ep],
+        ):
+            plugin = OTelPlugin()
+            plugin.initialize({
+                "enabled": True,
+                "exporter": "none",
+            })
+
+        # Verify the resource has the contributed attributes
+        resource_attrs = dict(plugin._provider.resource.attributes)
+        assert resource_attrs["service.name"] == "server-a"
+        assert resource_attrs["service.instance.id"] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert resource_attrs["service.version"] == "0.2.59"
+        assert resource_attrs["service.namespace"] == "production"
+        assert resource_attrs["host.name"] == "192.168.1.42"
+
+        plugin.shutdown()
+
+    def test_telemetry_resource_entry_point_failure_logged(self):
+        """Test that a failing entry point is logged and does not prevent
+        initialization from completing."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from unittest.mock import MagicMock
+
+        mock_ep = MagicMock()
+        mock_ep.name = "broken_provider"
+        mock_ep.load.return_value = MagicMock(side_effect=RuntimeError("boom"))
+
+        with patch(
+            "shared.plugins.telemetry.otel_plugin.entry_points",
+            return_value=[mock_ep],
+        ):
+            plugin = OTelPlugin()
+            plugin.initialize({
+                "enabled": True,
+                "exporter": "none",
+            })
+
+        # Plugin should still be enabled despite the failed entry point
+        assert plugin.enabled
+
+        # Resource falls back to default service.name
+        resource_attrs = dict(plugin._provider.resource.attributes)
+        assert resource_attrs["service.name"] == "jaato"
+
+        plugin.shutdown()
+
+    def test_telemetry_resource_no_entry_points(self):
+        """Test that when no entry points are registered, the Resource
+        uses the default service.name (single-server mode)."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+
+        with patch(
+            "shared.plugins.telemetry.otel_plugin.entry_points",
+            return_value=[],
+        ):
+            plugin = OTelPlugin()
+            plugin.initialize({
+                "enabled": True,
+                "exporter": "none",
+            })
+
+        resource_attrs = dict(plugin._provider.resource.attributes)
+        assert resource_attrs["service.name"] == "jaato"
+
+        plugin.shutdown()
+
+    def test_telemetry_resource_non_dict_ignored(self):
+        """Test that entry points returning non-dict values are ignored."""
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+        from unittest.mock import MagicMock
+
+        mock_ep = MagicMock()
+        mock_ep.name = "bad_provider"
+        mock_ep.load.return_value = lambda: "not a dict"
+
+        with patch(
+            "shared.plugins.telemetry.otel_plugin.entry_points",
+            return_value=[mock_ep],
+        ):
+            plugin = OTelPlugin()
+            plugin.initialize({
+                "enabled": True,
+                "exporter": "none",
+            })
+
+        # Should still initialize with defaults
+        resource_attrs = dict(plugin._provider.resource.attributes)
+        assert resource_attrs["service.name"] == "jaato"
+
+        plugin.shutdown()
