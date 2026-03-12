@@ -16,20 +16,16 @@ graph rendering.
 
 ## Goal
 
-Emit OpenInference-compliant attributes **alongside** the existing jaato
-attributes so that:
+Replace jaato's custom attribute schema with OpenInference semantic
+conventions so that:
 
 1. Phoenix dashboards render full AI-native UIs (messages, tokens, tool calls,
    agent graphs).
-2. Existing jaato-specific attributes (`jaato.tool.plugin_type`,
-   `jaato.gc.*`, `jaato.retry.*`, etc.) remain unchanged for jaato's own
-   dashboards and downstream consumers.
-3. The changes are confined to `otel_plugin.py` — no session-layer or
-   provider-layer changes required.
+2. Traces are interoperable with any OpenInference-compatible backend.
+3. The attribute vocabulary is an industry standard, not jaato-specific.
 
 ## Non-Goals
 
-- Removing or renaming existing `jaato.*` attributes (backwards-compatible).
 - Supporting the full breadth of OpenInference (embeddings, retrievers,
   rerankers, guardrails, evaluators, prompt templates). Only the span kinds
   jaato actually produces are mapped.
@@ -43,17 +39,20 @@ attributes so that:
 The single most critical attribute is `openinference.span.kind`. Without it,
 Phoenix treats spans as generic OTel spans and skips all AI-specific rendering.
 
-| jaato span name      | OTel span name (current) | OpenInference `span.kind` | Rationale |
-|----------------------|--------------------------|---------------------------|-----------|
-| Turn root            | `jaato.turn`             | `AGENT`                   | A turn is an agent reasoning loop (LLM calls + tool use). |
-| LLM API call         | `gen_ai.chat`            | `LLM`                     | Direct LLM invocation. |
-| Tool execution       | `jaato.tool`             | `TOOL`                    | External tool invocation. |
-| Retry attempt        | `jaato.retry`            | `CHAIN`                   | Internal orchestration step. |
-| GC operation         | `jaato.gc`               | `CHAIN`                   | Internal orchestration step. |
-| Permission check     | `jaato.permission`       | `CHAIN`                   | Internal orchestration step. |
+| jaato span name      | OTel span name (current → new) | OpenInference `span.kind` | Rationale |
+|----------------------|-------------------------------|---------------------------|-----------|
+| Turn root            | `jaato.turn` → `jaato.turn`   | `AGENT`                   | A turn is an agent reasoning loop (LLM calls + tool use). |
+| LLM API call         | `gen_ai.chat` → `gen_ai.chat` | `LLM`                     | Direct LLM invocation. |
+| Tool execution       | `jaato.tool` → `jaato.tool`   | `TOOL`                    | External tool invocation. |
+| Retry attempt        | `jaato.retry` → `jaato.retry` | `CHAIN`                   | Internal orchestration step. |
+| GC operation         | `jaato.gc` → `jaato.gc`       | `CHAIN`                   | Internal orchestration step. |
+| Permission check     | `jaato.permission` → `jaato.permission` | `CHAIN`          | Internal orchestration step. |
+
+Span names stay the same — Phoenix classifies by `openinference.span.kind`,
+not by span name.
 
 **Implementation:** Each `*_span()` method sets `openinference.span.kind` in
-the initial attributes dict, alongside the existing attributes.
+the initial attributes dict.
 
 ---
 
@@ -61,30 +60,48 @@ the initial attributes dict, alongside the existing attributes.
 
 ### 2.1. Turn Span → AGENT
 
-| Current jaato attribute     | OpenInference attribute     | Notes |
-|-----------------------------|-----------------------------|-------|
-| `jaato.session_id`          | `session.id`                | Direct rename for OI; keep original too. |
-| `jaato.agent_name`          | `agent.name`                | Only set when agent_name is non-None. |
-| `jaato.agent_type`          | *(keep as-is)*              | No OI equivalent; jaato-specific. |
-| `jaato.turn_index`          | *(keep as-is)*              | No OI equivalent; jaato-specific. |
-| *(new)*                     | `input.value`               | User prompt text (if not redacted). |
-| *(new)*                     | `output.value`              | Agent response text (if not redacted). |
-| *(new)*                     | `input.mime_type`           | `"text/plain"` |
-| *(new)*                     | `output.mime_type`          | `"text/plain"` |
+**Replaced attributes:**
 
-**Graph attributes** (new — enables Phoenix DAG visualization):
+| Old attribute               | New attribute (OpenInference) | Notes |
+|-----------------------------|-------------------------------|-------|
+| `jaato.session_id`          | `session.id`                  | |
+| `jaato.agent_name`          | `agent.name`                  | Only set when non-None. |
+| `jaato.agent_type`          | `metadata` (JSON string)      | Packed into metadata dict along with other jaato-specific fields. |
+| `jaato.turn_index`          | `metadata` (JSON string)      | Same — folded into metadata. |
+| `jaato.plan_id`             | `metadata` (JSON string)      | Same. |
+| `jaato.step_id`             | `metadata` (JSON string)      | Same. |
+
+**New attributes:**
 
 | Attribute              | Value                                          |
 |------------------------|-------------------------------------------------|
-| `graph.node.id`        | `session_id` (unique per agent)                 |
-| `graph.node.name`      | `agent_name` or `agent_type` (human-readable)   |
+| `openinference.span.kind` | `"AGENT"` |
+| `input.value`          | User prompt text (subject to redaction). |
+| `input.mime_type`      | `"text/plain"` |
+| `output.value`         | Agent response text (subject to redaction). |
+| `output.mime_type`     | `"text/plain"` |
+| `graph.node.id`        | `session_id` (unique per agent) |
+| `graph.node.name`      | `agent_name` or `agent_type` (human-readable) |
 | `graph.node.parent_id` | Empty string for main agent; parent's `session_id` for subagents |
 
-**How `graph.node.parent_id` is populated:** The turn span already receives
-`agent_type` (`"main"` vs `"subagent"`). For subagents, jaato's session
-creation flow passes the parent session ID. We add a new optional parameter
-`parent_session_id` to `turn_span()` that subagents provide. When absent or
-`agent_type == "main"`, `graph.node.parent_id` is set to `""` (root).
+**`metadata` consolidation:** OpenInference defines a `metadata` attribute
+(JSON string) for arbitrary span-level metadata. All jaato-specific context
+that has no OI equivalent goes here:
+
+```json
+{
+  "agent_type": "main",
+  "turn_index": 3,
+  "plan_id": "plan-xyz",
+  "step_id": "step-1",
+  "streaming": true
+}
+```
+
+**How `graph.node.parent_id` is populated:** Add a new optional parameter
+`parent_session_id` to `turn_span()`. For subagents, jaato's session creation
+flow passes the parent session ID. When absent or `agent_type == "main"`,
+`graph.node.parent_id` is `""` (root).
 
 ### 2.2. LLM Span → LLM
 
@@ -93,15 +110,16 @@ token breakdown, and tool call visualization.
 
 #### 2.2.1. Core Model Attributes
 
-| Current jaato attribute     | OpenInference attribute     | Notes |
-|-----------------------------|-----------------------------|-------|
-| `gen_ai.system`             | `llm.system`                | Same semantics; add alias. |
-| `gen_ai.request.model`      | `llm.model_name`            | Same semantics; add alias. |
-| `gen_ai.response.finish_reasons` | *(keep as-is)*         | No direct OI equivalent. |
+| Old attribute                    | New attribute (OpenInference) |
+|----------------------------------|-------------------------------|
+| `gen_ai.system`                  | `llm.system`                  |
+| `gen_ai.request.model`           | `llm.model_name`              |
+| `gen_ai.response.finish_reasons` | `metadata` (JSON string)      |
+| `jaato.streaming`                | `metadata` (JSON string)      |
 
 #### 2.2.2. Token Counts
 
-| Current jaato attribute             | OpenInference attribute                          |
+| Old attribute                        | New attribute (OpenInference)                    |
 |--------------------------------------|--------------------------------------------------|
 | `gen_ai.usage.input_tokens`          | `llm.token_count.prompt`                         |
 | `gen_ai.usage.output_tokens`         | `llm.token_count.completion`                     |
@@ -110,15 +128,13 @@ token breakdown, and tool call visualization.
 | `gen_ai.usage.cache_creation_tokens` | `llm.token_count.prompt_details.cache_write`     |
 | `gen_ai.usage.reasoning_tokens`      | `llm.token_count.completion_details.reasoning`   |
 
-**Implementation:** When the session sets a `gen_ai.usage.*` attribute on the
-LLM span, the `_SpanWrapper.set_attribute()` method (or a post-processing
-step) also writes the corresponding `llm.token_count.*` attribute. The
-`llm.token_count.total` is computed as `prompt + completion`.
+**Implementation:** The session layer sets attributes using the new OI names
+directly. `_SpanWrapper` tracks `prompt` and `completion` values to auto-
+compute and set `llm.token_count.total` when both are known.
 
 #### 2.2.3. Input/Output Messages
 
-This is the most complex mapping. OpenInference uses **flattened indexed
-prefixes** for messages:
+OpenInference uses **flattened indexed prefixes** for messages:
 
 ```
 llm.input_messages.0.message.role = "system"
@@ -128,18 +144,17 @@ llm.input_messages.1.message.content = "Hello"
 ```
 
 **Current state:** jaato's LLM span does NOT currently carry input/output
-messages as span attributes — they are not set anywhere in the session layer.
-The `gen_ai.prompt` and `gen_ai.completion` sensitive attributes exist in the
-redaction list but are never actually set.
+messages as span attributes. The `gen_ai.prompt` / `gen_ai.completion`
+attributes in the redaction list are never actually set.
 
-**Approach:** Add two new methods to `SpanContext` / `_SpanWrapper`:
+**Approach:** Add two methods to `SpanContext` / `_SpanWrapper`:
 
 ```python
 def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
     """Set OpenInference-formatted input messages on the span.
 
-    Each message dict should have 'role' and 'content' keys.
-    Messages are flattened to indexed attributes:
+    Each message dict has 'role' and 'content' keys.
+    Flattened to:
       llm.input_messages.{i}.message.role
       llm.input_messages.{i}.message.content
     """
@@ -147,8 +162,7 @@ def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
 def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
     """Set OpenInference-formatted output messages on the span.
 
-    Same format as input messages. Tool calls within messages are
-    flattened to:
+    Same format. Tool calls within messages flattened to:
       llm.output_messages.{i}.message.tool_calls.{j}.tool_call.function.name
       llm.output_messages.{i}.message.tool_calls.{j}.tool_call.function.arguments
     """
@@ -160,14 +174,11 @@ These methods handle:
 - Flattening to indexed attribute format.
 - Tool call extraction from output messages.
 
-**Session-layer call site** (`jaato_session.py`): After the LLM response is
-received, the session calls `llm_span.set_output_messages(...)` with the
-response messages. For input messages, the session calls
-`llm_span.set_input_messages(...)` with the messages sent to the provider.
-
-> **Note:** This is the ONE place where the session layer needs a small change
-> — adding two method calls inside the existing `with self._telemetry.llm_span(...)`
-> block. All other changes are in `otel_plugin.py`.
+**Session-layer call site** (`jaato_session.py`): Inside the existing
+`with self._telemetry.llm_span(...)` block, the session calls
+`llm_span.set_input_messages(...)` with the messages sent to the provider and
+`llm_span.set_output_messages(...)` with the response. Only messages for the
+current LLM call are captured (not the full conversation history).
 
 #### 2.2.4. Tool Calls in LLM Output
 
@@ -179,65 +190,118 @@ llm.output_messages.0.message.tool_calls.0.tool_call.function.name = "cli"
 llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments = '{"command": "ls"}'
 ```
 
-This is handled by `set_output_messages()` as described above. The session
-already has the parsed `FunctionCall` objects; it just needs to pass them.
+Handled by `set_output_messages()`. The session already has the parsed
+`FunctionCall` objects; it just needs to pass them.
 
 ### 2.3. Tool Span → TOOL
 
-| Current jaato attribute     | OpenInference attribute     | Notes |
-|-----------------------------|-----------------------------|-------|
-| `jaato.tool.name`           | `tool.name`                 | Add alias. |
-| `jaato.tool.call_id`        | `tool.id`                   | Add alias. |
-| *(new)*                     | `tool.description`          | Optional; from tool schema if available. |
-| *(new)*                     | `input.value`               | Tool arguments (JSON string, if not redacted). |
-| *(new)*                     | `output.value`              | Tool result (JSON string, if not redacted). |
-| *(new)*                     | `input.mime_type`           | `"application/json"` |
-| *(new)*                     | `output.mime_type`          | `"application/json"` |
-| `jaato.tool.plugin_type`    | *(keep as-is)*              | jaato-specific. |
-| `jaato.tool.success`        | *(keep as-is)*              | jaato-specific; OI uses span status. |
-| `jaato.tool.duration_seconds`| *(keep as-is)*             | jaato-specific. |
-| `jaato.tool.parallel`       | *(keep as-is)*              | jaato-specific. |
+| Old attribute              | New attribute (OpenInference) | Notes |
+|----------------------------|-------------------------------|-------|
+| `jaato.tool.name`          | `tool.name`                   | |
+| `jaato.tool.call_id`       | `tool.id`                     | |
+| `jaato.tool.plugin_type`   | `metadata` (JSON string)      | |
+| `jaato.tool.success`       | *(use span status)*           | `set_status_ok()` / `set_status_error()` already called. |
+| `jaato.tool.error`         | `exception.message`           | OI standard for errors. |
+| `jaato.tool.duration_seconds` | `metadata` (JSON string)   | OTel span duration already captures this; keep in metadata for convenience. |
+| `jaato.tool.parallel`      | `metadata` (JSON string)      | |
+| `jaato.tool.mcp_server`    | `metadata` (JSON string)      | |
+| `jaato.tool.streaming`     | `metadata` (JSON string)      | |
 
-### 2.4. Chain Spans (Retry, GC, Permission)
+**New attributes:**
 
-These internal orchestration spans get `openinference.span.kind = "CHAIN"` and
-`input.value` / `output.value` where meaningful. No further OpenInference-specific
-attributes are needed — they are jaato internals that Phoenix will render as
-generic chain steps in the trace waterfall.
+| Attribute              | Value |
+|------------------------|-------|
+| `openinference.span.kind` | `"TOOL"` |
+| `input.value`          | Tool arguments as JSON string (subject to redaction). |
+| `input.mime_type`      | `"application/json"` |
+| `output.value`         | Tool result as JSON string (subject to redaction). |
+| `output.mime_type`     | `"application/json"` |
+
+### 2.4. Retry Span → CHAIN
+
+| Old attribute              | New attribute (OpenInference) |
+|----------------------------|-------------------------------|
+| `jaato.retry.attempt`      | `metadata` (JSON string)      |
+| `jaato.retry.max_attempts` | `metadata` (JSON string)      |
+| `jaato.retry.context`      | `metadata` (JSON string)      |
+| `jaato.retry.delay_seconds`| `metadata` (JSON string)      |
+| `jaato.retry.error_type`   | `metadata` (JSON string)      |
+
+New: `openinference.span.kind = "CHAIN"`.
+
+### 2.5. GC Span → CHAIN
+
+| Old attribute              | New attribute (OpenInference) |
+|----------------------------|-------------------------------|
+| `jaato.gc.trigger_reason`  | `metadata` (JSON string)      |
+| `jaato.gc.strategy`        | `metadata` (JSON string)      |
+| `jaato.gc.items_collected` | `metadata` (JSON string)      |
+| `jaato.gc.tokens_freed`    | `metadata` (JSON string)      |
+| `jaato.gc.context_before`  | `metadata` (JSON string)      |
+| `jaato.gc.context_after`   | `metadata` (JSON string)      |
+
+New: `openinference.span.kind = "CHAIN"`.
+
+### 2.6. Permission Span → CHAIN
+
+| Old attribute                 | New attribute (OpenInference) |
+|-------------------------------|-------------------------------|
+| `jaato.permission.tool_name`  | `metadata` (JSON string)      |
+
+New: `openinference.span.kind = "CHAIN"`.
 
 ---
 
-## 3. Implementation Plan
+## 3. `_SpanWrapper` Redesign
 
-All changes are scoped to the telemetry plugin layer. The session layer gets
-minimal additions (passing messages to LLM spans).
+### 3.1. Remove Legacy Sensitive Attributes
 
-### 3.1. Changes to `otel_plugin.py`
-
-#### 3.1.1. Constants
-
-Add OpenInference attribute name constants at module level (raw strings, no
-external dependency):
+Replace `_SENSITIVE_ATTRS` with the new OI attribute names:
 
 ```python
-# OpenInference span kind (required for Phoenix rendering)
-_OI_SPAN_KIND = "openinference.span.kind"
-
-# OpenInference span kind values
-_OI_AGENT = "AGENT"
-_OI_LLM = "LLM"
-_OI_TOOL = "TOOL"
-_OI_CHAIN = "CHAIN"
+_SENSITIVE_ATTRS = frozenset({
+    "input.value",
+    "output.value",
+})
 ```
 
-#### 3.1.2. `_SpanWrapper` Additions
+The old `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.request.prompt`,
+`gen_ai.response.completion`, `jaato.tool.args`, `jaato.tool.result` are
+deleted — those attributes are no longer emitted.
 
-Add `set_input_messages()` and `set_output_messages()` methods that flatten
-message lists to indexed OpenInference attributes. These methods respect the
-existing `_redact` flag.
+### 3.2. Token Total Auto-Computation
+
+Add `_prompt_tokens` and `_completion_tokens` tracking to `_SpanWrapper`:
+
+```python
+__slots__ = ("_span", "_redact", "_prompt_tokens", "_completion_tokens")
+
+def set_attribute(self, key: str, value: Any) -> None:
+    # ... redaction logic ...
+    self._span.set_attribute(key, value)
+
+    # Auto-compute total
+    if key == "llm.token_count.prompt":
+        self._prompt_tokens = value
+        if self._completion_tokens is not None:
+            self._span.set_attribute(
+                "llm.token_count.total",
+                self._prompt_tokens + self._completion_tokens,
+            )
+    elif key == "llm.token_count.completion":
+        self._completion_tokens = value
+        if self._prompt_tokens is not None:
+            self._span.set_attribute(
+                "llm.token_count.total",
+                self._prompt_tokens + self._completion_tokens,
+            )
+```
+
+### 3.3. Message Flattening Methods
 
 ```python
 def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
+    """Flatten input messages to OpenInference indexed attributes."""
     for i, msg in enumerate(messages):
         prefix = f"llm.input_messages.{i}.message"
         self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
@@ -247,6 +311,7 @@ def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
         self._span.set_attribute(f"{prefix}.content", content)
 
 def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
+    """Flatten output messages to OpenInference indexed attributes."""
     for i, msg in enumerate(messages):
         prefix = f"llm.output_messages.{i}.message"
         self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
@@ -254,64 +319,48 @@ def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
         if self._redact and content:
             content = f"[REDACTED: {len(content)} chars]"
         self._span.set_attribute(f"{prefix}.content", content)
-        # Flatten tool calls
         for j, tc in enumerate(msg.get("tool_calls", [])):
             tc_prefix = f"{prefix}.tool_calls.{j}.tool_call"
             self._span.set_attribute(
-                f"{tc_prefix}.function.name",
-                tc.get("name", ""),
-            )
+                f"{tc_prefix}.function.name", tc.get("name", ""))
             args = tc.get("arguments", "")
             if self._redact and args:
                 args = f"[REDACTED: {len(args)} chars]"
             self._span.set_attribute(f"{tc_prefix}.function.arguments", args)
 ```
 
-Add a dual-write helper for the token count aliasing pattern:
+### 3.4. Metadata Helper
+
+A helper to pack jaato-specific attributes into the `metadata` JSON string:
 
 ```python
-# Token attribute aliasing: gen_ai.usage.* → llm.token_count.*
-_TOKEN_ALIASES = {
-    "gen_ai.usage.input_tokens": "llm.token_count.prompt",
-    "gen_ai.usage.output_tokens": "llm.token_count.completion",
-    "gen_ai.usage.cache_read_tokens": "llm.token_count.prompt_details.cache_read",
-    "gen_ai.usage.cache_creation_tokens": "llm.token_count.prompt_details.cache_write",
-    "gen_ai.usage.reasoning_tokens": "llm.token_count.completion_details.reasoning",
-}
+def set_metadata(self, data: Dict[str, Any]) -> None:
+    """Set the OpenInference metadata attribute as a JSON string.
 
-def set_attribute(self, key: str, value: Any) -> None:
-    """Set an attribute, redacting sensitive content if configured.
-
-    Also writes OpenInference aliases for gen_ai.usage.* token
-    attributes and tracks prompt/completion for total computation.
+    Used for jaato-specific fields that have no OpenInference equivalent.
     """
-    # Existing redaction logic ...
-
-    self._span.set_attribute(key, value)
-
-    # Dual-write OpenInference alias if applicable
-    oi_alias = _TOKEN_ALIASES.get(key)
-    if oi_alias is not None:
-        self._span.set_attribute(oi_alias, value)
-        # Track for total computation
-        if key == "gen_ai.usage.input_tokens":
-            self._prompt_tokens = value
-        elif key == "gen_ai.usage.output_tokens":
-            self._completion_tokens = value
-            # Write total when both are known
-            if self._prompt_tokens is not None:
-                self._span.set_attribute(
-                    "llm.token_count.total",
-                    self._prompt_tokens + value,
-                )
+    import json
+    self._span.set_attribute("metadata", json.dumps(data))
 ```
 
-> `_prompt_tokens` and `_completion_tokens` are `Optional[int]` fields added
-> to `__slots__` initialized to `None`.
+---
 
-#### 3.1.3. Span Method Changes
+## 4. Span Method Changes in `otel_plugin.py`
 
-**`turn_span()`** — add `parent_session_id` parameter:
+### 4.1. Constants
+
+```python
+# OpenInference span kind (required for Phoenix rendering)
+_OI_SPAN_KIND = "openinference.span.kind"
+
+# Span kind values
+_OI_AGENT = "AGENT"
+_OI_LLM = "LLM"
+_OI_TOOL = "TOOL"
+_OI_CHAIN = "CHAIN"
+```
+
+### 4.2. `turn_span()` — New Signature and Attributes
 
 ```python
 @contextmanager
@@ -324,265 +373,281 @@ def turn_span(
     parent_session_id: Optional[str] = None,
     attributes: Optional[Dict[str, Any]] = None,
 ) -> Generator[_SpanWrapper, None, None]:
-    # ... existing logic ...
-    attrs.update({
-        # OpenInference
+    # ...
+    attrs = {
         _OI_SPAN_KIND: _OI_AGENT,
         "session.id": session_id,
-        # Graph visualization
         "graph.node.id": session_id,
         "graph.node.name": agent_name or agent_type,
         "graph.node.parent_id": parent_session_id or "",
-    })
+    }
     if agent_name:
         attrs["agent.name"] = agent_name
-    # ... rest unchanged ...
+
+    # jaato-specific fields packed into metadata
+    metadata = {"agent_type": agent_type}
+    if turn_index is not None:
+        metadata["turn_index"] = turn_index
+    plan_id = getattr(ctx, "plan_id", None)
+    if plan_id:
+        metadata["plan_id"] = plan_id
+    step_id = getattr(ctx, "step_id", None)
+    if step_id:
+        metadata["step_id"] = step_id
+    attrs["metadata"] = json.dumps(metadata)
+
+    if attributes:
+        attrs.update(attributes)
+
+    with self._tracer.start_as_current_span("jaato.turn", attributes=attrs) as span:
+        yield _SpanWrapper(span, self._redact_content)
 ```
 
-**`llm_span()`**:
+### 4.3. `llm_span()` — OpenInference Attributes
 
 ```python
-attrs.update({
-    _OI_SPAN_KIND: _OI_LLM,
-    "llm.system": provider,       # OI alias
-    "llm.model_name": model,      # OI alias
-    # Keep existing gen_ai.* attributes
-    "gen_ai.system": provider,
-    "gen_ai.request.model": model,
-    "jaato.streaming": streaming,
-})
+@contextmanager
+def llm_span(
+    self,
+    model: str,
+    provider: str,
+    streaming: bool = False,
+    attributes: Optional[Dict[str, Any]] = None,
+) -> Generator[_SpanWrapper, None, None]:
+    # ...
+    attrs = {
+        _OI_SPAN_KIND: _OI_LLM,
+        "llm.system": provider,
+        "llm.model_name": model,
+    }
+    metadata = {"streaming": streaming}
+    attrs["metadata"] = json.dumps(metadata)
+
+    if attributes:
+        attrs.update(attributes)
+
+    with self._tracer.start_as_current_span("gen_ai.chat", attributes=attrs) as span:
+        yield _SpanWrapper(span, self._redact_content)
 ```
 
-**`tool_span()`**:
+### 4.4. `tool_span()` — OpenInference Attributes
 
 ```python
-attrs.update({
-    _OI_SPAN_KIND: _OI_TOOL,
-    "tool.name": tool_name,       # OI alias
-    "tool.id": call_id,           # OI alias
-    # Keep existing jaato.tool.* attributes
-    "jaato.tool.name": tool_name,
-    "jaato.tool.call_id": call_id,
-    "jaato.tool.plugin_type": plugin_type,
-})
+@contextmanager
+def tool_span(
+    self,
+    tool_name: str,
+    call_id: str,
+    plugin_type: str = "unknown",
+    attributes: Optional[Dict[str, Any]] = None,
+) -> Generator[_SpanWrapper, None, None]:
+    # ...
+    attrs = {
+        _OI_SPAN_KIND: _OI_TOOL,
+        "tool.name": tool_name,
+        "tool.id": call_id,
+    }
+    metadata = {"plugin_type": plugin_type}
+    attrs["metadata"] = json.dumps(metadata)
+
+    if attributes:
+        attrs.update(attributes)
+
+    with self._tracer.start_as_current_span("jaato.tool", attributes=attrs) as span:
+        yield _SpanWrapper(span, self._redact_content)
 ```
 
-**`retry_span()`**, **`gc_span()`**, **`permission_span()`**:
+### 4.5. `retry_span()`, `gc_span()`, `permission_span()` — CHAIN Kind
+
+All three follow the same pattern: set `openinference.span.kind = "CHAIN"`
+and pack their jaato-specific attributes into `metadata`.
+
+Example for `retry_span()`:
 
 ```python
-attrs[_OI_SPAN_KIND] = _OI_CHAIN
-# All other attributes unchanged
+attrs = {
+    _OI_SPAN_KIND: _OI_CHAIN,
+}
+metadata = {
+    "retry_attempt": attempt,
+    "retry_max_attempts": max_attempts,
+    "retry_context": context,
+}
+attrs["metadata"] = json.dumps(metadata)
 ```
 
-### 3.2. Changes to `plugin.py` (Protocol)
+### 4.6. `_get_agent_attrs()` — Removed
 
-Add `set_input_messages()` and `set_output_messages()` to the `SpanContext`
-protocol. Add optional `parent_session_id` parameter to `turn_span()`.
+This method currently builds a dict of `jaato.*` attributes from thread-local
+context. It is no longer needed as those attributes are either mapped to OI
+equivalents (`session.id`, `agent.name`) or packed into `metadata`. The
+thread-local context is still used, but the attribute construction moves
+inline into each span method.
 
-### 3.3. Changes to `null_plugin.py`
+---
 
-Add no-op `set_input_messages()` and `set_output_messages()` to `_NoOpSpan`.
+## 5. Session-Layer Changes (`jaato_session.py`)
 
-### 3.4. Changes to `jaato_session.py`
+### 5.1. Token Count Attributes
 
-Inside the existing `with self._telemetry.llm_span(...)` block, add calls to
-pass messages to the span. This requires converting jaato's internal message
-format to simple dicts:
+Replace all `gen_ai.usage.*` attribute calls with `llm.token_count.*`:
 
 ```python
-# After constructing the messages list for the provider call:
-if hasattr(llm_telemetry, 'set_input_messages'):
-    oi_messages = []
-    for msg in messages_for_provider:
-        oi_messages.append({
-            "role": msg.role,
-            "content": msg.text_content or "",
-        })
-    llm_telemetry.set_input_messages(oi_messages)
+# Before:
+llm_span.set_attribute("gen_ai.usage.input_tokens", usage.prompt_tokens)
+llm_span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+llm_span.set_attribute("gen_ai.usage.cache_read_tokens", usage.cache_read_tokens)
+llm_span.set_attribute("gen_ai.usage.cache_creation_tokens", usage.cache_creation_tokens)
+llm_span.set_attribute("gen_ai.usage.reasoning_tokens", usage.reasoning_tokens)
 
-# After receiving the response:
-if hasattr(llm_telemetry, 'set_output_messages'):
-    oi_output = [{
-        "role": "assistant",
-        "content": response.text or "",
-        "tool_calls": [
-            {
-                "name": fc.name,
-                "arguments": json.dumps(fc.args) if fc.args else "{}",
-            }
-            for fc in response.function_calls
-        ] if response.function_calls else [],
-    }]
-    llm_telemetry.set_output_messages(oi_output)
+# After:
+llm_span.set_attribute("llm.token_count.prompt", usage.prompt_tokens)
+llm_span.set_attribute("llm.token_count.completion", usage.output_tokens)
+# llm.token_count.total is auto-computed by _SpanWrapper
+if usage.cache_read_tokens:
+    llm_span.set_attribute("llm.token_count.prompt_details.cache_read", usage.cache_read_tokens)
+if usage.cache_creation_tokens:
+    llm_span.set_attribute("llm.token_count.prompt_details.cache_write", usage.cache_creation_tokens)
+if usage.reasoning_tokens:
+    llm_span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
 ```
 
-For the turn span, pass `parent_session_id` when creating subagent sessions:
+### 5.2. LLM Message Capture
+
+Inside the existing `with self._telemetry.llm_span(...)` block:
 
 ```python
-# In send_message():
+# Before sending to provider — capture input messages
+oi_messages = []
+for msg in messages_for_provider:
+    oi_messages.append({
+        "role": msg.role,
+        "content": msg.text_content or "",
+    })
+llm_telemetry.set_input_messages(oi_messages)
+
+# After receiving response — capture output messages
+oi_output = [{
+    "role": "assistant",
+    "content": response.text or "",
+    "tool_calls": [
+        {
+            "name": fc.name,
+            "arguments": json.dumps(fc.args) if fc.args else "{}",
+        }
+        for fc in response.function_calls
+    ] if response.function_calls else [],
+}]
+llm_telemetry.set_output_messages(oi_output)
+```
+
+### 5.3. Tool Span Input/Output
+
+Inside the existing `with self._telemetry.tool_span(...)` block:
+
+```python
+# Set tool input (arguments)
+tool_span.set_attribute("input.value", json.dumps(fc.args) if fc.args else "{}")
+tool_span.set_attribute("input.mime_type", "application/json")
+
+# ... execute tool ...
+
+# Set tool output (result)
+tool_span.set_attribute("output.value", json.dumps(result_dict))
+tool_span.set_attribute("output.mime_type", "application/json")
+```
+
+### 5.4. Turn Span — Pass `parent_session_id`
+
+```python
 with self._telemetry.turn_span(
     session_id=self._agent_id,
     agent_type=self._agent_type,
     agent_name=self._agent_name,
     turn_index=self._turn_index,
-    parent_session_id=self._parent_session_id,  # NEW
+    parent_session_id=self._parent_session_id,
 ) as turn_span:
 ```
 
-> `_parent_session_id` is already available on `JaatoSession` — it's set during
-> subagent creation via `runtime.create_session()`. If it doesn't exist yet,
-> add it as an optional parameter.
+If `_parent_session_id` doesn't exist on `JaatoSession` yet, add it as an
+optional parameter to `create_session()` in `jaato_runtime.py`.
 
-### 3.5. Changes to `jaato_session.py` — Tool Input/Output
+### 5.5. Tool Error Attributes
 
-Inside the existing `with self._telemetry.tool_span(...)` block, add
-input/output values:
+Replace `jaato.tool.error` with the OI standard:
 
 ```python
-with self._telemetry.tool_span(...) as tool_span:
-    # Set tool input (arguments)
-    tool_span.set_attribute("input.value", json.dumps(fc.args) if fc.args else "{}")
-    tool_span.set_attribute("input.mime_type", "application/json")
+# Before:
+tool_span.set_attribute("jaato.tool.error", error_message)
 
-    # ... execute tool ...
-
-    # Set tool output (result)
-    tool_span.set_attribute("output.value", json.dumps(result_dict))
-    tool_span.set_attribute("output.mime_type", "application/json")
+# After:
+tool_span.set_attribute("exception.message", error_message)
 ```
 
-The `input.value` and `output.value` attributes should be added to the
-`_SENSITIVE_ATTRS` set for redaction.
+### 5.6. Other Session Attribute Replacements
+
+| Old call | New call |
+|----------|----------|
+| `turn_span.set_attribute("jaato.cancelled", True)` | Pack into metadata or use span status |
+| `turn_span.set_attribute("jaato.streaming", True)` | Already in metadata via `turn_span()` |
+| `llm_span.set_attribute("gen_ai.response.finish_reasons", [...])` | Pack into metadata |
 
 ---
 
-## 4. Redaction Impact
+## 6. Protocol / Null Plugin Changes
 
-The new OpenInference attributes containing content must respect the existing
-redaction policy:
+### 6.1. `plugin.py` — SpanContext Protocol
 
-| New attribute                                          | Redactable? |
-|--------------------------------------------------------|-------------|
-| `llm.input_messages.*.message.content`                 | Yes — via `set_input_messages()` |
-| `llm.output_messages.*.message.content`                | Yes — via `set_output_messages()` |
-| `llm.output_messages.*.message.tool_calls.*.function.arguments` | Yes — via `set_output_messages()` |
-| `input.value`                                          | Yes — add to `_SENSITIVE_ATTRS` |
-| `output.value`                                         | Yes — add to `_SENSITIVE_ATTRS` |
-| `llm.input_messages.*.message.role`                    | No |
-| `llm.output_messages.*.message.role`                   | No |
-| `tool_call.function.name`                              | No |
-| `llm.model_name`, `llm.system`, `agent.name`          | No |
-| `session.id`, `graph.node.*`                           | No |
-| `llm.token_count.*`                                    | No |
-
-When `redact_content=True` (default), messages and tool arguments are redacted
-inside `set_input_messages()` / `set_output_messages()` directly — the
-redaction happens before attributes are written to the span, same as today.
-
----
-
-## 5. Configuration
-
-### 5.1. Feature Flag
-
-A new config key `openinference` (bool, default `True`) controls whether
-OpenInference attributes are emitted. When `False`, only the existing
-`jaato.*` and `gen_ai.*` attributes are written.
+Add methods:
 
 ```python
-# Environment variable
-JAATO_TELEMETRY_OPENINFERENCE=true  # default
+def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
+    """Set OpenInference input messages (flattened indexed attributes)."""
+    ...
 
-# Programmatic
-plugin.initialize({
-    "enabled": True,
-    "openinference": True,  # default
-})
+def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
+    """Set OpenInference output messages (flattened indexed attributes)."""
+    ...
+
+def set_metadata(self, data: Dict[str, Any]) -> None:
+    """Set OpenInference metadata attribute (JSON string)."""
+    ...
 ```
 
-**Rationale:** Default `True` because the whole point is Phoenix compatibility.
-The flag exists as an escape hatch for users sending to backends that choke on
-the extra attributes or have attribute count limits.
+Add `parent_session_id` parameter to `turn_span()`.
 
-### 5.2. No New Dependencies
+### 6.2. `null_plugin.py` — _NoOpSpan
 
-We use raw attribute name strings rather than the
-`openinference-semantic-conventions` package. The constants are defined as
-module-level strings in `otel_plugin.py`. This keeps the telemetry plugin
-zero-additional-dep (only `opentelemetry-api` and `opentelemetry-sdk`).
+Add no-op implementations of `set_input_messages()`, `set_output_messages()`,
+and `set_metadata()`.
 
 ---
 
-## 6. Validation & Testing
+## 7. Redaction
 
-### 6.1. Unit Tests (`test_plugin.py`)
+The redaction model simplifies. Content-bearing OI attributes:
 
-Add test cases for:
+| Attribute | Redacted? | Mechanism |
+|-----------|-----------|-----------|
+| `llm.input_messages.*.message.content` | Yes | `set_input_messages()` checks `_redact` |
+| `llm.output_messages.*.message.content` | Yes | `set_output_messages()` checks `_redact` |
+| `llm.output_messages.*.message.tool_calls.*.function.arguments` | Yes | `set_output_messages()` checks `_redact` |
+| `input.value` | Yes | `_SENSITIVE_ATTRS` set on `_SpanWrapper` |
+| `output.value` | Yes | `_SENSITIVE_ATTRS` set on `_SpanWrapper` |
 
-1. **Span kind presence:** Every span type sets `openinference.span.kind`.
-2. **Turn span → AGENT** with `session.id`, `agent.name`, `graph.node.*`.
-3. **LLM span → LLM** with `llm.model_name`, `llm.system`.
-4. **Tool span → TOOL** with `tool.name`, `tool.id`.
-5. **Token aliasing:** Setting `gen_ai.usage.input_tokens` also sets
-   `llm.token_count.prompt`.
-6. **Total computation:** `llm.token_count.total` = prompt + completion.
-7. **Message flattening:** `set_input_messages()` produces correct indexed
-   attributes.
-8. **Tool call flattening:** Tool calls in output messages produce correct
-   `tool_call.function.name` and `tool_call.function.arguments`.
-9. **Redaction:** Messages redacted when `redact_content=True`.
-10. **Feature flag off:** No OpenInference attributes when
-    `openinference=False`.
-11. **Graph attributes:** Subagent spans have `graph.node.parent_id` pointing
-    to parent session.
-12. **Backward compatibility:** All existing `jaato.*` and `gen_ai.*`
-    attributes still present.
-
-### 6.2. Integration Validation with Phoenix
-
-Manual validation steps (not automated):
-
-1. Start Phoenix: `phoenix serve`
-2. Configure jaato: `JAATO_TELEMETRY_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006/v1/traces`
-3. Run a multi-tool conversation.
-4. Verify in Phoenix UI:
-   - Trace waterfall shows AGENT → LLM → TOOL hierarchy.
-   - LLM spans show message inspector with input/output.
-   - Token counts appear in the cost breakdown.
-   - Tool calls are visible with names and arguments.
-   - Multi-agent sessions show DAG visualization via `graph.node.*`.
+Non-redactable (always emitted):
+- `llm.model_name`, `llm.system`
+- `agent.name`, `session.id`
+- `tool.name`, `tool.id`
+- `graph.node.*`
+- `llm.token_count.*`
+- `metadata` (contains only structural info, not content)
+- `openinference.span.kind`
+- Message roles and tool call function names
 
 ---
 
-## 7. Example: Before and After
-
-### Before (current jaato spans)
-
-```
-Span: "jaato.turn"
-  jaato.session_id: "sess-abc"
-  jaato.agent_type: "main"
-  jaato.turn_index: 3
-
-  Child: "gen_ai.chat"
-    gen_ai.system: "anthropic"
-    gen_ai.request.model: "claude-sonnet-4-20250514"
-    gen_ai.usage.input_tokens: 1500
-    gen_ai.usage.output_tokens: 200
-    gen_ai.usage.cache_read_tokens: 800
-
-    Child: "jaato.tool"
-      jaato.tool.name: "cli"
-      jaato.tool.call_id: "call_123"
-      jaato.tool.plugin_type: "cli"
-      jaato.tool.success: true
-      jaato.tool.duration_seconds: 0.5
-```
-
-**Phoenix rendering:** Generic span waterfall. No LLM details, no messages,
-no token breakdown.
-
-### After (with OpenInference attributes added)
+## 8. Example: Final Trace Output
 
 ```
 Span: "jaato.turn"
@@ -592,10 +657,11 @@ Span: "jaato.turn"
   graph.node.id: "sess-abc"
   graph.node.name: "main"
   graph.node.parent_id: ""
-  # (all existing jaato.* attributes preserved)
-  jaato.session_id: "sess-abc"
-  jaato.agent_type: "main"
-  jaato.turn_index: 3
+  metadata: '{"agent_type":"main","turn_index":3}'
+  input.value: "List files in /tmp"
+  input.mime_type: "text/plain"
+  output.value: "Here are the files in /tmp: ..."
+  output.mime_type: "text/plain"
 
   Child: "gen_ai.chat"
     openinference.span.kind: "LLM"
@@ -613,12 +679,7 @@ Span: "jaato.turn"
     llm.output_messages.0.message.content: ""
     llm.output_messages.0.message.tool_calls.0.tool_call.function.name: "cli"
     llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments: '{"command":"ls /tmp"}'
-    # (all existing gen_ai.* attributes preserved)
-    gen_ai.system: "anthropic"
-    gen_ai.request.model: "claude-sonnet-4-20250514"
-    gen_ai.usage.input_tokens: 1500
-    gen_ai.usage.output_tokens: 200
-    gen_ai.usage.cache_read_tokens: 800
+    metadata: '{"streaming":true}'
 
     Child: "jaato.tool"
       openinference.span.kind: "TOOL"
@@ -628,77 +689,72 @@ Span: "jaato.turn"
       input.mime_type: "application/json"
       output.value: '{"status":"success","output":"file1.txt\nfile2.txt"}'
       output.mime_type: "application/json"
-      # (all existing jaato.tool.* attributes preserved)
-      jaato.tool.name: "cli"
-      jaato.tool.call_id: "call_123"
-      jaato.tool.plugin_type: "cli"
-      jaato.tool.success: true
-      jaato.tool.duration_seconds: 0.5
-```
+      metadata: '{"plugin_type":"cli","duration_seconds":0.5,"parallel":false}'
 
-**Phoenix rendering:** Full AI-native UI — agent graph, message inspector,
-token cost breakdown, tool call visualization.
+    Child: "jaato.retry"
+      openinference.span.kind: "CHAIN"
+      metadata: '{"retry_attempt":1,"retry_max_attempts":5,"retry_context":"api_call"}'
+```
 
 ---
 
-## 8. Migration Path
+## 9. Migration Path
 
-### Phase 1 — Core Span Kinds (this design)
+### Phase 1 — Core Replacement (this design)
 
-- Add `openinference.span.kind` to all spans.
-- Add `session.id`, `agent.name`, `graph.node.*` to turn spans.
-- Add `llm.system`, `llm.model_name`, `llm.token_count.*` to LLM spans.
-- Add `tool.name`, `tool.id`, `input.value`, `output.value` to tool spans.
-- Add `set_input_messages()` / `set_output_messages()` for LLM message capture.
+- Replace all `jaato.*` / `gen_ai.*` attributes with OpenInference equivalents.
+- Add `openinference.span.kind` to every span.
+- Add message capture via `set_input_messages()` / `set_output_messages()`.
+- Add graph attributes for DAG visualization.
+- Pack jaato-specific context into `metadata` JSON.
 
-**Estimated scope:** ~200 lines in `otel_plugin.py`, ~30 lines in
+**Estimated scope:** ~150 lines changed in `otel_plugin.py`, ~50 lines in
 `jaato_session.py`, ~100 lines in tests.
 
 ### Phase 2 — Enrichments (future)
 
-- `llm.invocation_parameters` (temperature, max_tokens, etc.)
-- `llm.tools` (tool schemas sent to the model)
-- `llm.cost.*` (if token pricing data becomes available)
-- `metadata` attribute with jaato-specific structured data
+- `llm.invocation_parameters` (temperature, max_tokens, etc.).
+- `llm.tools` (tool schemas sent to the model, flattened indexed).
+- `llm.cost.*` (if token pricing data becomes available).
 
 ### Phase 3 — Full Observability (future)
 
-- Embedding spans for RAG plugin (if/when added)
-- Retriever spans for document retrieval
-- Guardrail spans for permission/safety checks (reclassify from CHAIN)
+- Embedding spans (EMBEDDING kind) for RAG plugin.
+- Retriever spans (RETRIEVER kind) for document retrieval.
+- Guardrail spans (GUARDRAIL kind) for permission/safety checks.
 
 ---
 
-## 9. File Change Summary
+## 10. File Change Summary
 
 | File | Change |
 |------|--------|
-| `shared/plugins/telemetry/otel_plugin.py` | Add OI constants, dual-write attributes, `set_input/output_messages()`, graph attrs, `openinference` config flag |
-| `shared/plugins/telemetry/plugin.py` | Add `set_input_messages()` / `set_output_messages()` to `SpanContext` protocol; `parent_session_id` to `turn_span()` |
-| `shared/plugins/telemetry/null_plugin.py` | Add no-op `set_input_messages()` / `set_output_messages()` to `_NoOpSpan` |
-| `shared/plugins/telemetry/tests/test_plugin.py` | Add tests for all OI attributes, message flattening, redaction, feature flag |
-| `shared/jaato_session.py` | Pass messages to LLM span, pass `parent_session_id` to turn span, set `input.value`/`output.value` on tool spans |
-| `docs/opentelemetry-design.md` | Add OpenInference section referencing this design |
-| `CLAUDE.md` | Update telemetry section with OI attribute list |
+| `shared/plugins/telemetry/otel_plugin.py` | Replace attribute schema with OI conventions, add message/metadata methods, remove `_get_agent_attrs()`, add OI constants |
+| `shared/plugins/telemetry/plugin.py` | Add `set_input_messages()`, `set_output_messages()`, `set_metadata()` to `SpanContext` protocol; add `parent_session_id` to `turn_span()` |
+| `shared/plugins/telemetry/null_plugin.py` | Add no-op `set_input_messages()`, `set_output_messages()`, `set_metadata()` |
+| `shared/plugins/telemetry/tests/test_plugin.py` | Rewrite tests for OI attributes, message flattening, redaction, metadata packing |
+| `shared/jaato_session.py` | Replace `gen_ai.usage.*` with `llm.token_count.*`, add message capture calls, pass `parent_session_id`, replace `jaato.tool.*` with OI equivalents |
+| `docs/opentelemetry-design.md` | Update attribute reference section |
+| `CLAUDE.md` | Update telemetry attribute list |
 
 ---
 
-## 10. Open Questions
+## 11. Decisions
 
-1. **Span name preservation:** Should we keep the current span names
-   (`jaato.turn`, `gen_ai.chat`, `jaato.tool`) or rename them to match
-   OpenInference conventions? Phoenix uses `openinference.span.kind` for
-   classification, not span names, so keeping current names is safe and
-   preserves backward compatibility.
-   **Recommendation:** Keep current names. ✓
+1. **Span names stay the same.** Phoenix classifies by
+   `openinference.span.kind`, not span name. No reason to change them.
 
-2. **Message capture performance:** Flattening messages to indexed attributes
-   could produce many attributes for long conversations. Should we cap at N
-   messages or only capture the last turn's messages?
-   **Recommendation:** Only capture messages for the current LLM call (not
-   the full history). This is what the span represents anyway. ✓
+2. **Messages scoped to current LLM call.** Only messages for the individual
+   provider call are captured, not the full conversation history. This is what
+   the span represents.
 
-3. **`openinference-semantic-conventions` dependency:** Should we add it
-   as an optional dependency for type safety?
-   **Recommendation:** No. Raw strings are sufficient and keep us zero-dep.
-   The constants are simple strings that rarely change. ✓
+3. **No `openinference-semantic-conventions` dependency.** Raw strings are
+   sufficient. The constants are simple and stable.
+
+4. **`metadata` as catch-all.** OpenInference defines `metadata` (JSON string)
+   for arbitrary data. All jaato-specific attributes that have no OI
+   equivalent go here rather than being silently dropped.
+
+5. **`_get_agent_attrs()` removed.** Thread-local context is still used, but
+   attribute names are now OI-native. The helper method that built a `jaato.*`
+   dict is replaced by inline construction in each span method.
