@@ -1,8 +1,12 @@
 """OpenTelemetry implementation of TelemetryPlugin.
 
 This module provides the OTelPlugin class that implements distributed
-tracing using the OpenTelemetry SDK. It follows GenAI semantic conventions
-for LLM operations.
+tracing using the OpenTelemetry SDK. It follows OpenInference semantic
+conventions so traces render correctly in Arize Phoenix and other
+OpenInference-compatible backends.
+
+OpenInference spec:
+    https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
 
 Requires:
     opentelemetry-api>=1.20.0
@@ -10,15 +14,25 @@ Requires:
     opentelemetry-exporter-otlp>=1.20.0 (for OTLP export)
 """
 
+import json
 import os
 import threading
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 # Lazy imports - only loaded when plugin is initialized
 _trace = None
 _Status = None
 _StatusCode = None
+
+# ---------------------------------------------------------------------------
+# OpenInference constants (raw strings — no external dependency)
+# ---------------------------------------------------------------------------
+_OI_SPAN_KIND = "openinference.span.kind"
+_OI_AGENT = "AGENT"
+_OI_LLM = "LLM"
+_OI_TOOL = "TOOL"
+_OI_CHAIN = "CHAIN"
 
 
 def _ensure_imports():
@@ -108,7 +122,6 @@ class _FileSpanExporter:
 
     def export(self, spans):
         """Export spans to the file in OTLP JSON format."""
-        import json
         from opentelemetry.sdk.trace.export import SpanExportResult
 
         if not spans:
@@ -150,32 +163,37 @@ class _FileSpanExporter:
 
 
 class _SpanWrapper:
-    """Wrapper providing consistent interface with content redaction."""
+    """Wrapper providing consistent interface with content redaction.
 
-    __slots__ = ("_span", "_redact")
+    Handles OpenInference message flattening, metadata serialization,
+    and auto-computation of ``llm.token_count.total``.
+    """
+
+    __slots__ = ("_span", "_redact", "_prompt_tokens", "_completion_tokens")
 
     # Attributes that may contain sensitive content
     _SENSITIVE_ATTRS = frozenset({
-        "gen_ai.prompt",
-        "gen_ai.completion",
-        "gen_ai.request.prompt",
-        "gen_ai.response.completion",
-        "jaato.tool.args",
-        "jaato.tool.result",
+        "input.value",
+        "output.value",
     })
 
     def __init__(self, span, redact_content: bool):
         self._span = span
         self._redact = redact_content
+        self._prompt_tokens: Optional[int] = None
+        self._completion_tokens: Optional[int] = None
 
     def set_attribute(self, key: str, value: Any) -> None:
-        """Set an attribute, redacting sensitive content if configured."""
+        """Set an attribute, redacting sensitive content if configured.
+
+        Also auto-computes ``llm.token_count.total`` when both prompt
+        and completion token counts have been set.
+        """
         if self._redact and key in self._SENSITIVE_ATTRS:
             # Redact but preserve length info for debugging
             if isinstance(value, str):
                 value = f"[REDACTED: {len(value)} chars]"
             elif isinstance(value, (dict, list)):
-                import json
                 try:
                     serialized = json.dumps(value)
                     value = f"[REDACTED: {len(serialized)} chars]"
@@ -184,6 +202,22 @@ class _SpanWrapper:
             else:
                 value = "[REDACTED]"
         self._span.set_attribute(key, value)
+
+        # Auto-compute llm.token_count.total
+        if key == "llm.token_count.prompt":
+            self._prompt_tokens = value
+            if self._completion_tokens is not None:
+                self._span.set_attribute(
+                    "llm.token_count.total",
+                    self._prompt_tokens + self._completion_tokens,
+                )
+        elif key == "llm.token_count.completion":
+            self._completion_tokens = value
+            if self._prompt_tokens is not None:
+                self._span.set_attribute(
+                    "llm.token_count.total",
+                    self._prompt_tokens + self._completion_tokens,
+                )
 
     def record_exception(self, exception: Exception) -> None:
         """Record an exception on the span."""
@@ -203,12 +237,58 @@ class _SpanWrapper:
         _ensure_imports()
         self._span.set_status(_Status(_StatusCode.OK))
 
+    def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Flatten input messages to OpenInference indexed attributes.
+
+        Each message dict should have 'role' and 'content' keys.
+        Content is redacted when ``redact_content`` is enabled.
+        """
+        for i, msg in enumerate(messages):
+            prefix = f"llm.input_messages.{i}.message"
+            self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
+            content = msg.get("content", "")
+            if self._redact and content:
+                content = f"[REDACTED: {len(content)} chars]"
+            self._span.set_attribute(f"{prefix}.content", content)
+
+    def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Flatten output messages to OpenInference indexed attributes.
+
+        Each message dict should have 'role', 'content', and optionally
+        'tool_calls' (list of dicts with 'name' and 'arguments').
+        Content and tool call arguments are redacted when enabled.
+        Tool call function names are never redacted.
+        """
+        for i, msg in enumerate(messages):
+            prefix = f"llm.output_messages.{i}.message"
+            self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
+            content = msg.get("content", "")
+            if self._redact and content:
+                content = f"[REDACTED: {len(content)} chars]"
+            self._span.set_attribute(f"{prefix}.content", content)
+            for j, tc in enumerate(msg.get("tool_calls", [])):
+                tc_prefix = f"{prefix}.tool_calls.{j}.tool_call"
+                self._span.set_attribute(
+                    f"{tc_prefix}.function.name", tc.get("name", ""))
+                args = tc.get("arguments", "")
+                if self._redact and args:
+                    args = f"[REDACTED: {len(args)} chars]"
+                self._span.set_attribute(f"{tc_prefix}.function.arguments", args)
+
+    def set_metadata(self, data: Dict[str, Any]) -> None:
+        """Set OpenInference metadata attribute as a JSON string.
+
+        Used for jaato-specific fields that have no OpenInference equivalent.
+        """
+        self._span.set_attribute("metadata", json.dumps(data))
+
 
 class OTelPlugin:
     """OpenTelemetry implementation of TelemetryPlugin.
 
-    Provides distributed tracing using the OpenTelemetry SDK with support
-    for OTLP and console exporters. Follows GenAI semantic conventions.
+    Provides distributed tracing using the OpenTelemetry SDK with
+    OpenInference semantic conventions for compatibility with Arize
+    Phoenix and other AI observability backends.
     """
 
     __slots__ = ("_enabled", "_tracer", "_redact_content", "_provider",
@@ -364,31 +444,22 @@ class OTelPlugin:
         """Check if telemetry is enabled and initialized."""
         return self._enabled and self._tracer is not None
 
-    def _get_agent_attrs(self) -> Dict[str, Any]:
-        """Return all thread-local context attributes (agent + plan/step).
+    def _get_context_metadata(self) -> Dict[str, Any]:
+        """Build metadata dict from thread-local context.
 
-        Agent identity is set by ``turn_span``.  Plan/step scope is
-        maintained by the EventBus subscription (``_on_bus_event``) which
-        listens for step lifecycle events — no coupling to the todo plugin.
+        Collects jaato-specific context (plan_id, step_id) that has no
+        OpenInference equivalent and should be packed into the
+        ``metadata`` attribute.
         """
         ctx = self._agent_context
-        attrs: Dict[str, Any] = {}
-        agent_id = getattr(ctx, "agent_id", None)
-        if agent_id:
-            attrs["jaato.session_id"] = agent_id
-        agent_type = getattr(ctx, "agent_type", None)
-        if agent_type:
-            attrs["jaato.agent_type"] = agent_type
-        agent_name = getattr(ctx, "agent_name", None)
-        if agent_name:
-            attrs["jaato.agent_name"] = agent_name
+        metadata: Dict[str, Any] = {}
         plan_id = getattr(ctx, "plan_id", None)
         if plan_id:
-            attrs["jaato.plan_id"] = plan_id
+            metadata["plan_id"] = plan_id
         step_id = getattr(ctx, "step_id", None)
         if step_id:
-            attrs["jaato.step_id"] = step_id
-        return attrs
+            metadata["step_id"] = step_id
+        return metadata
 
     def subscribe_to_bus(self, bus) -> None:
         """Subscribe to EventBus step lifecycle events for plan/step context.
@@ -437,16 +508,20 @@ class OTelPlugin:
         agent_type: str,
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
         """Create root span for a turn.
 
+        Sets ``openinference.span.kind = "AGENT"`` and populates
+        ``session.id``, ``agent.name``, and ``graph.node.*`` attributes
+        for Phoenix DAG visualization.
+
         Stores agent identity (session_id, agent_type, agent_name) in a
-        thread-local so that all child spans created within this turn
-        automatically inherit the same attributes.
+        thread-local so that child spans can access the context.
         """
         if not self.enabled:
-            from .null_plugin import _NoOpSpan, _NOOP_SPAN
+            from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
@@ -459,16 +534,24 @@ class OTelPlugin:
         ctx.agent_type = agent_type
         ctx.agent_name = agent_name
 
-        # Start from any existing plan/step context set by bus events
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "jaato.session_id": session_id,
-            "jaato.agent_type": agent_type,
-        })
+        # OpenInference attributes
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_AGENT,
+            "session.id": session_id,
+            "graph.node.id": session_id,
+            "graph.node.name": agent_name or agent_type,
+            "graph.node.parent_id": parent_session_id or "",
+        }
         if agent_name:
-            attrs["jaato.agent_name"] = agent_name
+            attrs["agent.name"] = agent_name
+
+        # jaato-specific context packed into metadata
+        metadata = self._get_context_metadata()
+        metadata["agent_type"] = agent_type
         if turn_index is not None:
-            attrs["jaato.turn_index"] = turn_index
+            metadata["turn_index"] = turn_index
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 
@@ -488,18 +571,27 @@ class OTelPlugin:
         streaming: bool = False,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create span for an LLM API call."""
+        """Create span for an LLM API call.
+
+        Sets ``openinference.span.kind = "LLM"`` with ``llm.model_name``
+        and ``llm.system``. Token counts should be set by the caller using
+        ``llm.token_count.prompt``, ``llm.token_count.completion``, etc.
+        """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "gen_ai.system": provider,
-            "gen_ai.request.model": model,
-            "jaato.streaming": streaming,
-        })
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_LLM,
+            "llm.system": provider,
+            "llm.model_name": model,
+        }
+
+        metadata = self._get_context_metadata()
+        metadata["streaming"] = streaming
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 
@@ -514,18 +606,27 @@ class OTelPlugin:
         plugin_type: str = "unknown",
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create span for tool execution."""
+        """Create span for tool execution.
+
+        Sets ``openinference.span.kind = "TOOL"`` with ``tool.name``
+        and ``tool.id``. Callers should set ``input.value`` /
+        ``output.value`` for tool arguments and results.
+        """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "jaato.tool.name": tool_name,
-            "jaato.tool.call_id": call_id,
-            "jaato.tool.plugin_type": plugin_type,
-        })
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_TOOL,
+            "tool.name": tool_name,
+            "tool.id": call_id,
+        }
+
+        metadata = self._get_context_metadata()
+        metadata["plugin_type"] = plugin_type
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 
@@ -540,18 +641,26 @@ class OTelPlugin:
         context: str = "api_call",
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create span for a retry attempt."""
+        """Create span for a retry attempt.
+
+        Sets ``openinference.span.kind = "CHAIN"``. Retry details are
+        packed into the ``metadata`` attribute.
+        """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "jaato.retry.attempt": attempt,
-            "jaato.retry.max_attempts": max_attempts,
-            "jaato.retry.context": context,
-        })
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_CHAIN,
+        }
+
+        metadata = self._get_context_metadata()
+        metadata["retry_attempt"] = attempt
+        metadata["retry_max_attempts"] = max_attempts
+        metadata["retry_context"] = context
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 
@@ -565,17 +674,25 @@ class OTelPlugin:
         strategy: str,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create span for GC operation."""
+        """Create span for GC operation.
+
+        Sets ``openinference.span.kind = "CHAIN"``. GC details are
+        packed into the ``metadata`` attribute.
+        """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "jaato.gc.trigger_reason": trigger_reason,
-            "jaato.gc.strategy": strategy,
-        })
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_CHAIN,
+        }
+
+        metadata = self._get_context_metadata()
+        metadata["gc_trigger_reason"] = trigger_reason
+        metadata["gc_strategy"] = strategy
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 
@@ -588,16 +705,24 @@ class OTelPlugin:
         tool_name: str,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
-        """Create span for permission check."""
+        """Create span for permission check.
+
+        Sets ``openinference.span.kind = "CHAIN"``. Permission details
+        are packed into the ``metadata`` attribute.
+        """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
             yield _NOOP_SPAN
             return
 
-        attrs = self._get_agent_attrs()
-        attrs.update({
-            "jaato.permission.tool_name": tool_name,
-        })
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_CHAIN,
+        }
+
+        metadata = self._get_context_metadata()
+        metadata["permission_tool_name"] = tool_name
+        attrs["metadata"] = json.dumps(metadata)
+
         if attributes:
             attrs.update(attributes)
 

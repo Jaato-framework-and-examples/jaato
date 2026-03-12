@@ -2634,11 +2634,17 @@ NOTES
             self._runtime.reliability_plugin.on_turn_start(self._turn_index)
 
         # Wrap entire turn with telemetry span
+        # Determine parent session ID for graph visualization
+        _parent_sid = None
+        if self._parent_session is not None:
+            _parent_sid = getattr(self._parent_session, '_agent_id', None)
+
         with self._telemetry.turn_span(
             session_id=self._agent_id,
             agent_type=self._agent_type,
             agent_name=self._agent_name,
             turn_index=self._turn_index,
+            parent_session_id=_parent_sid,
         ) as turn_span:
             self._current_turn_span = turn_span
 
@@ -2674,9 +2680,13 @@ NOTES
                 turn_span.set_status_error(str(e))
                 raise
 
-            # Record turn completion attributes
-            turn_span.set_attribute("jaato.cancelled", self._is_cancelled())
-            turn_span.set_attribute("jaato.streaming", self._use_streaming)
+            # Record turn completion metadata
+            turn_metadata = {}
+            if self._is_cancelled():
+                turn_metadata["cancelled"] = True
+            turn_metadata["streaming"] = self._use_streaming
+            if turn_metadata:
+                turn_span.set_metadata(turn_metadata)
 
             # Proactive GC: if threshold was crossed during streaming, trigger GC now
             if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
@@ -3404,14 +3414,14 @@ NOTES
                 self._turn_model_response_count += 1
                 # Record token usage to telemetry span
                 if response.usage:
-                    llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
-                    llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
                     if response.usage.cache_read_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
                     if response.usage.cache_creation_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
                     if response.usage.reasoning_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
             # Emit turn progress after initial response
@@ -4050,10 +4060,13 @@ NOTES
             plugin_type=plugin_type,
         ) as tool_span:
             # Check if this is a streaming tool (name ends with :stream)
+            # Set tool input
+            tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
+            tool_span.set_attribute("input.mime_type", "application/json")
+
             if self._is_streaming_tool(name):
                 # Route to streaming execution
                 executor_result = self._execute_streaming_tool(fc, on_output)
-                tool_span.set_attribute("jaato.tool.streaming", True)
             elif self._executor:
                 # Set up tool output callback for streaming output during execution
                 def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
@@ -4114,13 +4127,27 @@ NOTES
 
             # Record telemetry
             fc_duration = (fc_end - fc_start).total_seconds()
-            tool_span.set_attribute("jaato.tool.success", fc_success)
-            tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
             if fc_error_message:
-                tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                tool_span.set_attribute("exception.message", fc_error_message)
                 tool_span.set_status_error(fc_error_message)
             else:
                 tool_span.set_status_ok()
+
+            # Set tool output
+            result_dict_for_output = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                result_dict_for_output = executor_result[1]
+            elif isinstance(executor_result, dict):
+                result_dict_for_output = executor_result
+            if result_dict_for_output is not None:
+                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                tool_span.set_attribute("output.mime_type", "application/json")
+
+            # Pack jaato-specific tool metadata
+            tool_meta = {"duration_seconds": fc_duration, "success": fc_success}
+            if self._is_streaming_tool(name):
+                tool_meta["streaming"] = True
+            tool_span.set_metadata(tool_meta)
 
             # Convention-based telemetry enrichment: if the executor result
             # dict contains a '_telemetry' key mapping to a dict of
@@ -4288,11 +4315,14 @@ NOTES
             call_id=fc.id or "",
             plugin_type=plugin_type,
         ) as tool_span:
+            # Set tool input
+            tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
+            tool_span.set_attribute("input.mime_type", "application/json")
+
             # Check if this is a streaming tool (name ends with :stream)
             if self._is_streaming_tool(name):
                 # Route to streaming execution
                 executor_result = self._execute_streaming_tool(fc, None)
-                tool_span.set_attribute("jaato.tool.streaming", True)
             elif self._executor:
                 # Create callback that captures this tool's call_id
                 def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
@@ -4343,14 +4373,31 @@ NOTES
 
             # Record telemetry
             fc_duration = (fc_end - fc_start).total_seconds()
-            tool_span.set_attribute("jaato.tool.success", fc_success)
-            tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
-            tool_span.set_attribute("jaato.tool.parallel", True)
             if fc_error_message:
-                tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                tool_span.set_attribute("exception.message", fc_error_message)
                 tool_span.set_status_error(fc_error_message)
             else:
                 tool_span.set_status_ok()
+
+            # Set tool output
+            result_dict_for_output = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                result_dict_for_output = executor_result[1]
+            elif isinstance(executor_result, dict):
+                result_dict_for_output = executor_result
+            if result_dict_for_output is not None:
+                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                tool_span.set_attribute("output.mime_type", "application/json")
+
+            # Pack jaato-specific tool metadata
+            tool_meta = {
+                "duration_seconds": fc_duration,
+                "success": fc_success,
+                "parallel": True,
+            }
+            if self._is_streaming_tool(name):
+                tool_meta["streaming"] = True
+            tool_span.set_metadata(tool_meta)
 
             # Convention-based telemetry enrichment (parallel path)
             if isinstance(executor_result, tuple) and len(executor_result) == 2:
@@ -4952,14 +4999,14 @@ NOTES
             self._turn_model_response_count += 1
             # Record token usage to telemetry span
             if response.usage:
-                llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
-                llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
+                llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
                 if response.usage.cache_read_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
                 if response.usage.cache_creation_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
                 if response.usage.reasoning_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
 
             # Emit turn progress after tool result handling
             pending_calls = len([p for p in response.parts if p.function_call])
@@ -5105,14 +5152,14 @@ NOTES
             self._accumulate_turn_tokens(response, turn_data)
             # Record token usage to telemetry span
             if response.usage:
-                llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
-                llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
+                llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
                 if response.usage.cache_read_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
                 if response.usage.cache_creation_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
                 if response.usage.reasoning_tokens is not None:
-                    llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
 
             return response
 
@@ -5886,14 +5933,14 @@ NOTES
                 self._accumulate_turn_tokens(response, turn_data)
                 # Record token usage to telemetry span
                 if response.usage:
-                    llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
-                    llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
+                    llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
                     if response.usage.cache_read_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
                     if response.usage.cache_creation_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
                     if response.usage.reasoning_tokens is not None:
-                        llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
 
             from jaato_sdk.plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
@@ -6039,14 +6086,14 @@ NOTES
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
                     if response.usage:
-                        llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
-                        llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
+                        llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
                         if response.usage.cache_read_tokens is not None:
-                            llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                            llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
                         if response.usage.cache_creation_tokens is not None:
-                            llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                            llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
                         if response.usage.reasoning_tokens is not None:
-                            llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
+                            llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             final_text = response.get_text()

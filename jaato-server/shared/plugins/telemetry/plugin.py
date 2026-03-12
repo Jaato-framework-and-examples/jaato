@@ -6,21 +6,25 @@ span creation to ensure proper cleanup and timing.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, Generator, List, Optional, Protocol, runtime_checkable
 
 
 class SpanContext(Protocol):
     """Protocol for span context returned by span creation methods.
 
-    Provides methods to add attributes, events, and record exceptions
-    on the current span.
+    Provides methods to add attributes, events, record exceptions,
+    and set OpenInference message/metadata attributes on the current span.
     """
 
     def set_attribute(self, key: str, value: Any) -> None:
         """Set an attribute on the span.
 
+        For LLM spans, setting ``llm.token_count.prompt`` and
+        ``llm.token_count.completion`` will auto-compute
+        ``llm.token_count.total``.
+
         Args:
-            key: Attribute name (e.g., "gen_ai.usage.input_tokens")
+            key: Attribute name (e.g., "llm.token_count.prompt")
             value: Attribute value (string, int, float, bool, or list thereof)
         """
         ...
@@ -52,6 +56,48 @@ class SpanContext(Protocol):
 
     def set_status_ok(self) -> None:
         """Set the span status to OK."""
+        ...
+
+    def set_input_messages(self, messages: 'List[Dict[str, Any]]') -> None:
+        """Set OpenInference input messages on the span.
+
+        Flattens messages to indexed attributes::
+
+            llm.input_messages.{i}.message.role
+            llm.input_messages.{i}.message.content
+
+        Each message dict should have ``role`` and ``content`` keys.
+        Content is subject to redaction when enabled.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+        """
+        ...
+
+    def set_output_messages(self, messages: 'List[Dict[str, Any]]') -> None:
+        """Set OpenInference output messages on the span.
+
+        Same format as input messages. Tool calls within messages are
+        flattened to::
+
+            llm.output_messages.{i}.message.tool_calls.{j}.tool_call.function.name
+            llm.output_messages.{i}.message.tool_calls.{j}.tool_call.function.arguments
+
+        Args:
+            messages: List of message dicts with 'role', 'content', and
+                optional 'tool_calls' list.
+        """
+        ...
+
+    def set_metadata(self, data: Dict[str, Any]) -> None:
+        """Set OpenInference metadata attribute as a JSON string.
+
+        Used for jaato-specific fields that have no OpenInference equivalent
+        (e.g., agent_type, turn_index, plugin_type).
+
+        Args:
+            data: Dict of arbitrary metadata to serialize as JSON.
+        """
         ...
 
 
@@ -103,18 +149,24 @@ class TelemetryPlugin(Protocol):
         agent_type: str,
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[SpanContext, None, None]:
         """Create root span for a turn (send_message call).
 
         This is the top-level span that encompasses an entire turn,
         including all LLM calls, tool executions, and retries.
+        Sets ``openinference.span.kind = "AGENT"`` and populates
+        ``graph.node.*`` attributes for Phoenix DAG visualization.
 
         Args:
             session_id: Unique session identifier
             agent_type: Agent type ("main" or "subagent")
             agent_name: Optional agent name
             turn_index: Optional turn number in the session
+            parent_session_id: Optional parent session ID for subagents.
+                Populates ``graph.node.parent_id`` for DAG visualization.
+                Empty string or None means root node.
             attributes: Optional additional attributes
 
         Yields:
