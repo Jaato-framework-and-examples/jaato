@@ -5,7 +5,7 @@ All methods are no-ops that return immediately without any OTel imports.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 
 class _NoOpSpan:
@@ -26,6 +26,15 @@ class _NoOpSpan:
         pass
 
     def set_status_ok(self) -> None:
+        pass
+
+    def set_input_messages(self, messages: List[Dict[str, Any]]) -> None:
+        pass
+
+    def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
+        pass
+
+    def set_metadata(self, data: Dict[str, Any]) -> None:
         pass
 
 
@@ -65,6 +74,7 @@ class NullTelemetryPlugin:
         agent_type: str,
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
+        parent_session_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_NoOpSpan, None, None]:
         yield _NOOP_SPAN
