@@ -70,76 +70,20 @@ JaatoWSServer
     └── another-project/
 ```
 
-## Implementation Plan
+## Implementation Status
 
-### Phase 1: WorkspaceProvisioner
+### Phase 1: WorkspaceProvisioner ✅
 
-**New file: `jaato-server/server/workspace_provisioner.py`**
+**File: `jaato-server/server/workspace_provisioner.py`**
 
 Handles creation, tracking, and cleanup of auto-provisioned workspace
-directories for WebSocket sessions.
+directories for WebSocket sessions. 22 unit tests passing.
 
-```python
-@dataclass
-class ProvisionedWorkspace:
-    session_id: str
-    path: str                       # Absolute path
-    template: Optional[str]         # Template name used
-    created_at: str                 # ISO timestamp
-    last_activity: str              # ISO timestamp
-    client_id: Optional[str]        # Owning client (if any)
-
-class WorkspaceProvisioner:
-    """Provisions isolated workspace directories for remote sessions.
-
-    Each provisioned workspace is a subdirectory under
-    ``{workspace_root}/sessions/{session_id}/``. Templates from
-    ``{workspace_root}/templates/{name}/`` are copied into new workspaces
-    to provide initial configuration (.env, .jaato/).
-
-    Lifecycle:
-        provision() → workspace created, template applied
-        get_workspace() → lookup by session_id
-        update_activity() → bump last_activity timestamp
-        teardown() → remove workspace directory
-        reap_expired() → remove workspaces exceeding max_age
-    """
-
-    def __init__(self, workspace_root: str, default_template: str = "default"):
-        ...
-
-    def provision(
-        self,
-        session_id: str,
-        client_id: Optional[str] = None,
-        template: Optional[str] = None,
-    ) -> ProvisionedWorkspace:
-        """Create an isolated workspace directory for a session.
-
-        1. Create {workspace_root}/sessions/{session_id}/
-        2. Copy template contents (if template dir exists)
-        3. Create .jaato/ subdirectory
-        4. Return ProvisionedWorkspace with absolute path
-        """
-        ...
-
-    def teardown(self, session_id: str) -> None:
-        """Remove a provisioned workspace and its contents."""
-        ...
-
-    def reap_expired(self, max_age_seconds: int = 86400) -> List[str]:
-        """Remove workspaces not accessed within max_age. Returns removed IDs."""
-        ...
-
-    def get_workspace(self, session_id: str) -> Optional[ProvisionedWorkspace]:
-        ...
-
-    def list_workspaces(self) -> List[ProvisionedWorkspace]:
-        ...
-
-    def update_activity(self, session_id: str) -> None:
-        ...
-```
+Key implementation details:
+- `ProvisionedWorkspace` dataclass with session_id, path, template, timestamps, client_id
+- Thread-safe with `threading.Lock`, manifest persistence in `{root}/sessions/manifest.json`
+- Daemon reaper thread with configurable interval and `on_teardown` callback
+- Template copying via `shutil.copytree` from `{root}/templates/{name}/`
 
 **Key decisions:**
 - Templates are copied (not symlinked) so each workspace is fully independent.
@@ -147,147 +91,20 @@ class WorkspaceProvisioner:
 - `reap_expired()` is called by a background thread/timer, similar to the
   interactive shell reaper pattern.
 
-### Phase 2: AppArmorManager
+### Phase 2: AppArmorManager ✅
 
-**New file: `jaato-server/server/apparmor.py`**
+**File: `jaato-server/server/apparmor.py`**
 
 Manages AppArmor profiles for workspace confinement. Designed to be optional —
 when AppArmor is not available, the system falls back to directory-level
-sandboxing (existing behavior).
+sandboxing (existing behavior). 22 unit tests passing.
 
-```python
-class AppArmorManager:
-    """Manages AppArmor profiles for per-session workspace confinement.
-
-    When available, provides kernel-enforced filesystem isolation:
-    - Each session gets a profile restricting access to its workspace
-    - CLI and interactive shell commands are wrapped with aa-exec
-    - Profiles are created on provision and removed on teardown
-
-    When AppArmor is not available (non-Linux, not installed, or
-    insufficient privileges), all methods are no-ops and
-    ``is_available()`` returns False. Callers should check availability
-    and fall back to directory-level sandboxing.
-
-    Profile naming: ``jaato-ws-{session_id}``
-    """
-
-    PROFILE_TEMPLATE = '''
-#include <tunables/global>
-
-profile jaato-ws-{session_id} flags=(attach_disconnected) {{
-  #include <abstractions/base>
-  #include <abstractions/nameservice>
-  #include <abstractions/python>
-
-  # ---- workspace: read-write ----
-  {workspace_path}/   rw,
-  {workspace_path}/** rwkl,
-
-  # ---- shared read-only resources ----
-  {venv_path}/           r,
-  {venv_path}/**         r,
-  {venv_path}/bin/*      ix,
-
-  # ---- temp files scoped to session ----
-  /tmp/jaato-{session_id}-** rw,
-
-  # ---- deny sibling workspaces ----
-  deny {sessions_root}/ rw,
-  deny {sessions_root}/** rw,
-
-  # ---- basic system access ----
-  /usr/bin/**          ix,
-  /usr/local/bin/**    ix,
-  /bin/**              ix,
-  /usr/lib/**          rm,
-  /lib/**              rm,
-  /etc/ld.so.cache     r,
-  /etc/passwd          r,
-  /etc/nsswitch.conf   r,
-  /proc/self/**        r,
-  /dev/null            rw,
-  /dev/urandom         r,
-  /dev/pts/*           rw,
-
-  # ---- network: outbound only ----
-  network inet  stream,
-  network inet6 stream,
-  network inet  dgram,   # DNS
-  network inet6 dgram,
-  deny network raw,
-
-  # ---- deny dangerous capabilities ----
-  deny ptrace,
-  deny mount,
-  deny capability sys_admin,
-  deny capability net_admin,
-  deny capability sys_ptrace,
-}}
-'''
-
-    def __init__(
-        self,
-        workspace_root: str,
-        venv_path: Optional[str] = None,
-        profile_dir: str = "/etc/apparmor.d/jaato",
-    ):
-        """Initialize AppArmor manager.
-
-        Args:
-            workspace_root: Root directory containing sessions/.
-            venv_path: Path to Python venv (for read-only access).
-            profile_dir: Directory to write profile files.
-                Defaults to /etc/apparmor.d/jaato.
-        """
-        ...
-
-    def is_available(self) -> bool:
-        """Check if AppArmor is available and we can manage profiles.
-
-        Returns True only when:
-        - Running on Linux
-        - apparmor_parser is on PATH
-        - Profile directory is writable
-        - /sys/kernel/security/apparmor exists
-        """
-        ...
-
-    def provision_profile(
-        self,
-        session_id: str,
-        workspace_path: str,
-    ) -> bool:
-        """Create and load an AppArmor profile for a session.
-
-        Writes the profile file to {profile_dir}/jaato-ws-{session_id}
-        and loads it with apparmor_parser -r.
-
-        Returns True on success, False on failure (logged, not raised).
-        """
-        ...
-
-    def teardown_profile(self, session_id: str) -> bool:
-        """Unload and remove an AppArmor profile.
-
-        Runs apparmor_parser -R to unload, then deletes the profile file.
-        Returns True on success, False on failure.
-        """
-        ...
-
-    def wrap_command(self, session_id: str, command: list) -> list:
-        """Wrap a command to run under the session's AppArmor profile.
-
-        Returns: ["aa-exec", "-p", "jaato-ws-{session_id}", "--"] + command
-
-        If AppArmor is not available, returns the original command unchanged.
-        """
-        ...
-
-    def get_profile_name(self, session_id: str) -> str:
-        """Return the AppArmor profile name for a session."""
-        return f"jaato-ws-{session_id}"
-```
+Key implementation details:
+- `PROFILE_TEMPLATE` class constant with format placeholders for session_id, workspace_path, venv_path, sessions_root
+- Profile grants workspace rw, venv ro, denies sibling workspaces, allows network outbound, denies ptrace/mount/sys_admin
+- `is_available()` checks: Linux, apparmor_parser on PATH, aa-exec on PATH, kernel module loaded, profile dir writable (result cached)
+- `wrap_command()` for argv lists, `wrap_shell_command()` for shell strings with proper quote escaping
+- Graceful cleanup on `apparmor_parser` failure during provisioning
 
 **Key decisions:**
 - **Fail-open**: If AppArmor is unavailable, the system works exactly as before
@@ -299,152 +116,83 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 - **Deny sibling workspaces**: The `deny {sessions_root}/**` rule with a more
   specific allow for the session's own directory ensures cross-session isolation.
 
-### Phase 3: CLI Plugin Integration
+### Phase 3: CLI Plugin Integration ✅
 
 **Modified: `jaato-server/shared/plugins/cli/plugin.py`**
 
-The CLI plugin needs to know when it's running in a WS session with AppArmor
-so it can wrap subprocess calls.
+- Added `_apparmor_wrapper` (argv) and `_apparmor_shell_wrapper` (shell string) attributes
+- `set_apparmor_wrapper(argv_wrapper, shell_wrapper)` method
+- Both `_execute()` and `_execute_streaming()` apply the appropriate wrapper before `Popen()`
+- Shell mode uses `_apparmor_shell_wrapper`, non-shell mode uses `_apparmor_wrapper`
+- No-op when wrappers are None (existing behavior preserved)
 
-```python
-# New method on CLIPlugin:
-def set_apparmor_wrapper(
-    self,
-    wrapper: Optional[Callable[[list], list]],
-) -> None:
-    """Set an optional command wrapper for AppArmor confinement.
+### Phase 4: Interactive Shell Plugin Integration ✅
 
-    When set, all subprocess executions will be passed through the
-    wrapper function, which prepends aa-exec or similar confinement.
-    When None, commands execute without additional confinement.
+**Modified: `jaato-server/shared/plugins/interactive_shell/plugin.py`**
 
-    Called by JaatoServer during session initialization when the
-    session is created for a WebSocket client with AppArmor enabled.
-    """
-    self._apparmor_wrapper = wrapper
-```
+- Added `_apparmor_shell_wrapper` attribute
+- `set_apparmor_wrapper(shell_wrapper)` method
+- Wraps spawn command string through wrapper before `ShellSession()` creation
+- The wrapper prepends `aa-exec -p jaato-ws-{session_id} -- /bin/sh -c '...'`
 
-Changes to `_execute_command()`:
-- Before `subprocess.Popen()`, if `self._apparmor_wrapper` is set, transform
-  the command through it.
-- For shell mode commands, the wrapper wraps the entire shell invocation:
-  `aa-exec -p profile -- /bin/sh -c "command"`.
-- For non-shell mode, the wrapper prefixes the argv list.
-
-### Phase 4: Interactive Shell Plugin Integration
-
-**Modified: `jaato-server/shared/plugins/interactive_shell/session.py`**
-
-Same pattern — when an AppArmor wrapper is configured, `shell_spawn` wraps
-the pexpect command.
-
-```python
-# In ShellSession.__init__ or spawn():
-if self._apparmor_wrapper:
-    command = self._apparmor_wrapper(command)
-```
-
-The `pexpect.spawn()` call already takes the command as a string or list,
-so the wrapper just needs to prepend `aa-exec -p jaato-ws-{session_id} --`.
-
-### Phase 5: WebSocket Server Integration
+### Phase 5: WebSocket Server Integration ✅
 
 **Modified: `jaato-server/server/websocket.py`**
 
-The WS server gains workspace provisioning on session creation.
+Key changes implemented:
 
-Key changes:
+1. **`__init__`**: Accepts `apparmor` (Optional[bool]), `default_template`, `workspace_max_age`
+2. **`start()`**: Initializes `WorkspaceProvisioner` and `AppArmorManager` (with auto/required/disabled logic), starts reaper with `on_teardown` callback
+3. **Per-client tracking**: `_client_provisioned: Dict[client_id, str]` maps clients to session IDs
+4. **`_initialize_server_for_workspace()`**: Called from `_handle_config_update()` — auto-provisions workspace, creates `JaatoServer` with env_file, initializes in executor, applies AppArmor wrappers
+5. **`provision_workspace()`**: Provisions via provisioner, sets up AppArmor profile
+6. **`get_apparmor_wrappers()`**: Returns (argv_wrapper, shell_wrapper) closures
+7. **Client disconnect**: Calls `_workspace_manager.remove_client()`, pops `_client_provisioned`
+8. **Reaper**: Background thread calling `reap_expired()` + AppArmor teardown via callback
+9. **CLI flags**: `--apparmor/--no-apparmor`, `--workspace-template`, `--workspace-max-age`
+10. **`get_server_info()`**: Includes provisioned_workspaces count, available_templates, apparmor_available
 
-1. **`__init__`**: Accept optional `apparmor` flag (default: auto-detect).
-
-2. **`start()`**: Initialize `WorkspaceProvisioner` and `AppArmorManager`.
-   Start workspace reaper background task.
-
-3. **Per-client workspace tracking**: Replace single `_selected_workspace`
-   with `_client_workspaces: Dict[client_id, ProvisionedWorkspace]`.
-
-4. **New handler: `_handle_session_create`**: When a WS client creates a
-   session:
-   - Provision workspace via `WorkspaceProvisioner.provision()`
-   - Create AppArmor profile via `AppArmorManager.provision_profile()`
-   - Pass provisioned workspace path to `SessionManager.create_session()`
-   - Wire `AppArmorManager.wrap_command()` into the session's CLI and
-     interactive shell plugins
-
-5. **Client disconnect**: On disconnect, if no sessions reference the
-   workspace, schedule it for cleanup (with configurable grace period).
-
-6. **Workspace reaper task**: Periodic asyncio task that calls
-   `WorkspaceProvisioner.reap_expired()` and
-   `AppArmorManager.teardown_profile()` for cleaned-up workspaces.
-
-### Phase 6: Session Manager Integration
+### Phase 6: Session Manager Integration ✅
 
 **Modified: `jaato-server/server/session_manager.py`**
 
-Add awareness of provisioned workspaces:
+1. **`Session` dataclass**: Added `provisioned: bool = False`
+2. **`create_session()`**: Accepts `provisioned: bool = False` param
+3. **`_save_session()`**: Persists `provisioned` flag in `metadata['provisioned']`
+4. **`_load_session()`**: Restores `provisioned` flag from metadata
 
-1. **`create_session()`**: Accept optional `provisioned: bool` flag. When True,
-   the workspace_path is server-managed and should not be overridden by
-   client config.
-
-2. **`_save_session()`**: Persist `provisioned` flag in session state so
-   restored sessions know their workspace is server-managed.
-
-3. **Session cleanup hooks**: When a session is deleted, notify the
-   `WorkspaceProvisioner` and `AppArmorManager` to clean up.
-
-### Phase 7: JaatoServer Integration
+### Phase 7: JaatoServer Integration ✅
 
 **Modified: `jaato-server/server/core.py`**
 
-1. **`initialize()`**: After plugin wiring, if an `apparmor_wrapper` is
-   provided, call `cli_plugin.set_apparmor_wrapper()` and
-   `interactive_shell_plugin.set_apparmor_wrapper()`.
+- `set_apparmor_wrapper(argv_wrapper, shell_wrapper)` method
+- Propagates to CLI plugin (both wrappers) and interactive_shell plugin (shell wrapper)
+- Uses `registry.get_plugin()` with `hasattr` guard for safety
 
-2. **New method: `set_apparmor_wrapper(wrapper)`**: Stores the wrapper and
-   propagates it to relevant plugins.
-
-### Phase 8: Workspace Reaper
+### Phase 8: Workspace Reaper ✅
 
 **Integrated into `WorkspaceProvisioner`**
 
-```python
-class WorkspaceProvisioner:
-    ...
-    def start_reaper(
-        self,
-        interval_seconds: int = 3600,
-        max_age_seconds: int = 86400,
-        on_teardown: Optional[Callable[[str], None]] = None,
-    ) -> threading.Thread:
-        """Start background thread that periodically reaps expired workspaces.
+- `start_reaper(interval, max_age, on_teardown)` — daemon thread
+- `stop_reaper()` — signals shutdown via `threading.Event`
+- `on_teardown` callback enables AppArmor profile cleanup for reaped sessions
+- Called by WS server's `start()`, stopped by `stop()`
 
-        Args:
-            interval_seconds: How often to check (default: hourly).
-            max_age_seconds: Max age before reaping (default: 24h).
-            on_teardown: Callback for each reaped session_id (for AppArmor
-                cleanup, etc.).
+## Files Summary
 
-        Returns the daemon thread (auto-stops on process exit).
-        """
-        ...
-```
-
-## New/Modified Files Summary
-
-| File | Action | Description |
-|------|--------|-------------|
-| `server/workspace_provisioner.py` | **NEW** | Auto-provisioning, templates, reaper |
-| `server/apparmor.py` | **NEW** | AppArmor profile management |
-| `server/websocket.py` | MODIFY | Per-client workspaces, provisioning integration |
-| `server/workspace_manager.py` | MODIFY | Per-client tracking, integration with provisioner |
-| `server/session_manager.py` | MODIFY | Provisioned workspace awareness |
-| `server/core.py` | MODIFY | AppArmor wrapper propagation to plugins |
-| `shared/plugins/cli/plugin.py` | MODIFY | AppArmor command wrapping |
-| `shared/plugins/interactive_shell/plugin.py` | MODIFY | AppArmor command wrapping |
-| `shared/plugins/interactive_shell/session.py` | MODIFY | Wrap pexpect spawn command |
-| `deploy/apparmor/` | **NEW** | Example profiles, setup script |
+| File | Action | Status | Description |
+|------|--------|--------|-------------|
+| `server/workspace_provisioner.py` | **NEW** | ✅ | Auto-provisioning, templates, reaper |
+| `server/apparmor.py` | **NEW** | ✅ | AppArmor profile management |
+| `server/websocket.py` | MODIFY | ✅ | Per-client workspaces, provisioning integration |
+| `server/workspace_manager.py` | MODIFY | ✅ | Per-client tracking, integration with provisioner |
+| `server/session_manager.py` | MODIFY | ✅ | Provisioned workspace awareness |
+| `server/core.py` | MODIFY | ✅ | AppArmor wrapper propagation to plugins |
+| `shared/plugins/cli/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
+| `shared/plugins/interactive_shell/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
+| `shared/tests/test_workspace_provisioner.py` | **NEW** | ✅ | 22 unit tests |
+| `shared/tests/test_apparmor.py` | **NEW** | ✅ | 22 unit tests |
+| `deploy/apparmor/` | **NEW** | DEFERRED | Example profiles, setup script |
 
 ## Configuration
 
@@ -512,13 +260,25 @@ sudo -u jaato .venv/bin/python -m server \
     --daemon
 ```
 
-## Testing Strategy
+## Testing Status
 
-1. **Unit tests**: `WorkspaceProvisioner` — provision, teardown, reap, templates
-2. **Unit tests**: `AppArmorManager` — profile generation, `is_available()` mock
-3. **Integration tests**: WS connect → provision → CLI command → verify
-   confinement (requires AppArmor-enabled CI runner or mock)
-4. **Fallback tests**: Verify graceful degradation when AppArmor unavailable
+1. ✅ **Unit tests**: `WorkspaceProvisioner` — 22 tests (provision, teardown, reap, templates, manifest persistence, activity tracking)
+2. ✅ **Unit tests**: `AppArmorManager` — 22 tests (profile generation, `is_available()` mock, command/shell wrapping, provision/teardown with mocked subprocess)
+3. ⬚ **Integration tests**: WS connect → provision → CLI command → verify
+   confinement (requires AppArmor-enabled CI runner or mock) — DEFERRED
+4. ✅ **Fallback tests**: Graceful degradation when AppArmor unavailable (covered by apparmor unit tests)
+
+## Deferred Work
+
+- **Deployment artifacts**: `deploy/apparmor/` directory with setup scripts,
+  sudoers template, and example workspace templates. Needed for production
+  deployment but not for the core feature.
+- **WebSocket integration test**: End-to-end test covering WS connect → config
+  update → workspace provisioning → AppArmor wrapping → message flow. Requires
+  mocking the full WS server lifecycle.
+- **Session deletion hook**: When a session is deleted via session manager,
+  notify provisioner/apparmor for cleanup. Currently cleanup only happens via
+  reaper or client disconnect.
 
 ## Future Work
 
