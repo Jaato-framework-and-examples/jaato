@@ -119,6 +119,12 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._workspace_root: Optional[str] = None
         # Plugin registry for checking authorized external paths
         self._plugin_registry = None
+        # Optional AppArmor command wrapper for workspace confinement.
+        # When set, all subprocess executions are passed through this
+        # callable to prepend aa-exec or similar confinement prefix.
+        self._apparmor_wrapper: Optional[Callable[[List[str]], List[str]]] = None
+        # Optional AppArmor shell command wrapper for shell=True mode.
+        self._apparmor_shell_wrapper: Optional[Callable[[str], str]] = None
 
     @property
     def name(self) -> str:
@@ -127,6 +133,27 @@ class CLIToolPlugin(BackgroundCapableMixin):
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("CLI", msg)
+
+    def set_apparmor_wrapper(
+        self,
+        argv_wrapper: Optional[Callable[[List[str]], List[str]]] = None,
+        shell_wrapper: Optional[Callable[[str], str]] = None,
+    ) -> None:
+        """Set command wrappers for AppArmor confinement.
+
+        When set, all subprocess executions are transformed through the
+        wrappers before being passed to ``subprocess.Popen``.  This is
+        used by ``JaatoServer`` when the session belongs to a WebSocket
+        client with AppArmor enabled.
+
+        Args:
+            argv_wrapper: Wraps argv-style commands (``shell=False``).
+                Signature: ``(command: List[str]) -> List[str]``.
+            shell_wrapper: Wraps shell command strings (``shell=True``).
+                Signature: ``(command: str) -> str``.
+        """
+        self._apparmor_wrapper = argv_wrapper
+        self._apparmor_shell_wrapper = shell_wrapper
 
     def _detect_workspace_root(self) -> Optional[str]:
         """Auto-detect workspace root from environment variables.
@@ -568,6 +595,13 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
             # Start process with pipes
             cmd = command if use_shell else argv
+
+            # Apply AppArmor confinement wrapper if configured
+            if use_shell and self._apparmor_shell_wrapper:
+                cmd = self._apparmor_shell_wrapper(cmd)
+            elif not use_shell and self._apparmor_wrapper:
+                cmd = self._apparmor_wrapper(cmd)
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -992,6 +1026,13 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Both streaming and non-streaming use Popen so we can check the
             # cancel token while the process runs.
             cmd = command if use_shell else argv
+
+            # Apply AppArmor confinement wrapper if configured
+            if use_shell and self._apparmor_shell_wrapper:
+                cmd = self._apparmor_shell_wrapper(cmd)
+            elif not use_shell and self._apparmor_wrapper:
+                cmd = self._apparmor_wrapper(cmd)
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,

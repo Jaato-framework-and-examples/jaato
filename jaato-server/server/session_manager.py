@@ -98,6 +98,7 @@ class Session:
     workspace_path: Optional[str] = None  # Client's working directory
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
+    provisioned: bool = False  # True if workspace was auto-provisioned by server
 
 
 class SessionManager:
@@ -621,6 +622,7 @@ class SessionManager:
         workspace_path: Optional[str] = None,
         env_overrides: Optional[Dict[str, str]] = None,
         profile_name: Optional[str] = None,
+        provisioned: bool = False,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -634,6 +636,10 @@ class SessionManager:
                 is loaded from ``.jaato/profiles/`` in the workspace and applied
                 to the session (model, provider, plugins, system instructions,
                 GC configuration, etc.).
+            provisioned: True if the workspace was auto-provisioned by the
+                server (e.g., for WebSocket clients).  When True, the
+                workspace_path is server-managed and should not be overridden
+                by client config.
 
         Returns:
             The session ID (empty string on failure).
@@ -722,6 +728,7 @@ class SessionManager:
             description=None,
             is_dirty=True,  # New session needs saving
             workspace_path=workspace_path,
+            provisioned=provisioned,
         )
 
         # Register callback for when auth completes (if it was pending)
@@ -1120,6 +1127,7 @@ class SessionManager:
             is_dirty=recovered_count > 0,  # Mark dirty if recovery happened
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
+            provisioned=state.metadata.get('provisioned', False),
         )
 
         # Restore workspace file monitor with persisted tracked state
@@ -1432,6 +1440,11 @@ class SessionManager:
             monitor = self._workspace_monitors.get(session.session_id)
             if monitor:
                 workspace_files = monitor.get_tracked_dict() or None
+
+            # Persist provisioned flag in metadata so restored sessions
+            # know their workspace is server-managed.
+            if session.provisioned:
+                subagent_metadata['provisioned'] = True
 
             # Create SessionState
             state = SessionState(
