@@ -16,6 +16,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 import threading
 
@@ -471,9 +472,8 @@ class JaatoWSServer:
             return
 
         # Set logging context for session-specific log routing
-        # WebSocket server uses a single workspace at a time
         if self._jaato_server and self._workspace_manager:
-            selected = self._workspace_manager.get_selected_workspace()
+            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
             workspace_path = selected.path if selected else None
             session_env = self._jaato_server.get_all_session_env()
             # Use workspace name as session_id for WebSocket mode
@@ -489,7 +489,7 @@ class JaatoWSServer:
         if isinstance(event, SendMessageRequest):
             # Capture context for thread (ContextVars don't propagate to threads)
             if self._jaato_server and self._workspace_manager:
-                selected = self._workspace_manager.get_selected_workspace()
+                selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
                 ctx_workspace = selected.path if selected else None
                 ctx_session_env = self._jaato_server.get_all_session_env()
                 ctx_session_id = selected.name if selected else "websocket"
@@ -736,12 +736,18 @@ class JaatoWSServer:
         model: Optional[str],
         api_key: Optional[str],
     ) -> None:
-        """Handle workspace configuration update request."""
+        """Handle workspace configuration update request.
+
+        After successfully updating the workspace config, initializes a
+        ``JaatoServer`` for the workspace so the client can start sending
+        messages.  If auto-provisioning is active, the workspace is
+        provisioned first and AppArmor confinement is applied.
+        """
         if not self._workspace_manager:
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
-        selected = self._workspace_manager.get_selected_workspace()
+        selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
         if not selected:
             await self._send_error(client_id, "No workspace selected")
             return
@@ -751,6 +757,7 @@ class JaatoWSServer:
                 provider=provider,
                 model=model,
                 api_key=api_key,
+                name=selected.name,
             )
 
             await self._send_to_client(
@@ -763,8 +770,91 @@ class JaatoWSServer:
                 )
             )
 
+            # Initialize JaatoServer now that the workspace is configured
+            if result["success"]:
+                await self._initialize_server_for_workspace(client_id, selected)
+
         except ValueError as e:
             await self._send_error(client_id, str(e))
+
+    async def _initialize_server_for_workspace(
+        self,
+        client_id: str,
+        workspace_info: Any,
+    ) -> None:
+        """Initialize a JaatoServer for the selected workspace.
+
+        Creates the server from the workspace's ``.env`` file, initializes
+        it in a background thread, and optionally applies AppArmor
+        confinement.
+
+        This is called after ``_handle_config_update()`` succeeds, meaning
+        the workspace has a valid provider configuration.
+
+        Args:
+            client_id: The requesting client.
+            workspace_info: The ``WorkspaceInfo`` for the selected workspace.
+        """
+        env_file = self._workspace_manager.get_env_file(workspace_info.name)
+        if not env_file or not env_file.exists():
+            await self._send_error(client_id, "Workspace .env file not found")
+            return
+
+        # Auto-provision an isolated workspace directory if provisioner is
+        # configured.  This creates a session-specific subdirectory under
+        # {root}/sessions/ with template contents and AppArmor confinement.
+        session_id = workspace_info.name  # Use workspace name as session ID
+        provisioned_ws = None
+        if self._provisioner:
+            provisioned_ws = await self.provision_workspace(
+                client_id=client_id,
+                session_id=session_id,
+            )
+            if provisioned_ws:
+                # Use the provisioned workspace's .env instead
+                provisioned_env = Path(provisioned_ws.path) / ".env"
+                if provisioned_env.exists():
+                    env_file = provisioned_env
+
+        # Create JaatoServer
+        server = JaatoServer(
+            env_file=str(env_file),
+            on_event=self._on_server_event,
+            workspace_path=provisioned_ws.path if provisioned_ws else workspace_info.path,
+        )
+
+        # Initialize in executor (blocking call)
+        def _init():
+            return server.initialize()
+
+        success = await asyncio.get_event_loop().run_in_executor(None, _init)
+
+        if not success:
+            await self._send_error(client_id, "Failed to initialize server")
+            return
+
+        self._jaato_server = server
+
+        # Apply AppArmor confinement to CLI and interactive shell plugins
+        if provisioned_ws:
+            argv_wrapper, shell_wrapper = self.get_apparmor_wrappers(session_id)
+            if argv_wrapper or shell_wrapper:
+                server.set_apparmor_wrapper(
+                    argv_wrapper=argv_wrapper,
+                    shell_wrapper=shell_wrapper,
+                )
+                logger.info(
+                    "AppArmor confinement applied to session %s",
+                    session_id,
+                )
+
+        await self._send_to_client(
+            client_id,
+            SystemMessageEvent(
+                message=f"Server initialized: {server.model_provider}/{server.model_name}",
+                style="info",
+            ),
+        )
 
     # =========================================================================
     # Status Methods

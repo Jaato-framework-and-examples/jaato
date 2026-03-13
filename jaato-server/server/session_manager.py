@@ -1127,6 +1127,7 @@ class SessionManager:
             is_dirty=recovered_count > 0,  # Mark dirty if recovery happened
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
+            provisioned=state.metadata.get('provisioned', False),
         )
 
         # Restore workspace file monitor with persisted tracked state
@@ -1439,6 +1440,11 @@ class SessionManager:
             monitor = self._workspace_monitors.get(session.session_id)
             if monitor:
                 workspace_files = monitor.get_tracked_dict() or None
+
+            # Persist provisioned flag in metadata so restored sessions
+            # know their workspace is server-managed.
+            if session.provisioned:
+                subagent_metadata['provisioned'] = True
 
             # Create SessionState
             state = SessionState(
