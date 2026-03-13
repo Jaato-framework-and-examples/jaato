@@ -259,7 +259,7 @@ class TestOTelPlugin:
 
         spans = exporter.get_finished_spans()
         assert len(spans) == 1
-        assert spans[0].name == "jaato.turn"
+        assert spans[0].name == "jaato.test.turn"
         assert spans[0].attributes["openinference.span.kind"] == "AGENT"
         assert spans[0].attributes["session.id"] == "sess_123"
         assert spans[0].attributes["agent.name"] == "test"
@@ -437,7 +437,7 @@ class TestOTelPlugin:
 
         assert tool_span.name.startswith("jaato.tool.")
         assert llm_span.name == "llm"
-        assert turn_span.name == "jaato.turn"
+        assert turn_span.name == "jaato.unknown.turn"
 
         # Check parent-child relationships
         assert tool_span.parent.span_id == llm_span.context.span_id
@@ -656,7 +656,7 @@ class TestOTelPlugin:
         spans = exporter.get_finished_spans()
         # Tool span should be a child of the turn span
         tool_span = [s for s in spans if s.name.startswith("jaato.tool.")][0]
-        turn_span = [s for s in spans if s.name == "jaato.turn"][0]
+        turn_span = [s for s in spans if "turn" in s.name][0]
         assert tool_span.parent is not None
         assert tool_span.parent.span_id == turn_span.context.span_id
 
@@ -680,7 +680,7 @@ class TestOTelPlugin:
 
         spans = exporter.get_finished_spans()
         tool_span = [s for s in spans if s.name.startswith("jaato.tool.")][0]
-        turn_span = [s for s in spans if s.name == "jaato.turn"][0]
+        turn_span = [s for s in spans if "turn" in s.name][0]
         # Without context propagation, tool span has no parent link to turn
         if tool_span.parent is not None:
             assert tool_span.parent.span_id != turn_span.context.span_id

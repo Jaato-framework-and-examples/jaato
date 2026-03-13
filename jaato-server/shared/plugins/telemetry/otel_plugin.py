@@ -590,8 +590,12 @@ class OTelPlugin:
         if attributes:
             attrs.update(attributes)
 
+        name = agent_name or "unknown"
+        turn_suffix = f".{turn_index}" if turn_index is not None else ""
+        span_name = f"jaato.{name}.turn{turn_suffix}"
+
         try:
-            with self._tracer.start_as_current_span("jaato.turn", attributes=attrs) as span:
+            with self._tracer.start_as_current_span(span_name, attributes=attrs) as span:
                 yield _SpanWrapper(span, self._redact_content)
         finally:
             ctx.agent_id = prev_id
