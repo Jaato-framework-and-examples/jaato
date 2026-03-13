@@ -665,7 +665,7 @@ class OTelPlugin:
         if attributes:
             attrs.update(attributes)
 
-        with self._tracer.start_as_current_span("jaato.tool", attributes=attrs) as span:
+        with self._tracer.start_as_current_span(f"jaato.tool.{tool_name}", attributes=attrs) as span:
             yield _SpanWrapper(span, self._redact_content)
 
     @contextmanager

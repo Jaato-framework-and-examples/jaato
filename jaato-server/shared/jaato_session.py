@@ -3332,6 +3332,7 @@ NOTES
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=use_streaming,
             ) as llm_telemetry:
+                self._record_input_messages_telemetry(llm_telemetry)
                 if use_streaming:
                     # Track whether we've sent the first chunk (to use "write" vs "append")
                     first_chunk_sent = False
@@ -4941,6 +4942,7 @@ NOTES
             provider=self._provider.name if self._provider else "unknown",
             streaming=use_streaming,
         ) as llm_telemetry:
+            self._record_input_messages_telemetry(llm_telemetry)
             if use_streaming:
                 # Track first chunk to use "write" for new block, "append" for continuation
                 first_chunk_after_tools = [False]  # Use list to allow mutation in closure
@@ -5093,6 +5095,7 @@ NOTES
             provider=self._provider.name if self._provider else "unknown",
             streaming=use_streaming,
         ) as llm_telemetry:
+            self._record_input_messages_telemetry(llm_telemetry)
             if use_streaming:
                 first_chunk_sent = [False]
 
@@ -5628,19 +5631,34 @@ NOTES
         })
 
     def _record_token_telemetry(self, span, response: ProviderResponse) -> None:
-        """Record OpenInference token count attributes on a telemetry span.
+        """Record OpenInference token count and response attributes on a telemetry span.
 
         Sets ``llm.token_count.prompt`` and ``llm.token_count.completion``
         (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
         plus optional cache and reasoning detail attributes.
 
-        Also accumulates the counts on the current turn span so the root
+        Also records ``llm.output_messages.*`` (OpenInference indexed attributes)
+        from the model response, and ``gen_ai.response.finish_reasons``.
+
+        Accumulates the counts on the current turn span so the root
         AGENT span carries aggregate token usage for the entire turn.
 
         Args:
             span: The LLM span context to set attributes on.
-            response: Provider response containing usage data.
+            response: Provider response containing usage data and content.
         """
+        # Record finish reason (OpenInference convention)
+        if response.finish_reason is not None:
+            span.set_attribute(
+                "gen_ai.response.finish_reasons",
+                [response.finish_reason.value],
+            )
+
+        # Record output messages (OpenInference indexed attributes)
+        output_msgs = self._response_to_openinference(response)
+        if output_msgs:
+            span.set_output_messages(output_msgs)
+
         if not response.usage:
             return
 
@@ -5665,6 +5683,90 @@ NOTES
             if usage.output_tokens is not None:
                 self._turn_completion_tokens = getattr(self, '_turn_completion_tokens', 0) + usage.output_tokens
                 turn_span.set_attribute("llm.token_count.completion", self._turn_completion_tokens)
+
+    def _record_input_messages_telemetry(self, span) -> None:
+        """Record OpenInference input messages on a telemetry span.
+
+        Converts the current session history (messages being sent to the
+        provider) into OpenInference ``llm.input_messages.*`` indexed
+        attributes on the LLM span.
+
+        Args:
+            span: The LLM span context to set attributes on.
+        """
+        input_msgs = self._history_to_openinference()
+        if input_msgs:
+            span.set_input_messages(input_msgs)
+
+    @staticmethod
+    def _response_to_openinference(response: ProviderResponse) -> List[Dict[str, Any]]:
+        """Convert a ProviderResponse to OpenInference output message dicts.
+
+        Returns a list with a single assistant message containing text content
+        and any tool calls from the response parts.
+
+        Args:
+            response: The provider response to convert.
+
+        Returns:
+            List of message dicts with 'role', 'content', and optional
+            'tool_calls' suitable for ``span.set_output_messages()``.
+        """
+        text = response.get_text()
+        function_calls = response.get_function_calls()
+
+        if not text and not function_calls:
+            return []
+
+        msg: Dict[str, Any] = {"role": "assistant", "content": text or ""}
+        if function_calls:
+            msg["tool_calls"] = [
+                {
+                    "name": fc.name,
+                    "arguments": json.dumps(fc.args) if fc.args else "{}",
+                }
+                for fc in function_calls
+            ]
+        return [msg]
+
+    def _history_to_openinference(self) -> List[Dict[str, Any]]:
+        """Convert the current session history to OpenInference input message dicts.
+
+        Maps jaato ``Message`` objects to the dict format expected by
+        ``span.set_input_messages()``: each dict has 'role' and 'content'.
+
+        Returns:
+            List of message dicts suitable for ``span.set_input_messages()``.
+        """
+        result = []
+        for msg in self._history.messages:
+            # Map jaato roles to OpenInference roles
+            role = msg.role.value  # "user", "model", "tool"
+            if role == "model":
+                role = "assistant"
+
+            # Extract text content from parts
+            texts = [p.text for p in msg.parts if p.text]
+            content = "".join(texts) if texts else ""
+
+            entry: Dict[str, Any] = {"role": role, "content": content}
+
+            # Include tool calls from model messages
+            if msg.role == Role.MODEL:
+                tool_calls = [
+                    {
+                        "name": p.function_call.name,
+                        "arguments": json.dumps(p.function_call.args)
+                            if p.function_call.args else "{}",
+                    }
+                    for p in msg.parts
+                    if p.function_call
+                ]
+                if tool_calls:
+                    entry["tool_calls"] = tool_calls
+
+            result.append(entry)
+        return result
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
@@ -5949,6 +6051,7 @@ NOTES
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=False,
             ) as llm_telemetry:
+                self._record_input_messages_telemetry(llm_telemetry)
                 turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
                         self._history.messages,
@@ -6094,6 +6197,7 @@ NOTES
                     provider=self._provider.name if self._provider else "unknown",
                     streaming=False,
                 ) as llm_telemetry:
+                    self._record_input_messages_telemetry(llm_telemetry)
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
