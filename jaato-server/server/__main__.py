@@ -244,6 +244,12 @@ class JaatoDaemon:
         from server.event_sink import CompositeEventSink
         from server.command_router import CommandRouter
 
+        # Write PID and config files early so that clients checking
+        # _check_server_running() see this daemon before initialization
+        # completes (avoids race where TUI auto-starts a second server).
+        self._write_pid()
+        self._write_config()
+
         # Initialize session manager
         self._session_manager = SessionManager()
 
@@ -333,10 +339,6 @@ class JaatoDaemon:
 
         # Load daemon extensions (e.g., gossip clustering from jaato-premium)
         self._load_extensions()
-
-        # Write PID and config files
-        self._write_pid()
-        self._write_config()
 
         # Set up signal handlers (not supported on Windows)
         if sys.platform != "win32":
