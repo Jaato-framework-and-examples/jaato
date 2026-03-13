@@ -710,6 +710,10 @@ class JaatoWSServer:
         The router uses the ``EventSink`` to send responses back to this
         client (via ``WSEventSinkAdapter``).
 
+        Exceptions from the router are caught and sent back to the client
+        as ``ErrorEvent`` so that a single bad request does not tear down
+        the entire WebSocket connection.
+
         Args:
             client_id: The client's ID.
             event: The deserialized event.
@@ -721,18 +725,25 @@ class JaatoWSServer:
         if self._event_sink_adapter:
             session_id = self._event_sink_adapter._client_sessions.get(client_id, "")
 
-        # ClientConfigRequest must be processed synchronously (same as IPC)
-        if isinstance(event, ClientConfigRequest):
-            self._command_router.handle_request(client_id, session_id, event)
-        else:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                self._command_router.handle_request,
-                client_id,
-                session_id,
-                event,
+        try:
+            # ClientConfigRequest must be processed synchronously (same as IPC)
+            if isinstance(event, ClientConfigRequest):
+                self._command_router.handle_request(client_id, session_id, event)
+            else:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    self._command_router.handle_request,
+                    client_id,
+                    session_id,
+                    event,
+                )
+        except Exception as exc:
+            logger.error(
+                "Command routing failed for client %s: %s", client_id, exc,
+                exc_info=True,
             )
+            await self._send_error(client_id, f"Internal error: {exc}")
 
     async def _send_to_client(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client."""

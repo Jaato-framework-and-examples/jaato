@@ -764,7 +764,17 @@ class SessionManager:
         # pending the tool/model lists may be incomplete, but the client
         # needs the session_id immediately.  on_auth_complete() will send
         # an updated SessionInfoEvent once the provider is fully ready.
-        self._emit_to_client(client_id, self._build_session_info_event(session))
+        try:
+            self._emit_to_client(client_id, self._build_session_info_event(session))
+        except Exception as exc:
+            logger.error("Failed to build SessionInfoEvent: %s", exc, exc_info=True)
+            # Send a minimal SessionInfoEvent so the client can still proceed
+            self._emit_to_client(client_id, SessionInfoEvent(
+                session_id=session.session_id,
+                session_name=session.name,
+                model_provider=session.server.model_provider if session.server else "",
+                model_name=session.server.model_name if session.server else "",
+            ))
 
         if not server.auth_pending:
             self._emit_to_client(client_id, SystemMessageEvent(
