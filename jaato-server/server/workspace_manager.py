@@ -84,8 +84,12 @@ class WorkspaceManager:
         # In-memory cache
         self._workspaces: Dict[str, WorkspaceInfo] = {}
 
-        # Currently selected workspace
+        # Currently selected workspace (legacy single-client mode)
         self._selected_workspace: Optional[str] = None
+
+        # Per-client workspace selections for multi-client mode.
+        # Maps client_id → workspace name.
+        self._client_workspaces: Dict[str, str] = {}
 
         # Load registry
         self._load_registry()
@@ -286,11 +290,18 @@ class WorkspaceManager:
         logger.info(f"Created workspace: {name} at {path}")
         return ws_info
 
-    def select_workspace(self, name: str) -> WorkspaceInfo:
-        """Select a workspace for the session.
+    def select_workspace(
+        self,
+        name: str,
+        client_id: Optional[str] = None,
+    ) -> WorkspaceInfo:
+        """Select a workspace for a session or client.
 
         Args:
             name: Workspace name (relative path from root).
+            client_id: Optional client identifier for per-client tracking.
+                When provided, the selection is stored per-client.
+                When None, uses the legacy single-workspace mode.
 
         Returns:
             WorkspaceInfo with current configuration status.
@@ -308,21 +319,47 @@ class WorkspaceManager:
         ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
 
         self._workspaces[name] = ws_info
-        self._selected_workspace = name
+
+        if client_id:
+            self._client_workspaces[client_id] = name
+        else:
+            self._selected_workspace = name
+
         self._save_registry()
 
-        logger.info(f"Selected workspace: {name}")
+        logger.info(f"Selected workspace: {name} (client={client_id or 'default'})")
         return ws_info
 
-    def get_selected_workspace(self) -> Optional[WorkspaceInfo]:
+    def get_selected_workspace(
+        self,
+        client_id: Optional[str] = None,
+    ) -> Optional[WorkspaceInfo]:
         """Get the currently selected workspace.
+
+        Args:
+            client_id: Optional client identifier.  When provided,
+                returns the per-client selection.  Falls back to the
+                legacy single-workspace selection.
 
         Returns:
             WorkspaceInfo or None if no workspace selected.
         """
-        if not self._selected_workspace:
+        target = None
+        if client_id:
+            target = self._client_workspaces.get(client_id)
+        if not target:
+            target = self._selected_workspace
+        if not target:
             return None
-        return self._workspaces.get(self._selected_workspace)
+        return self._workspaces.get(target)
+
+    def remove_client(self, client_id: str) -> None:
+        """Remove per-client workspace tracking when a client disconnects.
+
+        Args:
+            client_id: Client identifier to remove.
+        """
+        self._client_workspaces.pop(client_id, None)
 
     def get_workspace_path(self, name: Optional[str] = None) -> Optional[Path]:
         """Get the absolute path to a workspace.

@@ -29,6 +29,8 @@ except ImportError:
     ServerConnection = Any
 
 from .core import JaatoServer
+from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
+from .apparmor import AppArmorManager
 from .session_logging import set_logging_context, clear_logging_context
 from jaato_sdk.events import (
     Event,
@@ -101,6 +103,9 @@ class JaatoWSServer:
         host: str = "localhost",
         port: int = 8080,
         workspace_root: Optional[str] = None,
+        apparmor: Optional[bool] = None,
+        default_template: str = "default",
+        workspace_max_age: int = 86400,
     ):
         """Initialize the WebSocket server.
 
@@ -110,6 +115,13 @@ class JaatoWSServer:
             workspace_root: Root directory for workspaces. Remote clients select
                 from subdirectories; each workspace has its own .env file that
                 determines the provider.
+            apparmor: Enable AppArmor confinement for provisioned workspaces.
+                ``None`` (default) auto-detects availability.  ``True`` requires
+                AppArmor.  ``False`` disables confinement.
+            default_template: Name of the default workspace template to copy
+                when auto-provisioning (default: ``"default"``).
+            workspace_max_age: Maximum age in seconds for provisioned workspaces
+                before the reaper removes them (default: 86400 = 24h).
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -132,6 +144,18 @@ class JaatoWSServer:
 
         # Workspace manager (if workspace_root provided)
         self._workspace_manager: Optional[WorkspaceManager] = None
+
+        # Workspace provisioner for auto-provisioning session workspaces
+        self._provisioner: Optional[WorkspaceProvisioner] = None
+
+        # AppArmor manager for per-session confinement
+        self._apparmor: Optional[AppArmorManager] = None
+        self._apparmor_mode = apparmor  # None=auto, True=required, False=disabled
+        self._default_template = default_template
+        self._workspace_max_age = workspace_max_age
+
+        # Per-client provisioned workspace tracking
+        self._client_provisioned: Dict[str, ProvisionedWorkspace] = {}
 
         # Core server (runs in thread)
         self._jaato_server: Optional[JaatoServer] = None
@@ -159,6 +183,38 @@ class JaatoWSServer:
             self._workspace_manager = WorkspaceManager(self._workspace_root)
             self._workspace_manager.discover_workspaces()
             logger.info(f"Workspace mode enabled, root: {self._workspace_root}")
+
+            # Initialize workspace provisioner for auto-provisioning
+            self._provisioner = WorkspaceProvisioner(
+                self._workspace_root,
+                default_template=self._default_template,
+            )
+
+            # Initialize AppArmor manager
+            self._apparmor = AppArmorManager(
+                workspace_root=self._workspace_root,
+            )
+            if self._apparmor_mode is False:
+                logger.info("AppArmor confinement disabled by configuration")
+                self._apparmor = None
+            elif self._apparmor_mode is True and not self._apparmor.is_available():
+                logger.warning(
+                    "AppArmor confinement required but not available — "
+                    "workspace isolation will rely on directory sandboxing only"
+                )
+            elif self._apparmor and self._apparmor.is_available():
+                logger.info("AppArmor confinement enabled")
+
+            # Start workspace reaper
+            def _on_workspace_reaped(session_id: str) -> None:
+                if self._apparmor and self._apparmor.is_available():
+                    self._apparmor.teardown_profile(session_id)
+
+            self._provisioner.start_reaper(
+                interval_seconds=3600,
+                max_age_seconds=self._workspace_max_age,
+                on_teardown=_on_workspace_reaped,
+            )
 
         # Start WebSocket server
         try:
@@ -209,6 +265,10 @@ class JaatoWSServer:
     async def stop(self) -> None:
         """Stop the server gracefully."""
         self._shutdown_event.set()
+
+        # Stop workspace reaper
+        if self._provisioner:
+            self._provisioner.stop_reaper()
 
         # Close all client connections
         async with self._lock:
@@ -376,6 +436,10 @@ class JaatoWSServer:
             async with self._lock:
                 if client_id in self._clients:
                     del self._clients[client_id]
+            # Clean up per-client state
+            if self._workspace_manager:
+                self._workspace_manager.remove_client(client_id)
+            self._client_provisioned.pop(client_id, None)
             logger.info(f"Client disconnected: {client_id}")
 
     async def _handle_message(self, client_id: str, message: str) -> None:
@@ -570,13 +634,15 @@ class JaatoWSServer:
         """Handle workspace selection request.
 
         This selects the workspace and returns its configuration status.
+        Per-client workspace tracking is used so multiple clients can
+        select different workspaces simultaneously.
         """
         if not self._workspace_manager:
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
         try:
-            ws_info = self._workspace_manager.select_workspace(name)
+            ws_info = self._workspace_manager.select_workspace(name, client_id=client_id)
             config_status = self._workspace_manager.get_config_status(name)
 
             # Send config status to client
@@ -594,6 +660,74 @@ class JaatoWSServer:
 
         except ValueError as e:
             await self._send_error(client_id, str(e))
+
+    async def provision_workspace(
+        self,
+        client_id: str,
+        session_id: str,
+        template: Optional[str] = None,
+    ) -> Optional[ProvisionedWorkspace]:
+        """Auto-provision an isolated workspace for a remote session.
+
+        Creates a new workspace directory, applies a template, and
+        optionally sets up AppArmor confinement.
+
+        Args:
+            client_id: The client requesting the workspace.
+            session_id: Session identifier (used as workspace directory name).
+            template: Template name to apply (default: server's default_template).
+
+        Returns:
+            The provisioned workspace, or None on failure.
+        """
+        if not self._provisioner:
+            logger.warning("Cannot provision workspace: no provisioner configured")
+            return None
+
+        try:
+            workspace = self._provisioner.provision(
+                session_id=session_id,
+                client_id=client_id,
+                template=template,
+            )
+        except ValueError as e:
+            logger.error("Workspace provision failed: %s", e)
+            return None
+
+        # Set up AppArmor confinement
+        if self._apparmor and self._apparmor.is_available():
+            self._apparmor.provision_profile(session_id, workspace.path)
+
+        self._client_provisioned[client_id] = workspace
+        return workspace
+
+    def get_apparmor_wrappers(
+        self,
+        session_id: str,
+    ) -> tuple:
+        """Get AppArmor command wrappers for a session.
+
+        Returns a (argv_wrapper, shell_wrapper) tuple suitable for
+        passing to ``JaatoServer.set_apparmor_wrapper()``.  Both are
+        None if AppArmor is not available or not configured.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            Tuple of (argv_wrapper, shell_wrapper) callables, or
+            (None, None) if AppArmor is not active.
+        """
+        if not self._apparmor or not self._apparmor.is_available():
+            return None, None
+
+        def argv_wrapper(cmd):
+            return self._apparmor.wrap_command(session_id, cmd)
+
+        def shell_wrapper(cmd):
+            return self._apparmor.wrap_shell_command(session_id, cmd)
+
+        return argv_wrapper, shell_wrapper
 
     async def _handle_config_update(
         self,
@@ -664,6 +798,13 @@ class JaatoWSServer:
             info["workspace_root"] = str(self._workspace_manager.workspace_root)
             info["selected_workspace"] = selected.name if selected else None
 
+        if self._provisioner:
+            info["provisioned_workspaces"] = len(self._provisioner.list_workspaces())
+            info["available_templates"] = self._provisioner.list_templates()
+
+        if self._apparmor:
+            info["apparmor_available"] = self._apparmor.is_available()
+
         return info
 
 
@@ -684,6 +825,30 @@ async def main():
         required=True,
         help="Root directory for workspaces (remote clients select from subdirectories)",
     )
+    parser.add_argument(
+        "--apparmor",
+        default=None,
+        action="store_true",
+        dest="apparmor",
+        help="Enable AppArmor confinement (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--no-apparmor",
+        action="store_false",
+        dest="apparmor",
+        help="Disable AppArmor confinement",
+    )
+    parser.add_argument(
+        "--workspace-template",
+        default="default",
+        help="Default template for auto-provisioned workspaces (default: 'default')",
+    )
+    parser.add_argument(
+        "--workspace-max-age",
+        type=int,
+        default=86400,
+        help="Max age in seconds for provisioned workspaces (default: 86400)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -697,6 +862,9 @@ async def main():
         host=args.host,
         port=args.port,
         workspace_root=args.workspace_root,
+        apparmor=args.apparmor,
+        default_template=args.workspace_template,
+        workspace_max_age=args.workspace_max_age,
     )
 
     try:

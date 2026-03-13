@@ -98,6 +98,7 @@ class Session:
     workspace_path: Optional[str] = None  # Client's working directory
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
+    provisioned: bool = False  # True if workspace was auto-provisioned by server
 
 
 class SessionManager:
@@ -621,6 +622,7 @@ class SessionManager:
         workspace_path: Optional[str] = None,
         env_overrides: Optional[Dict[str, str]] = None,
         profile_name: Optional[str] = None,
+        provisioned: bool = False,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -634,6 +636,10 @@ class SessionManager:
                 is loaded from ``.jaato/profiles/`` in the workspace and applied
                 to the session (model, provider, plugins, system instructions,
                 GC configuration, etc.).
+            provisioned: True if the workspace was auto-provisioned by the
+                server (e.g., for WebSocket clients).  When True, the
+                workspace_path is server-managed and should not be overridden
+                by client config.
 
         Returns:
             The session ID (empty string on failure).
@@ -722,6 +728,7 @@ class SessionManager:
             description=None,
             is_dirty=True,  # New session needs saving
             workspace_path=workspace_path,
+            provisioned=provisioned,
         )
 
         # Register callback for when auth completes (if it was pending)
