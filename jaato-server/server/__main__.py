@@ -90,12 +90,12 @@ class _ExtensionContext:
             ``:8080``, ``0.0.0.0:8080``), or ``None``.
         ipc_socket: The raw ``--ipc-socket`` CLI argument string, or ``None``.
         server_name: The ``--server-name`` CLI argument, or ``None``.
-        health_port: The ``--health-port`` CLI argument (int), or ``None``.
+        dashboard_port: The ``--dashboard-port`` CLI argument (int), or ``None``.
     """
 
     __slots__ = (
         "session_manager", "ws_server", "web_socket",
-        "ipc_socket", "server_name", "health_port",
+        "ipc_socket", "server_name", "dashboard_port",
     )
 
     def __init__(
@@ -105,14 +105,14 @@ class _ExtensionContext:
         web_socket: Optional[str],
         ipc_socket: Optional[str],
         server_name: Optional[str],
-        health_port: Optional[int],
+        dashboard_port: Optional[int],
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
         self.web_socket = web_socket
         self.ipc_socket = ipc_socket
         self.server_name = server_name
-        self.health_port = health_port
+        self.dashboard_port = dashboard_port
 
 
 def configure_logging(
@@ -183,7 +183,7 @@ class JaatoDaemon:
         config_file: str = DEFAULT_CONFIG_FILE,
         log_file: str = DEFAULT_LOG_FILE,
         socket_mode: int = 0o666,
-        health_port: Optional[int] = None,
+        dashboard_port: Optional[int] = None,
         server_name: Optional[str] = None,
     ):
         """Initialize the daemon.
@@ -195,7 +195,8 @@ class JaatoDaemon:
             config_file: Path to config file for restart support.
             log_file: Path to log file for daemon mode.
             socket_mode: Unix file permissions for the IPC socket (default: 0o666).
-            health_port: TCP port for the health HTTP endpoint (None to disable).
+            dashboard_port: TCP port for the dashboard and health HTTP endpoint
+                (None to disable).
             server_name: Explicit server name for self-identification.
                 Passed to daemon extensions via ``_ExtensionContext``.
         """
@@ -205,7 +206,7 @@ class JaatoDaemon:
         self.pid_file = pid_file
         self.config_file = config_file
         self.log_file = log_file
-        self._health_port = health_port
+        self._dashboard_port = dashboard_port
         self._server_name = server_name
 
         # Components
@@ -407,7 +408,7 @@ class JaatoDaemon:
             "pid_file": self.pid_file,
             "log_file": self.log_file,
             "socket_mode": self.socket_mode,
-            "health_port": self._health_port,
+            "dashboard_port": self._dashboard_port,
             "server_name": self._server_name,
         }
         try:
@@ -461,7 +462,7 @@ class JaatoDaemon:
         ``ipc_socket``      ``str | None``                 Raw CLI arg.
         ``server_name``     ``str | None``                 ``--server-name``
                                                            CLI argument.
-        ``health_port``     ``int | None``                 ``--health-port``
+        ``dashboard_port``  ``int | None``                 ``--dashboard-port``
                                                            CLI argument.
         =================== ============================== ================
 
@@ -531,7 +532,7 @@ class JaatoDaemon:
             web_socket=self.web_socket,
             ipc_socket=self.ipc_socket,
             server_name=self._server_name,
-            health_port=self._health_port,
+            dashboard_port=self._dashboard_port,
         )
 
         for ep in ext_eps:
@@ -846,11 +847,11 @@ Examples:
              "Use 660 to restrict to owner and group only.",
     )
     parser.add_argument(
-        "--health-port",
+        "--dashboard-port",
         metavar="PORT",
         type=int,
         default=None,
-        help="TCP port for the health HTTP endpoint (GET /health). "
+        help="TCP port for the dashboard and health HTTP endpoint. "
              "Disabled by default.",
     )
     parser.add_argument(
@@ -952,7 +953,7 @@ Examples:
         args.web_socket = config.get("web_socket")
         args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
         args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "666"
-        args.health_port = config.get("health_port")
+        args.dashboard_port = config.get("dashboard_port")
         args.server_name = config.get("server_name")
 
         # Always restart as daemon
@@ -1004,6 +1005,8 @@ Examples:
             print(f"  IPC socket: {args.ipc_socket}")
         if args.web_socket:
             print(f"  WebSocket: {args.web_socket}")
+        if args.dashboard_port:
+            print(f"  Dashboard: :{args.dashboard_port}")
         daemonize(args.log_file)
 
     # Reconfigure logging for daemon/background mode with rotating file handler
@@ -1019,7 +1022,7 @@ Examples:
         pid_file=args.pid_file,
         log_file=args.log_file,
         socket_mode=socket_mode,
-        health_port=args.health_port,
+        dashboard_port=args.dashboard_port,
         server_name=args.server_name,
     )
 
