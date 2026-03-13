@@ -304,9 +304,15 @@ class JaatoDaemon:
                 host = "0.0.0.0"
                 port = int(self.web_socket)
 
+            # Provision a workspace root so WS clients get isolated,
+            # non-persistent workspaces (same as standalone WS mode).
+            from pathlib import Path as _Path
+            _default_ws_root = str(_Path.home() / ".jaato" / "workspaces")
+
             self._ws_server = JaatoWSServer(
                 host=host,
                 port=port,
+                workspace_root=_default_ws_root,
             )
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())

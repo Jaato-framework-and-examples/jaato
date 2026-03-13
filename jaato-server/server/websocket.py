@@ -726,6 +726,30 @@ class JaatoWSServer:
         if self._event_sink_adapter:
             session_id = self._event_sink_adapter._client_sessions.get(client_id, "")
 
+        # Auto-provision a workspace for WS clients that don't have one
+        # when they request a new session.  This mirrors the standalone WS
+        # flow but plugs into the daemon command-router path.
+        from jaato_sdk.events import CommandRequest
+        if (isinstance(event, CommandRequest)
+                and event.command.lower() == "session.new"
+                and self._provisioner
+                and self._event_sink_adapter
+                and not self._event_sink_adapter.get_client_workspace(client_id)):
+            import uuid as _uuid
+            provisioned = await self.provision_workspace(
+                session_id=f"ws_{_uuid.uuid4().hex[:8]}",
+                client_id=client_id,
+            )
+            if provisioned:
+                self._event_sink_adapter.set_client_workspace(
+                    client_id, provisioned.path,
+                )
+                self._client_provisioned[client_id] = provisioned
+                logger.info(
+                    "Auto-provisioned workspace for WS client %s: %s",
+                    client_id, provisioned.path,
+                )
+
         try:
             # ClientConfigRequest must be processed synchronously (same as IPC)
             if isinstance(event, ClientConfigRequest):
