@@ -574,6 +574,17 @@ class JaatoIPCServer:
             ErrorEvent(error=error, error_type="RequestError")
         )
 
+    def send_event(self, client_id: str, event: Event) -> None:
+        """Send an event to a specific client (``EventSink`` protocol).
+
+        Delegates to ``queue_event()`` — this method exists so that
+        ``JaatoIPCServer`` satisfies the ``EventSink`` protocol defined
+        in ``server.event_sink``.
+
+        Thread-safe.
+        """
+        self.queue_event(client_id, event)
+
     def queue_event(self, client_id: str, event: Event) -> None:
         """Queue an event for delivery to a client.
 

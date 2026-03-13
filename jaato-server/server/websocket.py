@@ -58,9 +58,73 @@ from jaato_sdk.events import (
     ConfigUpdatedEvent,
 )
 from .workspace_manager import WorkspaceManager
+from .event_sink import EventSink
 
 
 logger = logging.getLogger(__name__)
+
+
+class WSEventSinkAdapter:
+    """Adapts ``JaatoWSServer`` to the ``EventSink`` protocol.
+
+    ``CommandRouter`` and ``SessionManager`` call ``send_event()`` from
+    synchronous model/session threads.  This adapter bridges that into
+    the async WebSocket world by scheduling coroutines on the WS
+    server's event loop via ``asyncio.run_coroutine_threadsafe()``.
+
+    ``client_id`` values that don't belong to any connected WebSocket
+    client are silently ignored, which is the contract of ``EventSink``
+    and allows ``CompositeEventSink`` to fan-out safely.
+
+    Per-client session/workspace state is tracked locally so the
+    ``CommandRouter`` can query workspace paths for WS clients.
+    """
+
+    def __init__(self, ws_server: "JaatoWSServer") -> None:
+        self._ws = ws_server
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        # Per-client tracking (mirrors IPC server's client fields)
+        self._client_sessions: Dict[str, str] = {}        # client_id -> session_id
+        self._client_workspaces: Dict[str, Optional[str]] = {}  # client_id -> workspace
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Capture the event loop for thread-safe scheduling.
+
+        Must be called from the async context (e.g., inside ``start()``).
+        """
+        self._event_loop = loop
+
+    def send_event(self, client_id: str, event) -> None:
+        """Send an event to a WebSocket client (thread-safe).
+
+        Silently ignores unknown ``client_id`` values.
+        """
+        if client_id not in self._ws._clients:
+            return
+        if not self._event_loop:
+            return
+
+        async def _send():
+            await self._ws._send_to_client(client_id, event)
+
+        asyncio.run_coroutine_threadsafe(_send(), self._event_loop)
+
+    def set_client_session(self, client_id: str, session_id: str) -> None:
+        """Associate a client with a session."""
+        self._client_sessions[client_id] = session_id
+
+    def get_client_workspace(self, client_id: str) -> Optional[str]:
+        """Get the workspace path for a client."""
+        return self._client_workspaces.get(client_id)
+
+    def set_client_workspace(self, client_id: str, workspace_path: str) -> None:
+        """Associate a workspace path with a client."""
+        self._client_workspaces[client_id] = workspace_path
+
+    def remove_client(self, client_id: str) -> None:
+        """Clean up tracking state when a client disconnects."""
+        self._client_sessions.pop(client_id, None)
+        self._client_workspaces.pop(client_id, None)
 
 
 def _get_server_version() -> str:
@@ -162,8 +226,39 @@ class JaatoWSServer:
         self._jaato_server: Optional[JaatoServer] = None
         self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
 
+        # Daemon-mode command routing.
+        # When running as part of JaatoDaemon, the command router handles
+        # session/tool/auth commands.  When None, the WS server handles
+        # commands directly via JaatoServer (standalone mode).
+        self._command_router = None  # Set by set_command_router()
+        self._event_sink_adapter: Optional[WSEventSinkAdapter] = None
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
+
+    def set_command_router(self, router) -> None:
+        """Set the daemon-mode command router.
+
+        When set, incoming ``CommandRequest``, ``SendMessageRequest``, etc.
+        are delegated to the ``CommandRouter`` instead of being handled
+        directly by a per-WS ``JaatoServer``.
+
+        Called by ``JaatoDaemon.start()`` after constructing the router.
+
+        Args:
+            router: ``CommandRouter`` instance.
+        """
+        self._command_router = router
+
+    def get_event_sink_adapter(self) -> WSEventSinkAdapter:
+        """Return (create if needed) the ``WSEventSinkAdapter`` for this server.
+
+        The adapter implements ``EventSink`` and is registered with the
+        ``CompositeEventSink`` in ``JaatoDaemon.start()``.
+        """
+        if self._event_sink_adapter is None:
+            self._event_sink_adapter = WSEventSinkAdapter(self)
+        return self._event_sink_adapter
 
     async def start(self) -> None:
         """Start the server and block until shutdown.
@@ -216,6 +311,10 @@ class JaatoWSServer:
                 max_age_seconds=self._workspace_max_age,
                 on_teardown=_on_workspace_reaped,
             )
+
+        # Bind event loop for the WSEventSinkAdapter (thread-safe scheduling)
+        if self._event_sink_adapter:
+            self._event_sink_adapter.bind_loop(asyncio.get_running_loop())
 
         # Start WebSocket server
         try:
@@ -441,6 +540,8 @@ class JaatoWSServer:
             if self._workspace_manager:
                 self._workspace_manager.remove_client(client_id)
             self._client_provisioned.pop(client_id, None)
+            if self._event_sink_adapter:
+                self._event_sink_adapter.remove_client(client_id)
             logger.info(f"Client disconnected: {client_id}")
 
     async def _handle_message(self, client_id: str, message: str) -> None:
@@ -459,6 +560,14 @@ class JaatoWSServer:
             await self._send_error(client_id, str(e))
             return
 
+        # --- Daemon-mode delegation ---
+        # When running as part of JaatoDaemon, route commands through the
+        # CommandRouter for unified dispatch across IPC and WS transports.
+        if self._command_router:
+            await self._handle_message_daemon(client_id, event)
+            return
+
+        # --- Standalone mode (workspace-based WS server) ---
         # Workspace requests work without JaatoServer
         is_workspace_request = isinstance(event, (
             WorkspaceListRequest,
@@ -579,6 +688,39 @@ class JaatoWSServer:
 
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
+
+    async def _handle_message_daemon(self, client_id: str, event: Event) -> None:
+        """Handle a message when running in daemon mode.
+
+        Delegates all events to the ``CommandRouter`` via
+        ``run_in_executor`` so the async event loop is not blocked.
+
+        The router uses the ``EventSink`` to send responses back to this
+        client (via ``WSEventSinkAdapter``).
+
+        Args:
+            client_id: The client's ID.
+            event: The deserialized event.
+        """
+        from jaato_sdk.events import ClientConfigRequest
+
+        # Resolve session_id from the adapter's tracking
+        session_id = ""
+        if self._event_sink_adapter:
+            session_id = self._event_sink_adapter._client_sessions.get(client_id, "")
+
+        # ClientConfigRequest must be processed synchronously (same as IPC)
+        if isinstance(event, ClientConfigRequest):
+            self._command_router.handle_request(client_id, session_id, event)
+        else:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                self._command_router.handle_request,
+                client_id,
+                session_id,
+                event,
+            )
 
     async def _send_to_client(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client."""
