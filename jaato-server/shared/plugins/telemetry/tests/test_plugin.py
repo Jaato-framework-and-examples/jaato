@@ -435,7 +435,7 @@ class TestOTelPlugin:
         turn_span = spans[2]
 
         assert tool_span.name == "jaato.tool"
-        assert llm_span.name == "gen_ai.chat"
+        assert llm_span.name == "llm"
         assert turn_span.name == "jaato.turn"
 
         # Check parent-child relationships
@@ -620,6 +620,83 @@ class TestOTelPlugin:
 
         plugin = OTelPlugin()
         assert isinstance(plugin, TelemetryPlugin)
+
+    def test_llm_span_name_is_llm(self):
+        """Test llm_span uses 'llm' span name (not gen_ai.chat)."""
+        plugin, exporter = _create_test_plugin()
+
+        with plugin.llm_span("model", "provider") as span:
+            pass
+
+        spans = exporter.get_finished_spans()
+        assert spans[0].name == "llm"
+
+        plugin.shutdown()
+
+    def test_capture_and_attach_context_for_parallel_spans(self):
+        """Test that captured context propagates parent to worker threads."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        plugin, exporter = _create_test_plugin()
+
+        with plugin.turn_span("sess_1", "main") as turn:
+            # Capture context from the parent thread
+            ctx = plugin.capture_context()
+
+            def worker():
+                with plugin.attach_context(ctx):
+                    with plugin.tool_span("parallel_tool", "call_1") as tool:
+                        tool.set_attribute("input.value", "{}")
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(worker)
+                future.result()
+
+        spans = exporter.get_finished_spans()
+        # Tool span should be a child of the turn span
+        tool_span = [s for s in spans if s.name == "jaato.tool"][0]
+        turn_span = [s for s in spans if s.name == "jaato.turn"][0]
+        assert tool_span.parent is not None
+        assert tool_span.parent.span_id == turn_span.context.span_id
+
+        plugin.shutdown()
+
+    def test_parallel_spans_orphaned_without_context_propagation(self):
+        """Test that without attach_context, parallel spans are orphaned."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        plugin, exporter = _create_test_plugin()
+
+        with plugin.turn_span("sess_1", "main") as turn:
+            def worker():
+                # No attach_context — span should be orphaned
+                with plugin.tool_span("orphan_tool", "call_1") as tool:
+                    tool.set_attribute("input.value", "{}")
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(worker)
+                future.result()
+
+        spans = exporter.get_finished_spans()
+        tool_span = [s for s in spans if s.name == "jaato.tool"][0]
+        turn_span = [s for s in spans if s.name == "jaato.turn"][0]
+        # Without context propagation, tool span has no parent link to turn
+        if tool_span.parent is not None:
+            assert tool_span.parent.span_id != turn_span.context.span_id
+
+        plugin.shutdown()
+
+    def test_null_plugin_capture_and_attach_context(self):
+        """Test that null plugin capture/attach are no-ops."""
+        from shared.plugins.telemetry.null_plugin import NullTelemetryPlugin
+
+        plugin = NullTelemetryPlugin()
+        ctx = plugin.capture_context()
+        assert ctx is None
+
+        with plugin.attach_context(ctx):
+            with plugin.tool_span("tool", "call_1") as span:
+                span.set_attribute("key", "value")
 
     def test_add_event(self):
         """Test adding events to spans."""

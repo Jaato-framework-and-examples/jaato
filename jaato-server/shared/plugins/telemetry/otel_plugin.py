@@ -24,6 +24,7 @@ from typing import Any, Dict, Generator, List, Optional
 _trace = None
 _Status = None
 _StatusCode = None
+_context_api = None
 
 # ---------------------------------------------------------------------------
 # OpenInference constants (raw strings — no external dependency)
@@ -37,13 +38,15 @@ _OI_CHAIN = "CHAIN"
 
 def _ensure_imports():
     """Lazily import OpenTelemetry modules."""
-    global _trace, _Status, _StatusCode
+    global _trace, _Status, _StatusCode, _context_api
     if _trace is None:
         from opentelemetry import trace as otel_trace
+        from opentelemetry import context as otel_context
         from opentelemetry.trace import Status, StatusCode
         _trace = otel_trace
         _Status = Status
         _StatusCode = StatusCode
+        _context_api = otel_context
 
 
 class _FileSpanExporter:
@@ -308,12 +311,23 @@ class OTelPlugin:
             config: Configuration dict with keys:
                 - enabled: bool (default True)
                 - service_name: str (default "jaato")
+                - instance_id: str (unique instance identifier; default: auto-generated)
                 - exporter: str ("otlp", "console", "none")
                 - endpoint: str (OTLP endpoint URL)
                 - headers: Dict[str, str] (auth headers)
                 - batch_export: bool (default True)
                 - sample_rate: float (0.0-1.0, default 1.0)
                 - redact_content: bool (default True)
+
+        Resource attributes set on every span from this instance:
+            - service.name: Logical service name (e.g., "jaato")
+            - service.instance.id: Unique instance ID for this process
+            - host.name: Hostname of the machine running this instance
+
+        These can also be set via standard OTel env vars:
+            - OTEL_SERVICE_NAME → service.name
+            - OTEL_RESOURCE_ATTRIBUTES → any additional resource attrs
+              (e.g., "service.instance.id=node-3,host.name=prod-west-2")
         """
         self._enabled = config.get("enabled", True)
         if not self._enabled:
@@ -327,12 +341,31 @@ class OTelPlugin:
 
         self._redact_content = config.get("redact_content", True)
 
-        # Build resource with service name
+        # Build resource with service identity attributes.
+        # These propagate to every span and let backends distinguish
+        # between multiple jaato-server instances in a fleet.
         service_name = config.get(
             "service_name",
             os.environ.get("OTEL_SERVICE_NAME", "jaato")
         )
-        resource = Resource.create({SERVICE_NAME: service_name})
+        resource_attrs: Dict[str, Any] = {SERVICE_NAME: service_name}
+
+        # service.instance.id — unique per process/deployment
+        instance_id = config.get(
+            "instance_id",
+            os.environ.get("JAATO_INSTANCE_ID"),
+        )
+        if not instance_id:
+            # Auto-generate from hostname + PID for uniqueness
+            import socket
+            instance_id = f"{socket.gethostname()}-{os.getpid()}"
+        resource_attrs["service.instance.id"] = instance_id
+
+        # host.name — machine/container hostname
+        import socket
+        resource_attrs["host.name"] = socket.gethostname()
+
+        resource = Resource.create(resource_attrs)
 
         # Configure sampler if sample_rate specified
         sampler = None
@@ -595,7 +628,7 @@ class OTelPlugin:
         if attributes:
             attrs.update(attributes)
 
-        with self._tracer.start_as_current_span("gen_ai.chat", attributes=attrs) as span:
+        with self._tracer.start_as_current_span("llm", attributes=attrs) as span:
             yield _SpanWrapper(span, self._redact_content)
 
     @contextmanager
@@ -728,6 +761,42 @@ class OTelPlugin:
 
         with self._tracer.start_as_current_span("jaato.permission", attributes=attrs) as span:
             yield _SpanWrapper(span, self._redact_content)
+
+    def capture_context(self) -> Optional[Any]:
+        """Capture the current OTel context for propagation to worker threads.
+
+        Call this on the parent thread before submitting work to a thread
+        pool. Pass the returned token to ``attach_context()`` on the
+        worker thread so that child spans are correctly parented.
+
+        Returns:
+            Opaque context object, or None if telemetry is disabled.
+        """
+        if not self.enabled:
+            return None
+        _ensure_imports()
+        return _context_api.get_current()
+
+    @contextmanager
+    def attach_context(self, ctx: Optional[Any]) -> Generator[None, None, None]:
+        """Attach a previously captured OTel context on the current thread.
+
+        Use this as a context manager in worker threads so that spans
+        created inside the block become children of the span that was
+        active when ``capture_context()`` was called.
+
+        Args:
+            ctx: Context returned by ``capture_context()``, or None.
+        """
+        if ctx is None or not self.enabled:
+            yield
+            return
+        _ensure_imports()
+        token = _context_api.attach(ctx)
+        try:
+            yield
+        finally:
+            _context_api.detach(token)
 
     def get_current_trace_id(self) -> Optional[str]:
         """Get the current trace ID if available."""

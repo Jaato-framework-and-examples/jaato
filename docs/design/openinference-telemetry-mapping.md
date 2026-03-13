@@ -42,7 +42,7 @@ Phoenix treats spans as generic OTel spans and skips all AI-specific rendering.
 | jaato span name      | OTel span name (current → new) | OpenInference `span.kind` | Rationale |
 |----------------------|-------------------------------|---------------------------|-----------|
 | Turn root            | `jaato.turn` → `jaato.turn`   | `AGENT`                   | A turn is an agent reasoning loop (LLM calls + tool use). |
-| LLM API call         | `gen_ai.chat` → `gen_ai.chat` | `LLM`                     | Direct LLM invocation. |
+| LLM API call         | `gen_ai.chat` → `llm`         | `LLM`                     | Direct LLM invocation. Renamed to avoid confusion with GenAI semantic conventions. |
 | Tool execution       | `jaato.tool` → `jaato.tool`   | `TOOL`                    | External tool invocation. |
 | Retry attempt        | `jaato.retry` → `jaato.retry` | `CHAIN`                   | Internal orchestration step. |
 | GC operation         | `jaato.gc` → `jaato.gc`       | `CHAIN`                   | Internal orchestration step. |
@@ -426,7 +426,7 @@ def llm_span(
     if attributes:
         attrs.update(attributes)
 
-    with self._tracer.start_as_current_span("gen_ai.chat", attributes=attrs) as span:
+    with self._tracer.start_as_current_span("llm", attributes=attrs) as span:
         yield _SpanWrapper(span, self._redact_content)
 ```
 
@@ -663,7 +663,7 @@ Span: "jaato.turn"
   output.value: "Here are the files in /tmp: ..."
   output.mime_type: "text/plain"
 
-  Child: "gen_ai.chat"
+  Child: "llm"
     openinference.span.kind: "LLM"
     llm.system: "anthropic"
     llm.model_name: "claude-sonnet-4-20250514"
