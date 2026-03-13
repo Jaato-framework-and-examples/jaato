@@ -676,8 +676,9 @@ class SessionManager:
 
         # Resolve agent profile if requested
         profile = None
-        if profile_name and workspace_path:
-            profile, error = self._resolve_profile(profile_name, workspace_path)
+        if profile_name:
+            resolve_path = workspace_path or str(pathlib.Path.home())
+            profile, error = self._resolve_profile(profile_name, resolve_path)
             if profile is None:
                 self._emit_to_client(client_id, ErrorEvent(
                     error=error,
