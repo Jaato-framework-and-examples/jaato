@@ -426,68 +426,49 @@ class ProfileDiscoveryResult:
     errors: Dict[str, str] = field(default_factory=dict)
 
 
-def discover_profiles(
-    profiles_dir: str,
-    base_path: Optional[str] = None
-) -> ProfileDiscoveryResult:
-    """Discover subagent profiles from a directory.
+def _scan_profiles_dir(
+    directory: Path,
+    profiles: Dict[str, 'SubagentProfile'],
+    errors: Dict[str, str],
+) -> None:
+    """Scan a directory for profile files and populate profiles/errors dicts.
 
-    Scans the specified directory for .json and .yaml/.yml files,
-    parsing each as a subagent profile definition.
+    Existing entries in ``profiles`` are never overwritten, so earlier
+    directories (higher precedence) win over later ones.
 
     Args:
-        profiles_dir: Directory path to scan (relative or absolute).
-        base_path: Base path for resolving relative profiles_dir.
-                   Defaults to current working directory.
-
-    Returns:
-        ProfileDiscoveryResult with discovered profiles and any parse errors.
+        directory: Directory to scan for .json/.yaml/.yml profile files.
+        profiles: Accumulator dict — discovered profiles are added here.
+        errors: Accumulator dict — parse errors are added here.
     """
-    if base_path is None:
-        base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+    if not directory.is_dir():
+        return
 
-    # Resolve the profiles directory path
-    profiles_path = Path(profiles_dir)
-    if not profiles_path.is_absolute():
-        profiles_path = Path(base_path) / profiles_path
-
-    if not profiles_path.exists():
-        logger.debug("Profiles directory does not exist: %s", profiles_path)
-        return ProfileDiscoveryResult()
-
-    if not profiles_path.is_dir():
-        logger.warning("Profiles path is not a directory: %s", profiles_path)
-        return ProfileDiscoveryResult()
-
-    profiles: Dict[str, SubagentProfile] = {}
-    errors: Dict[str, str] = {}
-
-    # Scan for profile files
-    for file_path in profiles_path.iterdir():
+    found = 0
+    for file_path in directory.iterdir():
         if not file_path.is_file():
             continue
-
         if file_path.suffix not in ('.json', '.yaml', '.yml'):
             continue
 
         name, data, error = _parse_profile_file(file_path)
         if error:
-            errors[file_path.stem] = error
+            if file_path.stem not in errors:
+                errors[file_path.stem] = error
             continue
         if name is None or data is None:
             continue
+        if name in profiles:
+            continue  # higher-precedence source already registered this name
 
-        # Parse GC configuration if present
         gc_config = None
         if 'gc' in data and data['gc']:
             gc_config = GCProfileConfig.from_dict(data['gc'])
 
-        # Parse plugin entries, separating (preload) annotations
         raw_plugins = data.get('plugins', [])
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
-        # Create SubagentProfile from parsed data
-        profile = SubagentProfile(
+        profiles[name] = SubagentProfile(
             name=name,
             description=data.get('description', ''),
             plugins=clean_plugins,
@@ -502,20 +483,60 @@ def discover_profiles(
             icon_name=data.get('icon_name'),
             gc=gc_config,
         )
-
-        profiles[name] = profile
+        found += 1
         logger.debug("Discovered profile '%s' from %s", name, file_path)
 
-    if profiles:
+    if found:
         logger.info(
             "Discovered %d profile(s) from %s: %s",
-            len(profiles),
-            profiles_path,
-            ", ".join(profiles.keys())
+            found, directory,
+            ", ".join(n for n, p in profiles.items()),
         )
 
-    # Also discover profiles from premium entry-point path (if installed).
-    # Workspace profiles take precedence over premium ones.
+
+def discover_profiles(
+    profiles_dir: str,
+    base_path: Optional[str] = None
+) -> ProfileDiscoveryResult:
+    """Discover subagent profiles from multiple sources.
+
+    Scans up to three locations for ``.json`` / ``.yaml`` / ``.yml``
+    profile files, in decreasing order of precedence:
+
+    1. **Workspace** — ``{base_path}/{profiles_dir}``
+    2. **User**      — ``~/.jaato/profiles/``
+    3. **Premium**   — profiles registered via ``jaato.premium`` entry points
+
+    When the same profile name appears in multiple sources, the
+    higher-precedence source wins.
+
+    Args:
+        profiles_dir: Directory path to scan (relative or absolute).
+        base_path: Base path for resolving relative profiles_dir.
+                   Defaults to current working directory.
+
+    Returns:
+        ProfileDiscoveryResult with discovered profiles and any parse errors.
+    """
+    if base_path is None:
+        base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+
+    profiles: Dict[str, SubagentProfile] = {}
+    errors: Dict[str, str] = {}
+
+    # 1. Workspace profiles
+    profiles_path = Path(profiles_dir)
+    if not profiles_path.is_absolute():
+        profiles_path = Path(base_path) / profiles_path
+    _scan_profiles_dir(profiles_path, profiles, errors)
+
+    # 2. User-level profiles from ~/.jaato/profiles/
+    #    Workspace profiles take precedence.
+    user_profiles_path = Path.home() / ".jaato" / "profiles"
+    _scan_profiles_dir(user_profiles_path, profiles, errors)
+
+    # 3. Premium entry-point profiles (if installed).
+    #    Workspace and user profiles take precedence over premium ones.
     premium_profiles = _discover_premium_profiles()
     for name, profile in premium_profiles.items():
         if name not in profiles:

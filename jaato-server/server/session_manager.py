@@ -201,10 +201,11 @@ class SessionManager:
         profile_name: str,
         workspace_path: str,
     ) -> Tuple[Optional[Any], Optional[str]]:
-        """Resolve an agent profile by name from the workspace.
+        """Resolve an agent profile by name.
 
-        Discovers profiles from ``.jaato/profiles/`` in the workspace
-        and returns the matching ``SubagentProfile``.  When the profile
+        Discovers profiles from workspace ``.jaato/profiles/``,
+        user ``~/.jaato/profiles/``, and premium entry points, then
+        returns the matching ``SubagentProfile``.  When the profile
         is not found, the second element carries a user-friendly error
         message (e.g. a JSON parse error for a broken profile file).
 
@@ -1818,24 +1819,24 @@ class SessionManager:
         self,
         workspace_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List available agent profiles from the workspace.
+        """List available agent profiles.
 
-        Discovers profiles from ``.jaato/profiles/`` and returns summary
-        dicts suitable for client display (profile picker).
+        Discovers profiles from three sources in decreasing precedence:
+        workspace ``.jaato/profiles/``, user ``~/.jaato/profiles/``,
+        and premium entry-point profiles.
 
         Args:
             workspace_path: Workspace directory to discover profiles from.
+                May be ``None`` (user-level and premium profiles are still
+                returned).
 
         Returns:
             List of profile summary dicts with keys: name, description,
             model, provider, icon_name, plugins.
         """
-        if not workspace_path:
-            return []
-
         from shared.plugins.subagent.config import discover_profiles
 
-        discovery = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        discovery = discover_profiles(".jaato/profiles", base_path=workspace_path or ".")
         result = []
         for name, profile in discovery.profiles.items():
             result.append({
