@@ -74,8 +74,9 @@ def create_plugin() -> TelemetryPlugin:
             "enabled": True,
             "exporter": exporter,
             "redact_content": redact,
-            # These are read inside initialize() from standard OTel env vars:
+            # These are read inside initialize() from env vars:
             # OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_SERVICE_NAME
+            # JAATO_INSTANCE_ID (optional, auto-generated from hostname+PID if unset)
         })
 
         return plugin

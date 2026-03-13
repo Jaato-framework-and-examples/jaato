@@ -126,6 +126,15 @@ class NullTelemetryPlugin:
     ) -> Generator[_NoOpSpan, None, None]:
         yield _NOOP_SPAN
 
+    def capture_context(self) -> Optional[Any]:
+        """No-op context capture."""
+        return None
+
+    @contextmanager
+    def attach_context(self, ctx: Optional[Any]) -> Generator[None, None, None]:
+        """No-op context attachment."""
+        yield
+
     def subscribe_to_bus(self, bus) -> None:
         """No-op bus subscription."""
         pass

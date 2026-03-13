@@ -2647,6 +2647,9 @@ NOTES
             parent_session_id=_parent_sid,
         ) as turn_span:
             self._current_turn_span = turn_span
+            # Reset per-turn token accumulators for aggregating on the turn span
+            self._turn_prompt_tokens = 0
+            self._turn_completion_tokens = 0
 
             # Check and perform GC if needed (pre-send)
             if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
@@ -3413,15 +3416,7 @@ NOTES
                 # Track model response count for turn complexity
                 self._turn_model_response_count += 1
                 # Record token usage to telemetry span
-                if response.usage:
-                    llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
-                    llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
-                    if response.usage.cache_read_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
-                    if response.usage.cache_creation_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
-                    if response.usage.reasoning_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
+                self._record_token_telemetry(llm_telemetry, response)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
             # Emit turn progress after initial response
@@ -3855,11 +3850,17 @@ NOTES
         # inherit them, so we snapshot them here and pass them explicitly.
         captured_channels = self._capture_interactive_channels()
 
+        # Capture the current OTel context so worker threads can attach it.
+        # Without this, tool spans created in the thread pool become orphans
+        # because OTel context (stored in contextvars) doesn't propagate
+        # automatically to ThreadPoolExecutor workers.
+        otel_ctx = self._telemetry.capture_context()
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_fc = {
                 executor.submit(
-                    self._execute_single_tool_for_parallel, fc, captured_channels
+                    self._execute_single_tool_for_parallel, fc, captured_channels, otel_ctx
                 ): fc
                 for fc in function_calls
             }
@@ -4261,6 +4262,7 @@ NOTES
         self,
         fc: FunctionCall,
         captured_channels: Optional[Dict[str, Any]] = None,
+        otel_ctx: Optional[Any] = None,
     ) -> _ToolExecutionResult:
         """Execute a single tool for parallel execution.
 
@@ -4270,6 +4272,7 @@ NOTES
         - Includes telemetry for this thread
         - Propagates session to worker thread's thread-local storage
         - Restores interactive plugin channels captured from spawning thread
+        - Attaches captured OTel context so tool spans parent correctly
 
         Args:
             fc: The function call to execute.
@@ -4278,6 +4281,10 @@ NOTES
                 this worker thread's thread-local storage so that permission
                 and clarification requests route through the correct channel
                 (e.g. ``ParentBridgedChannel`` for subagents).
+            otel_ctx: OTel context captured from the spawning thread via
+                ``telemetry.capture_context()``.  Attached here so that
+                tool spans become children of the active turn span instead
+                of being orphaned.
         """
         name = fc.name
         args = fc.args
@@ -4309,109 +4316,114 @@ NOTES
             if plugin:
                 plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
 
-        # Wrap tool execution with telemetry span
-        with self._telemetry.tool_span(
-            tool_name=name,
-            call_id=fc.id or "",
-            plugin_type=plugin_type,
-        ) as tool_span:
-            # Set tool input
-            tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
-            tool_span.set_attribute("input.mime_type", "application/json")
+        # Attach the OTel context captured from the spawning thread so that
+        # tool spans created here become children of the active turn span
+        # instead of being orphaned.  Without this, ThreadPoolExecutor
+        # workers start with an empty OTel context.
+        with self._telemetry.attach_context(otel_ctx):
+            # Wrap tool execution with telemetry span
+            with self._telemetry.tool_span(
+                tool_name=name,
+                call_id=fc.id or "",
+                plugin_type=plugin_type,
+            ) as tool_span:
+                # Set tool input
+                tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
+                tool_span.set_attribute("input.mime_type", "application/json")
 
-            # Check if this is a streaming tool (name ends with :stream)
-            if self._is_streaming_tool(name):
-                # Route to streaming execution
-                executor_result = self._execute_streaming_tool(fc, None)
-            elif self._executor:
-                # Create callback that captures this tool's call_id
-                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
-                    if self._ui_hooks and _call_id:
-                        self._ui_hooks.on_tool_output(
-                            agent_id=self._agent_id,
-                            call_id=_call_id,
-                            chunk=chunk
-                        )
-                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+                # Check if this is a streaming tool (name ends with :stream)
+                if self._is_streaming_tool(name):
+                    # Route to streaming execution
+                    executor_result = self._execute_streaming_tool(fc, None)
+                elif self._executor:
+                    # Create callback that captures this tool's call_id
+                    def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                        if self._ui_hooks and _call_id:
+                            self._ui_hooks.on_tool_output(
+                                agent_id=self._agent_id,
+                                call_id=_call_id,
+                                chunk=chunk
+                            )
+                        self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
 
-                # Set up done callback for auto-backgrounded tasks (parallel path)
-                def task_done_callback(
-                    task_id: str, success: bool, error: 'Optional[str]',
-                    duration: 'Optional[float]',
-                    _call_id=fc.id, _name=name
-                ) -> None:
-                    if self._ui_hooks:
-                        self._ui_hooks.on_tool_call_end(
-                            agent_id=self._agent_id,
-                            tool_name=_name,
-                            success=success,
-                            duration_seconds=duration or 0.0,
-                            error_message=error,
-                            call_id=_call_id,
-                        )
-                self._executor.set_task_done_callback(task_done_callback)
+                    # Set up done callback for auto-backgrounded tasks (parallel path)
+                    def task_done_callback(
+                        task_id: str, success: bool, error: 'Optional[str]',
+                        duration: 'Optional[float]',
+                        _call_id=fc.id, _name=name
+                    ) -> None:
+                        if self._ui_hooks:
+                            self._ui_hooks.on_tool_call_end(
+                                agent_id=self._agent_id,
+                                tool_name=_name,
+                                success=success,
+                                duration_seconds=duration or 0.0,
+                                error_message=error,
+                                call_id=_call_id,
+                            )
+                    self._executor.set_task_done_callback(task_done_callback)
 
-                # Pass callback and cancel token directly - executor will set them in thread-local
-                executor_result = self._executor.execute(
-                    name, args, tool_output_callback=tool_output_callback, call_id=fc.id,
-                    cancel_token=self._cancel_token,
-                )
+                    # Pass callback and cancel token directly - executor will set them in thread-local
+                    executor_result = self._executor.execute(
+                        name, args, tool_output_callback=tool_output_callback, call_id=fc.id,
+                        cancel_token=self._cancel_token,
+                    )
 
-                self._executor.set_task_done_callback(None)
-            else:
-                executor_result = (False, {"error": f"No executor registered for {name}"})
+                    self._executor.set_task_done_callback(None)
+                else:
+                    executor_result = (False, {"error": f"No executor registered for {name}"})
 
-            fc_end = datetime.now()
+                fc_end = datetime.now()
 
-            # Determine success and error message
-            fc_success = True
-            fc_error_message = None
-            if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                fc_success = executor_result[0]
-                if not fc_success and isinstance(executor_result[1], dict):
-                    fc_error_message = executor_result[1].get('error')
+                # Determine success and error message
+                fc_success = True
+                fc_error_message = None
+                if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                    fc_success = executor_result[0]
+                    if not fc_success and isinstance(executor_result[1], dict):
+                        fc_error_message = executor_result[1].get('error')
 
-            # Record telemetry
-            fc_duration = (fc_end - fc_start).total_seconds()
-            if fc_error_message:
-                tool_span.set_attribute("exception.message", fc_error_message)
-                tool_span.set_status_error(fc_error_message)
-            else:
-                tool_span.set_status_ok()
+                # Record telemetry
+                fc_duration = (fc_end - fc_start).total_seconds()
+                if fc_error_message:
+                    tool_span.set_attribute("exception.message", fc_error_message)
+                    tool_span.set_status_error(fc_error_message)
+                else:
+                    tool_span.set_status_ok()
 
-            # Set tool output
-            result_dict_for_output = None
-            if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                result_dict_for_output = executor_result[1]
-            elif isinstance(executor_result, dict):
-                result_dict_for_output = executor_result
-            if result_dict_for_output is not None:
-                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
-                tool_span.set_attribute("output.mime_type", "application/json")
+                # Set tool output
+                result_dict_for_output = None
+                if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                    result_dict_for_output = executor_result[1]
+                elif isinstance(executor_result, dict):
+                    result_dict_for_output = executor_result
+                if result_dict_for_output is not None:
+                    tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                    tool_span.set_attribute("output.mime_type", "application/json")
 
-            # Pack jaato-specific tool metadata
-            tool_meta = {
-                "duration_seconds": fc_duration,
-                "success": fc_success,
-                "parallel": True,
-            }
-            if self._is_streaming_tool(name):
-                tool_meta["streaming"] = True
-            tool_span.set_metadata(tool_meta)
+                # Pack jaato-specific tool metadata
+                tool_meta = {
+                    "duration_seconds": fc_duration,
+                    "success": fc_success,
+                    "parallel": True,
+                }
+                if self._is_streaming_tool(name):
+                    tool_meta["streaming"] = True
+                tool_span.set_metadata(tool_meta)
 
-            # Convention-based telemetry enrichment (parallel path)
-            if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                result_dict = executor_result[1]
-                if isinstance(result_dict, dict):
-                    telem = result_dict.get('_telemetry')
+                # Convention-based telemetry enrichment (parallel path)
+                if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                    result_dict = executor_result[1]
+                    if isinstance(result_dict, dict):
+                        telem = result_dict.get('_telemetry')
+                        if isinstance(telem, dict):
+                            for attr_key, attr_val in telem.items():
+                                tool_span.set_attribute(attr_key, attr_val)
+                elif isinstance(executor_result, dict):
+                    telem = executor_result.get('_telemetry')
                     if isinstance(telem, dict):
                         for attr_key, attr_val in telem.items():
                             tool_span.set_attribute(attr_key, attr_val)
-            elif isinstance(executor_result, dict):
-                telem = executor_result.get('_telemetry')
-                if isinstance(telem, dict):
-                    for attr_key, attr_val in telem.items():
-                        tool_span.set_attribute(attr_key, attr_val)
 
         return _ToolExecutionResult(
             fc=fc,
@@ -4998,15 +5010,7 @@ NOTES
             # Track model response count for turn complexity
             self._turn_model_response_count += 1
             # Record token usage to telemetry span
-            if response.usage:
-                llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
-                llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
-                if response.usage.cache_read_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
-                if response.usage.cache_creation_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
-                if response.usage.reasoning_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
+            self._record_token_telemetry(llm_telemetry, response)
 
             # Emit turn progress after tool result handling
             pending_calls = len([p for p in response.parts if p.function_call])
@@ -5151,15 +5155,7 @@ NOTES
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
             # Record token usage to telemetry span
-            if response.usage:
-                llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
-                llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
-                if response.usage.cache_read_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
-                if response.usage.cache_creation_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
-                if response.usage.reasoning_tokens is not None:
-                    llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
+            self._record_token_telemetry(llm_telemetry, response)
 
             return response
 
@@ -5631,6 +5627,45 @@ NOTES
             'total_tokens': response.usage.total_tokens,
         })
 
+    def _record_token_telemetry(self, span, response: ProviderResponse) -> None:
+        """Record OpenInference token count attributes on a telemetry span.
+
+        Sets ``llm.token_count.prompt`` and ``llm.token_count.completion``
+        (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
+        plus optional cache and reasoning detail attributes.
+
+        Also accumulates the counts on the current turn span so the root
+        AGENT span carries aggregate token usage for the entire turn.
+
+        Args:
+            span: The LLM span context to set attributes on.
+            response: Provider response containing usage data.
+        """
+        if not response.usage:
+            return
+
+        usage = response.usage
+        if usage.prompt_tokens is not None:
+            span.set_attribute("llm.token_count.prompt", usage.prompt_tokens)
+        if usage.output_tokens is not None:
+            span.set_attribute("llm.token_count.completion", usage.output_tokens)
+        if usage.cache_read_tokens is not None:
+            span.set_attribute("llm.token_count.prompt_details.cache_read", usage.cache_read_tokens)
+        if usage.cache_creation_tokens is not None:
+            span.set_attribute("llm.token_count.prompt_details.cache_write", usage.cache_creation_tokens)
+        if usage.reasoning_tokens is not None:
+            span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
+
+        # Accumulate on turn span so the root AGENT span shows totals
+        turn_span = self._current_turn_span
+        if turn_span:
+            if usage.prompt_tokens is not None:
+                self._turn_prompt_tokens = getattr(self, '_turn_prompt_tokens', 0) + usage.prompt_tokens
+                turn_span.set_attribute("llm.token_count.prompt", self._turn_prompt_tokens)
+            if usage.output_tokens is not None:
+                self._turn_completion_tokens = getattr(self, '_turn_completion_tokens', 0) + usage.output_tokens
+                turn_span.set_attribute("llm.token_count.completion", self._turn_completion_tokens)
+
     def get_history(self) -> List[Message]:
         """Get current conversation history.
 
@@ -5932,15 +5967,7 @@ NOTES
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 # Record token usage to telemetry span
-                if response.usage:
-                    llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
-                    llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
-                    if response.usage.cache_read_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
-                    if response.usage.cache_creation_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
-                    if response.usage.reasoning_tokens is not None:
-                        llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
+                self._record_token_telemetry(llm_telemetry, response)
 
             from jaato_sdk.plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
@@ -6085,15 +6112,7 @@ NOTES
                     self._record_token_usage(response)
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
-                    if response.usage:
-                        llm_telemetry.set_attribute("llm.token_count.prompt", response.usage.prompt_tokens)
-                        llm_telemetry.set_attribute("llm.token_count.completion", response.usage.output_tokens)
-                        if response.usage.cache_read_tokens is not None:
-                            llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_read", response.usage.cache_read_tokens)
-                        if response.usage.cache_creation_tokens is not None:
-                            llm_telemetry.set_attribute("llm.token_count.prompt_details.cache_write", response.usage.cache_creation_tokens)
-                        if response.usage.reasoning_tokens is not None:
-                            llm_telemetry.set_attribute("llm.token_count.completion_details.reasoning", response.usage.reasoning_tokens)
+                    self._record_token_telemetry(llm_telemetry, response)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             final_text = response.get_text()

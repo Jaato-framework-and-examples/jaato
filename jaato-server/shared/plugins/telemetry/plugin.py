@@ -288,6 +288,29 @@ class TelemetryPlugin(Protocol):
         """
         ...
 
+    def capture_context(self) -> Optional[Any]:
+        """Capture the current OTel context for propagation to worker threads.
+
+        Call on the parent thread before submitting work to a thread pool.
+        Pass the result to ``attach_context()`` on the worker thread.
+
+        Returns:
+            Opaque context object, or None if telemetry is disabled.
+        """
+        ...
+
+    @contextmanager
+    def attach_context(self, ctx: Optional[Any]) -> Generator[None, None, None]:
+        """Attach a previously captured OTel context on the current thread.
+
+        Use as a context manager in worker threads so child spans are
+        parented correctly.
+
+        Args:
+            ctx: Context from ``capture_context()``, or None.
+        """
+        ...
+
     def subscribe_to_bus(self, bus) -> None:
         """Subscribe to EventBus for plan/step lifecycle context.
 
