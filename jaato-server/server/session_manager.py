@@ -714,8 +714,9 @@ class SessionManager:
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
         # Configure TODO plugin with session-scoped storage
-        session_dir = self._session_storage_dir(workspace_path) / session_id
-        self._configure_todo_storage(server, session_dir)
+        if workspace_path:
+            session_dir = self._session_storage_dir(workspace_path) / session_id
+            self._configure_todo_storage(server, session_dir)
         self._run_session_hooks(server)
 
         # Apply client-specific config (e.g., presentation context)
