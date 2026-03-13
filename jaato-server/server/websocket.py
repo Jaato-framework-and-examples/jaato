@@ -530,7 +530,8 @@ class JaatoWSServer:
         except ConnectionClosed:
             pass
         except Exception as e:
-            logger.error(f"Client error {client_id}: {e}")
+            import traceback as _tb
+            logger.error(f"Client error {client_id}: {e}\n{''.join(_tb.format_exception(e))}")
         finally:
             # Remove client
             async with self._lock:
