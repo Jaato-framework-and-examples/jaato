@@ -560,23 +560,29 @@ class JaatoWSServer:
             await self._send_error(client_id, str(e))
             return
 
-        # --- Daemon-mode delegation ---
-        # When running as part of JaatoDaemon, route commands through the
-        # CommandRouter for unified dispatch across IPC and WS transports.
-        if self._command_router:
-            await self._handle_message_daemon(client_id, event)
-            return
-
-        # --- Standalone mode (workspace-based WS server) ---
-        # Workspace requests work without JaatoServer
+        # --- Workspace management (transport-level, all modes) ---
+        # Workspace negotiation is a transport concern, not a command concern.
+        # These events are handled by the WS server regardless of whether a
+        # CommandRouter is present (daemon mode) or not (standalone mode).
         is_workspace_request = isinstance(event, (
             WorkspaceListRequest,
             WorkspaceCreateRequest,
             WorkspaceSelectRequest,
             ConfigUpdateRequest,
         ))
+        if is_workspace_request:
+            await self._handle_workspace_event(client_id, event)
+            return
 
-        if not self._jaato_server and not is_workspace_request:
+        # --- Daemon-mode delegation ---
+        # When running as part of JaatoDaemon, route session/command events
+        # through the CommandRouter for unified dispatch across transports.
+        if self._command_router:
+            await self._handle_message_daemon(client_id, event)
+            return
+
+        # --- Standalone mode ---
+        if not self._jaato_server:
             await self._send_error(client_id, "No workspace selected")
             return
 
@@ -668,26 +674,32 @@ class JaatoWSServer:
                     )
                 )
 
-        # Workspace management requests
-        elif isinstance(event, WorkspaceListRequest):
-            await self._handle_workspace_list(client_id)
-
-        elif isinstance(event, WorkspaceCreateRequest):
-            await self._handle_workspace_create(client_id, event.name)
-
-        elif isinstance(event, WorkspaceSelectRequest):
-            await self._handle_workspace_select(client_id, event.name)
-
-        elif isinstance(event, ConfigUpdateRequest):
-            await self._handle_config_update(
-                client_id,
-                event.provider,
-                event.model,
-                event.api_key,
-            )
-
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
+
+    async def _handle_workspace_event(self, client_id: str, event: Event) -> None:
+        """Handle workspace management events (transport-level concern).
+
+        Routes to the existing workspace handlers and, when a workspace is
+        selected, bridges the resolved path to the ``WSEventSinkAdapter``
+        so the ``CommandRouter`` can query it via ``get_client_workspace()``.
+        """
+        if isinstance(event, WorkspaceListRequest):
+            await self._handle_workspace_list(client_id)
+        elif isinstance(event, WorkspaceCreateRequest):
+            await self._handle_workspace_create(client_id, event.name)
+        elif isinstance(event, WorkspaceSelectRequest):
+            await self._handle_workspace_select(client_id, event.name)
+            # Bridge selected workspace path to the event sink adapter
+            # so CommandRouter can resolve it via get_client_workspace()
+            if self._event_sink_adapter and self._workspace_manager:
+                selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+                if selected and selected.path:
+                    self._event_sink_adapter.set_client_workspace(client_id, selected.path)
+        elif isinstance(event, ConfigUpdateRequest):
+            await self._handle_config_update(
+                client_id, event.provider, event.model, event.api_key,
+            )
 
     async def _handle_message_daemon(self, client_id: str, event: Event) -> None:
         """Handle a message when running in daemon mode.

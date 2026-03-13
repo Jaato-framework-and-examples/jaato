@@ -577,12 +577,14 @@ class JaatoIPCServer:
     def send_event(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client (``EventSink`` protocol).
 
-        Delegates to ``queue_event()`` — this method exists so that
-        ``JaatoIPCServer`` satisfies the ``EventSink`` protocol defined
-        in ``server.event_sink``.
+        Silently ignores ``client_id`` values not owned by this transport,
+        which is the ``EventSink`` contract that allows ``CompositeEventSink``
+        to fan-out safely across IPC and WS sinks.
 
         Thread-safe.
         """
+        if client_id not in self._event_queues:
+            return
         self.queue_event(client_id, event)
 
     def queue_event(self, client_id: str, event: Event) -> None:
