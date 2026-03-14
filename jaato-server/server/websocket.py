@@ -719,7 +719,16 @@ class JaatoWSServer:
             client_id: The client's ID.
             event: The deserialized event.
         """
-        from jaato_sdk.events import ClientConfigRequest
+        from jaato_sdk.events import ClientConfigRequest, CommandListRequest, CommandListEvent
+
+        # Handle CommandListRequest directly (same as IPC path)
+        if isinstance(event, CommandListRequest):
+            if self._command_router:
+                commands = self._command_router.get_command_list()
+                await self._send_to_client(
+                    client_id, CommandListEvent(commands=commands),
+                )
+            return
 
         # Resolve session_id from the adapter's tracking
         session_id = ""
