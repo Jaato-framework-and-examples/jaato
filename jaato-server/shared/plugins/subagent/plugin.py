@@ -17,7 +17,8 @@ from datetime import datetime
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
     detect_workspace_tech_stack, discover_profiles, expand_plugin_configs,
-    _find_workspace_root, gc_profile_to_plugin_config, validate_profile
+    expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
+    validate_profile,
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from jaato_sdk.plugins.model_provider.types import ToolSchema
@@ -2222,6 +2223,17 @@ class SubagentPlugin:
             clear_trace_agent_context()
             return
 
+        # Apply profile-scoped environment variables.
+        # Save previous values so we can restore them when the subagent
+        # finishes — prevents env leaks to parent or sibling agents.
+        _saved_profile_env: Dict[str, Optional[str]] = {}
+        if profile.env:
+            expanded_env = expand_variables(profile.env, workspace_root_override=workspace_path)
+            for key, value in expanded_env.items():
+                if isinstance(value, str):
+                    _saved_profile_env[key] = os.environ.get(key)  # None if absent
+                    os.environ[key] = value
+
         try:
             # Create session using the existing runtime-based method logic
             # but with the pre-generated agent_id and parent forwarding
@@ -2520,6 +2532,13 @@ class SubagentPlugin:
 
             clear_trace_agent_context()
 
+            # Restore profile environment variables
+            for key, previous in _saved_profile_env.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
+
         except Exception as e:
             logger.exception(f"Error in async subagent {agent_id}")
             # Forward error to parent (CHILD source - status update)
@@ -2542,6 +2561,13 @@ class SubagentPlugin:
                 )
 
             clear_trace_agent_context()
+
+            # Restore profile environment variables on error path too
+            for key, previous in _saved_profile_env.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
 
 
 def create_plugin() -> SubagentPlugin:

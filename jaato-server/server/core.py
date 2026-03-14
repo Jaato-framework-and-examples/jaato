@@ -848,7 +848,15 @@ class JaatoServer:
             # Filter out None values and store as session env
             self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
 
+            # Apply profile environment variables (higher precedence than .env file).
+            # Values support ${VAR} expansion and secret URI resolution.
+            if self._profile and self._profile.env:
+                from shared.plugins.subagent.config import expand_variables
+                expanded_env = expand_variables(self._profile.env)
+                self._session_env.update(expanded_env)
+
             # Apply overrides (e.g., provider/model from post-auth wizard)
+            # Highest precedence — auth wizard results override everything.
             if self._env_overrides:
                 self._session_env.update(self._env_overrides)
 
