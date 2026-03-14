@@ -741,6 +741,34 @@ class JaatoWSServer:
                 client_id=client_id,
             )
             if provisioned:
+                # Copy staged artifacts into the workspace if present.
+                # The dashboard passes --artifacts <staging_id> in the
+                # session.new args after uploading via /api/task/artifacts.
+                args = event.args if hasattr(event, 'args') else []
+                staging_id = None
+                for i, arg in enumerate(args):
+                    if arg == "--artifacts" and i + 1 < len(args):
+                        staging_id = args[i + 1]
+                        break
+                if staging_id:
+                    import shutil
+                    import tempfile
+                    from pathlib import Path as _Path
+                    staging_dir = _Path(tempfile.gettempdir()) / f"jaato-artifacts-{staging_id}"
+                    if staging_dir.is_dir():
+                        ws_path = _Path(provisioned.path)
+                        for item in staging_dir.iterdir():
+                            dest = ws_path / item.name
+                            if item.is_dir():
+                                shutil.copytree(item, dest, dirs_exist_ok=True)
+                            else:
+                                shutil.copy2(item, dest)
+                        shutil.rmtree(staging_dir, ignore_errors=True)
+                        logger.info(
+                            "Copied staged artifacts %s into workspace %s",
+                            staging_id, provisioned.path,
+                        )
+
                 self._event_sink_adapter.set_client_workspace(
                     client_id, provisioned.path,
                 )
