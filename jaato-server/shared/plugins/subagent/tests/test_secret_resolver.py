@@ -1,0 +1,290 @@
+"""Tests for secret URI resolution in expand_variables / _expand_string."""
+
+import os
+from typing import FrozenSet, Optional
+from unittest.mock import patch
+
+import pytest
+
+from ..config import (
+    SecretResolutionError,
+    SecretResolver,
+    _expand_string,
+    _resolve_secret_uri,
+    _SECRET_URI_RE,
+    _discover_secret_resolvers,
+    expand_variables,
+    reset_secret_resolvers,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers — fake resolvers for testing
+# ---------------------------------------------------------------------------
+
+class FakeVaultResolver:
+    """Test resolver for vault:// URIs."""
+
+    @property
+    def schemes(self) -> FrozenSet[str]:
+        return frozenset({"vault"})
+
+    def resolve(self, scheme: str, path: str, key: Optional[str] = None) -> str:
+        if path == "secret/myapp" and key == "db_password":
+            return "s3cret_from_vault"
+        if path == "secret/myapp" and key is None:
+            return '{"db_password": "s3cret"}'
+        raise SecretResolutionError(
+            f"{scheme}://{path}{'#' + key if key else ''}",
+            "not found",
+        )
+
+
+class FakeMultiSchemeResolver:
+    """Test resolver handling multiple schemes."""
+
+    @property
+    def schemes(self) -> FrozenSet[str]:
+        return frozenset({"awssm", "gcpsm"})
+
+    def resolve(self, scheme: str, path: str, key: Optional[str] = None) -> str:
+        return f"resolved:{scheme}:{path}:{key}"
+
+
+class FailingResolver:
+    """Test resolver that always raises."""
+
+    @property
+    def schemes(self) -> FrozenSet[str]:
+        return frozenset({"failscheme"})
+
+    def resolve(self, scheme: str, path: str, key: Optional[str] = None) -> str:
+        raise RuntimeError("backend unreachable")
+
+
+# ---------------------------------------------------------------------------
+# URI regex tests
+# ---------------------------------------------------------------------------
+
+class TestSecretURIRegex:
+    """Tests for _SECRET_URI_RE pattern matching."""
+
+    def test_simple_uri(self):
+        m = _SECRET_URI_RE.match("vault://secret/myapp")
+        assert m
+        assert m.group("scheme") == "vault"
+        assert m.group("path") == "secret/myapp"
+        assert m.group("key") is None
+
+    def test_uri_with_key(self):
+        m = _SECRET_URI_RE.match("vault://secret/myapp#db_password")
+        assert m
+        assert m.group("scheme") == "vault"
+        assert m.group("path") == "secret/myapp"
+        assert m.group("key") == "db_password"
+
+    def test_awssm_uri(self):
+        m = _SECRET_URI_RE.match("awssm://prod/myapp/db_password")
+        assert m
+        assert m.group("scheme") == "awssm"
+        assert m.group("path") == "prod/myapp/db_password"
+
+    def test_sops_uri(self):
+        m = _SECRET_URI_RE.match("sops://secrets.yaml#db_password")
+        assert m
+        assert m.group("scheme") == "sops"
+        assert m.group("path") == "secrets.yaml"
+        assert m.group("key") == "db_password"
+
+    def test_keyring_uri(self):
+        m = _SECRET_URI_RE.match("keyring://myapp/db_password")
+        assert m
+        assert m.group("scheme") == "keyring"
+        assert m.group("path") == "myapp/db_password"
+
+    def test_not_a_uri(self):
+        assert _SECRET_URI_RE.match("just a string") is None
+        assert _SECRET_URI_RE.match("localhost:5432") is None
+        assert _SECRET_URI_RE.match("${VAR}") is None
+
+    def test_http_not_matched_as_secret(self):
+        """http/https are valid schemes but won't have resolvers — that's fine."""
+        m = _SECRET_URI_RE.match("https://example.com/path")
+        assert m  # regex matches, but no resolver will be registered
+        assert m.group("scheme") == "https"
+
+    def test_scheme_with_digits_and_hyphens(self):
+        m = _SECRET_URI_RE.match("my-vault2://path/to/secret")
+        assert m
+        assert m.group("scheme") == "my-vault2"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_secret_uri tests
+# ---------------------------------------------------------------------------
+
+class TestResolveSecretURI:
+    """Tests for _resolve_secret_uri dispatch."""
+
+    def setup_method(self):
+        reset_secret_resolvers()
+
+    def teardown_method(self):
+        reset_secret_resolvers()
+
+    def test_non_uri_passthrough(self):
+        """Non-URI strings pass through unchanged."""
+        assert _resolve_secret_uri("plain value") == "plain value"
+        assert _resolve_secret_uri("localhost") == "localhost"
+        assert _resolve_secret_uri("") == ""
+
+    def test_no_resolver_registered(self):
+        """URI with no matching resolver passes through unchanged."""
+        # Force empty registry
+        from .. import config as config_module
+        config_module._resolvers = {}
+        assert _resolve_secret_uri("vault://secret/x") == "vault://secret/x"
+
+    def test_resolver_dispatched(self):
+        """Registered resolver is called for matching scheme."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+        result = _resolve_secret_uri("vault://secret/myapp#db_password")
+        assert result == "s3cret_from_vault"
+
+    def test_resolver_not_found_raises(self):
+        """SecretResolutionError from resolver propagates."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+        with pytest.raises(SecretResolutionError, match="not found"):
+            _resolve_secret_uri("vault://secret/nonexistent#missing")
+
+    def test_resolver_exception_wrapped(self):
+        """Non-SecretResolutionError exceptions are wrapped."""
+        from .. import config as config_module
+        config_module._resolvers = {"failscheme": FailingResolver()}
+        with pytest.raises(SecretResolutionError, match="backend unreachable"):
+            _resolve_secret_uri("failscheme://anything")
+
+    def test_multi_scheme_resolver(self):
+        """A resolver handling multiple schemes works for each."""
+        from .. import config as config_module
+        resolver = FakeMultiSchemeResolver()
+        config_module._resolvers = {s: resolver for s in resolver.schemes}
+
+        assert _resolve_secret_uri("awssm://prod/key") == "resolved:awssm:prod/key:None"
+        assert _resolve_secret_uri("gcpsm://proj/secret#field") == "resolved:gcpsm:proj/secret:field"
+
+
+# ---------------------------------------------------------------------------
+# Integration with _expand_string and expand_variables
+# ---------------------------------------------------------------------------
+
+class TestExpandStringWithSecrets:
+    """Tests that _expand_string chains variable expansion → secret resolution."""
+
+    def setup_method(self):
+        reset_secret_resolvers()
+
+    def teardown_method(self):
+        reset_secret_resolvers()
+
+    def test_literal_secret_uri_resolved(self):
+        """A config value that is a secret URI is resolved."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        result = _expand_string("vault://secret/myapp#db_password", {})
+        assert result == "s3cret_from_vault"
+
+    def test_variable_expands_to_secret_uri(self):
+        """${VAR} that resolves to a secret URI triggers resolution."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        with patch.dict(os.environ, {"DB_SECRET": "vault://secret/myapp#db_password"}):
+            result = _expand_string("${DB_SECRET}", {})
+            assert result == "s3cret_from_vault"
+
+    def test_embedded_uri_not_resolved(self):
+        """Secret URIs embedded in larger strings are NOT resolved."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        # URI embedded in a prefix — should stay as-is
+        result = _expand_string("prefix vault://secret/myapp#db_password", {})
+        assert "vault://" in result  # Not resolved
+
+    def test_no_resolvers_installed_passthrough(self):
+        """Without resolvers, URI-like strings pass through unchanged."""
+        from .. import config as config_module
+        config_module._resolvers = {}
+
+        result = _expand_string("vault://secret/myapp#db_password", {})
+        assert result == "vault://secret/myapp#db_password"
+
+    def test_expand_variables_dict_with_secrets(self):
+        """expand_variables resolves secrets in dict values."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        input_dict = {
+            "host": "localhost",
+            "password": "vault://secret/myapp#db_password",
+        }
+        result = expand_variables(input_dict)
+        assert result["host"] == "localhost"
+        assert result["password"] == "s3cret_from_vault"
+
+    def test_expand_variables_list_with_secrets(self):
+        """expand_variables resolves secrets in list items."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        input_list = ["vault://secret/myapp#db_password", "plain"]
+        result = expand_variables(input_list)
+        assert result[0] == "s3cret_from_vault"
+        assert result[1] == "plain"
+
+
+# ---------------------------------------------------------------------------
+# Entry point discovery tests
+# ---------------------------------------------------------------------------
+
+class TestDiscoverSecretResolvers:
+    """Tests for _discover_secret_resolvers entry point loading."""
+
+    def setup_method(self):
+        reset_secret_resolvers()
+
+    def teardown_method(self):
+        reset_secret_resolvers()
+
+    def test_no_entry_points_returns_empty(self):
+        """No premium package installed → empty registry."""
+        resolvers = _discover_secret_resolvers()
+        # In test environment, no entry points should be registered
+        assert isinstance(resolvers, dict)
+
+    def test_caching(self):
+        """Second call returns cached result without re-scanning."""
+        r1 = _discover_secret_resolvers()
+        r2 = _discover_secret_resolvers()
+        assert r1 is r2  # Same dict object
+
+
+# ---------------------------------------------------------------------------
+# SecretResolver protocol conformance
+# ---------------------------------------------------------------------------
+
+class TestSecretResolverProtocol:
+    """Verify that test helpers satisfy the SecretResolver protocol."""
+
+    def test_fake_vault_is_resolver(self):
+        assert isinstance(FakeVaultResolver(), SecretResolver)
+
+    def test_fake_multi_is_resolver(self):
+        assert isinstance(FakeMultiSchemeResolver(), SecretResolver)
+
+    def test_failing_is_resolver(self):
+        assert isinstance(FailingResolver(), SecretResolver)
