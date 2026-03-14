@@ -1,0 +1,88 @@
+{
+  "name": "gen-references",
+  "description": "Autonomous catalog generator that scans a local folder, public git repository, or archive URL to produce reference JSON files, a unified template index, embedding sidecar matrix, subagent profiles, and optionally publishes the knowledge structure to a KB Manager instance. Accepts a source path/URL via the gen-references prompt. Supports incremental re-indexing, parallel processing via subagents, and remote source materialization.",
+
+  "model": null,
+  "provider": null,
+
+  "auto_approved": false,
+  "max_turns": 80,
+
+  "plugins": [
+    "introspection",
+    "clarification",
+    "references (preload)",
+    "template (preload)",
+    "subagent",
+    "service_connector",
+    "cli",
+    "file_edit",
+    "filesystem_query",
+    "web_fetch",
+    "todo",
+    "permission",
+    "prompt_library (preload)"
+  ],
+
+  "plugin_configs": {
+    "references": {
+      "exclude_tools": ["selectReferences", "listReferences", "listExtractedTemplates"]
+    },
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow",
+        "sanitization": {
+          "enabled": true,
+          "block_shell_metacharacters": false,
+          "block_dangerous_commands": true,
+          "allowed_dangerous_commands": [],
+          "path_scope": {
+            "enabled": true,
+            "allowed_roots": [".", "/tmp"],
+            "block_absolute": false,
+            "block_parent_traversal": true,
+            "allow_home": true,
+            "allow_tmp": true
+          }
+        },
+        "blacklist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {
+            "cli_based_tool": {
+              "command": [
+                "git push",
+                "git commit",
+                "sudo",
+                "shutdown",
+                "reboot",
+                "mkfs",
+                "dd if="
+              ]
+            }
+          }
+        },
+        "whitelist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {}
+        }
+      }
+    }
+  },
+
+  "gc": {
+    "type": "budget",
+    "threshold_percent": 70.0,
+    "target_percent": 45.0,
+    "pressure_percent": 0,
+    "preserve_recent_turns": 3,
+    "notify_on_gc": false,
+    "auto_trigger": true,
+    "check_before_send": true
+  },
+
+  "icon_name": "index",
+
+  "system_instructions": "You are gen-references, an autonomous catalog generator. Your mission: scan a knowledge base source (local folder, git repo, or archive URL) and produce a complete reference catalog, template index, embedding sidecar, subagent profiles, and optionally publish to a KB Manager.\n\nYou operate in six phases:\n- Phase 0: Source resolution (detect type, download remote sources to /tmp, extract, resolve subpaths)\n- Phase 1: Inventory (list directory tree, classify folders as documentation/validation/templates/policies/scripts)\n- Phase 1.5: Evaluate parallelization — if 3+ categories or 10+ folders and parallel=true, spawn subagents per category group\n- Phase 2: Process folders sequentially (or via subagents) — read entry-point → compute_embedding → sha256 hash → write reference JSON → persist embedding vector to disk → validateReference → process validation subfolders → extract template variables via listTemplateVariables\n- Phase 3: Write unified template index → validateTemplateIndex\n- Phase 3b: Assemble embedding sidecar (.npy matrix from persisted vectors)\n- Phase 4: Generate subagent profiles (skill, validator tiers 1-4, analyst, investigator) → validateProfile each\n- Phase 5: Publish to KB Manager via service_connector if kb_manager URL provided\n\nCritical rules:\n- Process one folder at a time: read → embed → write → discard. Never batch reads across folders.\n- Persist embedding vectors to disk immediately — do NOT accumulate in context (GC will reclaim them).\n- Ignore runtime hints about existing references/templates — you are building the catalog from scratch.\n- Do NOT call selectReferences, listReferences, or listExtractedTemplates — the catalog does not exist yet.\n- Use list_tools() and get_tool_schemas() to discover tools before first use (they are deferred/discoverable).\n- Execute autonomously without asking for confirmation, except when mandatory parameters are missing (use clarification tool).\n- There are no time constraints — complete ALL work fully. Do not abbreviate, skip, or simplify any phase.\n- Every module/skill folder discovered must get its own skill profile — no skipping."
+}
