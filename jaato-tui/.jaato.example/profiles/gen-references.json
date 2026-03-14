@@ -1,0 +1,80 @@
+{
+  "name": "gen-references",
+  "description": "Batch indexing agent that generates vector embeddings for reference documents. Reads each reference source, computes a SHA-256 content hash, calls compute_embedding, and writes embedding metadata back into the reference catalog plus a .npy sidecar matrix. Skips unchanged documents (hash match). Give it a references directory path or let it discover .jaato/references/ automatically.",
+
+  "model": null,
+  "provider": null,
+
+  "auto_approved": true,
+  "max_turns": 30,
+
+  "plugins": [
+    "references (preload)",
+    "filesystem_query",
+    "cli",
+    "todo"
+  ],
+
+  "plugin_configs": {
+    "references": {
+      "exclude_tools": ["selectReferences"],
+      "expose_compute_embedding": true
+    },
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow",
+        "sanitization": {
+          "enabled": true,
+          "block_shell_metacharacters": true,
+          "block_dangerous_commands": true,
+          "allowed_dangerous_commands": [],
+          "path_scope": {
+            "enabled": true,
+            "allowed_roots": ["."],
+            "block_absolute": true,
+            "block_parent_traversal": true,
+            "allow_home": false,
+            "allow_tmp": true
+          }
+        },
+        "blacklist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {
+            "cli_based_tool": {
+              "command": [
+                "git push",
+                "rm -rf",
+                "sudo",
+                "shutdown",
+                "reboot",
+                "mkfs",
+                "dd if="
+              ]
+            }
+          }
+        },
+        "whitelist": {
+          "tools": [],
+          "patterns": [],
+          "arguments": {}
+        }
+      }
+    }
+  },
+
+  "gc": {
+    "type": "budget",
+    "threshold_percent": 75.0,
+    "target_percent": 50.0,
+    "pressure_percent": 0,
+    "preserve_recent_turns": 3,
+    "notify_on_gc": false,
+    "auto_trigger": true,
+    "check_before_send": true
+  },
+
+  "icon_name": "index",
+
+  "system_instructions": "You are gen-references, an autonomous indexing agent. Your mission: generate vector embeddings for all reference documents in the workspace and produce a consistent embedding index.\n\nWorkflow:\n1. Discover all reference JSON files in the references directory (.jaato/references/ by default).\n2. Read each reference entry and resolve its target document (local file path, inline content, or URL).\n3. For each reference with a resolvable document:\n   a. Read the document contents.\n   b. Compute a SHA-256 hash of the contents.\n   c. If the reference already has an embedding with a matching source_hash, skip it (already indexed).\n   d. Otherwise, call compute_embedding with the file path (or input text for inline references).\n   e. Record the embedding metadata: {\"index\": <row>, \"source_hash\": \"sha256:<hex>\"}.\n4. After processing all references:\n   a. Write embedding_config.json with embedding_model, embedding_dimensions, and embedding_sidecar fields.\n   b. Collect all embedding vectors into a 2D float32 NumPy array (shape: N x D, rows ordered by index).\n   c. Write the array to the sidecar .npy file using numpy.save().\n   d. Update each reference JSON file with its embedding metadata.\n\nRules:\n- Never modify the content of referenced documents — only read them.\n- Always use incremental indexing: skip documents whose SHA-256 hash matches the existing source_hash.\n- Always validate that embedding dimensions are consistent across all vectors before writing the sidecar.\n- If a document cannot be read (missing file, network error for URLs), log the error in the todo list and continue with remaining references.\n- Report a final summary: total references, newly embedded, skipped (unchanged), failed."
+}
