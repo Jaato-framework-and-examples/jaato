@@ -546,6 +546,13 @@ class SubagentProfile:
         icon: Optional custom ASCII art icon (3 lines) for UI visualization.
         icon_name: Optional name of predefined icon (e.g., "code_assistant").
         gc: Optional garbage collection configuration for this subagent.
+        env: Session-scoped environment variables for this profile.
+            Values support ``${VAR}`` expansion and secret URI resolution
+            (e.g. ``vault://secret/myapp#db_password``).  For main sessions
+            these are merged into ``JaatoServer._session_env``; for subagents
+            they are applied to ``os.environ`` for the duration of the
+            subagent thread and restored on exit.  Never leaks to other
+            sessions or agents.
     """
     name: str
     description: str
@@ -560,6 +567,7 @@ class SubagentProfile:
     icon: Optional[List[str]] = None
     icon_name: Optional[str] = None
     gc: Optional[GCProfileConfig] = None
+    env: Dict[str, str] = field(default_factory=dict)
 
 
 def _parse_profile_file(
@@ -668,6 +676,10 @@ def _scan_profiles_dir(
         raw_plugins = data.get('plugins', [])
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
+        # Parse env: must be a flat dict of string→string
+        raw_env = data.get('env', {})
+        env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+
         profiles[name] = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -682,6 +694,7 @@ def _scan_profiles_dir(
             icon=data.get('icon'),
             icon_name=data.get('icon_name'),
             gc=gc_config,
+            env=env,
         )
         found += 1
         logger.debug("Discovered profile '%s' from %s", name, file_path)
@@ -779,6 +792,9 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         raw_plugins = data.get('plugins', [])
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
+        raw_env = data.get('env', {})
+        env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+
         profile = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -793,6 +809,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             icon=data.get('icon'),
             icon_name=data.get('icon_name'),
             gc=gc_config,
+            env=env,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -885,6 +902,18 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
     icon_name = data.get("icon_name")
     if icon_name is not None and not isinstance(icon_name, str):
         errors.append("'icon_name' must be a string or null")
+
+    # env: dict of string keys to string values, or null
+    env_data = data.get("env")
+    if env_data is not None:
+        if not isinstance(env_data, dict):
+            errors.append("'env' must be an object or null")
+        else:
+            for key, val in env_data.items():
+                if not isinstance(key, str):
+                    errors.append(f"env key {key!r} must be a string")
+                if not isinstance(val, str):
+                    errors.append(f"env['{key}'] must be a string")
 
     # GC sub-validation
     gc_data = data.get("gc")
@@ -997,6 +1026,9 @@ class SubagentConfig:
             raw_plugins = profile_data.get('plugins', [])
             clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
+            raw_env = profile_data.get('env', {})
+            env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+
             profiles[name] = SubagentProfile(
                 name=name,
                 description=profile_data.get('description', ''),
@@ -1011,6 +1043,7 @@ class SubagentConfig:
                 icon=profile_data.get('icon'),
                 icon_name=profile_data.get('icon_name'),
                 gc=gc_config,
+                env=env,
             )
 
         return cls(

@@ -269,3 +269,91 @@ class TestWorkspaceRootOverride:
             context={"workspaceRoot": "/from/context"}
         )
         assert result == "/from/context/file"
+
+
+class TestSubagentProfileEnv:
+    """Tests for the env field on SubagentProfile."""
+
+    def test_default_env_is_empty(self):
+        """Profile env defaults to empty dict."""
+        from ..config import SubagentProfile
+        profile = SubagentProfile(name="test", description="test")
+        assert profile.env == {}
+
+    def test_env_field_stored(self):
+        """Profile env stores provided dict."""
+        from ..config import SubagentProfile
+        env = {"DB_HOST": "localhost", "DB_PORT": "5432"}
+        profile = SubagentProfile(name="test", description="test", env=env)
+        assert profile.env == env
+
+    def test_env_parsed_from_config_dict(self):
+        """SubagentConfig.from_dict() parses env from profile data."""
+        from ..config import SubagentConfig
+        data = {
+            "project": "test-project",
+            "location": "us-central1",
+            "profiles": {
+                "db-agent": {
+                    "description": "Database agent",
+                    "env": {
+                        "DB_HOST": "localhost",
+                        "DB_PASSWORD": "vault://secret/myapp#db_password",
+                    },
+                }
+            },
+        }
+        config = SubagentConfig.from_dict(data)
+        profile = config.get_profile("db-agent")
+        assert profile is not None
+        assert profile.env["DB_HOST"] == "localhost"
+        assert profile.env["DB_PASSWORD"] == "vault://secret/myapp#db_password"
+
+    def test_env_missing_defaults_to_empty(self):
+        """SubagentConfig.from_dict() defaults env to empty dict."""
+        from ..config import SubagentConfig
+        data = {
+            "project": "test-project",
+            "location": "us-central1",
+            "profiles": {
+                "simple": {"description": "No env"},
+            },
+        }
+        config = SubagentConfig.from_dict(data)
+        profile = config.get_profile("simple")
+        assert profile is not None
+        assert profile.env == {}
+
+    def test_env_expansion_with_variables(self):
+        """expand_variables resolves ${VAR} refs in env values."""
+        env = {"API_URL": "${STAGING_HOST}/api", "PLAIN": "value"}
+        with patch.dict(os.environ, {"STAGING_HOST": "https://staging.example.com"}):
+            result = expand_variables(env)
+        assert result["API_URL"] == "https://staging.example.com/api"
+        assert result["PLAIN"] == "value"
+
+    def test_env_parsed_from_profile_file(self, tmp_path):
+        """discover_profiles() reads env from JSON profile files."""
+        from ..config import discover_profiles
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        profile_file = profiles_dir / "db-agent.json"
+        profile_file.write_text('{"name": "db-agent", "description": "DB", "env": {"DB_HOST": "localhost"}}')
+
+        result = discover_profiles(str(profiles_dir))
+        profile = result.profiles.get("db-agent")
+        assert profile is not None
+        assert profile.env == {"DB_HOST": "localhost"}
+
+    def test_env_non_dict_ignored_in_parsing(self, tmp_path):
+        """Non-dict env in profile file is coerced to empty dict."""
+        from ..config import discover_profiles
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        profile_file = profiles_dir / "bad-env.json"
+        profile_file.write_text('{"name": "bad-env", "description": "Bad", "env": "not-a-dict"}')
+
+        result = discover_profiles(str(profiles_dir))
+        profile = result.profiles.get("bad-env")
+        assert profile is not None
+        assert profile.env == {}

@@ -221,6 +221,57 @@ class TestValidateProfile:
         assert is_valid is False
         assert any("JSON object" in e for e in errors)
 
+    def test_env_valid_dict(self):
+        """Valid env dict is accepted."""
+        data = {
+            "name": "test",
+            "description": "test",
+            "env": {"DB_HOST": "localhost", "DB_PORT": "5432"},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True
+        assert errors == []
+
+    def test_env_null_accepted(self):
+        """Null env is accepted."""
+        data = {"name": "test", "description": "test", "env": None}
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True
+
+    def test_env_not_dict(self):
+        """Non-dict env is rejected."""
+        data = {"name": "test", "description": "test", "env": "DB_HOST=localhost"}
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is False
+        assert any("'env' must be an object" in e for e in errors)
+
+    def test_env_non_string_value(self):
+        """Non-string env values are rejected."""
+        data = {"name": "test", "description": "test", "env": {"PORT": 5432}}
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is False
+        assert any("env['PORT'] must be a string" in e for e in errors)
+
+    def test_env_with_variable_refs(self):
+        """Env values with ${VAR} references are valid strings."""
+        data = {
+            "name": "test",
+            "description": "test",
+            "env": {"API_URL": "${STAGING_HOST}/api"},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True
+
+    def test_env_with_secret_uris(self):
+        """Env values with vault:// URIs are valid strings."""
+        data = {
+            "name": "test",
+            "description": "test",
+            "env": {"DB_PASSWORD": "vault://secret/myapp#db_password"},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True
+
     def test_null_optional_fields(self):
         """Null values for optional fields should be accepted."""
         data = {
