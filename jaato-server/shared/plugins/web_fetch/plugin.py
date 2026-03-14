@@ -1055,12 +1055,14 @@ web_fetch(url="https://example.com", include_headers=true)
         Returns:
             Dict containing fetched content or error.
         """
-        url = args.get('url', '').strip()
+        # Expand ${VAR} placeholders in URL and headers from session env
+        from ..subagent.config import expand_variables
+        url = expand_variables(args.get('url', '')).strip()
         mode = args.get('mode', 'markdown')
         selector = args.get('selector')
         extract_components = args.get('extract')
         include_links = args.get('include_links', False)
-        custom_headers = args.get('headers')
+        custom_headers = expand_variables(args.get('headers')) if args.get('headers') else None
         no_cache = args.get('no_cache', False)
         include_headers = args.get('include_headers', False)
         insecure = bool(args.get('insecure', False))
