@@ -1,14 +1,192 @@
 """Configuration models for subagent plugin."""
 
+import importlib.metadata
 import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
+from typing import runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Secret resolver protocol and registry
+#
+# Allows premium (or third-party) packages to register secret backends
+# (HashiCorp Vault, AWS Secrets Manager, SOPS, OS keyring, etc.) via the
+# ``jaato.premium`` → ``secret_resolvers`` entry point.
+#
+# Config values like ``vault://secret/myapp#db_password`` are resolved
+# transparently during variable expansion.
+# ---------------------------------------------------------------------------
+
+# Regex for ``scheme://path`` or ``scheme://path#key``.
+_SECRET_URI_RE = re.compile(
+    r'^(?P<scheme>[a-z][a-z0-9_+-]*)://'  # scheme (lowercase, RFC-ish)
+    r'(?P<path>[^#]+)'                     # path (everything up to optional #)
+    r'(?:#(?P<key>.+))?$'                  # optional #key fragment
+)
+
+
+@runtime_checkable
+class SecretResolver(Protocol):
+    """Protocol for secret backend resolvers.
+
+    Each resolver handles one or more URI schemes (e.g. ``vault``, ``awssm``,
+    ``sops``, ``keyring``).  The framework discovers resolvers via the
+    ``jaato.premium`` → ``secret_resolvers`` entry point and dispatches
+    ``scheme://path#key`` references to the matching resolver.
+
+    Implementations live in the premium package (or any third-party package
+    that registers the entry point).  The core framework only defines this
+    protocol and the dispatch logic.
+    """
+
+    @property
+    def schemes(self) -> FrozenSet[str]:
+        """URI schemes this resolver handles (e.g. ``frozenset({"vault"})``).
+
+        Must be lowercase.  A resolver may handle multiple schemes — for
+        example a "cloud" resolver might handle both ``awssm`` and ``gcpsm``.
+        """
+        ...
+
+    def resolve(self, scheme: str, path: str, key: Optional[str] = None) -> str:
+        """Resolve a secret reference to its plaintext value.
+
+        Args:
+            scheme: The URI scheme (e.g. ``"vault"``).
+            path: The path portion of the URI (e.g. ``"secret/myapp"``).
+            key: Optional key/field within the secret (from the ``#fragment``).
+
+        Returns:
+            The resolved secret value as a string.
+
+        Raises:
+            SecretResolutionError: If the secret cannot be resolved (not found,
+                auth failure, backend unreachable, etc.).
+        """
+        ...
+
+
+class SecretResolutionError(Exception):
+    """Raised when a secret URI cannot be resolved.
+
+    Attributes:
+        uri: The original ``scheme://path#key`` string that failed.
+        reason: Human-readable explanation of the failure.
+    """
+
+    def __init__(self, uri: str, reason: str) -> None:
+        self.uri = uri
+        self.reason = reason
+        super().__init__(f"Failed to resolve secret '{uri}': {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Resolver registry — populated lazily from entry points.
+# ---------------------------------------------------------------------------
+
+_resolvers: Optional[Dict[str, 'SecretResolver']] = None
+
+
+def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
+    """Discover secret resolvers from ``jaato.premium`` entry points.
+
+    Looks for the ``secret_resolvers`` entry point which must return
+    an iterable of :class:`SecretResolver` instances.
+
+    Results are cached for the process lifetime.
+
+    Returns:
+        Dict mapping URI scheme → resolver instance.
+    """
+    global _resolvers
+    if _resolvers is not None:
+        return _resolvers
+
+    _resolvers = {}
+
+    eps = importlib.metadata.entry_points()
+    if sys.version_info >= (3, 12):
+        matches = eps.select(group="jaato.premium", name="secret_resolvers")
+    elif sys.version_info >= (3, 10):
+        matches = [ep for ep in eps.select(group="jaato.premium")
+                   if ep.name == "secret_resolvers"]
+    else:
+        matches = [ep for ep in eps.get("jaato.premium", [])
+                   if ep.name == "secret_resolvers"]
+
+    for ep in matches:
+        try:
+            provider_fn = ep.load()
+            resolvers = provider_fn()
+            for resolver in resolvers:
+                for scheme in resolver.schemes:
+                    if scheme in _resolvers:
+                        logger.warning(
+                            "Duplicate secret resolver for scheme '%s' — "
+                            "keeping first registered",
+                            scheme,
+                        )
+                        continue
+                    _resolvers[scheme] = resolver
+                    logger.debug("Registered secret resolver: %s://", scheme)
+        except Exception:
+            logger.warning(
+                "Failed to load secret_resolvers entry point",
+                exc_info=True,
+            )
+
+    if _resolvers:
+        logger.info(
+            "Secret resolvers available for schemes: %s",
+            ", ".join(sorted(_resolvers.keys())),
+        )
+
+    return _resolvers
+
+
+def _resolve_secret_uri(value: str) -> str:
+    """If *value* is a ``scheme://path[#key]`` URI with a registered resolver, resolve it.
+
+    Returns the original string unchanged if:
+    - It doesn't match the URI pattern.
+    - No resolver is registered for the scheme.
+
+    Raises:
+        SecretResolutionError: Propagated from the resolver on failure.
+    """
+    m = _SECRET_URI_RE.match(value)
+    if not m:
+        return value
+
+    scheme = m.group('scheme')
+    resolvers = _discover_secret_resolvers()
+    resolver = resolvers.get(scheme)
+    if resolver is None:
+        return value  # No resolver registered — treat as literal
+
+    path = m.group('path')
+    key = m.group('key')  # May be None
+
+    try:
+        return resolver.resolve(scheme, path, key)
+    except SecretResolutionError:
+        raise
+    except Exception as exc:
+        raise SecretResolutionError(value, str(exc)) from exc
+
+
+def reset_secret_resolvers() -> None:
+    """Reset the cached secret resolvers (for testing)."""
+    global _resolvers
+    _resolvers = None
 
 
 def parse_plugin_entry(entry: str) -> Tuple[str, bool]:
@@ -116,28 +294,50 @@ def expand_variables(
 
 
 def _expand_string(s: str, context: Dict[str, str]) -> str:
-    """Expand ${variable} references in a string.
+    """Expand ``${variable}`` references and secret URIs in a string.
+
+    Two-phase expansion:
+
+    1. **Variable substitution** — ``${VAR}`` patterns are replaced from
+       *context* first, then ``os.environ``.  Undefined variables are kept
+       as-is (``${UNKNOWN}`` stays literal).
+
+    2. **Secret URI resolution** — if the *fully expanded* string matches
+       ``scheme://path[#key]`` and a :class:`SecretResolver` is registered
+       for that scheme, the value is resolved to its plaintext secret.
+       This phase is a no-op when no premium resolvers are installed.
+
+    Secret resolution only applies when the **entire** string is a URI
+    (e.g. a config value ``vault://secret/myapp#db_password``).  URIs
+    embedded in a larger string are not resolved — use ``${VAR}``
+    indirection for those cases.
 
     Args:
-        s: String containing ${variable} references
-        context: Dict of variable names to values
+        s: String containing ``${variable}`` references or a secret URI.
+        context: Dict of variable names to values.
 
     Returns:
-        String with variables expanded
+        String with variables expanded and secrets resolved.
+
+    Raises:
+        SecretResolutionError: If a secret URI is recognised but the
+            resolver fails (auth error, not found, backend unreachable).
     """
-    if '${' not in s:
-        return s
+    # Phase 1: ${VAR} expansion
+    if '${' in s:
+        def replace_var(match: re.Match) -> str:
+            var_name = match.group(1)
+            # First check context, then environment
+            if var_name in context:
+                return context[var_name]
+            return os.environ.get(var_name, match.group(0))  # Keep original if not found
 
-    def replace_var(match: re.Match) -> str:
-        var_name = match.group(1)
-        # First check context, then environment
-        if var_name in context:
-            return context[var_name]
-        return os.environ.get(var_name, match.group(0))  # Keep original if not found
+        # Match ${VAR_NAME} pattern
+        pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
+        s = re.sub(pattern, replace_var, s)
 
-    # Match ${VAR_NAME} pattern
-    pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
-    return re.sub(pattern, replace_var, s)
+    # Phase 2: secret URI resolution (entire-string match only)
+    return _resolve_secret_uri(s)
 
 
 def _resolve_workspace_path(path: str) -> str:
