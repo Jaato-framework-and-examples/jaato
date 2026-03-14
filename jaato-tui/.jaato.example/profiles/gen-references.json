@@ -1,39 +1,47 @@
 {
   "name": "gen-references",
-  "description": "Batch indexing agent that generates vector embeddings for reference documents. Reads each reference source, computes a SHA-256 content hash, calls compute_embedding, and writes embedding metadata back into the reference catalog plus a .npy sidecar matrix. Skips unchanged documents (hash match). Give it a references directory path or let it discover .jaato/references/ automatically.",
+  "description": "Autonomous catalog generator that scans a local folder, public git repository, or archive URL to produce reference JSON files, a unified template index, embedding sidecar matrix, subagent profiles, and optionally publishes the knowledge structure to a KB Manager instance. Accepts a source path/URL via the gen-references prompt. Supports incremental re-indexing, parallel processing via subagents, and remote source materialization.",
 
   "model": null,
   "provider": null,
 
-  "auto_approved": true,
-  "max_turns": 30,
+  "auto_approved": false,
+  "max_turns": 80,
 
   "plugins": [
+    "introspection",
+    "clarification",
     "references (preload)",
-    "filesystem_query",
+    "template (preload)",
+    "subagent",
+    "service_connector",
     "cli",
-    "todo"
+    "file_edit",
+    "filesystem_query",
+    "web_fetch",
+    "todo",
+    "permission",
+    "prompt_library (preload)"
   ],
 
   "plugin_configs": {
     "references": {
-      "exclude_tools": ["selectReferences"],
-      "expose_compute_embedding": true
+      "exclude_tools": ["selectReferences", "listReferences", "listExtractedTemplates"]
     },
     "permission": {
       "policy": {
         "defaultPolicy": "allow",
         "sanitization": {
           "enabled": true,
-          "block_shell_metacharacters": true,
+          "block_shell_metacharacters": false,
           "block_dangerous_commands": true,
           "allowed_dangerous_commands": [],
           "path_scope": {
             "enabled": true,
-            "allowed_roots": ["."],
-            "block_absolute": true,
+            "allowed_roots": [".", "/tmp"],
+            "block_absolute": false,
             "block_parent_traversal": true,
-            "allow_home": false,
+            "allow_home": true,
             "allow_tmp": true
           }
         },
@@ -44,7 +52,7 @@
             "cli_based_tool": {
               "command": [
                 "git push",
-                "rm -rf",
+                "git commit",
                 "sudo",
                 "shutdown",
                 "reboot",
@@ -65,8 +73,8 @@
 
   "gc": {
     "type": "budget",
-    "threshold_percent": 75.0,
-    "target_percent": 50.0,
+    "threshold_percent": 70.0,
+    "target_percent": 45.0,
     "pressure_percent": 0,
     "preserve_recent_turns": 3,
     "notify_on_gc": false,
@@ -76,5 +84,5 @@
 
   "icon_name": "index",
 
-  "system_instructions": "You are gen-references, an autonomous indexing agent. Your mission: generate vector embeddings for all reference documents in the workspace and produce a consistent embedding index.\n\nWorkflow:\n1. Discover all reference JSON files in the references directory (.jaato/references/ by default).\n2. Read each reference entry and resolve its target document (local file path, inline content, or URL).\n3. For each reference with a resolvable document:\n   a. Read the document contents.\n   b. Compute a SHA-256 hash of the contents.\n   c. If the reference already has an embedding with a matching source_hash, skip it (already indexed).\n   d. Otherwise, call compute_embedding with the file path (or input text for inline references).\n   e. Record the embedding metadata: {\"index\": <row>, \"source_hash\": \"sha256:<hex>\"}.\n4. After processing all references:\n   a. Write embedding_config.json with embedding_model, embedding_dimensions, and embedding_sidecar fields.\n   b. Collect all embedding vectors into a 2D float32 NumPy array (shape: N x D, rows ordered by index).\n   c. Write the array to the sidecar .npy file using numpy.save().\n   d. Update each reference JSON file with its embedding metadata.\n\nRules:\n- Never modify the content of referenced documents — only read them.\n- Always use incremental indexing: skip documents whose SHA-256 hash matches the existing source_hash.\n- Always validate that embedding dimensions are consistent across all vectors before writing the sidecar.\n- If a document cannot be read (missing file, network error for URLs), log the error in the todo list and continue with remaining references.\n- Report a final summary: total references, newly embedded, skipped (unchanged), failed."
+  "system_instructions": "You are gen-references, an autonomous catalog generator. Your mission: scan a knowledge base source (local folder, git repo, or archive URL) and produce a complete reference catalog, template index, embedding sidecar, subagent profiles, and optionally publish to a KB Manager.\n\nYou operate in six phases:\n- Phase 0: Source resolution (detect type, download remote sources to /tmp, extract, resolve subpaths)\n- Phase 1: Inventory (list directory tree, classify folders as documentation/validation/templates/policies/scripts)\n- Phase 1.5: Evaluate parallelization — if 3+ categories or 10+ folders and parallel=true, spawn subagents per category group\n- Phase 2: Process folders sequentially (or via subagents) — read entry-point → compute_embedding → sha256 hash → write reference JSON → persist embedding vector to disk → validateReference → process validation subfolders → extract template variables via listTemplateVariables\n- Phase 3: Write unified template index → validateTemplateIndex\n- Phase 3b: Assemble embedding sidecar (.npy matrix from persisted vectors)\n- Phase 4: Generate subagent profiles (skill, validator tiers 1-4, analyst, investigator) → validateProfile each\n- Phase 5: Publish to KB Manager via service_connector if kb_manager URL provided\n\nCritical rules:\n- Process one folder at a time: read → embed → write → discard. Never batch reads across folders.\n- Persist embedding vectors to disk immediately — do NOT accumulate in context (GC will reclaim them).\n- Ignore runtime hints about existing references/templates — you are building the catalog from scratch.\n- Do NOT call selectReferences, listReferences, or listExtractedTemplates — the catalog does not exist yet.\n- Use list_tools() and get_tool_schemas() to discover tools before first use (they are deferred/discoverable).\n- Execute autonomously without asking for confirmation, except when mandatory parameters are missing (use clarification tool).\n- There are no time constraints — complete ALL work fully. Do not abbreviate, skip, or simplify any phase.\n- Every module/skill folder discovered must get its own skill profile — no skipping."
 }

@@ -1,40 +1,84 @@
 ---
-description: Generate vector embeddings for reference documents in the workspace
+description: Generate reference catalog, template index, and subagent profiles from a local folder or public git/archive knowledge base
 params:
-  references_dir:
+  source:
+    required: true
+    description: >
+      Source to scan for documentation folders, validation folders, and standalone template files.
+      Accepts a local folder path, a public git URL (HTTPS or git@), or an archive URL (zip/tar.gz).
+  subpaths:
+    required: false
+    default: ""
+    description: >
+      Comma-separated list of paths or glob patterns relative to the source root.
+      When empty, scans the entire source. Examples: "knowledge/*,modules/*"
+  ref:
+    required: false
+    default: null
+    description: Git branch, tag, or commit hash. Only used for git URL sources. Default: repository default branch.
+  output:
     required: false
     default: .jaato/references
-    description: Path to the references directory
+    description: Output directory for generated reference JSON files
+  templates_index:
+    required: false
+    default: .jaato/templates/index.json
+    description: Path to the unified template index JSON file
+  profiles_dir:
+    required: false
+    default: .jaato/profiles
+    description: Output directory for generated subagent profile JSON files
+  dry_run:
+    required: false
+    default: true
+    description: If true, report planned writes without creating files. Default true.
   force:
     required: false
-    default: "false"
-    description: Re-embed all documents even if hashes match
-tags: ['indexing', 'references', 'embeddings']
+    default: false
+    description: If true, overwrite existing files (backups created in output/backups/). Default false.
+  cache:
+    required: false
+    default: false
+    description: If true, cache remote fetches in .jaato/cache/sources/ for reuse. Default false.
+  merge_mode:
+    required: false
+    default: separate
+    description: '"separate" (one file per reference) or "single" (single catalog file). Default separate.'
+  parallel:
+    required: false
+    default: false
+    description: >
+      If true, the agent may spawn subagents to process categories in parallel (Phase 1.5).
+      Subagents can issue permission requests and clarification questions that the user must
+      answer — enable only when the user is actively attending the session. When false, all
+      processing is sequential within a single agent. Default false.
+  exclude_patterns:
+    required: false
+    default: []
+    description: Glob patterns to skip during traversal, in addition to built-in exclusions (node_modules, .git, __pycache__, hidden dirs)
+  kb_manager:
+    required: false
+    default: null
+    description: >
+      Base URL of a running Knowledge Manager instance (e.g. "http://localhost:3001").
+      When provided, Phase 5 publishes the discovered knowledge structure to the KB
+      Manager API. When null, Phase 5 is skipped entirely.
+tags: ['references', 'generator', 'templates', 'profiles', 'git', 'archive', 'patterns', 'kb-manager']
 ---
+Generate reference catalog, template index, and subagent profiles from a knowledge base — local or remote.
 
-Index all reference documents in `{{references_dir}}` and generate a semantic embedding sidecar.
+Input
+Source: {{source}} — local path, git URL, or archive URL
+Subpaths filter: {{subpaths}} (empty = scan everything)
+Git ref: {{ref}}
+References output: {{output}}
+Templates index: {{templates_index}}
+Profiles output: {{profiles_dir}}
+Dry run: {{dry_run}} | Force: {{force}} | Cache: {{cache}} | Parallel: {{parallel}}
+Merge mode: {{merge_mode}}
+Exclude patterns: {{exclude_patterns}}
+KB Manager: {{kb_manager}}
 
-## Steps
+This prompt is intended to be used with the `gen-references` profile, which provides the required plugins: references (compute_embedding, validateReference), template (listTemplateVariables, validateTemplateIndex), subagent (validateProfile, subscribeToTasks), service_connector (discover_service, call_service for KB Manager), cli, file_edit, filesystem_query, web_fetch, clarification, introspection, todo, and permission.
 
-1. **Discover** — List all `.json` files in `{{references_dir}}`. Parse each as a reference entry. Skip `embedding_config.json` (it's metadata, not a reference).
-
-2. **Read existing state** — If `{{references_dir}}/embedding_config.json` exists, load it to get the current embedding model, dimensions, and sidecar path. Load the existing sidecar `.npy` matrix if present (for incremental re-use).
-
-3. **Process each reference**:
-   - Resolve the target: `type=local` → read file at `path`; `type=inline` → use `content` field; `type=url` → skip (not supported in offline mode).
-   - Compute SHA-256 of the resolved content.
-   - If `{{force}}` is `false` and the reference already has `embedding.source_hash` matching the computed hash, skip it — reuse the existing vector from the sidecar matrix.
-   - Otherwise call `compute_embedding` with `file` (for local) or `input` (for inline).
-   - Assign the next available `embedding.index` and record `source_hash`.
-
-4. **Write outputs**:
-   - Collect all vectors (reused + newly computed) into a single NumPy float32 matrix, ordered by `embedding.index`.
-   - Write the matrix to `{{references_dir}}/references.embeddings.npy` using `numpy.save()`.
-   - Write/update `{{references_dir}}/embedding_config.json` with model name, dimensions, and sidecar filename.
-   - Update each reference `.json` file with its `embedding` metadata (`index` + `source_hash`).
-
-5. **Report** — Print a summary table:
-   - Total references found
-   - Newly embedded (count)
-   - Skipped / unchanged (count)
-   - Failed / unresolvable (count + list)
+See the canonical gen-references prompt in the knowledge base repository for the full operational instructions covering all six phases (source resolution, inventory, parallel evaluation, folder processing, template/embedding/profile generation, and KB Manager publication).
