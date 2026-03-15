@@ -872,6 +872,7 @@ class JaatoWSServer:
             description = tool_def.get('description', '')
             parameters = tool_def.get('parameters', {})
             timeout = tool_def.get('timeout', 30000) / 1000.0  # ms -> seconds
+            auto_approve = tool_def.get('auto_approve', True)
 
             # Create a waiting mechanism for this client's responses
             if not hasattr(self, '_client_tool_waiters'):
@@ -921,11 +922,11 @@ class JaatoWSServer:
                 description=description + ' [client-provided]',
                 parameters=parameters,
             )
-            registry.register_core_tool(schema, executor, auto_approved=True)
+            registry.register_core_tool(schema, executor, auto_approved=auto_approve)
 
             logger.info(
-                "Registered client tool '%s' for client %s (timeout=%ss)",
-                tool_name, client_id, timeout,
+                "Registered client tool '%s' for client %s (timeout=%ss, auto_approve=%s)",
+                tool_name, client_id, timeout, auto_approve,
             )
 
     def _handle_tool_execute_result(self, client_id: str, event) -> None:
