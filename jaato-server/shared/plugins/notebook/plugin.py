@@ -89,6 +89,7 @@ class NotebookPlugin(StreamingCapable):
         self._last_analysis: Optional[AnalysisResult] = None
         # Notebook Tool Bindings state
         self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")
+        self._tool_bindings_signatures: Optional[str] = None  # Cached for system instructions (not thread-local)
         # Tool bindings state (_tool_executor, _tool_bindings_bridge,
         # _tool_bindings_module) is stored in thread-local via properties
         # so subagent threads don't overwrite the parent's bindings.
@@ -291,6 +292,12 @@ class NotebookPlugin(StreamingCapable):
         self._tool_bindings_module = generate_tools_module(
             schemas, self._tool_bindings_bridge, exclude_tools=self._tool_bindings_exclude,
         )
+        # Cache signatures for system instructions (instance var, not
+        # thread-local) so get_system_instructions() can include them
+        # regardless of which thread calls it.
+        self._tool_bindings_signatures = generate_tool_signatures(
+            schemas, exclude_tools=self._tool_bindings_exclude,
+        )
         self._trace(
             f"Tool bindings module built: {len(schemas)} schemas, "
             f"{len(self._tool_bindings_module.list_tools())} tools exposed"
@@ -490,9 +497,8 @@ class NotebookPlugin(StreamingCapable):
 
         # Tool bindings information
         bindings_info = ""
-        if self._tool_bindings_enabled and self._tool_bindings_module is not None and self._plugin_registry is not None:
-            schemas = self._plugin_registry.get_exposed_tool_schemas()
-            signatures = generate_tool_signatures(schemas, exclude_tools=self._tool_bindings_exclude)
+        if self._tool_bindings_enabled and self._tool_bindings_signatures is not None:
+            signatures = self._tool_bindings_signatures
             bindings_info = "\n".join([
                 "",
                 "**Notebook Tool Bindings:**",
