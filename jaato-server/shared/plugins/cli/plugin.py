@@ -427,6 +427,17 @@ If a command requires ANY back-and-forth interaction, use the shell_spawn /
 shell_input tools instead — they provide a real PTY session where you can
 read output and send input repeatedly.
 
+ENVIRONMENT VARIABLES:
+Commands run in a shell that has access to session environment variables.
+When a command needs credentials or tokens, use shell variable references
+directly — do NOT attempt to echo, print, or retrieve their values:
+- GitHub: `$GITHUB_TOKEN` (e.g., `curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/...`)
+- Docker: `$DOCKER_HOST`, `$DOCKER_REGISTRY`
+- Cloud: `$AWS_ACCESS_KEY_ID`, `$GCP_PROJECT`, `$AZURE_SUBSCRIPTION_ID`
+- CI/CD: `$CI_TOKEN`, `$DEPLOY_KEY`
+The user manages which env vars are set. If a command fails due to a missing
+variable, report which variable is needed so the user can set it.
+
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
 - Use head/tail to limit output lines

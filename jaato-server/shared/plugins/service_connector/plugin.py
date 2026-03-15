@@ -544,10 +544,23 @@ class ServiceConnectorPlugin:
 1. `import_bruno_collection(path="./api-collection", service_name="myapi")`
 2. Then use `list_endpoints`, `call_service` as above
 
-**Authentication:**
-- Credentials are NEVER stored in files - always read from environment variables
+**Authentication and environment variable placeholders:**
+- Credentials are NEVER stored in files — always read from environment variables
 - Use `configure_service_auth` to set up auth for a service
 - Check `env_vars_missing` in the response to know which vars to set
+- URLs, headers, and auth configs support `${VAR}` placeholders resolved at execution time
+- Do NOT attempt to read, echo, or retrieve env var values — just use the placeholder:
+  ```
+  # Bearer token from env
+  call_service(url="https://api.github.com/repos", method="GET",
+               auth={"type": "bearer", "token_env": "GITHUB_TOKEN"})
+
+  # API key header
+  call_service(url="https://api.example.com/v1/data", method="GET",
+               headers={"X-API-Key": "${API_KEY}"})
+  ```
+- Common env vars by service: `GITHUB_TOKEN`, `GITLAB_TOKEN`, `SLACK_TOKEN`,
+  `JIRA_TOKEN`, `CONFLUENCE_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 **Request validation:**
 - Request bodies are validated against schema before sending

@@ -248,6 +248,27 @@ web_fetch(url="https://example.com/live-data", no_cache=true)
 web_fetch(url="https://example.com", include_headers=true)
 ```
 
+**Environment variable placeholders:**
+URLs and headers support `${VAR}` placeholders that are resolved at execution time.
+Use them for credentials and tokens — do NOT attempt to read, echo, or retrieve
+the value yourself. Just reference the appropriate env var by name:
+```
+# GitHub API
+web_fetch(url="https://api.github.com/repos/owner/repo", headers={"Authorization": "token ${GITHUB_TOKEN}"})
+
+# GitLab API
+web_fetch(url="https://gitlab.com/api/v4/projects", headers={"PRIVATE-TOKEN": "${GITLAB_TOKEN}"})
+
+# Slack API
+web_fetch(url="https://slack.com/api/conversations.list", headers={"Authorization": "Bearer ${SLACK_TOKEN}"})
+
+# Generic Bearer token
+web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer ${API_TOKEN}"})
+```
+The tool resolves `${VAR}` from the session environment. If a variable is not set,
+the placeholder is kept as-is and the request will fail with an auth error — the
+user will then set the variable.
+
 **Tips:**
 - Use `selector` to focus on specific page sections (server-rendered HTML only, no JS execution)
 - Use `structured` mode when you need to analyze page components or JSON API data

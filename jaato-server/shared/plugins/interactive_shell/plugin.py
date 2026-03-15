@@ -425,6 +425,12 @@ COMMON MISTAKES:
 - Losing track of the session_id. Note the session_id from shell_spawn
   and reuse it consistently.
 
+ENVIRONMENT VARIABLES:
+Spawned processes inherit session environment variables. When a command
+needs credentials, use shell variable references — do NOT attempt to
+echo, print, or retrieve their values. The user manages which env vars
+are set. If a command fails due to a missing variable, report it.
+
 IMPORTANT NOTES:
 - Always end text input with \\n — that's pressing Enter
 - For password prompts, the terminal won't echo what you type — that's normal
