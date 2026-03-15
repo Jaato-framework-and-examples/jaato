@@ -67,6 +67,8 @@ SHELL_METACHAR_PATTERN = re.compile(
     r'|&&|\|\|'        # Command chaining (AND/OR)
     r'|;'              # Command separator
     r'|\$\('           # Command substitution $(...)
+    r'|\$\{'           # Variable expansion ${VAR}
+    r'|\$[A-Za-z_]'    # Variable expansion $VAR
     r'|`'              # Backtick command substitution
     r'|&\s*$'          # Background execution (& at end)
 )
