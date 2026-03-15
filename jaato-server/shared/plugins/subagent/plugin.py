@@ -101,6 +101,7 @@ class SubagentPlugin:
         """
         self._config: Optional[SubagentConfig] = None
         self._initialized: bool = False
+        self._self_profile_name: Optional[str] = None  # Profile this agent was spawned from
         self._parent_plugins: List[str] = []
         # Lazy import to avoid circular dependencies
         self._registry_class = None
@@ -163,6 +164,10 @@ class SubagentPlugin:
         """
         if config:
             self._config = SubagentConfig.from_dict(config)
+            # Track which profile this agent was spawned from (if any),
+            # so we can exclude it from list_subagent_profiles and prevent
+            # self-spawning loops.
+            self._self_profile_name = config.get('agent_name')
         else:
             # Minimal config - will try env vars as fallback
             self._config = SubagentConfig(project='', location='')
@@ -1323,6 +1328,9 @@ class SubagentPlugin:
 
         profiles = []
         for name, profile in self._config.profiles.items():
+            # Exclude this agent's own profile to prevent self-spawning loops
+            if name == self._self_profile_name:
+                continue
             profiles.append({
                 'name': name,
                 'description': profile.description,
@@ -1331,11 +1339,14 @@ class SubagentPlugin:
                 'auto_approved': profile.auto_approved,
             })
 
-        return {
+        result: Dict[str, Any] = {
             'profiles': profiles,
             'inline_allowed': self._config.allow_inline,
             'inline_allowed_plugins': self._config.inline_allowed_plugins,
         }
+        if self._self_profile_name:
+            result['current_profile'] = self._self_profile_name
+        return result
 
     def _cmd_help(self) -> HelpLines:
         """Return detailed help text for pager display."""
@@ -1947,6 +1958,20 @@ class SubagentPlugin:
         inline_config = args.get('inline_config')
         custom_name = args.get('name', '')
         server = args.get('server', '')
+
+        # Prevent self-spawning loops: reject spawning the same profile
+        # this agent was created from.
+        if profile_name and profile_name == self._self_profile_name:
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"Cannot spawn profile '{profile_name}' — this is "
+                    f"your own profile. Spawning yourself would create an "
+                    f"infinite loop. Choose a different profile or use "
+                    f"inline_config for a specialized variant."
+                ),
+            ).to_dict()
 
         # ── Remote spawn path ──────────────────────────────────────────
         if server:
