@@ -49,6 +49,8 @@ class ClarificationPlugin:
         # Per-question hooks for progressive display
         self._on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None
         self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
+        # Batch hook for WS clients: receives full parsed request before channel loop
+        self._on_batch_requested: Optional[Callable] = None
 
     def _get_channel(self) -> Optional[ClarificationChannel]:
         """Get the channel for the current thread.
@@ -96,7 +98,8 @@ class ClarificationPlugin:
         on_requested: Optional[Callable[[str, List[str]], None]] = None,
         on_resolved: Optional[Callable[[str, List[Tuple[str, str]]], None]] = None,
         on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
-        on_question_answered: Optional[Callable[[str, int, str], None]] = None
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None,
+        on_batch_requested: Optional[Callable] = None,
     ) -> None:
         """Set hooks for clarification lifecycle events.
 
@@ -113,11 +116,15 @@ class ClarificationPlugin:
                 Signature: (tool_name, question_index, total_questions, question_lines) -> None
             on_question_answered: Called when user answers a question.
                 Signature: (tool_name, question_index, answer_summary) -> None
+            on_batch_requested: Called with (tool_name, request, request_id) before
+                the channel loop starts.  WS clients use this to emit all questions
+                at once so the browser can display a tabbed panel immediately.
         """
         self._on_clarification_requested = on_requested
         self._on_clarification_resolved = on_resolved
         self._on_question_displayed = on_question_displayed
         self._on_question_answered = on_question_answered
+        self._on_batch_requested = on_batch_requested
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool declarations for Vertex AI."""
@@ -369,6 +376,12 @@ The tool returns responses keyed by question number (1-based):
                 if request.context:
                     context_lines.append(f"Context: {request.context}")
                 self._on_clarification_requested("request_clarification", context_lines)
+
+            # Emit batch event for WS clients (all questions upfront)
+            # This fires BEFORE the channel loop so the client can render
+            # all questions immediately and submit answers in any order.
+            if self._on_batch_requested and not is_subagent_mode:
+                self._on_batch_requested("request_clarification", request)
 
             # Get user responses via the channel, passing per-question hooks
             # In subagent mode, skip the hooks as they would affect the parent's UI

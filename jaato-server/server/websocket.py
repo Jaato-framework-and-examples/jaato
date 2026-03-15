@@ -44,6 +44,7 @@ from jaato_sdk.events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ClarificationBatchResponseEvent,
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
@@ -648,6 +649,12 @@ class JaatoWSServer:
             self._jaato_server.respond_to_clarification(
                 event.request_id,
                 event.response
+            )
+
+        elif isinstance(event, ClarificationBatchResponseEvent):
+            self._jaato_server.respond_to_clarification_batch(
+                event.request_id,
+                event.answers
             )
 
         elif isinstance(event, ReferenceSelectionResponseRequest):

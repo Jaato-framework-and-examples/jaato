@@ -77,6 +77,7 @@ from jaato_sdk.events import (
     PermissionStatusEvent,
     ClarificationInputModeEvent,
     ClarificationResolvedEvent,
+    ClarificationBatchEvent,
     ReferenceSelectionRequestedEvent,
     ReferenceSelectionResolvedEvent,
     ReferenceSelectionResponseRequest,
@@ -2108,11 +2109,51 @@ class JaatoServer:
             # Question answered, waiting for next or resolution
             pass
 
+        def on_batch_requested(tool_name: str, request, *_args):
+            """Emit ClarificationBatchEvent with all questions for WS clients.
+
+            Fires before the QueueChannel loop so that WebSocket clients
+            can display every question at once in a tabbed panel and let
+            the user answer in any order.  TUI/IPC clients ignore this
+            event; they still receive individual ClarificationInputModeEvent
+            events one at a time through the existing on_question_displayed
+            hook.
+            """
+            request_id = server._pending_clarification_request_id or ""
+            questions_payload = []
+            for i, q in enumerate(request.questions, 1):
+                q_data = {
+                    "index": i,
+                    "text": q.text,
+                    "question_type": q.question_type.value,
+                    "required": q.required,
+                }
+                if q.choices:
+                    choices_list = []
+                    for j, c in enumerate(q.choices, 1):
+                        choice_entry = {"text": c.text}
+                        if q.default_choice == j:
+                            choice_entry["default"] = True
+                        choices_list.append(choice_entry)
+                    q_data["choices"] = choices_list
+                if q.default_choice:
+                    q_data["default_choice"] = q.default_choice
+                questions_payload.append(q_data)
+
+            server.emit(ClarificationBatchEvent(
+                agent_id=server._current_tool_agent_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                context=request.context or "",
+                questions=questions_payload,
+            ))
+
         clarification_plugin.set_clarification_hooks(
             on_requested=on_clarification_requested,
             on_resolved=on_clarification_resolved,
             on_question_displayed=on_question_displayed,
             on_question_answered=on_question_answered,
+            on_batch_requested=on_batch_requested,
         )
 
     def _setup_reference_selection_hooks(self) -> None:
@@ -2654,6 +2695,26 @@ class JaatoServer:
             return
 
         self._channel_input_queue.put(response)
+
+    def respond_to_clarification_batch(self, request_id: str, answers: List[str]) -> None:
+        """Respond to a batch clarification request with all answers at once.
+
+        Each answer is fed into the channel input queue sequentially so the
+        QueueChannel loop picks them up one by one and completes normally.
+
+        Args:
+            request_id: The clarification request ID.
+            answers: Ordered list of answer strings, one per question.
+        """
+        if self._pending_clarification_request_id != request_id:
+            self.emit(ErrorEvent(
+                error=f"Unknown clarification request: {request_id}",
+                error_type="StateError",
+            ))
+            return
+
+        for answer in answers:
+            self._channel_input_queue.put(answer)
 
     def respond_to_reference_selection(self, request_id: str, response: str) -> None:
         """Respond to a reference selection request.

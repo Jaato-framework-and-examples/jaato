@@ -52,6 +52,8 @@ class EventType(str, Enum):
     CLARIFICATION_QUESTION = "clarification.question"
     CLARIFICATION_RESOLVED = "clarification.resolved"
     CLARIFICATION_RESPONSE = "clarification.response"  # Client -> Server
+    CLARIFICATION_BATCH = "clarification.batch"  # Server -> Client: all questions at once (WS only)
+    CLARIFICATION_BATCH_RESPONSE = "clarification.batch_response"  # Client -> Server: all answers at once
 
     # Reference selection flow (Server <-> Client)
     REFERENCE_SELECTION_REQUESTED = "reference_selection.requested"
@@ -398,6 +400,32 @@ class ClarificationResolvedEvent(Event):
     tool_name: str = ""
     qa_pairs: List[List[str]] = field(default_factory=list)
     # ^ List of [question_text, answer_text] pairs for overview display
+
+
+@dataclass
+class ClarificationBatchEvent(Event):
+    """All clarification questions sent at once for batch answering (WS clients only).
+
+    Emitted before the QueueChannel loop so WS clients can display all
+    questions simultaneously in a tabbed panel and let the user answer
+    in any order.
+    """
+    type: EventType = field(default=EventType.CLARIFICATION_BATCH)
+    agent_id: str = ""
+    request_id: str = ""
+    tool_name: str = ""
+    context: str = ""
+    questions: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {index, text, question_type, required, choices: [{text, default?}]}
+
+
+@dataclass
+class ClarificationBatchResponseEvent(Event):
+    """Client responds with all answers at once (WS batch mode)."""
+    type: EventType = field(default=EventType.CLARIFICATION_BATCH_RESPONSE)
+    request_id: str = ""
+    answers: List[str] = field(default_factory=list)
+    # ^ Ordered list of answers, one per question (by index)
 
 
 @dataclass
@@ -1522,6 +1550,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLARIFICATION_INPUT_MODE.value: ClarificationInputModeEvent,
     EventType.CLARIFICATION_QUESTION.value: ClarificationQuestionEvent,
     EventType.CLARIFICATION_RESOLVED.value: ClarificationResolvedEvent,
+    EventType.CLARIFICATION_BATCH.value: ClarificationBatchEvent,
+    EventType.CLARIFICATION_BATCH_RESPONSE.value: ClarificationBatchResponseEvent,
     EventType.REFERENCE_SELECTION_REQUESTED.value: ReferenceSelectionRequestedEvent,
     EventType.REFERENCE_SELECTION_RESOLVED.value: ReferenceSelectionResolvedEvent,
     EventType.REFERENCE_SELECTION_RESPONSE.value: ReferenceSelectionResponseRequest,

@@ -2139,6 +2139,7 @@ class SessionManager:
             SendMessageRequest,
             PermissionResponseRequest,
             ClarificationResponseRequest,
+            ClarificationBatchResponseEvent,
             ReferenceSelectionResponseRequest,
             StopRequest,
             CommandRequest,
@@ -2194,6 +2195,9 @@ class SessionManager:
 
         elif isinstance(event, ClarificationResponseRequest):
             server.respond_to_clarification(event.request_id, event.response)
+
+        elif isinstance(event, ClarificationBatchResponseEvent):
+            server.respond_to_clarification_batch(event.request_id, event.answers)
 
         elif isinstance(event, ReferenceSelectionResponseRequest):
             server.respond_to_reference_selection(event.request_id, event.response)
