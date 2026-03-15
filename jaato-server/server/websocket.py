@@ -719,7 +719,10 @@ class JaatoWSServer:
             client_id: The client's ID.
             event: The deserialized event.
         """
-        from jaato_sdk.events import ClientConfigRequest, CommandListRequest, CommandListEvent
+        from jaato_sdk.events import (
+            ClientConfigRequest, CommandListRequest, CommandListEvent,
+            ToolsRegisterClientRequest, ToolExecuteResultEvent,
+        )
 
         # Handle CommandListRequest directly (same as IPC path)
         if isinstance(event, CommandListRequest):
@@ -728,6 +731,16 @@ class JaatoWSServer:
                 await self._send_to_client(
                     client_id, CommandListEvent(commands=commands),
                 )
+            return
+
+        # Handle client-side tool registration
+        if isinstance(event, ToolsRegisterClientRequest):
+            self._register_client_tools(client_id, event.tools)
+            return
+
+        # Handle client-side tool execution result
+        if isinstance(event, ToolExecuteResultEvent):
+            self._handle_tool_execute_result(client_id, event)
             return
 
         # Resolve session_id from the adapter's tracking
@@ -823,6 +836,111 @@ class JaatoWSServer:
             client_id,
             ErrorEvent(error=error, error_type="RequestError")
         )
+
+    # =========================================================================
+    # Client-side tool execution
+    # =========================================================================
+
+    def _register_client_tools(self, client_id: str, tools: list) -> None:
+        """Register client-provided tools as proxies in the session's registry.
+
+        Each tool becomes a real tool in the model's tool list. When the model
+        calls it, the executor sends a ``tool.execute_request`` to the WS
+        client and waits for ``tool.execute_result``.
+        """
+        if not self._event_sink_adapter:
+            return
+        session_id = self._event_sink_adapter._client_sessions.get(client_id, "")
+        if not session_id or not self._command_router:
+            return
+
+        session = self._command_router._session_manager.get_session(session_id)
+        if not session or not session.server or not session.server.registry:
+            return
+
+        import threading
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        from jaato_sdk.events import ToolExecuteRequestEvent
+
+        registry = session.server.registry
+
+        for tool_def in tools:
+            tool_name = tool_def.get('name', '')
+            if not tool_name:
+                continue
+
+            description = tool_def.get('description', '')
+            parameters = tool_def.get('parameters', {})
+            timeout = tool_def.get('timeout', 30000) / 1000.0  # ms -> seconds
+
+            # Create a waiting mechanism for this client's responses
+            if not hasattr(self, '_client_tool_waiters'):
+                self._client_tool_waiters = {}
+
+            # Build the proxy executor
+            ws_server = self
+            cid = client_id
+
+            def make_executor(tname, tout):
+                def executor(args):
+                    import uuid
+                    call_id = str(uuid.uuid4())[:8]
+
+                    # Create a threading Event to wait for the result
+                    waiter = threading.Event()
+                    result_holder = {'result': None, 'error': None}
+                    ws_server._client_tool_waiters[call_id] = (waiter, result_holder)
+
+                    # Send execute request to client
+                    import asyncio
+                    if ws_server._event_sink_adapter and ws_server._event_sink_adapter._event_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            ws_server._send_to_client(cid, ToolExecuteRequestEvent(
+                                call_id=call_id,
+                                agent_id='',
+                                tool_name=tname,
+                                tool_args=args,
+                            )),
+                            ws_server._event_sink_adapter._event_loop,
+                        )
+
+                    # Wait for result with timeout
+                    if waiter.wait(timeout=tout):
+                        if result_holder['error']:
+                            return {'error': result_holder['error']}
+                        return {'result': result_holder['result']}
+                    else:
+                        return {'error': f'Client tool {tname} timed out after {tout}s'}
+                return executor
+
+            executor = make_executor(tool_name, timeout)
+
+            # Register as a tool in the session's registry
+            schema = ToolSchema(
+                name=tool_name,
+                description=description + ' [client-provided]',
+                parameters=parameters,
+            )
+            registry.register_core_tool(schema, executor, auto_approved=True)
+
+            logger.info(
+                "Registered client tool '%s' for client %s (timeout=%ss)",
+                tool_name, client_id, timeout,
+            )
+
+    def _handle_tool_execute_result(self, client_id: str, event) -> None:
+        """Route a tool execution result back to the waiting executor thread."""
+        if not hasattr(self, '_client_tool_waiters'):
+            return
+        call_id = event.call_id
+        entry = self._client_tool_waiters.pop(call_id, None)
+        if not entry:
+            logger.warning("No waiter for tool result call_id=%s", call_id)
+            return
+        waiter, result_holder = entry
+        result_holder['result'] = event.result
+        result_holder['error'] = event.error
+        waiter.set()
 
     # =========================================================================
     # Workspace Management Handlers

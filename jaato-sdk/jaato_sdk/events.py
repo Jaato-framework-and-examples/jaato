@@ -114,6 +114,11 @@ class EventType(str, Enum):
     # Tool management (Client -> Server)
     TOOL_DISABLE_REQUEST = "tools.disable"
 
+    # Client-side tool execution (Client <-> Server)
+    TOOLS_REGISTER_CLIENT = "tools.register_client"   # Client -> Server
+    TOOL_EXECUTE_REQUEST = "tool.execute_request"      # Server -> Client
+    TOOL_EXECUTE_RESULT = "tool.execute_result"        # Client -> Server
+
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
@@ -989,6 +994,38 @@ class ToolDisableRequest(Event):
 
 
 @dataclass
+class ToolsRegisterClientRequest(Event):
+    """Register client-side tools that the browser/frontend can execute.
+
+    The server creates proxy tools in the session's registry. When the model
+    calls one, the server routes execution to the WS client via
+    ``tool.execute_request`` and waits for ``tool.execute_result``.
+    """
+    type: EventType = field(default=EventType.TOOLS_REGISTER_CLIENT)
+    tools: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {name, description, parameters: {type:'object', properties, required}, timeout}
+
+
+@dataclass
+class ToolExecuteRequestEvent(Event):
+    """Server requests the WS client to execute a client-registered tool."""
+    type: EventType = field(default=EventType.TOOL_EXECUTE_REQUEST)
+    call_id: str = ""
+    agent_id: str = ""
+    tool_name: str = ""
+    tool_args: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolExecuteResultEvent(Event):
+    """Client returns the result of a client-side tool execution."""
+    type: EventType = field(default=EventType.TOOL_EXECUTE_RESULT)
+    call_id: str = ""
+    result: str = ""  # JSON-encoded result
+    error: str = ""   # Error message if execution failed
+
+
+@dataclass
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = field(default=EventType.HISTORY_REQUEST)
@@ -1523,6 +1560,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
     EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
+    EventType.TOOLS_REGISTER_CLIENT.value: ToolsRegisterClientRequest,
+    EventType.TOOL_EXECUTE_REQUEST.value: ToolExecuteRequestEvent,
+    EventType.TOOL_EXECUTE_RESULT.value: ToolExecuteResultEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
