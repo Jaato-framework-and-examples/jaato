@@ -170,7 +170,13 @@ def _resolve_secret_uri(value: str) -> str:
     resolvers = _discover_secret_resolvers()
     resolver = resolvers.get(scheme)
     if resolver is None:
-        return value  # No resolver registered — treat as literal
+        logger.warning(
+            "Secret URI '%s' uses scheme '%s' but no resolver is registered "
+            "for it (available: %s). The literal URI will be used as the value, "
+            "which is almost certainly wrong.",
+            value, scheme, list(resolvers.keys()) or "none",
+        )
+        return value
 
     path = m.group('path')
     key = m.group('key')  # May be None
