@@ -288,6 +288,9 @@ class ToolExecutor:
             if plugin and hasattr(plugin, 'get_executors'):
                 if name in plugin.get_executors():
                     return True
+            # Core executors (client-registered tools, dismiss_stream, etc.)
+            if name in self._registry.get_core_executors():
+                return True
         # Generic executor fallback
         if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
             return True
@@ -618,6 +621,14 @@ class ToolExecutor:
                     self._map[name] = fn
                     if debug:
                         print(f"[ai_tool_runner] execute: found executor for {name} via registry fallback")
+            # Also check core executors (client-registered tools, dismiss_stream, etc.)
+            if not fn:
+                core_executors = self._registry.get_core_executors()
+                fn = core_executors.get(name)
+                if fn:
+                    self._map[name] = fn
+                    if debug:
+                        print(f"[ai_tool_runner] execute: found executor for {name} via core executors")
         if not fn:
             if debug:
                 print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")
