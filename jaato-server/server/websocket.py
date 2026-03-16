@@ -834,19 +834,7 @@ class JaatoWSServer:
                     and client_id in self._pending_client_tools):
                 pending = self._pending_client_tools.pop(client_id)
                 self._register_client_tools(client_id, pending)
-                # Refresh the runtime's tool schema list so the model sees them
-                new_session_id = self._event_sink_adapter._client_sessions.get(client_id, "") if self._event_sink_adapter else ""
-                if new_session_id and self._command_router:
-                    session = self._command_router._session_manager.get_session(new_session_id)
-                    if session and session.server and session.server._jaato:
-                        runtime = session.server._jaato.get_runtime()
-                        if runtime and hasattr(runtime, '_all_tool_schemas'):
-                            from jaato_sdk.plugins.model_provider.types import ToolSchema as _TS
-                            existing = {s.name for s in runtime._all_tool_schemas}
-                            for name, schema in session.server.registry._core_tools.items():
-                                if name not in existing:
-                                    runtime._all_tool_schemas.append(schema)
-                            logger.info("Refreshed runtime tool list with %d client tools", len(pending))
+                # (runtime refresh happens inside _register_client_tools)
 
         except Exception as exc:
             logger.error(
@@ -965,6 +953,16 @@ class JaatoWSServer:
                 "Registered client tool '%s' for client %s (timeout=%ss, auto_approve=%s)",
                 tool_name, client_id, timeout, auto_approve,
             )
+
+        # Refresh the runtime's tool schema list so the model sees new tools
+        if session.server and session.server._jaato:
+            runtime = session.server._jaato.get_runtime()
+            if runtime and hasattr(runtime, '_all_tool_schemas'):
+                existing = {s.name for s in runtime._all_tool_schemas}
+                for name, schema in registry._core_tools.items():
+                    if name not in existing:
+                        runtime._all_tool_schemas.append(schema)
+                logger.info("Refreshed runtime tool list for client %s", client_id)
 
     def _handle_tool_execute_result(self, client_id: str, event) -> None:
         """Route a tool execution result back to the waiting executor thread."""
