@@ -878,6 +878,7 @@ class JaatoWSServer:
 
             description = tool_def.get('description', '')
             parameters = tool_def.get('parameters', {})
+            category = tool_def.get('category', '')
             timeout = tool_def.get('timeout', 30000) / 1000.0  # ms -> seconds
             auto_approve = tool_def.get('auto_approve', True)
 
@@ -928,6 +929,7 @@ class JaatoWSServer:
                 name=tool_name,
                 description=description + ' [client-provided]',
                 parameters=parameters,
+                category=category or None,
             )
             registry.register_core_tool(schema, executor, auto_approved=auto_approve)
 
