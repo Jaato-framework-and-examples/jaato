@@ -316,6 +316,12 @@ class ToolExecutor:
                 if fn:
                     # Cache it for future calls
                     self._map[name] = fn
+            # Also check core executors (client-registered tools, dismiss_stream, etc.)
+            if not fn:
+                core_executors = self._registry.get_core_executors()
+                fn = core_executors.get(name)
+                if fn:
+                    self._map[name] = fn
         if not fn:
             # Check if generic execution is allowed
             if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
