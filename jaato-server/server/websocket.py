@@ -742,7 +742,14 @@ class JaatoWSServer:
 
         # Handle client-side tool registration
         if isinstance(event, ToolsRegisterClientRequest):
-            self._register_client_tools(client_id, event.tools)
+            # Buffer tools if no session yet (registered after session.new)
+            if not self._event_sink_adapter or not self._event_sink_adapter._client_sessions.get(client_id):
+                if not hasattr(self, '_pending_client_tools'):
+                    self._pending_client_tools = {}
+                self._pending_client_tools[client_id] = event.tools
+                logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
+            else:
+                self._register_client_tools(client_id, event.tools)
             return
 
         # Handle client-side tool execution result
@@ -820,6 +827,27 @@ class JaatoWSServer:
                     session_id,
                     event,
                 )
+            # After session.new completes, register any buffered client tools
+            if (isinstance(event, CommandRequest)
+                    and event.command.lower() == "session.new"
+                    and hasattr(self, '_pending_client_tools')
+                    and client_id in self._pending_client_tools):
+                pending = self._pending_client_tools.pop(client_id)
+                self._register_client_tools(client_id, pending)
+                # Refresh the runtime's tool schema list so the model sees them
+                new_session_id = self._event_sink_adapter._client_sessions.get(client_id, "") if self._event_sink_adapter else ""
+                if new_session_id and self._command_router:
+                    session = self._command_router._session_manager.get_session(new_session_id)
+                    if session and session.server and session.server._jaato:
+                        runtime = session.server._jaato.get_runtime()
+                        if runtime and hasattr(runtime, '_all_tool_schemas'):
+                            from jaato_sdk.plugins.model_provider.types import ToolSchema as _TS
+                            existing = {s.name for s in runtime._all_tool_schemas}
+                            for name, schema in session.server.registry._core_tools.items():
+                                if name not in existing:
+                                    runtime._all_tool_schemas.append(schema)
+                            logger.info("Refreshed runtime tool list with %d client tools", len(pending))
+
         except Exception as exc:
             logger.error(
                 "Command routing failed for client %s: %s", client_id, exc,
