@@ -309,10 +309,15 @@ class JaatoDaemon:
             from pathlib import Path as _Path
             _default_ws_root = str(_Path.home() / ".jaato" / "workspaces")
 
+            # Load TLS context from servers.json if available
+            from server.websocket import load_tls_context
+            ws_ssl_ctx = load_tls_context()
+
             self._ws_server = JaatoWSServer(
                 host=host,
                 port=port,
                 workspace_root=_default_ws_root,
+                ssl_context=ws_ssl_ctx,
             )
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())
@@ -320,7 +325,8 @@ class JaatoDaemon:
             t = asyncio.create_task(self._ws_server.start())
             t.add_done_callback(_on_task_done)
             tasks.append(t)
-            logger.info(f"WebSocket server will listen on ws://{host}:{port}")
+            scheme = "wss" if ws_ssl_ctx else "ws"
+            logger.info(f"WebSocket server will listen on {scheme}://{host}:{port}")
 
         if not tasks:
             logger.error("No servers configured. Use --ipc-socket and/or --web-socket")

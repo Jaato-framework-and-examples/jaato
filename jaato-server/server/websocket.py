@@ -14,6 +14,7 @@ import asyncio
 import errno
 import json
 import logging
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,58 @@ from .event_sink import EventSink
 
 
 logger = logging.getLogger(__name__)
+
+# Default path for servers.json (contains TLS config)
+_SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
+
+
+def load_tls_context(servers_json: Optional[Path] = None) -> Optional[ssl.SSLContext]:
+    """Build an ``ssl.SSLContext`` from the ``tls`` section in servers.json.
+
+    Args:
+        servers_json: Path to servers.json. Defaults to ``~/.jaato/servers.json``.
+
+    Returns:
+        An ``ssl.SSLContext`` configured for TLS server mode, or ``None``
+        if the file is missing, has no ``tls`` section, or cert files don't exist.
+    """
+    path = servers_json or _SERVERS_JSON
+    if not path.exists():
+        return None
+
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to read %s: %s", path, exc)
+        return None
+
+    tls = data.get("tls")
+    if not tls:
+        return None
+
+    cert = Path(tls.get("cert", "")).expanduser()
+    key = Path(tls.get("key", "")).expanduser()
+    ca_cert = Path(tls.get("ca_cert", "")).expanduser()
+
+    if not cert.exists() or not key.exists():
+        logger.warning(
+            "TLS cert (%s) or key (%s) not found — falling back to plain ws://",
+            cert, key,
+        )
+        return None
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(str(cert), str(key))
+    if ca_cert.exists():
+        ctx.load_verify_locations(str(ca_cert))
+    # Do not require client certificates — browser dashboard uses SSO,
+    # not mTLS.  Peer gossip connections handle mTLS separately.
+    ctx.verify_mode = ssl.CERT_NONE
+
+    logger.info("TLS context loaded: cert=%s, ca=%s", cert, ca_cert)
+    return ctx
 
 
 class WSEventSinkAdapter:
@@ -172,6 +225,7 @@ class JaatoWSServer:
         apparmor: Optional[bool] = None,
         default_template: str = "default",
         workspace_max_age: int = 86400,
+        ssl_context: Optional[ssl.SSLContext] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -188,6 +242,9 @@ class JaatoWSServer:
                 when auto-provisioning (default: ``"default"``).
             workspace_max_age: Maximum age in seconds for provisioned workspaces
                 before the reaper removes them (default: 86400 = 24h).
+            ssl_context: Optional ``ssl.SSLContext`` for TLS. When provided the
+                server listens on ``wss://`` instead of ``ws://``. Use
+                :func:`load_tls_context` to build one from ``servers.json``.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -196,6 +253,7 @@ class JaatoWSServer:
 
         self.host = host
         self.port = port
+        self._ssl_context = ssl_context
         self._workspace_root = workspace_root
 
         # Connection interceptors registered by daemon extensions.
@@ -319,15 +377,22 @@ class JaatoWSServer:
 
         # Start WebSocket server
         try:
+            serve_kwargs: Dict[str, Any] = dict(
+                ping_interval=30,
+                ping_timeout=10,
+            )
+            if self._ssl_context:
+                serve_kwargs["ssl"] = self._ssl_context
+
             async with websockets.serve(
                 self._handle_client,
                 self.host,
                 self.port,
-                ping_interval=30,
-                ping_timeout=10,
+                **serve_kwargs,
             ) as server:
                 self._server = server
-                logger.info(f"WebSocket server listening on ws://{self.host}:{self.port}")
+                scheme = "wss" if self._ssl_context else "ws"
+                logger.info(f"WebSocket server listening on {scheme}://{self.host}:{self.port}")
 
                 # Run event broadcaster and wait for shutdown
                 broadcast_task = asyncio.create_task(self._broadcast_loop())
