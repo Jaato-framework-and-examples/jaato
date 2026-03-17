@@ -642,9 +642,10 @@ class JaatoServer:
             if isinstance(created_at, datetime):
                 created_at = created_at.isoformat()
 
+            display_name = info.get('display_name') or (profile.name if profile else agent_id)
             emit(AgentCreatedEvent(
                 agent_id=agent_id,
-                agent_name=profile.name if profile else agent_id,
+                agent_name=display_name,
                 agent_type="subagent",
                 profile_name=profile.name if profile else "",
                 parent_agent_id="main",

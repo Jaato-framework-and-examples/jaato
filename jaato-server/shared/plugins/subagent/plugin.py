@@ -2135,6 +2135,9 @@ class SubagentPlugin:
             f"result={parent_cwd}"
         )
 
+        # Display name: prefer custom_name over profile.name
+        display_name = custom_name or profile.name
+
         # Submit to thread pool (always async)
         self._executor.submit(
             self._run_subagent_async,
@@ -2142,7 +2145,8 @@ class SubagentPlugin:
             profile,
             full_prompt,
             parent_cwd,
-            owner_id
+            owner_id,
+            display_name,
         )
 
         # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
@@ -2167,7 +2171,8 @@ class SubagentPlugin:
         profile: SubagentProfile,
         prompt: str,
         parent_cwd: str,
-        owner_id: int = 0
+        owner_id: int = 0,
+        display_name: Optional[str] = None,
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -2180,6 +2185,8 @@ class SubagentPlugin:
             prompt: The prompt to send to the subagent.
             parent_cwd: Parent's working directory for resolving relative paths.
             owner_id: ``id()`` of the parent session that owns this subagent.
+            display_name: Custom display name for the agent (from spawn_subagent's
+                ``name`` parameter). Falls back to ``profile.name`` when ``None``.
         """
         # Get workspace path from runtime registry as authoritative source
         # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
@@ -2274,10 +2281,11 @@ class SubagentPlugin:
                 provider = getattr(self._parent_session, '_provider_name_override', None)
 
             # Notify UI hooks about agent creation
+            agent_display_name = display_name or profile.name
             if self._ui_hooks:
                 self._ui_hooks.on_agent_created(
                     agent_id=agent_id,
-                    agent_name=profile.name,
+                    agent_name=agent_display_name,
                     agent_type="subagent",
                     profile_name=profile.name,
                     parent_agent_id=self._parent_agent_id,
@@ -2297,7 +2305,7 @@ class SubagentPlugin:
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
                     effective_plugin_configs[plugin_name] = {}
-                effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+                effective_plugin_configs[plugin_name]["agent_name"] = agent_display_name
                 if plugin_name == "todo" and self._plan_reporter:
                     effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
                 # Inject base_path for template plugin so it uses parent's workspace
@@ -2328,7 +2336,7 @@ class SubagentPlugin:
             # Set agent context
             session.set_agent_context(
                 agent_type="subagent",
-                agent_name=profile.name
+                agent_name=agent_display_name
             )
 
             # Set parent session for output forwarding
@@ -2441,6 +2449,7 @@ class SubagentPlugin:
                 self._active_sessions[agent_id] = {
                     'session': session,
                     'profile': profile,
+                    'display_name': agent_display_name,
                     'agent_id': agent_id,
                     'owner_id': owner_id,
                     'created_at': datetime.now(),
