@@ -1198,6 +1198,22 @@ class JaatoServer:
                 if gc_strategy.startswith('gc_'):
                     gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
 
+            # Wire event subscription notification so WS clients learn
+            # which event types the agent is listening for.
+            with _s5.sub("event_bus_hooks"):
+                session = self._jaato.get_session()
+                if session and hasattr(session, '_event_bus_tools') and session._event_bus_tools:
+                    _server_ref = self
+
+                    def _on_subscribed(agent_id: str, event_names: list) -> None:
+                        from jaato_sdk.events import EventsSubscribedEvent
+                        _server_ref.emit(EventsSubscribedEvent(
+                            agent_id=agent_id,
+                            event_names=event_names,
+                        ))
+
+                    session._event_bus_tools._on_subscribed = _on_subscribed
+
             # Set up instruction budget callback and emit initial budget
             # This must happen after configure_tools() which populates the budget
             with _s5.sub("instruction_budget"):

@@ -120,6 +120,9 @@ class EventBusTools:
         self._session = session
         self._subscriptions: List[str] = []  # subscription IDs for cleanup
         self._bus: Optional[Any] = None  # lazy import to avoid circular deps
+        # Optional callback invoked after a successful subscription.
+        # Set by the server to emit EventsSubscribedEvent to WS clients.
+        self._on_subscribed: Optional[Callable[[str, List[str]], None]] = None
 
     def _get_bus(self):
         """Get the session's EventBus instance from the runtime."""
@@ -167,6 +170,15 @@ class EventBusTools:
                                 "enum": _ALL_EVENT_TYPES,
                             },
                             "description": "Event types to subscribe to",
+                        },
+                        "event_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Filter external events by name (e.g., 'editor.change', "
+                                "'order.placed'). Only meaningful when event_types includes "
+                                "'external_event'. Omit to receive all external events."
+                            ),
                         },
                     },
                     "required": ["event_types"],
@@ -290,6 +302,7 @@ class EventBusTools:
         agent_id = args.get("agent_id")
         plan_id = args.get("plan_id")
         step_id = args.get("step_id")
+        event_names_raw = args.get("event_names", [])
 
         if not event_types_raw:
             return {"error": "event_types is required"}
@@ -301,8 +314,13 @@ class EventBusTools:
             try:
                 event_types_raw = json.loads(event_types_raw)
             except json.JSONDecodeError:
-                # Single event type as a plain string
                 event_types_raw = [event_types_raw]
+
+        if isinstance(event_names_raw, str):
+            try:
+                event_names_raw = json.loads(event_names_raw)
+            except json.JSONDecodeError:
+                event_names_raw = [event_names_raw]
 
         # Parse event types
         event_types = []
@@ -311,6 +329,9 @@ class EventBusTools:
                 event_types.append(EventType(et))
             except ValueError:
                 return {"error": f"Invalid event type: {et}"}
+
+        # event_names filter: only applies to external_event subscriptions
+        event_names_set = set(event_names_raw) if event_names_raw else None
 
         bus = self._get_bus()
         subscriber_name = self._get_agent_name()
@@ -335,6 +356,12 @@ class EventBusTools:
             if event.source_agent == subscriber_name:
                 return
 
+            # Apply event_names filter for external events
+            if event_names_set and event.event_type == EventType.EXTERNAL_EVENT:
+                name = event.payload.get("event_type", "")
+                if name not in event_names_set:
+                    return
+
             event_message = _format_event_notification(event)
 
             from shared.message_queue import SourceType
@@ -353,6 +380,16 @@ class EventBusTools:
             callback=on_event,
         )
         self._subscriptions.append(sub_id)
+
+        # Notify WS clients only for external_event subscriptions so the
+        # host page knows the agent is ready to receive external events.
+        has_external = EventType.EXTERNAL_EVENT in event_types
+        if has_external and self._on_subscribed:
+            names = list(event_names_raw) if event_names_raw else ["*"]
+            try:
+                self._on_subscribed(subscriber_name, names)
+            except Exception:
+                logger.debug("Failed to emit subscription notification", exc_info=True)
 
         return {
             "subscription_id": sub_id,

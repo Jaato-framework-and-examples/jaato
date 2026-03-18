@@ -160,6 +160,9 @@ class EventType(str, Enum):
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
 
+    # Event subscription notifications (Server -> Client)
+    EVENTS_SUBSCRIBED = "events.subscribed"
+
     # Peer channel events (server-to-server gossip)
     PEER_HEARTBEAT = "peer.heartbeat"
     PEER_SPAWN_REQUEST = "peer.spawn_request"
@@ -975,6 +978,19 @@ class ExternalEventRequest(Event):
 
 
 @dataclass
+class EventsSubscribedEvent(Event):
+    """Notification that an agent has subscribed to external events.
+
+    Sent to WS clients so the host page knows which external event
+    names the agent is listening for.  ``["*"]`` means all external
+    events.
+    """
+    type: EventType = field(default=EventType.EVENTS_SUBSCRIBED)
+    agent_id: str = ""
+    event_names: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CommandRequest(Event):
     """Execute a command (like 'model', 'save', 'resume', etc.)."""
     type: EventType = field(default=EventType.COMMAND)
@@ -1601,6 +1617,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
     EventType.STOP.value: StopRequest,
     EventType.EVENT_EXTERNAL.value: ExternalEventRequest,
+    EventType.EVENTS_SUBSCRIBED.value: EventsSubscribedEvent,
     EventType.COMMAND.value: CommandRequest,
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
