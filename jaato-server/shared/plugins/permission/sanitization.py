@@ -19,28 +19,29 @@ from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 logger = logging.getLogger(__name__)
 
 
-# Shell metacharacters that could enable injection attacks
+# Shell metacharacters that could enable injection attacks.
+# Note: '$' is NOT included here — env var references like $VAR and
+# ${VAR} are legitimate.  Command substitution ($(...) and backticks)
+# is caught by SHELL_INJECTION_PATTERNS instead.
 SHELL_METACHARACTERS = {
     ';',   # Command separator
     '|',   # Pipe
     '&',   # Background / AND
     '`',   # Command substitution (backticks)
-    '$',   # Variable expansion / command substitution
     '(',   # Subshell
     ')',
-    '{',   # Brace expansion
-    '}',
     '<',   # Redirection
     '>',
     '\n',  # Newline (command separator)
     '\r',
 }
 
-# Patterns that indicate shell injection attempts
+# Patterns that indicate shell injection attempts.
+# $VAR and ${VAR} (env var references) are allowed — only command
+# substitution forms $(...) and `...` are blocked.
 SHELL_INJECTION_PATTERNS = [
-    r'\$\(',        # $(command)
-    r'\$\{',        # ${variable}
-    r'`[^`]+`',     # `command`
+    r'\$\(',        # $(command) — command substitution
+    r'`[^`]+`',     # `command` — backtick command substitution
     r';\s*\w',      # ; command
     r'\|\s*\w',     # | command
     r'&&\s*\w',     # && command

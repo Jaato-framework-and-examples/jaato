@@ -50,14 +50,17 @@ class TestCheckShellInjection:
     def test_dollar_paren_substitution(self):
         result = check_shell_injection("echo $(cat /etc/passwd)")
         assert not result.is_safe
-        # $ is detected as shell metacharacter OR $( pattern is detected
-        assert any("$" in v for v in result.violations)
+        assert any("injection pattern" in v for v in result.violations)
 
-    def test_dollar_brace_expansion(self):
+    def test_dollar_brace_expansion_is_allowed(self):
+        """${VAR} env var references are legitimate and should be allowed."""
         result = check_shell_injection("echo ${HOME}")
-        assert not result.is_safe
-        # $ is detected as shell metacharacter OR ${ pattern is detected
-        assert any("$" in v for v in result.violations)
+        assert result.is_safe
+
+    def test_dollar_var_reference_is_allowed(self):
+        """$VAR env var references are legitimate and should be allowed."""
+        result = check_shell_injection("curl -H \"Authorization: token $GITHUB_TOKEN\" https://api.github.com")
+        assert result.is_safe
 
     def test_output_redirection(self):
         result = check_shell_injection("echo data > /etc/passwd")
