@@ -253,6 +253,7 @@ class JaatoSession:
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
+        self._telemetry_spans_started: bool = False
 
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
@@ -380,6 +381,38 @@ class JaatoSession:
         """Get telemetry plugin from runtime."""
         return self._runtime.telemetry
 
+    def _ensure_telemetry_spans(self) -> None:
+        """Lazily start the session and agent telemetry spans.
+
+        Called on the first turn rather than in ``set_agent_context``
+        because the parent session reference may not be set yet when
+        ``set_agent_context`` runs (subagents call it before
+        ``set_parent_session``).
+
+        Uses the main session's ``_agent_id`` as the root session span
+        so that all agents (main + subagents) share one session tree.
+        """
+        if self._telemetry_spans_started:
+            return
+        self._telemetry_spans_started = True
+
+        telemetry = self._telemetry
+        # Determine the root session ID: use the main session's agent_id
+        # so all agents tree under one session span.
+        parent = self._parent_session
+        session_root = self._agent_id
+        while parent is not None:
+            session_root = parent._agent_id
+            parent = getattr(parent, '_parent_session', None)
+
+        telemetry.begin_session(session_root)
+        telemetry.begin_agent(
+            session_id=session_root,
+            agent_id=self._agent_id,
+            agent_name=self._agent_name,
+            agent_type=self._agent_type,
+        )
+
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
 
@@ -491,18 +524,9 @@ class JaatoSession:
                 agent_id=self._agent_id
             )
 
-        # Start telemetry session and agent spans so turns nest under them:
-        # session → agent → turn → llm / tool
-        telemetry = self._telemetry
-        parent_sid = getattr(self._parent_session, '_agent_id', None) if self._parent_session else None
-        session_root = parent_sid or self._agent_id
-        telemetry.begin_session(session_root)
-        telemetry.begin_agent(
-            session_id=session_root,
-            agent_id=self._agent_id,
-            agent_name=agent_name,
-            agent_type=agent_type,
-        )
+        # Telemetry session/agent spans are started lazily on the first
+        # turn (see _ensure_telemetry_spans) because the parent session
+        # reference may not be set yet when set_agent_context is called.
 
     def set_ui_hooks(
         self,
@@ -2645,6 +2669,9 @@ NOTES
         # Notify reliability plugin of turn start
         if self._runtime.reliability_plugin:
             self._runtime.reliability_plugin.on_turn_start(self._turn_index)
+
+        # Ensure session/agent spans exist before the first turn
+        self._ensure_telemetry_spans()
 
         # Wrap entire turn with telemetry span
         # Determine parent session ID for graph visualization
