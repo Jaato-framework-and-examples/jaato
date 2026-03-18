@@ -491,6 +491,19 @@ class JaatoSession:
                 agent_id=self._agent_id
             )
 
+        # Start telemetry session and agent spans so turns nest under them:
+        # session → agent → turn → llm / tool
+        telemetry = self._telemetry
+        parent_sid = getattr(self._parent_session, '_agent_id', None) if self._parent_session else None
+        session_root = parent_sid or self._agent_id
+        telemetry.begin_session(session_root)
+        telemetry.begin_agent(
+            session_id=session_root,
+            agent_id=self._agent_id,
+            agent_name=agent_name,
+            agent_type=agent_type,
+        )
+
     def set_ui_hooks(
         self,
         hooks: 'AgentUIHooks',

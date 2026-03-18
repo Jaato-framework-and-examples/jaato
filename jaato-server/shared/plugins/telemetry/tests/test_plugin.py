@@ -436,7 +436,7 @@ class TestOTelPlugin:
         turn_span = spans[2]
 
         assert tool_span.name.startswith("jaato.tool.")
-        assert llm_span.name == "llm"
+        assert llm_span.name == "jaato.sess_1.llm"
         assert turn_span.name == "jaato.unknown.turn"
 
         # Check parent-child relationships
@@ -622,15 +622,27 @@ class TestOTelPlugin:
         plugin = OTelPlugin()
         assert isinstance(plugin, TelemetryPlugin)
 
-    def test_llm_span_name_is_llm(self):
-        """Test llm_span uses 'llm' span name (not gen_ai.chat)."""
+    def test_llm_span_name_uses_session_id(self):
+        """Test llm_span uses session ID in span name when inside a turn."""
+        plugin, exporter = _create_test_plugin()
+
+        with plugin.turn_span("sess_42", "main") as turn:
+            with plugin.llm_span("model", "provider") as span:
+                pass
+
+        spans = exporter.get_finished_spans()
+        llm_span = [s for s in spans if ".llm" in s.name][0]
+        assert llm_span.name == "jaato.sess_42.llm"
+
+    def test_llm_span_name_fallback_without_session(self):
+        """Test llm_span falls back to 'jaato.llm' without session context."""
         plugin, exporter = _create_test_plugin()
 
         with plugin.llm_span("model", "provider") as span:
             pass
 
         spans = exporter.get_finished_spans()
-        assert spans[0].name == "llm"
+        assert spans[0].name == "jaato.llm"
 
         plugin.shutdown()
 

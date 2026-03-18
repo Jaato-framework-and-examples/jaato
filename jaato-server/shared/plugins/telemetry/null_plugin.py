@@ -67,6 +67,18 @@ class NullTelemetryPlugin:
         """Always returns False."""
         return False
 
+    def begin_session(self, session_id, attributes=None):
+        pass
+
+    def end_session(self, session_id):
+        pass
+
+    def begin_agent(self, session_id, agent_id, agent_name=None, agent_type="main", attributes=None):
+        pass
+
+    def end_agent(self, session_id, agent_id):
+        pass
+
     @contextmanager
     def turn_span(
         self,

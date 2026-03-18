@@ -299,7 +299,7 @@ class OTelPlugin:
     """
 
     __slots__ = ("_enabled", "_tracer", "_redact_content", "_provider",
-                 "_agent_context")
+                 "_agent_context", "_long_lived_spans")
 
     def __init__(self):
         self._enabled = False
@@ -307,6 +307,10 @@ class OTelPlugin:
         self._redact_content = True
         self._provider = None
         self._agent_context = threading.local()
+        # Long-lived spans keyed by identifier.  Each entry holds
+        # ``(span, otel_context)`` so child spans can be parented under
+        # them.  Used for session spans and agent spans.
+        self._long_lived_spans: Dict[str, Any] = {}
 
     def initialize(self, config: Dict[str, Any]) -> None:
         """Initialize OpenTelemetry with the given configuration.
@@ -468,6 +472,8 @@ class OTelPlugin:
 
     def shutdown(self) -> None:
         """Flush pending spans and shutdown."""
+        for key in list(self._long_lived_spans):
+            self._end_long_lived(key)
         if self._provider:
             self._provider.shutdown()
             self._provider = None
@@ -478,6 +484,118 @@ class OTelPlugin:
     def enabled(self) -> bool:
         """Check if telemetry is enabled and initialized."""
         return self._enabled and self._tracer is not None
+
+    # ------------------------------------------------------------------
+    # Long-lived span helpers (session and agent spans)
+    # ------------------------------------------------------------------
+
+    def _start_long_lived(
+        self, key: str, span_name: str, attrs: Dict[str, Any],
+        parent_key: Optional[str] = None,
+    ) -> None:
+        """Start a long-lived span and store it by *key*.
+
+        Args:
+            key: Lookup key (e.g., session_id or agent_id).
+            span_name: OTel span name.
+            attrs: Span attributes.
+            parent_key: Optional key of a parent long-lived span.
+        """
+        if not self.enabled or key in self._long_lived_spans:
+            return
+        _ensure_imports()
+
+        parent_ctx = None
+        if parent_key:
+            parent_entry = self._long_lived_spans.get(parent_key)
+            if parent_entry:
+                parent_ctx = parent_entry[1]
+
+        span = self._tracer.start_span(span_name, attributes=attrs, context=parent_ctx)
+        ctx = _trace.set_span_in_context(span)
+        self._long_lived_spans[key] = (span, ctx)
+
+    def _end_long_lived(self, key: str) -> None:
+        """End and remove a long-lived span by *key*."""
+        entry = self._long_lived_spans.pop(key, None)
+        if entry:
+            entry[0].end()
+
+    def begin_session(
+        self,
+        session_id: str,
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Start the root session span.
+
+        All agent spans (and transitively all turn/llm/tool spans)
+        become children of this span, forming the tree:
+        ``session → agent → turn → llm / tool``.
+
+        Args:
+            session_id: Unique session identifier.
+            attributes: Optional extra span attributes.
+        """
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_CHAIN,
+            "session.id": session_id,
+        }
+        if attributes:
+            attrs.update(attributes)
+        self._start_long_lived(
+            key=f"session:{session_id}",
+            span_name=f"jaato.session.{session_id}",
+            attrs=attrs,
+        )
+
+    def end_session(self, session_id: str) -> None:
+        """End the session span and any orphaned agent spans under it."""
+        # End agent spans that belong to this session
+        agent_prefix = f"agent:{session_id}:"
+        for key in list(self._long_lived_spans):
+            if key.startswith(agent_prefix):
+                self._end_long_lived(key)
+        self._end_long_lived(f"session:{session_id}")
+
+    def begin_agent(
+        self,
+        session_id: str,
+        agent_id: str,
+        agent_name: Optional[str] = None,
+        agent_type: str = "main",
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Start an agent span under the session span.
+
+        Turn spans with matching *session_id* are automatically parented
+        under this agent span.
+
+        Args:
+            session_id: Parent session identifier.
+            agent_id: Unique agent identifier (session_id for main, subagent ID for subs).
+            agent_name: Display name (e.g., profile name).
+            agent_type: ``"main"`` or ``"subagent"``.
+            attributes: Optional extra span attributes.
+        """
+        name = agent_name or agent_id
+        attrs: Dict[str, Any] = {
+            _OI_SPAN_KIND: _OI_AGENT,
+            "session.id": session_id,
+            "agent.name": name,
+            "agent.type": agent_type,
+        }
+        if attributes:
+            attrs.update(attributes)
+        self._start_long_lived(
+            key=f"agent:{session_id}:{agent_id}",
+            span_name=f"jaato.agent.{name}",
+            attrs=attrs,
+            parent_key=f"session:{session_id}",
+        )
+
+    def end_agent(self, session_id: str, agent_id: str) -> None:
+        """End an agent span."""
+        self._end_long_lived(f"agent:{session_id}:{agent_id}")
 
     def _get_context_metadata(self) -> Dict[str, Any]:
         """Build metadata dict from thread-local context.
@@ -594,8 +712,15 @@ class OTelPlugin:
         turn_suffix = f".{turn_index}" if turn_index is not None else ""
         span_name = f"jaato.{name}.turn{turn_suffix}"
 
+        # Parent under the agent span if one is active (session → agent → turn)
+        agent_key = f"agent:{parent_session_id or session_id}:{session_id}"
+        agent_entry = self._long_lived_spans.get(agent_key)
+        parent_ctx = agent_entry[1] if agent_entry else None
+
         try:
-            with self._tracer.start_as_current_span(span_name, attributes=attrs) as span:
+            with self._tracer.start_as_current_span(
+                span_name, attributes=attrs, context=parent_ctx,
+            ) as span:
                 yield _SpanWrapper(span, self._redact_content)
         finally:
             ctx.agent_id = prev_id
@@ -634,7 +759,11 @@ class OTelPlugin:
         if attributes:
             attrs.update(attributes)
 
-        with self._tracer.start_as_current_span("llm", attributes=attrs) as span:
+        ctx = self._agent_context
+        session_id = getattr(ctx, "agent_id", None)
+        span_name = f"jaato.{session_id}.llm" if session_id else "jaato.llm"
+
+        with self._tracer.start_as_current_span(span_name, attributes=attrs) as span:
             yield _SpanWrapper(span, self._redact_content)
 
     @contextmanager

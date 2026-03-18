@@ -142,6 +142,41 @@ class TelemetryPlugin(Protocol):
         """Check if telemetry is enabled."""
         ...
 
+    def begin_session(
+        self,
+        session_id: str,
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Start the root session span.
+
+        Creates a long-lived span that parents all agent and turn spans
+        for this session.  Call ``end_session`` when the session is done.
+        """
+        ...
+
+    def end_session(self, session_id: str) -> None:
+        """End the session span."""
+        ...
+
+    def begin_agent(
+        self,
+        session_id: str,
+        agent_id: str,
+        agent_name: Optional[str] = None,
+        agent_type: str = "main",
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Start an agent span under the session span.
+
+        Turn spans are automatically parented under the agent span.
+        Call ``end_agent`` when the agent is done.
+        """
+        ...
+
+    def end_agent(self, session_id: str, agent_id: str) -> None:
+        """End an agent span."""
+        ...
+
     @contextmanager
     def turn_span(
         self,
