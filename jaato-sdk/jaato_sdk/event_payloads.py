@@ -175,6 +175,7 @@ class AgentCompletedPayload(TypedDict):
     success: bool
     token_usage: NotRequired[Optional[Dict[str, int]]]
     turns_used: NotRequired[Optional[int]]
+    error: NotRequired[str]
 
 
 class ToolCallStartedPayload(TypedDict):
