@@ -1612,7 +1612,7 @@ class JaatoServer:
                 ))
 
             def on_agent_completed(self, agent_id, completed_at, success,
-                                   token_usage=None, turns_used=None):
+                                   token_usage=None, turns_used=None, error=""):
                 # Convert datetime to isoformat string if needed
                 completed_at_str = completed_at
                 if completed_at and hasattr(completed_at, 'isoformat'):
@@ -1629,6 +1629,7 @@ class JaatoServer:
                     success=success,
                     token_usage=token_usage,
                     turns_used=turns_used,
+                    error=error,
                 ))
 
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,

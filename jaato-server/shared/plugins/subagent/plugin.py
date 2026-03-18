@@ -223,7 +223,7 @@ class SubagentPlugin:
                 session = info.get('session')
                 if session and getattr(session, 'is_running', False):
                     if getattr(session, 'supports_stop', False):
-                        session.request_stop()
+                        session.request_stop(reason="parent_reset")
             self._active_sessions.clear()
         self._owner_counters.clear()
         self._subagent_counter = 0
@@ -1650,7 +1650,7 @@ class SubagentPlugin:
             if session and session.is_running:
                 was_running = True
                 if session.supports_stop:
-                    session.request_stop()
+                    session.request_stop(reason="parent_closed")
 
             self._close_session_unlocked(subagent_id)
 
@@ -1725,7 +1725,7 @@ class SubagentPlugin:
             }
 
         # Request cancellation
-        cancelled = session.request_stop()
+        cancelled = session.request_stop(reason="parent_cancelled")
         if cancelled:
             # Notify UI hooks
             if self._ui_hooks:
@@ -1824,7 +1824,7 @@ class SubagentPlugin:
                     continue
                 session = info.get('session')
                 if session and session.is_running and session.supports_stop:
-                    if session.request_stop():
+                    if session.request_stop(reason="parent_cancelled"):
                         cancelled_count += 1
                         if self._ui_hooks:
                             self._ui_hooks.on_agent_status_changed(

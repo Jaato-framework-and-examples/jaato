@@ -244,6 +244,7 @@ class AgentCompletedEvent(Event):
     success: bool = True
     token_usage: Optional[Dict[str, int]] = None
     turns_used: Optional[int] = None
+    error: str = ""  # Cancellation reason or error message
 
 
 @dataclass

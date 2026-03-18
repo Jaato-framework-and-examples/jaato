@@ -973,11 +973,16 @@ class JaatoSession:
             # Also clear turn suspension (turn has ended)
             self._runtime.permission_plugin.clear_turn_suspension()
 
-    def request_stop(self) -> bool:
+    def request_stop(self, reason: str = "") -> bool:
         """Request cancellation of the current message processing.
 
         If a message is being processed, signals the cancel token to stop.
         The message loop will check this token and exit gracefully.
+
+        Args:
+            reason: Why the stop was requested. Included in the
+                ``[Generation cancelled (reason)]`` output message.
+                Defaults to ``"user_cancelled"``.
 
         Returns:
             True if a cancellation was requested (message was running),
@@ -988,7 +993,7 @@ class JaatoSession:
             The current streaming chunk will complete before stopping.
         """
         if self._cancel_token and self._is_running:
-            self._cancel_token.cancel()
+            self._cancel_token.cancel(reason=reason or "user_cancelled")
             return True
         return False
 
@@ -3056,7 +3061,9 @@ NOTES
                 )
 
         # --- Normal cancellation path ---
-        cancel_msg = "[Generation cancelled]"
+        reason = self._cancel_token.cancel_reason if self._cancel_token else ""
+        reason_suffix = f" ({reason})" if reason else ""
+        cancel_msg = f"[Generation cancelled{reason_suffix}]"
         if on_output and not cancellation_notified:
             self._trace(f"CANCEL_NOTIFY: {cancel_msg} ({context})")
             on_output("system", cancel_msg, "write")
@@ -3219,7 +3226,9 @@ NOTES
 
         # 2. Simple cancellation check after execution
         if self._is_cancelled():
-            cancel_msg = "[Generation cancelled]"
+            reason = self._cancel_token.cancel_reason if self._cancel_token else ""
+            reason_suffix = f" ({reason})" if reason else ""
+            cancel_msg = f"[Generation cancelled{reason_suffix}]"
             if on_output and not cancellation_notified:
                 on_output("system", cancel_msg, "write")
             partial = ''.join(accumulated_text) if accumulated_text else ""
@@ -3719,9 +3728,12 @@ NOTES
         except CancelledException:
             # Handle explicit cancellation exception
             # Note: Don't send on_output here - the explicit checks above already do
-            self._forward_to_parent("CANCELLED", "Generation cancelled")
+            reason = self._cancel_token.cancel_reason if self._cancel_token else ""
+            reason_suffix = f" ({reason})" if reason else ""
+            cancel_msg = f"Generation cancelled{reason_suffix}"
+            self._forward_to_parent("CANCELLED", cancel_msg)
             terminal_event_sent = True
-            return "[Generation cancelled]"
+            return f"[{cancel_msg}]"
 
         except Exception as exc:
             # Route provider errors through output callback before re-raising
