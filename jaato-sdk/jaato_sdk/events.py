@@ -157,6 +157,9 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
 
+    # External events (Client -> Server, from web components)
+    EVENT_EXTERNAL = "event.external"
+
     # Peer channel events (server-to-server gossip)
     PEER_HEARTBEAT = "peer.heartbeat"
     PEER_SPAWN_REQUEST = "peer.spawn_request"
@@ -959,6 +962,19 @@ class StopRequest(Event):
 
 
 @dataclass
+class ExternalEventRequest(Event):
+    """External event injected by the host page via the web component.
+
+    Published on the session's ``EventBus`` as an ``external_event``
+    so that agents subscribed via ``subscribeToEvents`` are notified.
+    """
+    type: EventType = field(default=EventType.EVENT_EXTERNAL)
+    name: str = ""        # Event name (e.g., "order.placed")
+    data: Dict[str, Any] = field(default_factory=dict)  # Arbitrary payload
+    timestamp: str = ""   # ISO 8601 timestamp from the client
+
+
+@dataclass
 class CommandRequest(Event):
     """Execute a command (like 'model', 'save', 'resume', etc.)."""
     type: EventType = field(default=EventType.COMMAND)
@@ -1584,6 +1600,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
     EventType.STOP.value: StopRequest,
+    EventType.EVENT_EXTERNAL.value: ExternalEventRequest,
     EventType.COMMAND.value: CommandRequest,
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,

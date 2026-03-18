@@ -641,6 +641,12 @@ class JaatoWSServer:
             await self._handle_workspace_event(client_id, event)
             return
 
+        # --- External events (from <jaato-task> web component) ---
+        from jaato_sdk.events import ExternalEventRequest
+        if isinstance(event, ExternalEventRequest):
+            await self._handle_external_event(client_id, event)
+            return
+
         # --- Daemon-mode delegation ---
         # When running as part of JaatoDaemon, route session/command events
         # through the CommandRouter for unified dispatch across transports.
@@ -749,6 +755,68 @@ class JaatoWSServer:
 
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
+
+    async def _handle_external_event(self, client_id: str, event) -> None:
+        """Handle an ``ExternalEventRequest`` from the web component.
+
+        Publishes the external event on the session's ``EventBus`` so that
+        agents subscribed via ``subscribeToEvents(event_types=['external_event'])``
+        are woken via ``inject_prompt()``.
+
+        Args:
+            client_id: The WS client that sent the message.
+            event: Deserialized ``ExternalEventRequest``.
+        """
+        from jaato_sdk.event_bus import Event as BusEvent, EventType as BusEventType
+
+        # Resolve the session attached to this client
+        session_id = ""
+        if self._event_sink_adapter:
+            session_id = self._event_sink_adapter._client_sessions.get(client_id, "")
+
+        if not session_id:
+            await self._send_error(client_id, "No session attached — cannot deliver external event")
+            return
+
+        # Find the session's EventBus.
+        # In daemon mode: SessionManager → Session → JaatoServer → JaatoClient → session → runtime
+        # In standalone mode: self._jaato_server → JaatoClient → session → runtime
+        bus = None
+        if self._command_router:
+            sm = self._command_router._session_manager
+            session_obj = sm.get_session(session_id) if hasattr(sm, 'get_session') else None
+            if session_obj and session_obj.server and session_obj.server._jaato:
+                jaato_session = session_obj.server._jaato.get_session()
+                if jaato_session:
+                    bus = jaato_session._runtime.event_bus
+        elif self._jaato_server and self._jaato_server._jaato:
+            jaato_session = self._jaato_server._jaato.get_session()
+            if jaato_session:
+                bus = jaato_session._runtime.event_bus
+
+        if not bus:
+            await self._send_error(client_id, "Session event bus not available")
+            return
+
+        # Build and publish the bus event
+        timestamp = event.timestamp or datetime.now(timezone.utc).isoformat()
+
+        bus_event = BusEvent(
+            event_id=f"ext_{timestamp}",
+            event_type=BusEventType.EXTERNAL_EVENT,
+            timestamp=timestamp,
+            source_agent="_external",
+            payload={
+                "source": "websocket",
+                "event_type": event.name,
+                "data": event.data,
+            },
+        )
+        notified = bus.publish(bus_event)
+        logger.debug(
+            "External event '%s' published to session %s, notified %d subscriber(s)",
+            event.name, session_id, notified,
+        )
 
     async def _handle_workspace_event(self, client_id: str, event: Event) -> None:
         """Handle workspace management events (transport-level concern).
