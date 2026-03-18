@@ -211,6 +211,7 @@ class TemplatePlugin:
             self._templates_dir = self._base_path / ".jaato" / "templates"
 
         self._initialized = True
+        self._load_persisted_index()
         self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
 
     def set_plugin_registry(self, registry) -> None:
@@ -232,10 +233,46 @@ class TemplatePlugin:
         Called by PluginRegistry.set_workspace_path() when a session binds
         to a specific workspace.  Re-resolves _base_path and _templates_dir
         so template resolution uses the workspace, not the server CWD.
+        Also loads the persisted template index from disk so templates are
+        available immediately — without depending on the references plugin.
         """
         self._base_path = Path(path)
         self._templates_dir = self._base_path / ".jaato" / "templates"
+        self._load_persisted_index()
         self._trace(f"set_workspace_path: base_path={self._base_path}, templates_dir={self._templates_dir}")
+
+    def _load_persisted_index(self) -> None:
+        """Load the template index from .jaato/templates/index.json if it exists.
+
+        Seeds ``_template_index`` so that ``listAvailableTemplates`` and
+        ``writeFileFromTemplate`` work immediately, even before the
+        references plugin discovers template directories.  Entries loaded
+        here are overwritten if the references plugin later discovers the
+        same template name (runtime discovery takes precedence).
+        """
+        if not self._templates_dir:
+            return
+        index_path = self._templates_dir / "index.json"
+        if not index_path.exists():
+            return
+        try:
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            templates = data.get("templates", {})
+            loaded = 0
+            for name, entry_data in templates.items():
+                if name not in self._template_index:
+                    self._template_index[name] = TemplateIndexEntry(
+                        name=entry_data.get("name", name),
+                        source_path=entry_data.get("source_path", ""),
+                        syntax=entry_data.get("syntax", "jinja2"),
+                        variables=entry_data.get("variables", []),
+                        origin=entry_data.get("origin", "standalone"),
+                    )
+                    loaded += 1
+            if loaded:
+                self._trace(f"_load_persisted_index: loaded {loaded} templates from {index_path}")
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
+            self._trace(f"_load_persisted_index: failed to load {index_path}: {exc}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
