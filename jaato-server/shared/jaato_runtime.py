@@ -42,7 +42,11 @@ _TASK_COMPLETION_INSTRUCTION = (
     "Pause only for permissions or clarifications—never from uncertainty. "
     "CRITICAL: Never fabricate results. Every completion claim must be backed by "
     "an actual tool call result or subagent output in this conversation. If a step "
-    "cannot be verified, mark it failed honestly—do not invent success."
+    "cannot be verified, mark it failed honestly—do not invent success. "
+    "CRITICAL: Never invent constraints that were not stated by the user. Do not "
+    "claim token budget limits, time constraints, complexity ceilings, or any other "
+    "restriction unless the user or the system explicitly told you about it. If you "
+    "have work remaining, continue doing it—do not stop and summarize what is left."
 )
 
 # Parallel tool execution guidance — basic efficiency
