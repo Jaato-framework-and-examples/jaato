@@ -1129,13 +1129,18 @@ class JaatoWSServer:
             if not hasattr(self, '_client_tool_waiters'):
                 self._client_tool_waiters = {}
 
-            # Build the proxy executor
+            # Build the proxy executor.
+            # The executor sends the request to whichever clients are
+            # currently attached to the session (not a hardcoded client_id).
+            # If no client is connected, it waits for one to appear —
+            # same behavior as permission requests during disconnection.
             ws_server = self
-            cid = client_id
+            sid = session_id
 
             def make_executor(tname, tout):
                 def executor(args):
                     import uuid
+                    import time
                     call_id = str(uuid.uuid4())[:8]
 
                     # Create a threading Event to wait for the result
@@ -1143,21 +1148,41 @@ class JaatoWSServer:
                     result_holder = {'result': None, 'error': None}
                     ws_server._client_tool_waiters[call_id] = (waiter, result_holder)
 
-                    # Send execute request to client
-                    import asyncio
-                    if ws_server._event_sink_adapter and ws_server._event_sink_adapter._event_loop:
-                        asyncio.run_coroutine_threadsafe(
-                            ws_server._send_to_client(cid, ToolExecuteRequestEvent(
-                                call_id=call_id,
-                                agent_id='',
-                                tool_name=tname,
-                                tool_args=args,
-                            )),
-                            ws_server._event_sink_adapter._event_loop,
-                        )
+                    request_event = ToolExecuteRequestEvent(
+                        call_id=call_id,
+                        agent_id='',
+                        tool_name=tname,
+                        tool_args=args,
+                    )
 
-                    # Wait for result with timeout
-                    if waiter.wait(timeout=tout):
+                    def _send_to_session_clients():
+                        """Send the request to all clients attached to the session."""
+                        if not ws_server._event_sink_adapter or not ws_server._event_sink_adapter._event_loop:
+                            return False
+                        sent = False
+                        for cid, csid in ws_server._event_sink_adapter._client_sessions.items():
+                            if csid == sid:
+                                import asyncio
+                                asyncio.run_coroutine_threadsafe(
+                                    ws_server._send_to_client(cid, request_event),
+                                    ws_server._event_sink_adapter._event_loop,
+                                )
+                                sent = True
+                        return sent
+
+                    # Try to send; if no client connected, poll until one appears
+                    deadline = time.time() + tout
+                    sent = _send_to_session_clients()
+                    while not sent and time.time() < deadline:
+                        time.sleep(1.0)
+                        sent = _send_to_session_clients()
+
+                    if not sent:
+                        return {'error': f'No client connected to receive tool call {tname}'}
+
+                    # Wait for result with remaining timeout
+                    remaining = max(0, deadline - time.time())
+                    if waiter.wait(timeout=remaining):
                         if result_holder['error']:
                             return {'error': result_holder['error']}
                         return {'result': result_holder['result']}
