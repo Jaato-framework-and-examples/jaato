@@ -178,15 +178,21 @@ class MessageQueue:
             return msg
 
     def has_parent_messages(self) -> bool:
-        """Check if there are any parent/user/system messages pending.
+        """Check if there are any user/system messages that should interrupt streaming.
+
+        Only ``USER`` and ``SYSTEM`` messages trigger mid-turn interrupts.
+        ``PARENT`` (inter-agent) and ``EVENT`` messages are processed at the
+        next natural pause point (between tool calls) without cancelling the
+        current generation — just like how user messages to the main agent
+        are handled when the agent is executing tools.
 
         Returns:
-            True if at least one high-priority message exists.
+            True if at least one interrupt-worthy message exists.
         """
         with self._lock:
             current = self._head
             while current:
-                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM, SourceType.EVENT):
+                if current.source_type in (SourceType.USER, SourceType.SYSTEM):
                     return True
                 current = current._next
         return False
