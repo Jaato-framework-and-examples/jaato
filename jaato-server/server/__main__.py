@@ -85,7 +85,9 @@ class _ExtensionContext:
         ws_server: The ``JaatoWSServer`` instance if ``--web-socket`` was
             passed, or ``None`` otherwise.  Extensions can call
             ``ws_server.set_connection_interceptor(check, handler)`` to
-            route special WebSocket connections to custom handlers.
+            route special WebSocket connections to custom handlers, or
+            ``ws_server.register_message_handler(type, callback)`` to
+            handle custom message types on client connections.
         web_socket: The raw ``--web-socket`` CLI argument string (e.g.
             ``:8080``, ``0.0.0.0:8080``), or ``None``.
         ipc_socket: The raw ``--ipc-socket`` CLI argument string, or ``None``.

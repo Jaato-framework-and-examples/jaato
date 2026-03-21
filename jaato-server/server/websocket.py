@@ -292,6 +292,10 @@ class JaatoWSServer:
         self._command_router = None  # Set by set_command_router()
         self._event_sink_adapter: Optional[WSEventSinkAdapter] = None
 
+        # Extension message handlers: {type_string: async callback(ws, message_dict)}
+        # Registered by daemon extensions for custom WS message types.
+        self._message_handlers: Dict[str, Any] = {}
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
@@ -308,6 +312,45 @@ class JaatoWSServer:
             router: ``CommandRouter`` instance.
         """
         self._command_router = router
+
+    def register_message_handler(
+        self,
+        message_type: str,
+        handler: Any,
+    ) -> None:
+        """Register an async handler for a custom WS message type.
+
+        Daemon extensions call this (via ``_ExtensionContext.ws_server``)
+        to handle custom message types on client WS connections — the same
+        connections used for built-in session/command messages.
+
+        The handler is called when a client sends a JSON message whose
+        ``type`` field matches *message_type* and no built-in handler
+        recognises it.  Built-in types cannot be overridden.
+
+        Args:
+            message_type: The ``type`` field value to match
+                (e.g., ``"reconnect.snapshot"``).
+            handler: Async callback with signature
+                ``async def handler(ws, message: dict) -> None``.
+                *ws* is the raw ``websockets.ServerConnection``;
+                *message* is the parsed JSON dict.
+
+        Example::
+
+            async def handle_snapshot(ws, message):
+                snapshot = build_snapshot(message["session_id"])
+                await ws.send(json.dumps({"type": "reconnect.snapshot", **snapshot}))
+
+            ws_server.register_message_handler("reconnect.snapshot", handle_snapshot)
+        """
+        if message_type in self._message_handlers:
+            logger.warning(
+                "Overwriting existing handler for message type '%s'",
+                message_type,
+            )
+        self._message_handlers[message_type] = handler
+        logger.debug("Registered WS message handler: %s", message_type)
 
     def get_event_sink_adapter(self) -> WSEventSinkAdapter:
         """Return (create if needed) the ``WSEventSinkAdapter`` for this server.
@@ -623,8 +666,23 @@ class JaatoWSServer:
         except json.JSONDecodeError as e:
             await self._send_error(client_id, f"Invalid JSON: {e}")
             return
-        except ValueError as e:
-            await self._send_error(client_id, str(e))
+        except ValueError:
+            # Unknown event type — check extension message handlers
+            # before discarding.
+            try:
+                raw = json.loads(message)
+            except json.JSONDecodeError:
+                return
+            msg_type = raw.get("type", "")
+            handler = self._message_handlers.get(msg_type)
+            if handler:
+                async with self._lock:
+                    client = self._clients.get(client_id)
+                ws = client.websocket if client else None
+                if ws:
+                    await handler(ws, raw)
+            else:
+                await self._send_error(client_id, f"Unknown message type: {msg_type}")
             return
 
         # --- Workspace management (transport-level, all modes) ---
