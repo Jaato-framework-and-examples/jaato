@@ -319,6 +319,22 @@ class JaatoServer:
         return self._session_id
 
     @property
+    def event_bus(self):
+        """Get the session's EventBus for cross-agent event delivery.
+
+        Available after ``initialize()`` completes.  Returns ``None``
+        if the server is not yet initialized or has no session.
+        """
+        if self._jaato:
+            try:
+                session = self._jaato.get_session()
+                if session:
+                    return session._runtime.event_bus
+            except (RuntimeError, AttributeError):
+                pass
+        return None
+
+    @property
     def workspace_path(self) -> Optional[str]:
         """Get the client's workspace path."""
         return self._workspace_path
