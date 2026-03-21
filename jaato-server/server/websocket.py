@@ -175,6 +175,14 @@ class WSEventSinkAdapter:
         """Associate a workspace path with a client."""
         self._client_workspaces[client_id] = workspace_path
 
+    def get_client_user(self, client_id: str) -> Optional[str]:
+        """Get the authenticated user for a WS client."""
+        return self._ws.get_client_user(client_id)
+
+    def set_client_user(self, client_id: str, user_id: str) -> None:
+        """Associate a user identity with a WS client."""
+        self._ws.set_client_user(client_id, user_id)
+
     def remove_client(self, client_id: str) -> None:
         """Clean up tracking state when a client disconnects."""
         self._client_sessions.pop(client_id, None)
@@ -194,6 +202,7 @@ class ClientConnection:
     client_id: str
     connected_at: str
     subscriptions: Set[str]  # Event types to receive (empty = all)
+    user_id: Optional[str] = None  # Authenticated user identity (set by auth middleware)
 
 
 class JaatoWSServer:
@@ -313,6 +322,32 @@ class JaatoWSServer:
         """
         self._command_router = router
 
+    def set_client_user(self, client_id: str, user_id: str) -> None:
+        """Associate an authenticated user identity with a WS client.
+
+        Called by auth middleware (e.g., Keycloak SSO in jaato-premium)
+        after the client's identity is verified.  The identity is stored
+        on the ``ClientConnection`` and propagated to sessions the client
+        creates (``Session.created_by``) and to extension message handler
+        callbacks.
+
+        Args:
+            client_id: The WS client ID.
+            user_id: Authenticated user identifier (username, email, or sub claim).
+        """
+        client = self._clients.get(client_id)
+        if client:
+            client.user_id = user_id
+
+    def get_client_user(self, client_id: str) -> Optional[str]:
+        """Get the authenticated user identity for a WS client.
+
+        Returns:
+            The user ID string, or ``None`` if not authenticated.
+        """
+        client = self._clients.get(client_id)
+        return client.user_id if client else None
+
     def register_message_handler(
         self,
         message_type: str,
@@ -332,14 +367,15 @@ class JaatoWSServer:
             message_type: The ``type`` field value to match
                 (e.g., ``"reconnect.snapshot"``).
             handler: Async callback with signature
-                ``async def handler(ws, message: dict) -> None``.
+                ``async def handler(ws, message: dict, user: str | None) -> None``.
                 *ws* is the raw ``websockets.ServerConnection``;
-                *message* is the parsed JSON dict.
+                *message* is the parsed JSON dict;
+                *user* is the authenticated user ID (``None`` if unauthenticated).
 
         Example::
 
-            async def handle_snapshot(ws, message):
-                snapshot = build_snapshot(message["session_id"])
+            async def handle_snapshot(ws, message, user):
+                snapshot = build_snapshot(message["session_id"], user)
                 await ws.send(json.dumps({"type": "reconnect.snapshot", **snapshot}))
 
             ws_server.register_message_handler("reconnect.snapshot", handle_snapshot)
@@ -678,9 +714,8 @@ class JaatoWSServer:
             if handler:
                 async with self._lock:
                     client = self._clients.get(client_id)
-                ws = client.websocket if client else None
-                if ws:
-                    await handler(ws, raw)
+                if client:
+                    await handler(client.websocket, raw, client.user_id)
             else:
                 await self._send_error(client_id, f"Unknown message type: {msg_type}")
             return

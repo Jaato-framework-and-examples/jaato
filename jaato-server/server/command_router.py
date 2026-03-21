@@ -228,9 +228,11 @@ class CommandRouter:
             elif name is None:
                 name = arg
 
+        created_by = self._event_sink.get_client_user(client_id)
         new_session_id = self._session_manager.create_session(
             client_id, name, workspace_path=workspace_path,
             profile_name=profile_name,
+            created_by=created_by,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
@@ -801,6 +803,7 @@ class CommandRouter:
                 "JAATO_PROVIDER": provider_name,
                 "MODEL_NAME": model_name,
             },
+            created_by=self._event_sink.get_client_user(client_id),
         )
         if session_id:
             set_logging_context(

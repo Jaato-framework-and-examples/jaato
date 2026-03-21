@@ -644,6 +644,18 @@ class JaatoIPCServer:
         client = self._clients.get(client_id)
         return client.workspace_path if client else None
 
+    def get_client_user(self, client_id: str) -> Optional[str]:
+        """Get the authenticated user for an IPC client.
+
+        IPC connections are local and unauthenticated — always returns
+        ``None``.  User identity is a WS/SSO concept.
+        """
+        return None
+
+    def set_client_user(self, client_id: str, user_id: str) -> None:
+        """No-op for IPC — local connections have no user identity."""
+        pass
+
     def broadcast_to_session(self, session_id: str, event: Event) -> None:
         """Broadcast an event to all clients attached to a session."""
         for client_id, client in self._clients.items():

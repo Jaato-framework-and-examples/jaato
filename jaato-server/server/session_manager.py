@@ -82,6 +82,7 @@ class RuntimeSessionInfo:
     client_count: int
     turn_count: int
     workspace_path: Optional[str] = None
+    created_by: Optional[str] = None  # Authenticated user who created the session
 
 
 @dataclass
@@ -99,6 +100,7 @@ class Session:
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
+    created_by: Optional[str] = None  # Authenticated user who created the session
 
 
 class SessionManager:
@@ -628,6 +630,7 @@ class SessionManager:
         env_overrides: Optional[Dict[str, str]] = None,
         profile_name: Optional[str] = None,
         provisioned: bool = False,
+        created_by: Optional[str] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -736,6 +739,7 @@ class SessionManager:
             is_dirty=True,  # New session needs saving
             workspace_path=workspace_path,
             provisioned=provisioned,
+            created_by=created_by,
         )
 
         # Register callback for when auth completes (if it was pending)
@@ -1933,6 +1937,7 @@ class SessionManager:
                     client_count=len(session.attached_clients),
                     turn_count=len(session.server.get_history()) // 2,
                     workspace_path=session.workspace_path,
+                    created_by=session.created_by,
                 )
 
         # Sort by last activity

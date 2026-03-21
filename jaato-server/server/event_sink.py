@@ -46,6 +46,18 @@ class EventSink(Protocol):
         """Associate a workspace path with a client."""
         ...
 
+    def get_client_user(self, client_id: str) -> Optional[str]:
+        """Get the authenticated user identity for a client.
+
+        Returns ``None`` if the client is not authenticated or if the
+        transport does not support authentication (e.g., local IPC).
+        """
+        ...
+
+    def set_client_user(self, client_id: str, user_id: str) -> None:
+        """Associate an authenticated user identity with a client."""
+        ...
+
 
 class CompositeEventSink:
     """Multiplexes event delivery across multiple transport sinks.
@@ -87,3 +99,16 @@ class CompositeEventSink:
         """Fan-out to all registered sinks."""
         for sink in self._sinks:
             sink.set_client_workspace(client_id, workspace_path)
+
+    def get_client_user(self, client_id: str) -> Optional[str]:
+        """Return the first non-None user from any sink."""
+        for sink in self._sinks:
+            user = sink.get_client_user(client_id)
+            if user is not None:
+                return user
+        return None
+
+    def set_client_user(self, client_id: str, user_id: str) -> None:
+        """Fan-out to all registered sinks."""
+        for sink in self._sinks:
+            sink.set_client_user(client_id, user_id)
