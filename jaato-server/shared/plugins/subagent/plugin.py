@@ -212,25 +212,22 @@ class SubagentPlugin:
         )
 
     def shutdown(self) -> None:
-        """Clean up plugin resources.
+        """Clean up plugin configuration state for re-initialisation.
 
-        Cancels any running subagents and clears all session state so
-        the plugin can be safely re-initialised or garbage-collected.
+        Resets config and counters but **preserves running subagents**.
+        Subagents are independent sessions — a parent reset or plugin
+        re-configuration does not invalidate their work.  The parent
+        can explicitly cancel subagents via ``cancel_subagent`` if
+        needed.
         """
-        # Cancel all running subagents before clearing state
-        with self._sessions_lock:
-            for agent_id, info in list(self._active_sessions.items()):
-                session = info.get('session')
-                if session and getattr(session, 'is_running', False):
-                    if getattr(session, 'supports_stop', False):
-                        session.request_stop(reason="parent_reset")
-            self._active_sessions.clear()
+        # Preserve _active_sessions and _sessions_lock — running
+        # subagents continue independently.
         self._owner_counters.clear()
         self._subagent_counter = 0
         self._parent_session = None
         self._config = None
         self._initialized = False
-        logger.info("Subagent plugin shutdown")
+        logger.info("Subagent plugin shutdown (running subagents preserved)")
 
     # =========================================================================
     # Persistence Methods
