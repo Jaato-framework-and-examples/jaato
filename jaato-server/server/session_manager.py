@@ -240,21 +240,24 @@ class SessionManager:
         inject per-session functionality (e.g., registering custom
         environment aspects, wiring remote spawn handlers).
 
-        The hook is called with a single argument — the ``JaatoServer``
-        instance for the newly created or loaded session.  At the point
-        the hook is called, the server is fully initialized: the plugin
-        registry is populated, the provider is connected, and tools are
-        configured.
+        The hook is called with two arguments:
+
+        1. ``server`` — the ``JaatoServer`` instance for the newly created
+           or loaded session.  Fully initialized: plugin registry populated,
+           provider connected, tools configured.
+        2. ``session_id`` — the unique session identifier string
+           (e.g., ``"20260321_132926"``).
 
         Hooks are called in registration order.  If a hook raises an
         exception, it is logged and subsequent hooks still run.
 
         Args:
-            hook: A callable with signature ``(server: JaatoServer) -> None``.
+            hook: A callable with signature
+                ``(server: JaatoServer, session_id: str) -> None``.
 
         Example (from a daemon extension)::
 
-            def _on_session_ready(self, server):
+            def _on_session_ready(self, server, session_id):
                 env = server.registry.get_plugin("environment")
                 if env and hasattr(env, 'register_aspect'):
                     env.register_aspect("my_aspect", self._handler)
@@ -264,15 +267,16 @@ class SessionManager:
         """
         self._session_hooks.append(hook)
 
-    def _run_session_hooks(self, server: JaatoServer) -> None:
+    def _run_session_hooks(self, server: JaatoServer, session_id: str) -> None:
         """Invoke all registered session hooks for a newly set-up session.
 
         Args:
             server: The JaatoServer instance to pass to each hook.
+            session_id: The session identifier.
         """
         for hook in self._session_hooks:
             try:
-                hook(server)
+                hook(server, session_id)
             except Exception as exc:
                 logger.warning("Session hook failed: %s", exc, exc_info=True)
 
@@ -717,7 +721,7 @@ class SessionManager:
         if workspace_path:
             session_dir = self._session_storage_dir(workspace_path) / session_id
             self._configure_todo_storage(server, session_dir)
-        self._run_session_hooks(server)
+        self._run_session_hooks(server, session_id)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -1035,7 +1039,7 @@ class SessionManager:
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
-        self._run_session_hooks(server)
+        self._run_session_hooks(server, session_id)
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:

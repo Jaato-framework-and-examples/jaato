@@ -314,6 +314,11 @@ class JaatoServer:
     # =========================================================================
 
     @property
+    def session_id(self) -> Optional[str]:
+        """Get the session identifier for this server instance."""
+        return self._session_id
+
+    @property
     def workspace_path(self) -> Optional[str]:
         """Get the client's workspace path."""
         return self._workspace_path

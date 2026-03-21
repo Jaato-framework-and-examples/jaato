@@ -513,8 +513,9 @@ class JaatoDaemon:
                 async def stop(self):
                     pass  # clean up
 
-                def _hook(self, server):
+                def _hook(self, server, session_id):
                     # ``server`` is the JaatoServer for the new session.
+                    # ``session_id`` is its unique identifier.
                     plugin = server.registry.get_plugin("environment")
                     if plugin and hasattr(plugin, 'register_aspect'):
                         plugin.register_aspect("my_aspect", self._handler)
