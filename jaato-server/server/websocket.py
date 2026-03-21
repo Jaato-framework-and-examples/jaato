@@ -367,14 +367,15 @@ class JaatoWSServer:
             message_type: The ``type`` field value to match
                 (e.g., ``"reconnect.snapshot"``).
             handler: Async callback with signature
-                ``async def handler(ws, message: dict, user: str | None) -> None``.
+                ``async def handler(ws, message, user, client_id) -> None``.
                 *ws* is the raw ``websockets.ServerConnection``;
                 *message* is the parsed JSON dict;
-                *user* is the authenticated user ID (``None`` if unauthenticated).
+                *user* is the authenticated user ID (``None`` if unauthenticated);
+                *client_id* is the server-assigned client identifier.
 
         Example::
 
-            async def handle_snapshot(ws, message, user):
+            async def handle_snapshot(ws, message, user, client_id):
                 snapshot = build_snapshot(message["session_id"], user)
                 await ws.send(json.dumps({"type": "reconnect.snapshot", **snapshot}))
 
@@ -715,7 +716,7 @@ class JaatoWSServer:
                 async with self._lock:
                     client = self._clients.get(client_id)
                 if client:
-                    await handler(client.websocket, raw, client.user_id)
+                    await handler(client.websocket, raw, client.user_id, client_id)
             else:
                 await self._send_error(client_id, f"Unknown message type: {msg_type}")
             return
