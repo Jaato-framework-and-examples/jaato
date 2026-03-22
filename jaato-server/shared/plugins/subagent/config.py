@@ -543,7 +543,9 @@ class SubagentProfile:
             the initial context. Derived from ``(preload)`` annotations in the
             raw ``plugins`` list during profile parsing.
         plugin_configs: Per-plugin configuration overrides.
-        system_instructions: Additional system instructions for the subagent.
+        system_instructions: **Deprecated.** Use agents (``.jaato/agents/``) instead.
+            When an agent is specified via ``--agent``, its rendered markdown
+            replaces this field.  Profiles should contain runtime config only.
         model: Optional model override (uses parent's model if not specified).
         provider: Optional provider override (e.g., 'anthropic', 'google_genai').
                   Allows subagents to use a different provider than the parent.
@@ -696,6 +698,20 @@ def _scan_profiles_dir(
             gc=gc_config,
             env=env,
         )
+        if data.get('system_instructions'):
+            import warnings
+            warnings.warn(
+                f"Profile '{name}' has 'system_instructions' which is deprecated. "
+                f"Move the prompt to .jaato/agents/{name}.md and remove "
+                f"system_instructions from the profile.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            logger.warning(
+                "Profile '%s' has deprecated 'system_instructions'. "
+                "Move to .jaato/agents/%s.md instead.",
+                name, name,
+            )
         found += 1
         logger.debug("Discovered profile '%s' from %s", name, file_path)
 

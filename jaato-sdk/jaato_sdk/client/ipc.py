@@ -831,6 +831,8 @@ class IPCClient:
         self,
         name: Optional[str] = None,
         profile: Optional[str] = None,
+        agent: Optional[str] = None,
+        agent_params: Optional[Dict[str, str]] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session on the server.
@@ -847,9 +849,11 @@ class IPCClient:
 
         Args:
             name: Optional session name.
-            profile: Optional agent profile name. If provided, the session
-                will be configured using the predefined profile from
-                ``.jaato/profiles/<name>.json``.
+            profile: Optional runtime profile name (model, plugins, env).
+            agent: Optional agent name. The agent's rendered markdown
+                becomes the session's system instructions.
+            agent_params: Parameter values for the agent's ``{{param}}``
+                placeholders.  Only used when *agent* is specified.
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
@@ -861,6 +865,11 @@ class IPCClient:
         args = [name] if name else []
         if profile:
             args.extend(["--profile", profile])
+        if agent:
+            args.extend(["--agent", agent])
+        if agent_params:
+            for key, value in agent_params.items():
+                args.append(f"{key}={value}")
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,

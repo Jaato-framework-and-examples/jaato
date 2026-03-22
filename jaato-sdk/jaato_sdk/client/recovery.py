@@ -422,14 +422,18 @@ class IPCRecoveryClient:
         self,
         name: Optional[str] = None,
         profile: Optional[str] = None,
+        agent: Optional[str] = None,
+        agent_params: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
         """Create a new session.
 
         Args:
             name: Optional name for the session.
-            profile: Optional agent profile name. If provided, the session
-                will be configured using the predefined profile from
-                ``.jaato/profiles/<name>.json``.
+            profile: Optional runtime profile name (model, plugins, env).
+            agent: Optional agent name. The agent's rendered markdown
+                becomes the session's system instructions.
+            agent_params: Parameter values for the agent's ``{{param}}``
+                placeholders.
 
         Returns:
             Session ID if created, None otherwise.
@@ -441,7 +445,9 @@ class IPCRecoveryClient:
         self._check_can_send()
 
         if self._client:
-            session_id = await self._client.create_session(name, profile=profile)
+            session_id = await self._client.create_session(
+                name, profile=profile, agent=agent, agent_params=agent_params,
+            )
             if session_id:
                 self._session_id = session_id
             return session_id
