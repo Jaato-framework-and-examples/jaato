@@ -74,13 +74,17 @@ agent = Agent(
 - Simple, Pythonic API
 - `before_tool_callback` and `after_tool_callback` for per-agent guardrails
 - Plugin system for cross-cutting guardrails (registered on Runner, applies globally)
-- Agent teams with hierarchical delegation
+- Agent teams with hierarchical delegation (single-parent rule, strict tree)
+- **Dynamic tool scoping** via `BaseToolset.get_tools(readonly_context)` — toolset decides at runtime which tools to expose based on user permissions, session state, etc.
+- **`MCPToolset` with `tool_filter`** — effectively a whitelist for MCP tools
+- **`LongRunningFunctionTool`** — built-in human-in-the-loop: runner pauses, client decides to approve/reject, sends `FunctionResponse` to resume
 
 **Gaps vs Jaato:**
 - No external profile files — tool/permission config lives in application code
-- No built-in blacklist/whitelist mechanism
+- No declarative blacklist/whitelist — must implement in callbacks
 - No declarative per-agent permission policies
 - No profile discovery or layered precedence
+- **Shared session state in multi-agent** — agents in `ParallelAgent` share `session.state` with no data isolation (must use unique keys to avoid races); jaato provides per-session isolation via ContextVar + threading.local
 
 ### LangChain / LangGraph
 
@@ -139,23 +143,40 @@ Sanitization checks → Session blacklist → Static blacklist
 }
 ```
 
-### Google ADK: Callback + Plugin Model
+### Google ADK: Callback + Plugin + LongRunningFunctionTool
 
 ```python
+# Callback-based guardrail (block or allow)
 def my_guardrail(callback_context, tool, args, tool_context):
     if tool.name == "execute_sql" and "DROP" in args.get("query", ""):
         return {"error": "DROP statements are not allowed"}
-    # return None to allow execution
+    return None  # allow execution
+
+# Dynamic tool scoping (runtime filtering)
+class RoleAwareToolset(BaseToolset):
+    async def get_tools(self, readonly_context):
+        role = readonly_context.state.get("user_role", "viewer")
+        if role == "admin":
+            return [read_tool, write_tool, delete_tool]
+        return [read_tool]  # viewers get read-only
+
+# Human-in-the-loop (built-in pause/resume)
+approval_tool = LongRunningFunctionTool(func=transfer_money)
+# Runner pauses → client shows approval UI → sends FunctionResponse to resume
 ```
 
 **Key design:**
 - `before_tool_callback` per-agent or globally via Plugin
 - Full access to `ToolContext` (state, auth, artifacts)
-- Plugin system for reusable cross-agent guardrails
+- Plugin system for reusable cross-agent guardrails (registered on Runner)
+- `BaseToolset.get_tools()` for dynamic runtime tool filtering
+- `MCPToolset(tool_filter=...)` for MCP tool whitelisting
+- `LongRunningFunctionTool` for human-in-the-loop approval
 - Authentication via `tool_context.request_credential()`
+- Policy data stored in `session.state` and enforced in callbacks
 
-**Strengths:** Very flexible — any Python logic as a guardrail.
-**Weaknesses:** No declarative policy language. Every rule is imperative code. No approval modes beyond "block or allow." No built-in user prompting for approval.
+**Strengths:** Very flexible — any Python logic as a guardrail. Dynamic toolsets enable runtime RBAC. `LongRunningFunctionTool` provides real HITL.
+**Weaknesses:** No declarative policy language. Every rule is imperative code. No multi-mode approval (turn/idle/always/never). No argument-level pattern matching. Shared session state means no data isolation between parallel agents.
 
 ### LangChain / LangGraph: HITL + Middleware + Shell Allow-Lists
 
@@ -216,12 +237,14 @@ deepagents run -S all                   # permit anything
 
 | Mechanism | Purpose |
 |---|---|
-| Separate `Session` objects | Each agent gets its own session with isolated state |
+| Per-agent `tools` list | Each agent can only use explicitly declared tools |
+| Single-parent tree rule | `ValueError` if agent assigned to two parents |
+| OAuth-scoped identity | Tools use controlling user's OAuth token (natural external boundary) |
 | GKE Code Executor | Container-level isolation for code execution |
 | VPC-SC perimeters | Network-level data exfiltration prevention |
 | Model Armor | Centralized content safety with RBAC |
 
-Google ADK relies more on **infrastructure-level isolation** (GKE, VPC-SC) than application-level session isolation.
+**Notable gap:** Agents in `ParallelAgent` share `session.state` — no data isolation at the state level. Each agent must write to unique keys to avoid race conditions. Google ADK relies more on **infrastructure-level isolation** (GKE, VPC-SC) than application-level session isolation.
 
 ### LangChain / LangGraph
 
@@ -249,10 +272,13 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 
 ### Google ADK Only
 - **`ToolContext.request_credential()`** — first-class OAuth flow integrated into tool execution
+- **`BaseToolset.get_tools(context)`** — dynamic runtime tool filtering based on session state / user role
+- **`LongRunningFunctionTool`** — built-in HITL with runner pause/resume via `FunctionResponse`
+- **`MCPToolset(tool_filter=...)`** — declarative MCP tool whitelisting
 - **Plugin system for global guardrails** — register once on Runner, applies everywhere
 - **Model Armor integration** — enterprise content safety with centralized RBAC
 - **GKE Code Executor** — native Kubernetes integration with RBAC YAML configs
-- **Agent teams** — built-in hierarchical agent delegation
+- **Agent teams** — built-in hierarchical agent delegation with single-parent tree rule
 
 ### LangChain / LangGraph Only
 - **Graph-based execution** — most flexible composition model for complex workflows
@@ -290,6 +316,10 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 - [Google ADK Callback Patterns](https://google.github.io/adk-docs/callbacks/design-patterns-and-best-practices/)
 - [Google ADK Plugins](https://google.github.io/adk-docs/plugins/)
 - [Google ADK Authentication](https://google.github.io/adk-docs/tools-custom/authentication/)
+- [Google ADK Multi-Agent Systems](https://google.github.io/adk-docs/agents/multi-agents/)
+- [Google ADK Custom Tools](https://google.github.io/adk-docs/tools-custom/)
+- [Google ADK MCP Tools](https://google.github.io/adk-docs/tools-custom/mcp-tools/)
+- [Google ADK Tool Limitations](https://google.github.io/adk-docs/tools/limitations/)
 - [Google ADK GKE Code Executor](https://google.github.io/adk-docs/integrations/gke-code-executor/)
 - [LangChain Security Best Practices](https://python.langchain.com/docs/security/)
 - [LangGraph Human-in-the-Loop](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
