@@ -15,7 +15,7 @@ tool access control, permission enforcement, and security boundaries.
 | **Per-agent tool scoping** | Plugin list per profile → registry only exposes listed tools | Tools list per Agent constructor | Tools list per `ToolNode`; middleware can filter dynamically by user role |
 | **Blacklist / whitelist** | Static + session-level, pattern-based (globs), argument-level | Not built-in; implementable in callbacks | Deep Agents: `-S` shell allow-list (specific cmds / `recommended` / `all`) + 13 blocked injection patterns |
 | **Session isolation** | ContextVar + threading.local; CI-enforced plugin safety | Separate Session objects; no thread isolation guarantees | Separate state per graph node; no isolation enforcement |
-| **Sandboxing** | Path scoping, shell metachar blocking, sanitization config | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
+| **Sandboxing** | Path scoping, shell metachar blocking, sanitization config; **AppArmor profiles** (premium) for kernel-level MAC | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
 | **Auth delegation** | OAuth plugins per provider (Anthropic PKCE, GitHub device code, Google) | `ToolContext.request_credential()` + OAuth flows | Not built-in; manual token management |
 
 ---
@@ -232,6 +232,7 @@ deepagents run -S all                   # permit anything
 | Per-thread permission channels | Subagent approvals don't leak to parent |
 | Profile-scoped `env` vars | Only applied to the subagent's thread |
 | Path scoping / sanitization | Configurable allowed/denied filesystem paths |
+| **AppArmor profiles** (premium) | Kernel-level Mandatory Access Control — confines tool processes to declared file, network, and capability rules |
 
 ### Google ADK
 
@@ -257,6 +258,8 @@ deepagents run -S all                   # permit anything
 
 LangChain's strongest isolation story is **LangSmith Sandboxes** — true microVM isolation with binary authorization and network restrictions. However, this is a paid service, not a framework feature.
 
+**Comparison note:** Jaato's premium AppArmor support provides **kernel-level MAC** (Mandatory Access Control) — a different isolation approach that operates at the OS level rather than requiring container/microVM infrastructure. AppArmor profiles confine tool processes to declared filesystem paths, network access, and Linux capabilities, and are enforced by the kernel itself (not bypassable by the agent). This gives jaato a strong isolation primitive that doesn't require external infrastructure, though it complements rather than replaces container-level isolation for full defense-in-depth.
+
 ---
 
 ## 4. Unique Differentiators
@@ -269,6 +272,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 - **Plugin (preload) syntax** — fine-grained control over tool loading strategy
 - **CI-enforced session safety** — automated tests catch cross-session leakage
 - **Profile-level GC strategy** — each agent role can have different context management
+- **AppArmor confinement** (premium) — kernel-level Mandatory Access Control that confines tool processes to declared file paths, network access, and Linux capabilities; enforced by the kernel, not bypassable by the agent
 
 ### Google ADK Only
 - **`ToolContext.request_credential()`** — first-class OAuth flow integrated into tool execution
@@ -305,7 +309,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 1. **Global guardrail plugins** (from ADK) — jaato's permission plugin is per-profile; a Runner-level plugin that applies cross-cutting policies to all sessions could simplify enterprise governance
 2. **`request_credential()` in tool context** (from ADK) — jaato has auth plugins per-provider, but a standardized `tool_context.request_credential()` API would unify the pattern
 3. **Graph-based interruption** (from LangGraph) — jaato's approval is synchronous; async graph-style "pause and resume with modified state" could enable more complex approval workflows
-4. **Infrastructure sandbox integration** (from both) — jaato has path scoping and sanitization but no container/microVM integration; a GKE or Docker-based sandbox plugin would strengthen the story for code execution tools
+4. **Container/microVM sandbox integration** (from both) — jaato already has kernel-level confinement via AppArmor (premium), which is stronger than application-level sandboxing; adding container or microVM isolation (GKE, Docker) would complement AppArmor for full defense-in-depth in code execution scenarios
 
 ---
 
