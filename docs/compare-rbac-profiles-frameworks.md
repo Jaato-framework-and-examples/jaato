@@ -1,0 +1,265 @@
+# Profiles & RBAC Comparison: Jaato vs Google ADK vs LangChain
+
+Comparison of how each framework handles agent profiles (role definitions),
+tool access control, permission enforcement, and security boundaries.
+
+---
+
+## Executive Summary
+
+| Capability | Jaato | Google ADK | LangChain / LangGraph |
+|---|---|---|---|
+| **Declarative agent profiles** | JSON profiles with plugin lists, model/provider overrides, GC config, env vars | Agent class with `tools` list; no external profile files | No built-in profiles; tools passed per-agent in code |
+| **Permission policy engine** | 3-layer: sanitization → blacklist/whitelist → default policy | Callback-based (`before_tool_callback`) + Plugin guardrails | Human-in-the-loop interrupt; no policy engine |
+| **Interactive approval** | Multi-mode: y/n/always/never/turn/idle + channels (console, webhook, queue) | Must be hand-coded in callbacks | `interrupt_before` / `interrupt_after` in LangGraph |
+| **Per-agent tool scoping** | Plugin list per profile → registry only exposes listed tools | Tools list per Agent constructor | Tools list per agent; no enforcement layer |
+| **Blacklist / whitelist** | Static + session-level, pattern-based (globs), argument-level | Not built-in; implementable in callbacks | Not built-in |
+| **Session isolation** | ContextVar + threading.local; CI-enforced plugin safety | Separate Session objects; no thread isolation guarantees | Separate state per graph node; no isolation enforcement |
+| **Sandboxing** | Path scoping, shell metachar blocking, sanitization config | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
+| **Auth delegation** | OAuth plugins per provider (Anthropic PKCE, GitHub device code, Google) | `ToolContext.request_credential()` + OAuth flows | Not built-in; manual token management |
+
+---
+
+## 1. Agent Profiles / Role Definitions
+
+### Jaato
+
+Declarative JSON files in `.jaato/profiles/`:
+
+```json
+{
+  "name": "github-resolver",
+  "description": "Fixes GitHub issues autonomously",
+  "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
+  "plugins": ["cli", "file_edit", "lsp(preload)", "permission"],
+  "plugin_configs": {
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow",
+        "blacklist": { "arguments": { "cli_based_tool": { "command": ["git push -f", "rm -rf"] } } }
+      }
+    }
+  },
+  "max_turns": 10,
+  "auto_approved": false,
+  "gc": { "type": "budget", "threshold_percent": 80.0 },
+  "env": { "GITHUB_TOKEN": "${VAULT_SECRET_ID}" }
+}
+```
+
+**Strengths:**
+- Profiles are **declarative and portable** — checked into the repo, no code changes needed
+- Per-profile permission policy overrides (a "researcher" profile can be permissive on web tools but locked down on file writes)
+- Plugin `(preload)` syntax controls deferred vs eager tool loading
+- `env` with `${VAR}` expansion and secret URI support
+- Discovery precedence: workspace → user → premium (entry points)
+- Profile-level GC strategy (budget, summarize, hybrid)
+
+### Google ADK
+
+Profiles are defined **in code** via the `Agent` class:
+
+```python
+agent = Agent(
+    name="researcher",
+    model="gemini-2.5-flash",
+    tools=[web_search, code_execution],
+    instruction="You are a research analyst...",
+    before_tool_callback=my_guardrail,
+)
+```
+
+**Strengths:**
+- Simple, Pythonic API
+- `before_tool_callback` and `after_tool_callback` for per-agent guardrails
+- Plugin system for cross-cutting guardrails (registered on Runner, applies globally)
+- Agent teams with hierarchical delegation
+
+**Gaps vs Jaato:**
+- No external profile files — tool/permission config lives in application code
+- No built-in blacklist/whitelist mechanism
+- No declarative per-agent permission policies
+- No profile discovery or layered precedence
+
+### LangChain / LangGraph
+
+Tools passed directly in code:
+
+```python
+# LangChain
+agent = initialize_agent(tools=[search, calculator], llm=llm)
+
+# LangGraph
+builder.add_node("agent", agent_node)
+builder.add_node("tools", ToolNode(tools=[search, calculator]))
+```
+
+**Strengths:**
+- Extremely flexible graph-based composition (LangGraph)
+- `interrupt_before` / `interrupt_after` for human-in-the-loop
+- Deep Agents for containerized execution (Modal, Daytona, Runloop)
+
+**Gaps vs Jaato:**
+- No profile concept at all — everything is imperative code
+- No permission policy engine
+- No blacklist/whitelist
+- Human-in-the-loop is binary (interrupt or don't) — no turn/idle/always/never modes
+
+---
+
+## 2. Permission & Access Control
+
+### Jaato: 3-Layer Policy Engine
+
+```
+Sanitization checks → Session blacklist → Static blacklist
+    → Session whitelist → Static whitelist → Default policy
+```
+
+**Key design:**
+- Blacklist **always** beats whitelist (defense in depth)
+- Argument-level matching (block `rm -rf /` but allow `rm temp.txt`)
+- Glob patterns for commands (`git push -f *`)
+- Multiple approval channels: console, webhook, file, queue, parent-bridged
+- 7 approval modes: yes, no, always, never, turn, idle, once
+- Session-level dynamic rules (user runs `permissions allow git*` mid-session)
+
+**Config (`permissions.json`):**
+```json
+{
+  "defaultPolicy": "ask",
+  "blacklist": { "patterns": ["rm -rf /*", "sudo *"] },
+  "whitelist": { "patterns": ["git status", "npm test"] },
+  "sanitization": { "block_shell_metacharacters": true, "path_scope": { "allowed_roots": ["."] } }
+}
+```
+
+### Google ADK: Callback + Plugin Model
+
+```python
+def my_guardrail(callback_context, tool, args, tool_context):
+    if tool.name == "execute_sql" and "DROP" in args.get("query", ""):
+        return {"error": "DROP statements are not allowed"}
+    # return None to allow execution
+```
+
+**Key design:**
+- `before_tool_callback` per-agent or globally via Plugin
+- Full access to `ToolContext` (state, auth, artifacts)
+- Plugin system for reusable cross-agent guardrails
+- Authentication via `tool_context.request_credential()`
+
+**Strengths:** Very flexible — any Python logic as a guardrail.
+**Weaknesses:** No declarative policy language. Every rule is imperative code. No approval modes beyond "block or allow." No built-in user prompting for approval.
+
+### LangChain / LangGraph: Human-in-the-Loop
+
+```python
+# LangGraph interrupt
+graph.add_node("tools", ToolNode(tools), interrupt_before=["dangerous_tool"])
+```
+
+**Key design:**
+- `interrupt_before` pauses graph execution for human review
+- State-based: human can modify state before resuming
+- LangSmith Sandboxes for code execution isolation (microVM)
+- "Sandbox as Tool" pattern recommended for production
+
+**Strengths:** Clean graph interruption model; strong sandboxing via LangSmith.
+**Weaknesses:** No policy engine. No pattern matching. Binary interrupt (yes/no). No session-level dynamic rules. No multi-mode approval.
+
+---
+
+## 3. Session Isolation & Security Boundaries
+
+### Jaato
+
+| Mechanism | Purpose |
+|---|---|
+| `ContextVar` per-session | Prevents cross-session data leakage in async code |
+| `threading.local()` per-plugin | Prevents cross-thread state sharing |
+| CI test enforcement | `test_plugin_session_safety.py` scans for `self._*` in `set_session()` |
+| Per-thread permission channels | Subagent approvals don't leak to parent |
+| Profile-scoped `env` vars | Only applied to the subagent's thread |
+| Path scoping / sanitization | Configurable allowed/denied filesystem paths |
+
+### Google ADK
+
+| Mechanism | Purpose |
+|---|---|
+| Separate `Session` objects | Each agent gets its own session with isolated state |
+| GKE Code Executor | Container-level isolation for code execution |
+| VPC-SC perimeters | Network-level data exfiltration prevention |
+| Model Armor | Centralized content safety with RBAC |
+
+Google ADK relies more on **infrastructure-level isolation** (GKE, VPC-SC) than application-level session isolation.
+
+### LangChain / LangGraph
+
+| Mechanism | Purpose |
+|---|---|
+| Graph state isolation | Each node operates on its own state slice |
+| LangSmith Sandboxes | MicroVM isolation for code execution |
+| Binary authorization | Control which binaries can run in sandbox |
+| Deprecated: Pyodide WASM | Application-level isolation (not recommended) |
+
+LangChain's strongest isolation story is **LangSmith Sandboxes** — true microVM isolation with binary authorization and network restrictions. However, this is a paid service, not a framework feature.
+
+---
+
+## 4. Unique Differentiators
+
+### Jaato Only
+- **Declarative profile files** — non-developers can define agent roles via JSON
+- **7-mode approval system** — turn/idle/always/never/once granularity
+- **Multiple approval channels** — webhook, file, queue (not just console)
+- **Argument-level blacklist/whitelist** — block specific command arguments, not just tool names
+- **Plugin (preload) syntax** — fine-grained control over tool loading strategy
+- **CI-enforced session safety** — automated tests catch cross-session leakage
+- **Profile-level GC strategy** — each agent role can have different context management
+
+### Google ADK Only
+- **`ToolContext.request_credential()`** — first-class OAuth flow integrated into tool execution
+- **Plugin system for global guardrails** — register once on Runner, applies everywhere
+- **Model Armor integration** — enterprise content safety with centralized RBAC
+- **GKE Code Executor** — native Kubernetes integration with RBAC YAML configs
+- **Agent teams** — built-in hierarchical agent delegation
+
+### LangChain / LangGraph Only
+- **Graph-based execution** — most flexible composition model for complex workflows
+- **State modification on interrupt** — human can edit agent state before resuming
+- **Deep Agents** — first-party integrations with Modal, Daytona, Runloop for containerized agents
+- **LangSmith Sandboxes** — production-grade microVM isolation with binary authorization
+- **Massive ecosystem** — most integrations, community tools, and third-party extensions
+
+---
+
+## 5. Gap Analysis for Jaato
+
+### What Jaato Has That Others Don't
+1. **Declarative, portable profiles** — biggest differentiator for enterprise/team use
+2. **Granular approval modes** — no other framework offers turn/idle/always/never
+3. **Argument-level policy matching** — ADK and LangChain only filter at tool level
+4. **CI-enforced isolation** — automated safety testing for plugin developers
+5. **Multi-channel approval** — webhook/file channels enable CI/CD and external approval workflows
+
+### Potential Improvements Inspired by Others
+1. **Global guardrail plugins** (from ADK) — jaato's permission plugin is per-profile; a Runner-level plugin that applies cross-cutting policies to all sessions could simplify enterprise governance
+2. **`request_credential()` in tool context** (from ADK) — jaato has auth plugins per-provider, but a standardized `tool_context.request_credential()` API would unify the pattern
+3. **Graph-based interruption** (from LangGraph) — jaato's approval is synchronous; async graph-style "pause and resume with modified state" could enable more complex approval workflows
+4. **Infrastructure sandbox integration** (from both) — jaato has path scoping and sanitization but no container/microVM integration; a GKE or Docker-based sandbox plugin would strengthen the story for code execution tools
+
+---
+
+## Sources
+
+- [Google ADK Safety & Security](https://google.github.io/adk-docs/safety/)
+- [Google ADK Callbacks](https://google.github.io/adk-docs/callbacks/)
+- [Google ADK Callback Patterns](https://google.github.io/adk-docs/callbacks/design-patterns-and-best-practices/)
+- [Google ADK Plugins](https://google.github.io/adk-docs/plugins/)
+- [Google ADK Authentication](https://google.github.io/adk-docs/tools-custom/authentication/)
+- [Google ADK GKE Code Executor](https://google.github.io/adk-docs/integrations/gke-code-executor/)
+- [LangChain Security Best Practices](https://python.langchain.com/docs/security/)
+- [LangGraph Human-in-the-Loop](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
+- [LangSmith Sandboxes](https://docs.smith.langchain.com/evaluation/how_to_guides/sandboxes)
