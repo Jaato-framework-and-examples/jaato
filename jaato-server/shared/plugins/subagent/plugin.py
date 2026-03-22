@@ -453,9 +453,26 @@ class SubagentPlugin:
                         "profile": {
                             "type": "string",
                             "description": (
-                                "Name of a preconfigured subagent profile. "
+                                "Name of a runtime profile (model, plugins, permissions). "
                                 "Use list_subagent_profiles to see available profiles."
                             )
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": (
+                                "Name of an agent definition (parameterized prompt from "
+                                ".jaato/agents/). Provides the subagent's system instructions. "
+                                "Use with 'profile' for runtime config, or alone to inherit "
+                                "the parent's runtime config."
+                            )
+                        },
+                        "agent_params": {
+                            "type": "object",
+                            "description": (
+                                "Parameter values for the agent's {{param}} placeholders. "
+                                "Only used when 'agent' is specified."
+                            ),
+                            "additionalProperties": {"type": "string"},
                         },
                         "task": {
                             "type": "string",
@@ -1951,6 +1968,8 @@ class SubagentPlugin:
             ).to_dict()
 
         profile_name = args.get('profile')
+        agent_name_arg = args.get('agent')
+        agent_params_arg = args.get('agent_params', {})
         context = args.get('context', '')
         inline_config = args.get('inline_config')
         custom_name = args.get('name', '')
@@ -2083,6 +2102,25 @@ class SubagentPlugin:
                 max_turns=max_turns,
                 gc=gc_config,
             )
+
+        # Resolve agent if specified — sets profile.system_instructions
+        if agent_name_arg:
+            from server.session_manager import SessionManager
+            agent_result = SessionManager._resolve_agent(
+                agent_name_arg, agent_params_arg, parent_cwd,
+            )
+            if agent_result is None:
+                return SubagentResult(
+                    success=False,
+                    response='',
+                    error=f"Agent '{agent_name_arg}' not found in .jaato/agents/ or .jaato/prompts/"
+                ).to_dict()
+            profile.system_instructions = agent_result["system_instructions"]
+            if agent_result.get("missing_params"):
+                logger.warning(
+                    "Subagent agent '%s' has unresolved params: %s",
+                    agent_name_arg, agent_result["missing_params"],
+                )
 
         # Build the full prompt
         full_prompt = task

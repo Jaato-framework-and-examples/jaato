@@ -251,6 +251,13 @@ class PromptLibraryPlugin:
         # Workspace-relative sources (only when workspace is set)
         if workspace:
             sources.extend([
+                # Jaato agents — parameterized prompts used as session identity
+                PromptSource(
+                    path=workspace / ".jaato" / "agents",
+                    source_name="project-agents",
+                    entry_file=PROMPT_ENTRY_FILE,
+                    writable=True,
+                ),
                 # Jaato native prompts (writable)
                 PromptSource(
                     path=workspace / ".jaato" / "prompts",
@@ -288,6 +295,12 @@ class PromptLibraryPlugin:
             ])
 
         sources.extend([
+            PromptSource(
+                path=home / ".jaato" / "agents",
+                source_name="global-agents",
+                entry_file=PROMPT_ENTRY_FILE,
+                writable=True,
+            ),
             PromptSource(
                 path=home / ".jaato" / "prompts",
                 source_name="global",
@@ -520,6 +533,57 @@ class PromptLibraryPlugin:
         content = POSITIONAL_PARAM_PATTERN.sub(replace_positional, content)
 
         return content, missing_params
+
+    def resolve_agent(
+        self,
+        name: str,
+        params: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve an agent by name and render its prompt with parameters.
+
+        Agents are markdown files with ``params:`` in their YAML frontmatter,
+        discovered from ``.jaato/agents/`` and ``.jaato/prompts/`` directories.
+        This method is called by the server during session creation when
+        ``--agent`` is specified.
+
+        Args:
+            name: Agent name (filename stem, e.g., ``"gen-references"``).
+            params: Parameter values to substitute (``{{param}}`` placeholders).
+
+        Returns:
+            Dict with keys:
+                - ``system_instructions``: Rendered prompt text (frontmatter stripped).
+                - ``description``: From frontmatter, or empty string.
+                - ``default_profile``: From frontmatter, or ``None``.
+                - ``missing_params``: List of required params not provided.
+                - ``source_path``: Absolute path to the agent file.
+            Returns ``None`` if the agent is not found.
+        """
+        prompts = self._discover_prompts()
+        if name not in prompts:
+            return None
+
+        info = prompts[name]
+        content = self._get_prompt_content(info)
+        rendered, missing = self._substitute_params(content, params or {}, [])
+
+        # Re-read frontmatter for metadata
+        if info.is_directory:
+            entry_path = info.path / PROMPT_ENTRY_FILE
+            if not entry_path.exists():
+                entry_path = info.path / SKILL_ENTRY_FILE
+            raw = entry_path.read_text(encoding='utf-8') if entry_path.exists() else ""
+        else:
+            raw = info.path.read_text(encoding='utf-8')
+        frontmatter, _ = self._parse_frontmatter(raw)
+
+        return {
+            "system_instructions": rendered,
+            "description": frontmatter.get("description", ""),
+            "default_profile": frontmatter.get("default_profile"),
+            "missing_params": missing,
+            "source_path": str(info.path),
+        }
 
     def _get_prompt_content(self, info: PromptInfo) -> str:
         """Get the raw content of a prompt."""

@@ -217,14 +217,27 @@ class CommandRouter:
     def _handle_session_new(
         self, client_id: str, args: list, workspace_path: Optional[str],
     ) -> None:
-        """Handle ``session.new`` command."""
-        # Parse args: positional name and --profile flag
+        """Handle ``session.new`` command.
+
+        Accepts ``--agent <name>`` and/or ``--profile <name>`` flags.
+        When ``--agent`` is provided, the agent's rendered markdown
+        becomes the session's system instructions.  When ``--profile``
+        is provided, it supplies runtime config (model, plugins, etc.).
+        Remaining key=value pairs are passed as agent parameters.
+        """
         name = None
         profile_name = None
+        agent_name = None
+        agent_params: Dict[str, str] = {}
         args_iter = iter(args)
         for arg in args_iter:
             if arg == "--profile":
                 profile_name = next(args_iter, None)
+            elif arg == "--agent":
+                agent_name = next(args_iter, None)
+            elif "=" in arg:
+                key, _, value = arg.partition("=")
+                agent_params[key] = value
             elif name is None:
                 name = arg
 
@@ -232,6 +245,8 @@ class CommandRouter:
         new_session_id = self._session_manager.create_session(
             client_id, name, workspace_path=workspace_path,
             profile_name=profile_name,
+            agent_name=agent_name,
+            agent_params=agent_params if agent_params else None,
             created_by=created_by,
         )
         if new_session_id:

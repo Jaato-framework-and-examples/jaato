@@ -198,6 +198,106 @@ class SessionManager:
             raise ValueError("workspace_path required for session storage")
         return pathlib.Path(workspace_path) / self._session_config.storage_path
 
+    @staticmethod
+    def _resolve_agent(
+        agent_name: str,
+        params: Optional[Dict[str, str]],
+        workspace_path: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve an agent by name from .jaato/agents/ and .jaato/prompts/.
+
+        Scans agent directories (workspace then user-level), reads the
+        markdown file, parses frontmatter, substitutes params, and returns
+        the rendered system instructions.
+
+        Args:
+            agent_name: Agent name (filename stem).
+            params: Parameter values for ``{{param}}`` placeholders.
+            workspace_path: Workspace directory for agent resolution.
+
+        Returns:
+            Dict with ``system_instructions``, ``description``,
+            ``default_profile``, ``missing_params``, or ``None`` if not found.
+        """
+        import re
+
+        search_dirs = []
+        if workspace_path:
+            search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "agents")
+            search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "prompts")
+        search_dirs.append(pathlib.Path.home() / ".jaato" / "agents")
+        search_dirs.append(pathlib.Path.home() / ".jaato" / "prompts")
+
+        # Find the agent file
+        agent_path = None
+        for search_dir in search_dirs:
+            if not search_dir.is_dir():
+                continue
+            # Single file: agents/gen-references.md
+            candidate = search_dir / f"{agent_name}.md"
+            if candidate.is_file():
+                agent_path = candidate
+                break
+            # Directory: agents/gen-references/PROMPT.md
+            candidate_dir = search_dir / agent_name
+            if candidate_dir.is_dir():
+                for entry_name in ("PROMPT.md", "SKILL.md"):
+                    entry = candidate_dir / entry_name
+                    if entry.is_file():
+                        agent_path = entry
+                        break
+                if agent_path:
+                    break
+
+        if not agent_path:
+            return None
+
+        raw = agent_path.read_text(encoding="utf-8")
+
+        # Parse YAML frontmatter
+        frontmatter: Dict[str, Any] = {}
+        body = raw
+        if raw.startswith("---"):
+            match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            if match:
+                try:
+                    import yaml
+                    frontmatter = yaml.safe_load(match.group(1)) or {}
+                except Exception:
+                    pass
+                body = raw[match.end():]
+
+        # Substitute params
+        effective_params = params or {}
+        missing = []
+        param_defs = frontmatter.get("params", {})
+
+        # Apply defaults for unset params
+        if isinstance(param_defs, dict):
+            for pname, pdef in param_defs.items():
+                if pname not in effective_params:
+                    if isinstance(pdef, dict) and "default" in pdef:
+                        default = pdef["default"]
+                        if default is not None:
+                            effective_params[pname] = str(default)
+
+        def replace_param(m: re.Match) -> str:
+            name = m.group(1)
+            if name in effective_params:
+                return effective_params[name]
+            missing.append(name)
+            return m.group(0)  # Keep unresolved
+
+        rendered = re.sub(r"\{\{(\w+)\}\}", replace_param, body)
+
+        return {
+            "system_instructions": rendered,
+            "description": frontmatter.get("description", ""),
+            "default_profile": frontmatter.get("default_profile"),
+            "missing_params": missing,
+            "source_path": str(agent_path),
+        }
+
     def _resolve_profile(
         self,
         profile_name: str,
@@ -631,6 +731,8 @@ class SessionManager:
         profile_name: Optional[str] = None,
         provisioned: bool = False,
         created_by: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_params: Optional[Dict[str, str]] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -640,14 +742,18 @@ class SessionManager:
             workspace_path: Client's working directory for file operations.
             env_overrides: Optional env vars that override the .env file
                           (e.g., JAATO_PROVIDER/MODEL_NAME from post-auth wizard).
-            profile_name: Optional agent profile name. If provided, the profile
-                is loaded from ``.jaato/profiles/`` in the workspace and applied
-                to the session (model, provider, plugins, system instructions,
-                GC configuration, etc.).
+            profile_name: Optional profile name for runtime config (model,
+                provider, plugins, GC, env). Loaded from ``.jaato/profiles/``.
             provisioned: True if the workspace was auto-provisioned by the
                 server (e.g., for WebSocket clients).  When True, the
                 workspace_path is server-managed and should not be overridden
                 by client config.
+            created_by: Authenticated user who created the session.
+            agent_name: Optional agent name. If provided, the agent's rendered
+                markdown becomes the session's system instructions. Resolved
+                from ``.jaato/agents/`` and ``.jaato/prompts/``.
+            agent_params: Parameter values for the agent's ``{{param}}``
+                placeholders.
 
         Returns:
             The session ID (empty string on failure).
@@ -693,7 +799,40 @@ class SessionManager:
                     recoverable=True,
                 ))
                 return ""
-            logger.info(f"  Using agent profile: {profile_name}")
+            logger.info(f"  Using profile: {profile_name}")
+
+        # Resolve agent if requested — the agent's rendered markdown
+        # becomes the session's system instructions.
+        agent_instructions = None
+        if agent_name:
+            agent_result = self._resolve_agent(agent_name, agent_params, workspace_path)
+            if agent_result is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Agent '{agent_name}' not found in .jaato/agents/ or .jaato/prompts/",
+                    error_type="AgentNotFoundError",
+                    recoverable=True,
+                ))
+                return ""
+            agent_instructions = agent_result["system_instructions"]
+            # Use agent's default_profile if no explicit --profile was provided
+            if not profile_name and agent_result.get("default_profile"):
+                default_prof = agent_result["default_profile"]
+                resolve_path = workspace_path or str(pathlib.Path.home())
+                profile, error = self._resolve_profile(default_prof, resolve_path)
+                if profile:
+                    logger.info(f"  Using agent's default profile: {default_prof}")
+                else:
+                    logger.warning(f"  Agent's default_profile '{default_prof}' not found: {error}")
+            if agent_result.get("missing_params"):
+                logger.warning(f"  Agent has unresolved params: {agent_result['missing_params']}")
+            logger.info(f"  Using agent: {agent_name}")
+
+            # Set agent instructions on the profile (overrides deprecated
+            # system_instructions if present).
+            if profile:
+                if profile.system_instructions:
+                    logger.info("  Agent instructions override profile's system_instructions (deprecated)")
+                profile.system_instructions = agent_instructions
 
         # Create JaatoServer for this session
         # Provider is determined by env_file, with optional overrides
