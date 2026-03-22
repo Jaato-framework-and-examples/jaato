@@ -10,10 +10,10 @@ tool access control, permission enforcement, and security boundaries.
 | Capability | Jaato | Google ADK | LangChain / LangGraph |
 |---|---|---|---|
 | **Declarative agent profiles** | JSON profiles with plugin lists, model/provider overrides, GC config, env vars | Agent class with `tools` list; no external profile files | No built-in profiles; tools passed per-agent in code |
-| **Permission policy engine** | 3-layer: sanitization → blacklist/whitelist → default policy | Callback-based (`before_tool_callback`) + Plugin guardrails | Human-in-the-loop interrupt; no policy engine |
-| **Interactive approval** | Multi-mode: y/n/always/never/turn/idle + channels (console, webhook, queue) | Must be hand-coded in callbacks | `interrupt_before` / `interrupt_after` in LangGraph |
-| **Per-agent tool scoping** | Plugin list per profile → registry only exposes listed tools | Tools list per Agent constructor | Tools list per agent; no enforcement layer |
-| **Blacklist / whitelist** | Static + session-level, pattern-based (globs), argument-level | Not built-in; implementable in callbacks | Not built-in |
+| **Permission policy engine** | 3-layer: sanitization → blacklist/whitelist → default policy | Callback-based (`before_tool_callback`) + Plugin guardrails | `HumanInTheLoopMiddleware` with per-tool approve/edit/reject policies |
+| **Interactive approval** | Multi-mode: y/n/always/never/turn/idle + channels (console, webhook, queue) | Must be hand-coded in callbacks | `interrupt_before` / `interrupt_after` + `interrupt()` function + HITL middleware |
+| **Per-agent tool scoping** | Plugin list per profile → registry only exposes listed tools | Tools list per Agent constructor | Tools list per `ToolNode`; middleware can filter dynamically by user role |
+| **Blacklist / whitelist** | Static + session-level, pattern-based (globs), argument-level | Not built-in; implementable in callbacks | Deep Agents: `-S` shell allow-list (specific cmds / `recommended` / `all`) + 13 blocked injection patterns |
 | **Session isolation** | ContextVar + threading.local; CI-enforced plugin safety | Separate Session objects; no thread isolation guarantees | Separate state per graph node; no isolation enforcement |
 | **Sandboxing** | Path scoping, shell metachar blocking, sanitization config | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
 | **Auth delegation** | OAuth plugins per provider (Anthropic PKCE, GitHub device code, Google) | `ToolContext.request_credential()` + OAuth flows | Not built-in; manual token management |
@@ -84,27 +84,31 @@ agent = Agent(
 
 ### LangChain / LangGraph
 
-Tools passed directly in code:
+Tools passed directly in code, with newer middleware-based dynamic filtering:
 
 ```python
-# LangChain
-agent = initialize_agent(tools=[search, calculator], llm=llm)
-
-# LangGraph
-builder.add_node("agent", agent_node)
+# LangGraph — static tool binding
 builder.add_node("tools", ToolNode(tools=[search, calculator]))
+
+# LangGraph — middleware-based dynamic filtering (newer API)
+# Middleware reads user role from state and filters tools at runtime
+agent = create_agent(model, tools, middleware=[role_filter_middleware])
 ```
 
 **Strengths:**
 - Extremely flexible graph-based composition (LangGraph)
-- `interrupt_before` / `interrupt_after` for human-in-the-loop
+- `interrupt_before` / `interrupt_after` + programmatic `interrupt()` function
+- `HumanInTheLoopMiddleware` — declarative per-tool approval policy (approve/edit/reject)
+- Middleware can dynamically scope tools by user role, feature flags, or Store config
 - Deep Agents for containerized execution (Modal, Daytona, Runloop)
+- Deep Agents CLI shell allow-list: specific commands, `recommended` (42 safe defaults), or `all`
 
 **Gaps vs Jaato:**
-- No profile concept at all — everything is imperative code
-- No permission policy engine
-- No blacklist/whitelist
-- Human-in-the-loop is binary (interrupt or don't) — no turn/idle/always/never modes
+- No declarative profile files — everything is imperative code
+- No argument-level policy matching (tool-level only)
+- HITL requires external checkpointer (PostgreSQL etc.) for state persistence
+- No multi-channel approval (console only, or custom code)
+- No turn/idle approval scoping — decisions are per-invocation
 
 ---
 
@@ -153,21 +157,45 @@ def my_guardrail(callback_context, tool, args, tool_context):
 **Strengths:** Very flexible — any Python logic as a guardrail.
 **Weaknesses:** No declarative policy language. Every rule is imperative code. No approval modes beyond "block or allow." No built-in user prompting for approval.
 
-### LangChain / LangGraph: Human-in-the-Loop
+### LangChain / LangGraph: HITL + Middleware + Shell Allow-Lists
+
+Three layers of increasing sophistication:
 
 ```python
-# LangGraph interrupt
-graph.add_node("tools", ToolNode(tools), interrupt_before=["dangerous_tool"])
+# 1. Static breakpoints (compile-time)
+graph.compile(interrupt_before=["tools"])
+
+# 2. Programmatic interrupt (runtime, Jan 2025+)
+def my_node(state):
+    if state["risk_level"] > threshold:
+        answer = interrupt({"question": "Approve this action?", "tool": tool_name})
+
+# 3. HumanInTheLoopMiddleware (declarative, newest)
+HumanInTheLoopMiddleware(interrupt_on={
+    "write_file": True,                              # approve/edit/reject
+    "execute_sql": {"allowed_decisions": ["approve", "reject"]},
+    "read_data": False,                              # auto-approve
+})
+```
+
+**Deep Agents CLI shell allow-list:**
+```bash
+deepagents run -S "pytest,git,make"     # specific commands only
+deepagents run -S recommended           # 42 curated safe defaults
+deepagents run -S all                   # permit anything
+# 13 injection patterns always blocked regardless of allow-list
 ```
 
 **Key design:**
-- `interrupt_before` pauses graph execution for human review
-- State-based: human can modify state before resuming
-- LangSmith Sandboxes for code execution isolation (microVM)
-- "Sandbox as Tool" pattern recommended for production
+- `interrupt_before`/`interrupt_after` for static breakpoints
+- `interrupt()` function for dynamic, conditional pauses inside node logic
+- `HumanInTheLoopMiddleware` maps tool names → approval policies (closest to jaato's permission plugin)
+- Human can **modify agent state** before resuming (unique to LangGraph)
+- Requires **external checkpointer** (PostgreSQL, SQLite) for state persistence across interrupts
+- Deep Agents: 3-tier shell allow-list + 13 always-blocked injection patterns + path traversal validation
 
-**Strengths:** Clean graph interruption model; strong sandboxing via LangSmith.
-**Weaknesses:** No policy engine. No pattern matching. Binary interrupt (yes/no). No session-level dynamic rules. No multi-mode approval.
+**Strengths:** Most flexible interruption model (static + dynamic + declarative); state editing on resume; strong sandboxing via LangSmith.
+**Weaknesses:** No argument-level pattern matching. No multi-channel approval (webhook, file, queue). No turn/idle scoping. Requires external persistence for HITL. No declarative policy files.
 
 ---
 
@@ -229,6 +257,9 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 ### LangChain / LangGraph Only
 - **Graph-based execution** — most flexible composition model for complex workflows
 - **State modification on interrupt** — human can edit agent state before resuming
+- **`HumanInTheLoopMiddleware`** — declarative per-tool approval mapping (approve/edit/reject)
+- **Middleware-based dynamic tool scoping** — filter tools by user role/feature flags at runtime
+- **Deep Agents shell allow-list** — 3-tier system (specific/recommended/all) + 13 injection pattern blocks
 - **Deep Agents** — first-party integrations with Modal, Daytona, Runloop for containerized agents
 - **LangSmith Sandboxes** — production-grade microVM isolation with binary authorization
 - **Massive ecosystem** — most integrations, community tools, and third-party extensions
@@ -240,7 +271,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 ### What Jaato Has That Others Don't
 1. **Declarative, portable profiles** — biggest differentiator for enterprise/team use
 2. **Granular approval modes** — no other framework offers turn/idle/always/never
-3. **Argument-level policy matching** — ADK and LangChain only filter at tool level
+3. **Argument-level policy matching** — ADK and LangChain filter at tool level; Deep Agents blocks injection patterns but doesn't support custom argument globs
 4. **CI-enforced isolation** — automated safety testing for plugin developers
 5. **Multi-channel approval** — webhook/file channels enable CI/CD and external approval workflows
 
@@ -262,4 +293,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 - [Google ADK GKE Code Executor](https://google.github.io/adk-docs/integrations/gke-code-executor/)
 - [LangChain Security Best Practices](https://python.langchain.com/docs/security/)
 - [LangGraph Human-in-the-Loop](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
+- [LangGraph interrupt() Function](https://blog.langchain.com/making-it-easier-to-build-human-in-the-loop-agents-with-interrupt/)
+- [LangChain Agent Authorization](https://blog.langchain.com/agent-authorization-explainer/)
+- [Deep Agents CLI](https://docs.langchain.com/oss/python/deepagents/cli/overview)
 - [LangSmith Sandboxes](https://docs.smith.langchain.com/evaluation/how_to_guides/sandboxes)
