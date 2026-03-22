@@ -1571,7 +1571,7 @@ class JaatoServer:
             """Agent hooks that emit events."""
 
             def on_agent_created(self, agent_id, agent_name, agent_type, profile_name,
-                                 parent_agent_id, icon_lines, created_at):
+                                 parent_agent_id, created_at, **_kwargs):
                 agent = AgentState(
                     agent_id=agent_id,
                     name=agent_name,
@@ -1593,7 +1593,6 @@ class JaatoServer:
                     agent_type=agent_type,
                     profile_name=profile_name,
                     parent_agent_id=parent_agent_id,
-                    icon_lines=icon_lines,
                     created_at=agent.created_at,
                 ))
 

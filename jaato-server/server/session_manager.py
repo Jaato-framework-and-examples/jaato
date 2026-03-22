@@ -1864,7 +1864,6 @@ class SessionManager:
                 "description": profile.description,
                 "model": profile.model,
                 "provider": profile.provider,
-                "icon_name": profile.icon_name,
                 "plugins": profile.plugins,
             })
         # Surface parse errors so the profile listing shows broken files
@@ -1874,7 +1873,6 @@ class SessionManager:
                 "description": f"[parse error] {error}",
                 "model": None,
                 "provider": None,
-                "icon_name": None,
                 "plugins": [],
             })
         return result

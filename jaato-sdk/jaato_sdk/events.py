@@ -218,7 +218,6 @@ class AgentCreatedEvent(Event):
     agent_type: str = ""  # "main" or "subagent"
     profile_name: Optional[str] = None
     parent_agent_id: Optional[str] = None
-    icon_lines: Optional[List[str]] = None
     created_at: Optional[str] = None
 
 
@@ -809,12 +808,12 @@ class SessionProfilesEvent(Event):
 
     Sent in response to a ``session.profiles`` command. Each profile
     is a summary dict containing the profile's name, description,
-    model, provider, icon_name, and list of plugins — enough for a
-    client to display a profile picker.
+    model, provider, and list of plugins — enough for a client to
+    display a profile picker.
     """
     type: EventType = field(default=EventType.SESSION_PROFILES)
     profiles: List[Dict[str, Any]] = field(default_factory=list)
-    # ^ [{name, description, model, provider, icon_name, plugins}, ...]
+    # ^ [{name, description, model, provider, plugins}, ...]
 
 
 # =============================================================================

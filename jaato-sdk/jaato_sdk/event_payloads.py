@@ -140,7 +140,6 @@ class AgentCreatedPayload(TypedDict):
     agent_type: str
     profile_name: NotRequired[Optional[str]]
     parent_agent_id: NotRequired[Optional[str]]
-    icon_lines: NotRequired[Optional[List[str]]]
     created_at: NotRequired[Optional[str]]
 
 

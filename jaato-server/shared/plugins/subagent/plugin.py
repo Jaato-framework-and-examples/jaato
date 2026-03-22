@@ -2286,7 +2286,6 @@ class SubagentPlugin:
                     agent_type="subagent",
                     profile_name=profile.name,
                     parent_agent_id=self._parent_agent_id,
-                    icon_lines=profile.icon,
                     created_at=datetime.now()
                 )
 

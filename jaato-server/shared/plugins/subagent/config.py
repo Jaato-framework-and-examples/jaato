@@ -549,8 +549,6 @@ class SubagentProfile:
                   Allows subagents to use a different provider than the parent.
         max_turns: Maximum conversation turns before returning (default: 10).
         auto_approved: Whether this subagent can be spawned without permission.
-        icon: Optional custom ASCII art icon (3 lines) for UI visualization.
-        icon_name: Optional name of predefined icon (e.g., "code_assistant").
         gc: Optional garbage collection configuration for this subagent.
         env: Session-scoped environment variables for this profile.
             Values support ``${VAR}`` expansion and secret URI resolution
@@ -570,8 +568,6 @@ class SubagentProfile:
     provider: Optional[str] = None
     max_turns: int = 10
     auto_approved: bool = False
-    icon: Optional[List[str]] = None
-    icon_name: Optional[str] = None
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
 
@@ -697,8 +693,6 @@ def _scan_profiles_dir(
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
             auto_approved=data.get('auto_approved', False),
-            icon=data.get('icon'),
-            icon_name=data.get('icon_name'),
             gc=gc_config,
             env=env,
         )
@@ -812,8 +806,6 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
             auto_approved=data.get('auto_approved', False),
-            icon=data.get('icon'),
-            icon_name=data.get('icon_name'),
             gc=gc_config,
             env=env,
         )
@@ -893,21 +885,6 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
     provider = data.get("provider")
     if provider is not None and not isinstance(provider, str):
         errors.append("'provider' must be a string or null")
-
-    # icon: list of exactly 3 strings or null
-    icon = data.get("icon")
-    if icon is not None:
-        if not isinstance(icon, list):
-            errors.append("'icon' must be an array of 3 strings or null")
-        elif len(icon) != 3:
-            errors.append(f"'icon' must contain exactly 3 strings, got {len(icon)}")
-        elif not all(isinstance(line, str) for line in icon):
-            errors.append("'icon' must contain only strings")
-
-    # icon_name: string or null
-    icon_name = data.get("icon_name")
-    if icon_name is not None and not isinstance(icon_name, str):
-        errors.append("'icon_name' must be a string or null")
 
     # env: dict of string keys to string values, or null
     env_data = data.get("env")
@@ -1046,8 +1023,6 @@ class SubagentConfig:
                 provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),
                 auto_approved=profile_data.get('auto_approved', False),
-                icon=profile_data.get('icon'),
-                icon_name=profile_data.get('icon_name'),
                 gc=gc_config,
                 env=env,
             )
