@@ -669,4 +669,5 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
+- [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation for multi-tenant WS deployments
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
