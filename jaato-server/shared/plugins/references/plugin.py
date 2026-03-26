@@ -29,8 +29,11 @@ from ..subagent.config import expand_variables
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths, validate_reference_file
-from .embedding_provider import LocalEmbeddingProvider
-from .semantic_matching import SemanticMatcher
+from .embedding_types import (
+    EmbeddingProviderProtocol,
+    SemanticMatcherProtocol,
+    discover_embedding_subsystem,
+)
 from jaato_sdk.plugins.base import (
     UserCommand,
     CommandParameter,
@@ -102,8 +105,8 @@ class ReferencesPlugin:
         # Semantic matching: embedding provider and matcher.
         # Initialized during initialize() when embedding config is present
         # and sentence-transformers is installed.
-        self._embedding_provider: Optional[LocalEmbeddingProvider] = None
-        self._semantic_matcher: Optional[SemanticMatcher] = None
+        self._embedding_provider: Optional[EmbeddingProviderProtocol] = None
+        self._semantic_matcher: Optional[SemanticMatcherProtocol] = None
         # Semantic matching configuration.
         # lookup_strategy: "hybrid" (tags + semantic), "tags_only", "semantic_only"
         self._lookup_strategy: str = "hybrid"
@@ -953,29 +956,36 @@ class ReferencesPlugin:
             )
 
     def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
-        """Initialize the embedding provider for ``compute_embedding`` tool.
+        """Initialize the embedding provider via entry point discovery.
 
         Called unconditionally from ``initialize()`` so that the
         ``compute_embedding`` tool works even during first-time generation
-        (when no sidecar or embedding config exists yet). Uses lazy loading
-        to avoid the model-load cost when embeddings aren't needed.
+        (when no sidecar or embedding config exists yet).
+
+        The provider is discovered via the ``jaato.embedding`` entry point
+        group. If no provider is registered, embedding features are
+        unavailable and tag-based matching continues to work.
         """
         if self._embedding_provider is not None:
             return  # Already initialized (e.g. by _init_semantic_matching)
 
-        model_name = config.get("embedding_model", "all-MiniLM-L6-v2")
-        max_input_tokens = config.get("embedding_max_input_tokens", 512)
+        provider, matcher = discover_embedding_subsystem(config)
 
-        provider = LocalEmbeddingProvider(
-            model_name=model_name,
-            max_input_tokens=max_input_tokens,
-            eager_load=False,  # Lazy — only loads when compute_embedding is called
-        )
+        if provider is not None:
+            self._embedding_provider = provider
+            self._trace(
+                f"_init_embedding_provider: discovered provider "
+                f"(model='{provider.model_name}')"
+            )
+        else:
+            self._trace(
+                "_init_embedding_provider: no embedding provider registered "
+                "via jaato.embedding entry point"
+            )
 
-        self._embedding_provider = provider
-        self._trace(
-            f"_init_embedding_provider: ready (model='{model_name}', lazy_load)"
-        )
+        # Cache the discovered matcher for _init_semantic_matching()
+        if matcher is not None:
+            self._semantic_matcher = matcher
 
     def _init_semantic_matching(self, config: Dict[str, Any]) -> None:
         """Initialize the semantic matcher with existing embedding index.
@@ -984,8 +994,8 @@ class ReferencesPlugin:
         metadata and the lookup strategy includes semantic matching.
 
         Sets up:
-        1. The ``LocalEmbeddingProvider`` (loads the sentence-transformers model).
-        2. The ``SemanticMatcher`` (loads the sidecar ``.npy`` matrix).
+        1. The embedding provider (discovered via ``jaato.embedding`` entry point).
+        2. The semantic matcher (discovered via the same entry point group).
         3. Validates that the provider's model matches the index's model.
 
         On any failure, logs a warning and leaves semantic matching disabled
@@ -1019,30 +1029,34 @@ class ReferencesPlugin:
             self._trace("_init_semantic_matching: no sources have embeddings")
             return
 
-        # Reuse embedding provider from _init_embedding_provider(),
-        # but eagerly load the model now since we need it for matching.
-        provider_model = config.get("embedding_model", embedding_model)
+        # Provider and matcher were discovered in _init_embedding_provider().
+        # If either is missing, semantic matching cannot proceed.
         if self._embedding_provider is None:
-            max_input_tokens = config.get("embedding_max_input_tokens", 512)
-            self._embedding_provider = LocalEmbeddingProvider(
-                model_name=provider_model,
-                max_input_tokens=max_input_tokens,
-                eager_load=True,
+            self._trace(
+                "_init_semantic_matching: no embedding provider available"
             )
-        elif not self._embedding_provider.available:
-            # Lazy provider exists — trigger model load now
-            self._embedding_provider._load_model()
+            return
+
+        if self._semantic_matcher is None:
+            self._trace(
+                "_init_semantic_matching: no semantic matcher available"
+            )
+            return
+
+        # Eagerly load the model now since we need it for matching
+        if not self._embedding_provider.available:
+            self._embedding_provider.load_model()
 
         if not self._embedding_provider.available:
             self._trace(
                 "_init_semantic_matching: embedding provider not available "
-                "(sentence-transformers not installed?)"
+                "(model failed to load)"
             )
             self._embedding_provider = None
+            self._semantic_matcher = None
             return
 
-        # Initialize matcher
-        self._semantic_matcher = SemanticMatcher()
+        provider_model = config.get("embedding_model", embedding_model)
 
         # Validate model match
         if not self._semantic_matcher.validate_model(provider_model):
@@ -1560,8 +1574,9 @@ class ReferencesPlugin:
         if not self._embedding_provider:
             return {
                 "error": (
-                    "Embedding provider not available. Ensure sentence-transformers "
-                    "is installed and embedding config is present in references.json."
+                    "No embedding provider available. Install a package that "
+                    "registers a provider via the jaato.embedding entry point "
+                    "(e.g. jaato-premium)."
                 )
             }
 

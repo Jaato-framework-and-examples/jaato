@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.3.69"
+version = "0.3.70"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -53,8 +53,8 @@ dependencies = [
     "rich>=13.0.0",  # Shared plugins: terminal formatting (tables, panels, syntax highlighting) across multiple plugins
     "ast-grep-py>=0.30.0",  # ast_search plugin: multi-language AST-based code pattern search (Python, JS, TS, Go, Rust, Java, C/C++, etc.)
     "pymupdf4llm>=0.2.0",  # web_fetch plugin: PDF-to-markdown conversion for fetched PDF documents
-    "sentence-transformers>=2.2.0",  # references plugin: local semantic embedding provider for reference matching (no API calls needed)
-    "numpy>=1.24.0",  # references plugin: vector operations for embedding similarity + notebook plugin image processing
+    # sentence-transformers + numpy removed: provided by external packages
+    # via the jaato.embedding entry point group (e.g. jaato-premium)
     "openai>=1.0",  # NIM and ZhipuAI model provider plugins: OpenAI-compatible SDK for NVIDIA NIM and Zhipu AI APIs
 ]
 
@@ -119,6 +119,11 @@ gc_budget = "shared.plugins.gc_budget:create_plugin"
 cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
 cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
 cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
+
+# Entry points for embedding subsystem (references plugin semantic matching).
+# External packages register embedding_provider and semantic_matcher factories.
+[project.entry-points."jaato.embedding"]
+# Reserved — external packages (e.g. jaato-premium) register providers here.
 
 # Entry points for premium extensions
 # The jaato-premium package registers prompt providers, content paths,
