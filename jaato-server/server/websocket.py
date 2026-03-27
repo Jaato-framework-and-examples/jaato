@@ -326,29 +326,33 @@ class JaatoWSServer:
 
         # Register a session hook that applies AppArmor wrappers to
         # provisioned WS sessions and records the sandbox_mode.
-        if self._apparmor:
-            sm = router._session_manager
+        # Note: self._apparmor is initialized lazily in start(), which
+        # runs after set_command_router(), so we check it at hook
+        # execution time rather than registration time.
+        ws_server = self
+        sm = router._session_manager
 
-            def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
-                sess = sm.get_session(session_id)
-                if not sess or not sess.workspace_path:
-                    return
+        def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
+            sess = sm.get_session(session_id)
+            if not sess or not sess.workspace_path:
+                return
 
-                argv_wrapper, shell_wrapper = self.get_apparmor_wrappers(session_id)
-                if argv_wrapper or shell_wrapper:
-                    server.set_apparmor_wrapper(
-                        argv_wrapper=argv_wrapper,
-                        shell_wrapper=shell_wrapper,
-                    )
-                    sess.sandbox_mode = "apparmor"
-                    logger.info(
-                        "AppArmor confinement applied to session %s",
-                        session_id,
-                    )
-                else:
-                    sess.sandbox_mode = "soft"
+            argv_wrapper, shell_wrapper = ws_server.get_apparmor_wrappers(session_id)
+            if argv_wrapper or shell_wrapper:
+                server.set_apparmor_wrapper(
+                    argv_wrapper=argv_wrapper,
+                    shell_wrapper=shell_wrapper,
+                )
+                sess.sandbox_mode = "apparmor"
+                logger.info(
+                    "AppArmor confinement applied to session %s",
+                    session_id,
+                )
+            elif ws_server._apparmor is not None:
+                # AppArmor manager exists but wrappers not available
+                sess.sandbox_mode = "soft"
 
-            sm.add_session_hook(_apparmor_session_hook)
+        sm.add_session_hook(_apparmor_session_hook)
 
     def set_client_user(self, client_id: str, user_id: str) -> None:
         """Associate an authenticated user identity with a WS client.
