@@ -1484,12 +1484,17 @@ class JaatoWSServer:
             else:
                 sandbox_mode = "soft"
 
-            # Record sandbox mode on the Session object so it appears in
-            # session.info events sent to clients.
+            # Record sandbox mode on the Session object and re-emit
+            # session.info so the client receives the updated field.
+            # The initial session.info was sent during create_session()
+            # before AppArmor confinement was applied.
             sm = self._command_router._session_manager
             sess = sm.get_session(session_id)
             if sess:
                 sess.sandbox_mode = sandbox_mode
+                sm._emit_to_client(
+                    client_id, sm._build_session_info_event(sess)
+                )
 
         await self._send_to_client(
             client_id,
