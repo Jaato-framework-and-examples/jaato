@@ -316,11 +316,39 @@ class JaatoWSServer:
         directly by a per-WS ``JaatoServer``.
 
         Called by ``JaatoDaemon.start()`` after constructing the router.
+        Registers a session hook to apply AppArmor confinement and set
+        ``sandbox_mode`` on each newly created session.
 
         Args:
             router: ``CommandRouter`` instance.
         """
         self._command_router = router
+
+        # Register a session hook that applies AppArmor wrappers to
+        # provisioned WS sessions and records the sandbox_mode.
+        if self._apparmor:
+            sm = router._session_manager
+
+            def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
+                sess = sm.get_session(session_id)
+                if not sess or not sess.workspace_path:
+                    return
+
+                argv_wrapper, shell_wrapper = self.get_apparmor_wrappers(session_id)
+                if argv_wrapper or shell_wrapper:
+                    server.set_apparmor_wrapper(
+                        argv_wrapper=argv_wrapper,
+                        shell_wrapper=shell_wrapper,
+                    )
+                    sess.sandbox_mode = "apparmor"
+                    logger.info(
+                        "AppArmor confinement applied to session %s",
+                        session_id,
+                    )
+                else:
+                    sess.sandbox_mode = "soft"
+
+            sm.add_session_hook(_apparmor_session_hook)
 
     def set_client_user(self, client_id: str, user_id: str) -> None:
         """Associate an authenticated user identity with a WS client.
@@ -1468,7 +1496,9 @@ class JaatoWSServer:
 
         self._jaato_server = server
 
-        # Apply AppArmor confinement to CLI and interactive shell plugins
+        # Apply AppArmor confinement to CLI and interactive shell plugins.
+        # (In daemon mode this is handled by the session hook registered in
+        # set_command_router; this branch covers standalone WS server mode.)
         if provisioned_ws:
             argv_wrapper, shell_wrapper = self.get_apparmor_wrappers(session_id)
             if argv_wrapper or shell_wrapper:
@@ -1476,37 +1506,9 @@ class JaatoWSServer:
                     argv_wrapper=argv_wrapper,
                     shell_wrapper=shell_wrapper,
                 )
-                sandbox_mode = "apparmor"
                 logger.info(
                     "AppArmor confinement applied to session %s",
                     session_id,
-                )
-            else:
-                sandbox_mode = "soft"
-
-            # Record sandbox mode on the Session object and re-emit
-            # session.info so the client receives the updated field.
-            # The initial session.info was sent during create_session()
-            # before AppArmor confinement was applied.
-            sm = self._command_router._session_manager
-            sess = sm.get_session(session_id)
-            if sess:
-                sess.sandbox_mode = sandbox_mode
-                logger.info(
-                    "sandbox_mode=%s set on session %s, re-emitting session.info",
-                    sandbox_mode, session_id,
-                )
-                sm._emit_to_client(
-                    client_id, sm._build_session_info_event(sess)
-                )
-            else:
-                # Session might be registered under a different ID by the
-                # command router.  Try finding it by workspace path.
-                logger.warning(
-                    "sandbox_mode: session %s not found in session manager "
-                    "(known sessions: %s)",
-                    session_id,
-                    [s.session_id for s in sm.list_sessions()],
                 )
 
         await self._send_to_client(

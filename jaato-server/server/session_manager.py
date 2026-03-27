@@ -864,7 +864,6 @@ class SessionManager:
         if workspace_path:
             session_dir = self._session_storage_dir(workspace_path) / session_id
             self._configure_todo_storage(server, session_dir)
-        self._run_session_hooks(server, session_id)
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
@@ -895,6 +894,10 @@ class SessionManager:
             self._sessions[session_id] = session
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
+
+        # Run session hooks after the Session is stored so hooks can
+        # call get_session() to modify session attributes (e.g. sandbox_mode).
+        self._run_session_hooks(server, session_id)
 
         # Start workspace file monitor
         if workspace_path:
@@ -1183,7 +1186,6 @@ class SessionManager:
         else:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
-        self._run_session_hooks(server, session_id)
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
@@ -1306,6 +1308,11 @@ class SessionManager:
                         len(reconcile_changes),
                         session_id,
                     )
+
+        # Store session before running hooks so hooks can call get_session().
+        with self._lock:
+            self._sessions[session_id] = session
+        self._run_session_hooks(server, session_id)
 
         logger.info(f"Loaded session from disk: {session_id}")
         return session
