@@ -1492,8 +1492,21 @@ class JaatoWSServer:
             sess = sm.get_session(session_id)
             if sess:
                 sess.sandbox_mode = sandbox_mode
+                logger.info(
+                    "sandbox_mode=%s set on session %s, re-emitting session.info",
+                    sandbox_mode, session_id,
+                )
                 sm._emit_to_client(
                     client_id, sm._build_session_info_event(sess)
+                )
+            else:
+                # Session might be registered under a different ID by the
+                # command router.  Try finding it by workspace path.
+                logger.warning(
+                    "sandbox_mode: session %s not found in session manager "
+                    "(known sessions: %s)",
+                    session_id,
+                    [s.session_id for s in sm.list_sessions()],
                 )
 
         await self._send_to_client(
