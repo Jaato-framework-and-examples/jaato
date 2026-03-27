@@ -101,6 +101,7 @@ class Session:
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
+    sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
 
 
 class SessionManager:
@@ -2091,17 +2092,26 @@ class SessionManager:
         - models: Available model names
         """
         # Get sessions list
-        sessions_data = [{
-            "id": s.session_id,
-            "name": s.name or "",
-            "description": s.description or "",
-            "model_provider": s.model_provider or "",
-            "model_name": s.model_name or "",
-            "is_loaded": s.is_loaded,
-            "client_count": s.client_count,
-            "turn_count": s.turn_count,
-            "workspace_path": s.workspace_path or "",
-        } for s in self.list_sessions()]
+        # Build sessions list. Enrich with sandbox_mode from Session objects
+        # (sandbox_mode is set by the WS server during workspace provisioning).
+        session_lookup = {s.session_id: s for s in self._sessions.values()}
+        sessions_data = []
+        for s in self.list_sessions():
+            entry = {
+                "id": s.session_id,
+                "name": s.name or "",
+                "description": s.description or "",
+                "model_provider": s.model_provider or "",
+                "model_name": s.model_name or "",
+                "is_loaded": s.is_loaded,
+                "client_count": s.client_count,
+                "turn_count": s.turn_count,
+                "workspace_path": s.workspace_path or "",
+            }
+            sess = session_lookup.get(s.session_id)
+            if sess and sess.sandbox_mode:
+                entry["sandbox_mode"] = sess.sandbox_mode
+            sessions_data.append(entry)
 
         # Get tools list from the session's server
         tools_data = []

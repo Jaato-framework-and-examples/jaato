@@ -1476,10 +1476,20 @@ class JaatoWSServer:
                     argv_wrapper=argv_wrapper,
                     shell_wrapper=shell_wrapper,
                 )
+                sandbox_mode = "apparmor"
                 logger.info(
                     "AppArmor confinement applied to session %s",
                     session_id,
                 )
+            else:
+                sandbox_mode = "soft"
+
+            # Record sandbox mode on the Session object so it appears in
+            # session.info events sent to clients.
+            sm = self._command_router._session_manager
+            sess = sm.get_session(session_id)
+            if sess:
+                sess.sandbox_mode = sandbox_mode
 
         await self._send_to_client(
             client_id,
