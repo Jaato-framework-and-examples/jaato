@@ -276,6 +276,10 @@ class SemanticMatcherProtocol(Protocol):
 
 _ENTRY_POINT_GROUP = "jaato.embedding"
 
+# Cached entry point map — populated on first discovery call.
+# Entry points don't change while the process is running.
+_cached_ep_map: Optional[Dict[str, Any]] = None
+
 
 def discover_embedding_subsystem(
     config: Dict[str, Any],
@@ -302,19 +306,24 @@ def discover_embedding_subsystem(
         Tuple of (provider_or_none, matcher_or_none). Both are None when
         no entry point is registered or loading fails.
     """
+    global _cached_ep_map
+
     provider: Optional[EmbeddingProviderProtocol] = None
     matcher: Optional[SemanticMatcherProtocol] = None
 
-    try:
-        if sys.version_info >= (3, 10):
-            eps = importlib.metadata.entry_points(group=_ENTRY_POINT_GROUP)
-        else:
-            all_eps = importlib.metadata.entry_points()
-            eps = all_eps.get(_ENTRY_POINT_GROUP, [])
-    except Exception:
-        return (None, None)
+    if _cached_ep_map is None:
+        try:
+            if sys.version_info >= (3, 10):
+                eps = importlib.metadata.entry_points(group=_ENTRY_POINT_GROUP)
+            else:
+                all_eps = importlib.metadata.entry_points()
+                eps = all_eps.get(_ENTRY_POINT_GROUP, [])
+        except Exception:
+            _cached_ep_map = {}
+            return (None, None)
+        _cached_ep_map = {ep.name: ep for ep in eps}
 
-    ep_map = {ep.name: ep for ep in eps}
+    ep_map = _cached_ep_map
 
     # Discover embedding provider
     ep = ep_map.get("embedding_provider")
