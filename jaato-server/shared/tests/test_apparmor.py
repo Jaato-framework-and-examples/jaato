@@ -151,7 +151,9 @@ class TestProvisionProfile:
 
         mock_run.assert_called_once()
         call_args = mock_run.call_args
-        assert "apparmor_parser" in call_args[0][0][0]
+        cmd = call_args[0][0]
+        assert cmd[0] == "sudo"
+        assert cmd[1] == "apparmor_parser"
 
     def test_returns_false_when_unavailable(self, manager):
         manager._available = False

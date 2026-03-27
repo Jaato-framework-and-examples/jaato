@@ -180,6 +180,19 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             logger.debug("AppArmor: profile dir not writable: %s", self._profile_dir)
             return False
 
+        # Verify sudo access to apparmor_parser (required for loading profiles)
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "apparmor_parser", "--version"],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode != 0:
+                logger.debug("AppArmor: sudo apparmor_parser not available (no sudoers rule?)")
+                return False
+        except (subprocess.TimeoutExpired, OSError):
+            logger.debug("AppArmor: sudo apparmor_parser check failed")
+            return False
+
         # Create user-local cache directory for apparmor_parser
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -227,7 +240,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         try:
             result = subprocess.run(
-                ["apparmor_parser", "-r", "--cache-loc", str(self._cache_dir), str(profile_path)],
+                ["sudo", "apparmor_parser", "-r", "--cache-loc", str(self._cache_dir), str(profile_path)],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -276,7 +289,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         try:
             subprocess.run(
-                ["apparmor_parser", "-R", "--cache-loc", str(self._cache_dir), str(profile_path)],
+                ["sudo", "apparmor_parser", "-R", "--cache-loc", str(self._cache_dir), str(profile_path)],
                 capture_output=True,
                 text=True,
                 timeout=30,
