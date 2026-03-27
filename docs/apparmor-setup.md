@@ -68,20 +68,30 @@ Or, if using a non-root user that can write to the profile directory and `apparm
 
 In practice, most deployments write profiles as the jaato user and load them via a helper script with sudo.
 
-### 3. Start the server with AppArmor
+> **Note:** The server uses `--cache-loc ~/.jaato/apparmor-cache/` when invoking `apparmor_parser`, so the system-level cache at `/var/cache/apparmor` (which requires root) is not needed.
+
+### 3. Start the server
+
+Via `jaato-server`, AppArmor confinement activates automatically when the server starts with a WebSocket listener and all prerequisites are met — no extra flags are needed:
 
 ```bash
-# Auto-detect (default) — enables if prerequisites are met
 jaato-server --web-socket :8089 --daemon
-
-# Explicitly enable — fails if prerequisites are missing
-jaato-server --web-socket :8089 --apparmor --daemon
-
-# Explicitly disable
-jaato-server --web-socket :8089 --no-apparmor --daemon
 ```
 
-Check the log to confirm:
+If you run the WebSocket server standalone, you can explicitly control AppArmor:
+
+```bash
+# Auto-detect (default)
+python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
+
+# Explicitly enable — logs a warning if prerequisites are missing
+python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --apparmor
+
+# Explicitly disable
+python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-apparmor
+```
+
+Check the log to confirm which mode is active:
 
 ```bash
 grep -i apparmor /tmp/jaato.log
@@ -138,9 +148,9 @@ AppArmor confinement not available    → directory sandboxing only
 
 ## Troubleshooting
 
-### "AppArmor confinement required but not available"
+### "AppArmor confinement not available" / "required but not available"
 
-This appears when `--apparmor` is passed explicitly but prerequisites are missing. Check:
+The first message appears when auto-detection finds missing prerequisites. The second appears only when `--apparmor` is passed explicitly to the standalone WS server. In both cases, check:
 
 ```bash
 # Is the kernel module loaded?

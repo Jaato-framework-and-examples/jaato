@@ -120,6 +120,10 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         self._venv_path = Path(venv_path or sys.prefix).resolve()
         self._profile_dir = Path(profile_dir)
 
+        # User-local cache directory for apparmor_parser, avoiding the
+        # system-level /var/cache/apparmor which requires root access.
+        self._cache_dir = Path("~/.jaato/apparmor-cache").expanduser().resolve()
+
         self._available: Optional[bool] = None  # Lazy-checked
 
     # ------------------------------------------------------------------
@@ -176,6 +180,13 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             logger.debug("AppArmor: profile dir not writable: %s", self._profile_dir)
             return False
 
+        # Create user-local cache directory for apparmor_parser
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.debug("AppArmor: cannot create cache dir %s", self._cache_dir)
+            return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -216,7 +227,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         try:
             result = subprocess.run(
-                ["apparmor_parser", "-r", str(profile_path)],
+                ["apparmor_parser", "-r", "--cache-loc", str(self._cache_dir), str(profile_path)],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -265,7 +276,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         try:
             subprocess.run(
-                ["apparmor_parser", "-R", str(profile_path)],
+                ["apparmor_parser", "-R", "--cache-loc", str(self._cache_dir), str(profile_path)],
                 capture_output=True,
                 text=True,
                 timeout=30,
