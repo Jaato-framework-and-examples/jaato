@@ -71,6 +71,7 @@ The factory receives an `_ExtensionContext` with these attributes:
 | `server_name`       | `str \| None`           | `--server-name` CLI arg              |
 | `dashboard_port`    | `int \| None`           | `--dashboard-port` CLI arg           |
 | `available_plugins` | `frozenset[str]`        | Plugin names discovered at startup   |
+| `plugin_registry`   | `PluginRegistry`        | Registry for config schema queries   |
 
 ### Extension Protocol
 

@@ -97,12 +97,15 @@ class _ExtensionContext:
             load.  Discovered once at daemon startup via
             ``PluginRegistry.discover()``.  Names match what profiles use
             (e.g. ``"cli"``, ``"references"``, ``"todo"``).
+        plugin_registry: The ``PluginRegistry`` instance used for discovery.
+            Extensions can call ``plugin_registry.get_plugin_config_schema(name)``
+            to introspect a plugin's configurable settings.
     """
 
     __slots__ = (
         "session_manager", "ws_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
-        "available_plugins",
+        "available_plugins", "plugin_registry",
     )
 
     def __init__(
@@ -114,6 +117,7 @@ class _ExtensionContext:
         server_name: Optional[str],
         dashboard_port: Optional[int],
         available_plugins: frozenset = frozenset(),
+        plugin_registry=None,
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
@@ -122,6 +126,7 @@ class _ExtensionContext:
         self.server_name = server_name
         self.dashboard_port = dashboard_port
         self.available_plugins = available_plugins
+        self.plugin_registry = plugin_registry
 
 
 def configure_logging(
@@ -566,6 +571,7 @@ class JaatoDaemon:
             server_name=self._server_name,
             dashboard_port=self._dashboard_port,
             available_plugins=_available,
+            plugin_registry=_discovery_registry,
         )
 
         for ep in ext_eps:
