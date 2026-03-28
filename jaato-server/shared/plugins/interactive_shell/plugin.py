@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import PluginSetting, UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
@@ -177,6 +177,35 @@ class InteractiveShellPlugin:
             self._sessions.clear()
 
         self._initialized = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="max_sessions",
+                type="int",
+                default=8,
+                description="Maximum concurrent shell sessions",
+            ),
+            PluginSetting(
+                name="max_lifetime",
+                type="int",
+                default=600,
+                description="Session lifetime ceiling in seconds",
+            ),
+            PluginSetting(
+                name="max_idle",
+                type="int",
+                default=300,
+                description="Max idle seconds before session reaping",
+            ),
+            PluginSetting(
+                name="idle_timeout",
+                type="float",
+                default=0.5,
+                description="Output settling time in seconds",
+            ),
+        ]
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.

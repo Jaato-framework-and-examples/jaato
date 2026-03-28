@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import PluginSetting, UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..streaming import StreamingCapable, StreamChunk, ChunkCallback
 
@@ -166,6 +166,29 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
         self._shutdown_bg_executor()
         self._initialized = False
         logger.info("ASTSearchPlugin shutdown")
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="max_results",
+                type="int",
+                default=100,
+                description="Maximum matches to return",
+            ),
+            PluginSetting(
+                name="context_lines",
+                type="int",
+                default=2,
+                description="Lines of context around each match",
+            ),
+            PluginSetting(
+                name="exclude_dirs",
+                type="list[str]",
+                default=list(DEFAULT_EXCLUDE_DIRS),
+                description="Directories to exclude from search",
+            ),
+        ]
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool schemas for AST search.

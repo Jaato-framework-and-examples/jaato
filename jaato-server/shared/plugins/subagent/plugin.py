@@ -20,7 +20,7 @@ from .config import (
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
-from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
+from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines, PluginSetting
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
@@ -228,6 +228,35 @@ class SubagentPlugin:
         self._config = None
         self._initialized = False
         logger.info("Subagent plugin shutdown (running subagents preserved)")
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="allow_inline",
+                type="bool",
+                default=False,
+                description="Allow inline subagent creation",
+            ),
+            PluginSetting(
+                name="inline_allowed_plugins",
+                type="list[str]",
+                default=[],
+                description="Plugins allowed for inline subagent creation",
+            ),
+            PluginSetting(
+                name="auto_discover_profiles",
+                type="bool",
+                default=True,
+                description="Auto-discover profiles from profiles directory",
+            ),
+            PluginSetting(
+                name="profiles_dir",
+                type="str",
+                default=".jaato/profiles",
+                description="Directory for profile discovery",
+            ),
+        ]
 
     # =========================================================================
     # Persistence Methods

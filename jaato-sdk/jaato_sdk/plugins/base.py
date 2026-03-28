@@ -60,6 +60,37 @@ OutputCallback = Callable[[str, str, str], None]
 
 
 @dataclass
+class PluginSetting:
+    """Declaration of a configurable plugin setting.
+
+    Used by plugins to declare what config keys they accept in
+    ``initialize(config)``.  Enables introspection by profile managers,
+    TUI settings forms, and documentation generators.
+
+    Only user/profile-configurable settings should be declared.  Internal
+    wiring keys like ``agent_name`` or ``workspace_root`` (set by the
+    framework via auto-wiring) are excluded.
+
+    Attributes:
+        name: Config key name as used in ``config.get(name, default)``.
+        type: Type hint string (``"int"``, ``"str"``, ``"bool"``,
+            ``"float"``, ``"list[str]"``, ``"dict"``).
+        default: Default value when the key is absent from config.
+        description: Human-readable description of the setting.
+        required: If True, the setting must be provided in config.
+        choices: If set, restricts valid values to this list.
+        env_var: Environment variable that can override this setting.
+    """
+    name: str
+    type: str
+    default: Any
+    description: str
+    required: bool = False
+    choices: Optional[List[Any]] = None
+    env_var: Optional[str] = None
+
+
+@dataclass
 class PromptEnrichmentResult:
     """Result of prompt enrichment by a plugin.
 
@@ -319,6 +350,14 @@ class EnrichmentPlugin(Protocol):
         """Called when the plugin is disabled. Clean up resources here."""
         ...
 
+    # ==================== Optional Extensions ====================
+    #
+    # Configuration Schema:
+    #
+    # def get_config_schema(self) -> List[PluginSetting]:
+    #     """Declare configurable settings. See ToolPlugin for details."""
+    #     ...
+
     # ==================== Enrichment Methods ====================
     #
     # At least one enrichment subscription set should be implemented.
@@ -454,6 +493,39 @@ class ToolPlugin(Protocol):
     #
     # The following methods are optional extensions to the base protocol.
     # Plugins can implement these for additional functionality.
+    #
+    # Configuration Schema:
+    #
+    # def get_config_schema(self) -> List[PluginSetting]:
+    #     """Declare configurable settings for this plugin.
+    #
+    #     Returns a list of PluginSetting descriptors describing the config
+    #     keys this plugin accepts in initialize(config).  Only include
+    #     user/profile-configurable settings — omit internal wiring keys
+    #     like agent_name or workspace_root.
+    #
+    #     Returns:
+    #         List of PluginSetting objects, or empty list if no settings.
+    #
+    #     Example:
+    #         def get_config_schema(self) -> List[PluginSetting]:
+    #             return [
+    #                 PluginSetting(
+    #                     name="max_results",
+    #                     type="int",
+    #                     default=100,
+    #                     description="Maximum matches to return",
+    #                 ),
+    #                 PluginSetting(
+    #                     name="region",
+    #                     type="str",
+    #                     default="wt-wt",
+    #                     description="Region for search results",
+    #                     choices=["wt-wt", "us-en", "uk-en"],
+    #                 ),
+    #             ]
+    #     """
+    #     ...
     #
     # Model Requirements:
     #

@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jaato_sdk.plugins.base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
+from jaato_sdk.plugins.base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo, PluginSetting
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
 from shared.trace import trace as _trace_write
 
@@ -279,6 +279,14 @@ class TemplatePlugin:
         self._initialized = False
         self._extracted_templates.clear()
         self._template_index.clear()
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin.
+
+        The template plugin has no user-configurable settings. All config
+        keys (agent_name, base_path) are internal wiring set by the framework.
+        """
+        return []
 
     def get_prerequisite_policies(self):
         """Declare template-first file creation policy for reliability enforcement.

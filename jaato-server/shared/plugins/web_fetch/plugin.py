@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import PluginSetting, UserCommand
 from ..background import BackgroundCapableMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from shared.trace import trace as _trace_write
@@ -123,6 +123,35 @@ class WebFetchPlugin(BackgroundCapableMixin):
         self._trace("shutdown: clearing cache")
         self._cache.clear()
         self._initialized = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="timeout",
+                type="int",
+                default=30,
+                description="HTTP request timeout in seconds",
+            ),
+            PluginSetting(
+                name="max_length",
+                type="int",
+                default=100000,
+                description="Maximum content length in characters",
+            ),
+            PluginSetting(
+                name="follow_redirects",
+                type="bool",
+                default=True,
+                description="Follow HTTP redirects",
+            ),
+            PluginSetting(
+                name="cache_ttl",
+                type="int",
+                default=300,
+                description="Cache time-to-live in seconds",
+            ),
+        ]
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the web fetch tool."""

@@ -27,7 +27,7 @@ from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import PluginSetting, UserCommand
 
 
 # Thread-local storage for per-agent context
@@ -292,6 +292,18 @@ class TodoPlugin:
         when another agent re-initializes the plugin with different config.
         """
         self._trace("shutdown: cleaning up (preserving plan tracking and storage)")
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="storage_type",
+                type="str",
+                default="memory",
+                description="Storage backend type",
+                choices=["memory", "file", "hybrid"],
+            ),
+        ]
         # Don't shutdown reporter - it's shared and may still be in use
         # self._reporter will be replaced in initialize() if needed
         self._initialized = False

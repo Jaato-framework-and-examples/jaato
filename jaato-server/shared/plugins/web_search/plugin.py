@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import PluginSetting, UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from shared.trace import trace as _trace_write
 
@@ -82,6 +82,36 @@ class WebSearchPlugin:
         self._trace("shutdown: cleaning up")
         self._ddgs = None
         self._initialized = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="max_results",
+                type="int",
+                default=10,
+                description="Maximum search results to return",
+            ),
+            PluginSetting(
+                name="timeout",
+                type="int",
+                default=10,
+                description="Request timeout in seconds",
+            ),
+            PluginSetting(
+                name="region",
+                type="str",
+                default="wt-wt",
+                description="Region code for search results",
+            ),
+            PluginSetting(
+                name="safesearch",
+                type="str",
+                default="moderate",
+                description="Safe search level",
+                choices=["off", "moderate", "strict"],
+            ),
+        ]
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the web search tool."""

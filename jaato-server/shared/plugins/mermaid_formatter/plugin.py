@@ -13,11 +13,12 @@ formatter adds syntax highlighting to them.
 import logging
 import os
 import re
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from . import renderer
 from .backends import select_backend
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
+from jaato_sdk.plugins.base import PluginSetting
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,31 @@ class MermaidFormatterPlugin:
         if env_vision_dir:
             self._artifact_dir = env_vision_dir
         # else: remains None until set_workspace_path() is called
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="theme",
+                type="str",
+                default="default",
+                description="Mermaid theme",
+                env_var="JAATO_MERMAID_THEME",
+            ),
+            PluginSetting(
+                name="scale",
+                type="int",
+                default=2,
+                description="Scale factor for rendering",
+                env_var="JAATO_MERMAID_SCALE",
+            ),
+            PluginSetting(
+                name="background",
+                type="str",
+                default="white",
+                description="Background color for diagrams",
+            ),
+        ]
 
     def set_console_width(self, width: int) -> None:
         """Update console width for rendering."""

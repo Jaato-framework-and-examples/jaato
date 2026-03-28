@@ -20,7 +20,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
-from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
+from jaato_sdk.plugins.base import PluginSetting, UserCommand, PermissionDisplayInfo
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
@@ -223,6 +223,37 @@ class NotebookPlugin(StreamingCapable):
         self._current_notebook_id = None
         self._initialized = False
         self._kaggle_init_attempted = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="default_backend",
+                type="str",
+                default="local",
+                description="Default execution backend",
+                choices=["local", "kaggle"],
+            ),
+            PluginSetting(
+                name="enable_kaggle",
+                type="bool",
+                default=True,
+                description="Enable Kaggle backend",
+            ),
+            PluginSetting(
+                name="max_output_length",
+                type="int",
+                default=10000,
+                description="Maximum output characters",
+            ),
+            PluginSetting(
+                name="sandbox_mode",
+                type="str",
+                default="warn",
+                description="Sandbox mode",
+                choices=["disabled", "warn", "block_critical", "strict"],
+            ),
+        ]
 
     def set_workspace_path(self, path: str) -> None:
         """Set workspace root path (auto-wired by PluginRegistry).

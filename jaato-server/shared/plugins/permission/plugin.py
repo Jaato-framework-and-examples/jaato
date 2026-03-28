@@ -26,7 +26,7 @@ from .channels import (
     get_permission_options_with_edit,
     EDIT_PERMISSION_OPTION,
 )
-from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
+from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines, PluginSetting
 from ...ui_utils import format_permission_options, format_tool_args_summary
 from shared.trace import trace as _trace_write
 
@@ -228,6 +228,24 @@ class PermissionPlugin:
         self._allow_all = False
         self._turn_suspended = False
         self._idle_suspended = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="channel_type",
+                type="str",
+                default="console",
+                description="Permission channel type",
+                choices=["console", "webhook", "file"],
+            ),
+            PluginSetting(
+                name="channel_config",
+                type="dict",
+                default={},
+                description="Channel-specific configuration",
+            ),
+        ]
 
     def add_whitelist_tools(self, tools: List[str]) -> None:
         """Add tools to the permission whitelist.

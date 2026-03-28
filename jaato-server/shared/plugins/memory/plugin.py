@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from jaato_sdk.plugins.base import (
     CommandCompletion,
     HelpLines,
+    PluginSetting,
     PromptEnrichmentResult,
     UserCommand,
 )
@@ -105,6 +106,17 @@ class MemoryPlugin:
         if self._indexer:
             self._indexer.clear()
         self._storage = None
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return the user-configurable settings for this plugin."""
+        return [
+            PluginSetting(
+                name="storage_path",
+                type="str",
+                default=".jaato/memories.jsonl",
+                description="Path to JSONL memory storage file",
+            ),
+        ]
         self._indexer = None
 
     def set_workspace_path(self, path: str) -> None:
