@@ -18,6 +18,7 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from jaato_sdk.plugins.base import PluginSetting
 from jaato_sdk.plugins.model_provider.types import Message, Role
 
 from ..gc import (
@@ -121,6 +122,40 @@ class BudgetGCPlugin:
         self._trace("shutdown")
         self._config = {}
         self._initialized = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return user-configurable settings for this plugin.
+
+        Returns:
+            List of PluginSetting describing each config key read
+            by initialize().
+        """
+        return [
+            PluginSetting(
+                name="preserve_recent_turns",
+                type="int",
+                default=5,
+                description="Number of recent turns to preserve during GC",
+            ),
+            PluginSetting(
+                name="target_percent",
+                type="float",
+                default=60.0,
+                description="Target context usage percentage after GC",
+            ),
+            PluginSetting(
+                name="pressure_percent",
+                type="float",
+                default=90.0,
+                description="Context pressure threshold for aggressive GC",
+            ),
+            PluginSetting(
+                name="notify_on_gc",
+                type="bool",
+                default=False,
+                description="Emit notification when GC runs",
+            ),
+        ]
 
     def set_plugin_registry(self, registry) -> None:
         """Set the plugin registry for looking up plugins.

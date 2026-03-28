@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from jaato_sdk.plugins.base import PluginSetting
 from jaato_sdk.plugins.model_provider.types import Message
 
 from ..gc import (
@@ -114,6 +115,34 @@ class HybridGCPlugin:
         self._config = {}
         self._summarizer = None
         self._initialized = False
+
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Return user-configurable settings for this plugin.
+
+        Returns:
+            List of PluginSetting describing each config key read
+            by initialize().
+        """
+        return [
+            PluginSetting(
+                name="preserve_recent_turns",
+                type="int",
+                default=5,
+                description="Number of recent turns to preserve during GC",
+            ),
+            PluginSetting(
+                name="summarize_middle_turns",
+                type="int",
+                default=10,
+                description="Number of middle turns to summarize",
+            ),
+            PluginSetting(
+                name="notify_on_gc",
+                type="bool",
+                default=False,
+                description="Emit notification when GC runs",
+            ),
+        ]
 
     def should_collect(
         self,

@@ -100,12 +100,18 @@ class _ExtensionContext:
         plugin_registry: The ``PluginRegistry`` instance used for discovery.
             Extensions can call ``plugin_registry.get_plugin_config_schema(name)``
             to introspect a plugin's configurable settings.
+        available_gc_plugins: Frozen set of GC plugin names discovered at
+            startup (e.g. ``"gc_truncate"``, ``"gc_budget"``).
+        gc_plugin_factories: Dict mapping GC plugin names to their factory
+            functions.  Extensions can instantiate a GC plugin to call
+            ``get_config_schema()`` for settings introspection.
     """
 
     __slots__ = (
         "session_manager", "ws_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
         "available_plugins", "plugin_registry",
+        "available_gc_plugins", "gc_plugin_factories",
     )
 
     def __init__(
@@ -118,6 +124,8 @@ class _ExtensionContext:
         dashboard_port: Optional[int],
         available_plugins: frozenset = frozenset(),
         plugin_registry=None,
+        available_gc_plugins: frozenset = frozenset(),
+        gc_plugin_factories: dict = None,
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
@@ -127,6 +135,8 @@ class _ExtensionContext:
         self.dashboard_port = dashboard_port
         self.available_plugins = available_plugins
         self.plugin_registry = plugin_registry
+        self.available_gc_plugins = available_gc_plugins
+        self.gc_plugin_factories = gc_plugin_factories or {}
 
 
 def configure_logging(
@@ -562,6 +572,12 @@ class JaatoDaemon:
         _available = frozenset(_discovery_registry.list_available())
         logger.info("Discovered %d available plugins for extensions", len(_available))
 
+        # Discover GC plugins so extensions can list/introspect them.
+        from shared.plugins.gc import discover_gc_plugins
+        _gc_factories = discover_gc_plugins()
+        _available_gc = frozenset(_gc_factories.keys())
+        logger.info("Discovered %d available GC plugins for extensions", len(_available_gc))
+
         # Build the context namespace passed to every extension factory.
         context = _ExtensionContext(
             session_manager=self._session_manager,
@@ -572,6 +588,8 @@ class JaatoDaemon:
             dashboard_port=self._dashboard_port,
             available_plugins=_available,
             plugin_registry=_discovery_registry,
+            available_gc_plugins=_available_gc,
+            gc_plugin_factories=_gc_factories,
         )
 
         for ep in ext_eps:

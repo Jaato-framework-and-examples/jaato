@@ -70,8 +70,10 @@ The factory receives an `_ExtensionContext` with these attributes:
 | `ipc_socket`        | `str \| None`           | Raw `--ipc-socket` CLI arg           |
 | `server_name`       | `str \| None`           | `--server-name` CLI arg              |
 | `dashboard_port`    | `int \| None`           | `--dashboard-port` CLI arg           |
-| `available_plugins` | `frozenset[str]`        | Plugin names discovered at startup   |
-| `plugin_registry`   | `PluginRegistry`        | Registry for config schema queries   |
+| `available_plugins`    | `frozenset[str]`        | Tool/enrichment plugin names            |
+| `plugin_registry`      | `PluginRegistry`        | Registry for config schema queries      |
+| `available_gc_plugins` | `frozenset[str]`        | GC plugin names (e.g. `gc_truncate`)    |
+| `gc_plugin_factories`  | `dict[str, Callable]`   | GC plugin factories for introspection   |
 
 ### Extension Protocol
 
