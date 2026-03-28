@@ -127,7 +127,7 @@ Following [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/do
 
 | Attribute | Type | Description | Example |
 |-----------|------|-------------|---------|
-| `jaato.session_id` | string | Session identifier | `"sess_abc123"` |
+| `jaato.session_id` | string | Daemon session manager ID (for Phoenix correlation) | `"20260328_204308"` |
 | `jaato.agent_type` | string | Agent type | `"main"`, `"subagent"` |
 | `jaato.agent_name` | string | Agent name | `"code_reviewer"` |
 | `jaato.turn_index` | int | Turn number in session | `5` |

@@ -542,6 +542,10 @@ class OTelPlugin:
         }
         if attributes:
             attrs.update(attributes)
+            # Persist daemon session ID on thread-local so all child spans
+            # (turn, llm, tool, etc.) include it automatically.
+            if "jaato.session_id" in attributes:
+                self._agent_context.daemon_session_id = attributes["jaato.session_id"]
         self._start_long_lived(
             key=f"session:{session_id}",
             span_name=f"jaato.session.{session_id}",
@@ -596,6 +600,17 @@ class OTelPlugin:
     def end_agent(self, session_id: str, agent_id: str) -> None:
         """End an agent span."""
         self._end_long_lived(f"agent:{session_id}:{agent_id}")
+
+    def _inject_daemon_session_id(self, attrs: Dict[str, Any]) -> None:
+        """Add ``jaato.session_id`` to span attributes from thread-local context.
+
+        Called by every span creator so that all spans — not just the
+        session/agent parent spans — carry the daemon session ID for
+        Phoenix correlation.
+        """
+        daemon_sid = getattr(self._agent_context, "daemon_session_id", None)
+        if daemon_sid:
+            attrs["jaato.session_id"] = daemon_sid
 
     def _get_context_metadata(self) -> Dict[str, Any]:
         """Build metadata dict from thread-local context.
@@ -697,6 +712,7 @@ class OTelPlugin:
         }
         if agent_name:
             attrs["agent.name"] = agent_name
+        self._inject_daemon_session_id(attrs)
 
         # jaato-specific context packed into metadata
         metadata = self._get_context_metadata()
@@ -751,6 +767,7 @@ class OTelPlugin:
             "llm.system": provider,
             "llm.model_name": model,
         }
+        self._inject_daemon_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["streaming"] = streaming
@@ -790,6 +807,7 @@ class OTelPlugin:
             "tool.name": tool_name,
             "tool.id": call_id,
         }
+        self._inject_daemon_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["plugin_type"] = plugin_type
@@ -822,6 +840,7 @@ class OTelPlugin:
         attrs: Dict[str, Any] = {
             _OI_SPAN_KIND: _OI_CHAIN,
         }
+        self._inject_daemon_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["retry_attempt"] = attempt
@@ -855,6 +874,7 @@ class OTelPlugin:
         attrs: Dict[str, Any] = {
             _OI_SPAN_KIND: _OI_CHAIN,
         }
+        self._inject_daemon_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["gc_trigger_reason"] = trigger_reason
@@ -886,6 +906,7 @@ class OTelPlugin:
         attrs: Dict[str, Any] = {
             _OI_SPAN_KIND: _OI_CHAIN,
         }
+        self._inject_daemon_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["permission_tool_name"] = tool_name

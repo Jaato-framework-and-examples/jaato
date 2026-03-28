@@ -939,6 +939,7 @@ class JaatoServer:
                                     provider_name=provider_to_use,
                                     workspace_path=self._workspace_path,
                                     instruction_token_cache=self._instruction_token_cache,
+                                    daemon_session_id=self._session_id,
                                 )
                             with _s2.sub("client_connect"):
                                 self._jaato.connect(project_id, location, model_name)

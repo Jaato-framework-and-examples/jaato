@@ -258,6 +258,7 @@ class JaatoSession:
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"  # Unique ID for this agent
+        self._daemon_session_id: Optional[str] = None  # Session manager ID for telemetry correlation
 
         # Retry notification callback (client-configurable)
         self._on_retry: Optional[RetryCallback] = None
@@ -405,12 +406,27 @@ class JaatoSession:
             session_root = parent._agent_id
             parent = getattr(parent, '_parent_session', None)
 
-        telemetry.begin_session(session_root)
+        # Resolve daemon session ID: walk up to root session to find it.
+        daemon_sid = self._daemon_session_id
+        if not daemon_sid:
+            p = self._parent_session
+            while p is not None:
+                if p._daemon_session_id:
+                    daemon_sid = p._daemon_session_id
+                    break
+                p = getattr(p, '_parent_session', None)
+
+        extra_attrs = {}
+        if daemon_sid:
+            extra_attrs["jaato.session_id"] = daemon_sid
+
+        telemetry.begin_session(session_root, attributes=extra_attrs or None)
         telemetry.begin_agent(
             session_id=session_root,
             agent_id=self._agent_id,
             agent_name=self._agent_name,
             agent_type=self._agent_type,
+            attributes=extra_attrs or None,
         )
 
     def set_terminal_width(self, width: int) -> None:
@@ -527,6 +543,18 @@ class JaatoSession:
         # Telemetry session/agent spans are started lazily on the first
         # turn (see _ensure_telemetry_spans) because the parent session
         # reference may not be set yet when set_agent_context is called.
+
+    def set_daemon_session_id(self, session_id: str) -> None:
+        """Set the daemon session manager ID for telemetry correlation.
+
+        This ID (e.g. ``"20260328_204308"``) is emitted as the
+        ``jaato.session_id`` span attribute so Phoenix traces can be
+        correlated back to jaato session manager sessions.
+
+        Args:
+            session_id: The session manager's session ID.
+        """
+        self._daemon_session_id = session_id
 
     def set_ui_hooks(
         self,

@@ -92,7 +92,8 @@ class JaatoClient:
 
     def __init__(self, provider_name: Optional[str] = None,
                  workspace_path: Optional[str] = None,
-                 instruction_token_cache: Optional[InstructionTokenCache] = None):
+                 instruction_token_cache: Optional[InstructionTokenCache] = None,
+                 daemon_session_id: Optional[str] = None):
         """Initialize JaatoClient with specified provider.
 
         Args:
@@ -104,6 +105,9 @@ class JaatoClient:
             instruction_token_cache: Optional shared cache for instruction token
                 counts.  When provided (e.g. from ``SessionManager``), cached
                 counts survive across session creates/restores.
+            daemon_session_id: Session manager ID (e.g. ``"20260328_204308"``).
+                Propagated to telemetry spans as ``jaato.session_id`` for
+                correlating Phoenix traces to jaato sessions.
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
@@ -122,6 +126,7 @@ class JaatoClient:
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"
         self._agent_name: str = "Main Agent"
+        self._daemon_session_id: Optional[str] = daemon_session_id
 
     def _trace(self, msg: str) -> None:
         """Write trace message to the provider trace log.
@@ -460,6 +465,8 @@ class JaatoClient:
             kwargs["skip_model_test"] = True
         self._session = self._runtime.create_session(**kwargs)
         self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
+        if self._daemon_session_id:
+            self._session.set_daemon_session_id(self._daemon_session_id)
 
         # Pass UI hooks to session if they were set before configure_tools
         if self._ui_hooks:
@@ -490,6 +497,8 @@ class JaatoClient:
         # Create a minimal session with user commands but no provider
         self._session = self._runtime.create_session_without_provider(model=self._model_name)
         self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
+        if self._daemon_session_id:
+            self._session.set_daemon_session_id(self._daemon_session_id)
 
         # Pass UI hooks to session if they were set
         if self._ui_hooks:
@@ -526,6 +535,8 @@ class JaatoClient:
         # Create session manually
         self._session = JaatoSession(self._runtime, self._model_name)
         self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
+        if self._daemon_session_id:
+            self._session.set_daemon_session_id(self._daemon_session_id)
         self._session._provider = provider
         self._session._tools = tools
         self._session._system_instruction = system_instruction
