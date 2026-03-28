@@ -1086,9 +1086,10 @@ class JaatoWSServer:
                     session_id,
                     event,
                 )
-            # After session.new completes, register any buffered client tools
+            # After session.new or session.attach completes, register any
+            # buffered client tools that were sent before the session existed.
             if (isinstance(event, CommandRequest)
-                    and event.command.lower() == "session.new"
+                    and event.command.lower() in ("session.new", "session.attach")
                     and hasattr(self, '_pending_client_tools')
                     and client_id in self._pending_client_tools):
                 pending = self._pending_client_tools.pop(client_id)
