@@ -255,6 +255,60 @@ ToolSchema(
 2. Update consumers (session, plugins) to query `registry.get_tool_traits()` for
    the new trait.
 
+## Configuration Schema (`get_config_schema`)
+
+Plugins that accept configuration in `initialize(config)` should declare their
+settings via `get_config_schema()`. This enables profile managers, TUI settings
+forms, and documentation generators to introspect available settings.
+
+```python
+from jaato_sdk.plugins.base import PluginSetting
+
+def get_config_schema(self) -> List[PluginSetting]:
+    return [
+        PluginSetting(
+            name="max_results",
+            type="int",
+            default=100,
+            description="Maximum matches to return",
+        ),
+        PluginSetting(
+            name="region",
+            type="str",
+            default="wt-wt",
+            description="Region for search results",
+            choices=["wt-wt", "us-en", "uk-en"],
+        ),
+        PluginSetting(
+            name="timeout",
+            type="int",
+            default=30,
+            description="Request timeout in seconds",
+            env_var="MY_PLUGIN_TIMEOUT",
+        ),
+    ]
+```
+
+**PluginSetting fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | str | yes | Config key as used in `config.get(name, default)` |
+| `type` | str | yes | Type hint: `"int"`, `"str"`, `"bool"`, `"float"`, `"list[str]"`, `"dict"` |
+| `default` | Any | yes | Default value when key is absent |
+| `description` | str | yes | Human-readable description |
+| `required` | bool | no | If True, key must be in config (default: False) |
+| `choices` | list | no | Restricts valid values to this list |
+| `env_var` | str | no | Environment variable that can override |
+
+**What to include:** Only user/profile-configurable settings.
+
+**What to exclude:** Internal wiring keys set by the framework — `agent_name`,
+`workspace_root`, `workspace_path`, `session_id`, `base_path`, `config_path`.
+
+**Registry access:** `registry.get_plugin_config_schema("cli")` returns the list
+of `PluginSetting` for a plugin, or `[]` if unimplemented.
+
 ## Checklist for New Plugins
 
 1. `__init__.py` has `PLUGIN_KIND = "tool"` or `"enrichment"` (or other appropriate kind)
@@ -264,9 +318,10 @@ ToolSchema(
 5. User commands listed in `get_auto_approved_tools()` (prevents permission prompts)
 6. `get_command_completions()` implemented for subcommand autocompletion
 7. Help command returns `HelpLines` (not `str`) for pager display
-8. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
-9. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
-10. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
+8. `get_config_schema()` implemented if plugin has configurable settings
+9. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
+10. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
+11. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
 
 ## Critical: `verify_auth()` in Model Provider Plugins
 
