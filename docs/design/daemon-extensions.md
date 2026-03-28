@@ -64,12 +64,13 @@ The factory receives an `_ExtensionContext` with these attributes:
 
 | Attribute         | Type                    | Description                          |
 |-------------------|-------------------------|--------------------------------------|
-| `session_manager` | `SessionManager`        | The daemon's session manager         |
-| `ws_server`       | `JaatoWSServer \| None` | WebSocket server (None if disabled)  |
-| `web_socket`      | `str \| None`           | Raw `--web-socket` CLI arg           |
-| `ipc_socket`      | `str \| None`           | Raw `--ipc-socket` CLI arg           |
-| `server_name`     | `str \| None`           | `--server-name` CLI arg              |
-| `health_port`     | `int \| None`           | `--health-port` CLI arg              |
+| `session_manager`   | `SessionManager`        | The daemon's session manager         |
+| `ws_server`         | `JaatoWSServer \| None` | WebSocket server (None if disabled)  |
+| `web_socket`        | `str \| None`           | Raw `--web-socket` CLI arg           |
+| `ipc_socket`        | `str \| None`           | Raw `--ipc-socket` CLI arg           |
+| `server_name`       | `str \| None`           | `--server-name` CLI arg              |
+| `dashboard_port`    | `int \| None`           | `--dashboard-port` CLI arg           |
+| `available_plugins` | `frozenset[str]`        | Plugin names discovered at startup   |
 
 ### Extension Protocol
 

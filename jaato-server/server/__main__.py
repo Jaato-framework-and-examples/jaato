@@ -93,11 +93,16 @@ class _ExtensionContext:
         ipc_socket: The raw ``--ipc-socket`` CLI argument string, or ``None``.
         server_name: The ``--server-name`` CLI argument, or ``None``.
         dashboard_port: The ``--dashboard-port`` CLI argument (int), or ``None``.
+        available_plugins: Frozen set of plugin names that the server can
+            load.  Discovered once at daemon startup via
+            ``PluginRegistry.discover()``.  Names match what profiles use
+            (e.g. ``"cli"``, ``"references"``, ``"todo"``).
     """
 
     __slots__ = (
         "session_manager", "ws_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
+        "available_plugins",
     )
 
     def __init__(
@@ -108,6 +113,7 @@ class _ExtensionContext:
         ipc_socket: Optional[str],
         server_name: Optional[str],
         dashboard_port: Optional[int],
+        available_plugins: frozenset = frozenset(),
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
@@ -115,6 +121,7 @@ class _ExtensionContext:
         self.ipc_socket = ipc_socket
         self.server_name = server_name
         self.dashboard_port = dashboard_port
+        self.available_plugins = available_plugins
 
 
 def configure_logging(
@@ -542,6 +549,14 @@ class JaatoDaemon:
         if not ext_eps:
             return
 
+        # Discover available plugins once so extensions can validate
+        # profile definitions against the actual plugin set.
+        from shared.plugins.registry import PluginRegistry
+        _discovery_registry = PluginRegistry()
+        _discovery_registry.discover()
+        _available = frozenset(_discovery_registry.list_available())
+        logger.info("Discovered %d available plugins for extensions", len(_available))
+
         # Build the context namespace passed to every extension factory.
         context = _ExtensionContext(
             session_manager=self._session_manager,
@@ -550,6 +565,7 @@ class JaatoDaemon:
             ipc_socket=self.ipc_socket,
             server_name=self._server_name,
             dashboard_port=self._dashboard_port,
+            available_plugins=_available,
         )
 
         for ep in ext_eps:
