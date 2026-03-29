@@ -50,7 +50,6 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
             'model': profile.model,
             'provider': profile.provider,
             'max_turns': profile.max_turns,
-            'auto_approved': profile.auto_approved,
             'icon': profile.icon,
             'icon_name': profile.icon_name,
         }
@@ -135,7 +134,6 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
             model=profile_data.get('model'),
             provider=profile_data.get('provider'),
             max_turns=profile_data.get('max_turns', 10),
-            auto_approved=profile_data.get('auto_approved', False),
             icon=profile_data.get('icon'),
             icon_name=profile_data.get('icon_name'),
             gc=gc_config,

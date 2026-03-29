@@ -52,7 +52,6 @@ class TestSerializeSubagentState:
             model='gemini-2.5-flash',
             provider='google_genai',
             max_turns=5,
-            auto_approved=True,
             icon=['[R]', '[E]', '[S]'],
             icon_name='research',
         )
@@ -77,7 +76,6 @@ class TestSerializeSubagentState:
         assert result['profile']['model'] == 'gemini-2.5-flash'
         assert result['profile']['provider'] == 'google_genai'
         assert result['profile']['max_turns'] == 5
-        assert result['profile']['auto_approved'] is True
         assert result['profile']['icon'] == ['[R]', '[E]', '[S]']
         assert result['profile']['icon_name'] == 'research'
 
@@ -196,7 +194,6 @@ class TestDeserializeSubagentState:
                 'model': 'gemini-2.5-flash',
                 'provider': 'google_genai',
                 'max_turns': 5,
-                'auto_approved': True,
             },
             'history': [],
             'turn_accounting': [],
@@ -218,7 +215,6 @@ class TestDeserializeSubagentState:
         assert profile.model == 'gemini-2.5-flash'
         assert profile.provider == 'google_genai'
         assert profile.max_turns == 5
-        assert profile.auto_approved is True
 
     def test_deserialize_with_gc_config(self):
         """Test deserialization with GC configuration."""

@@ -177,7 +177,6 @@ class TestDiscoverProfiles:
                 "system_instructions": "You are a helpful assistant.",
                 "model": "gemini-2.5-pro",
                 "max_turns": 20,
-                "auto_approved": True,
                 "icon": ["[*]", "| |", "---"],
                 "icon_name": "custom_icon",
             }
@@ -194,7 +193,6 @@ class TestDiscoverProfiles:
             assert profile.system_instructions == "You are a helpful assistant."
             assert profile.model == "gemini-2.5-pro"
             assert profile.max_turns == 20
-            assert profile.auto_approved is True
             assert profile.icon == ["[*]", "| |", "---"]
             assert profile.icon_name == "custom_icon"
 

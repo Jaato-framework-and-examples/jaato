@@ -28,7 +28,6 @@ class TestValidateProfile:
             "model": "gemini-2.5-flash",
             "provider": "google_genai",
             "max_turns": 15,
-            "auto_approved": False,
             "icon": ["╔══╗", "║CB║", "╚══╝"],
             "icon_name": "circuit_breaker",
             "gc": {
@@ -105,12 +104,6 @@ class TestValidateProfile:
         is_valid, errors, warnings = validate_profile(data)
         assert is_valid is False
         assert any("'max_turns' must be an integer" in e for e in errors)
-
-    def test_auto_approved_not_bool(self):
-        data = {"name": "test", "description": "test", "auto_approved": "yes"}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'auto_approved' must be a boolean" in e for e in errors)
 
     def test_model_not_string(self):
         data = {"name": "test", "description": "test", "model": 123}

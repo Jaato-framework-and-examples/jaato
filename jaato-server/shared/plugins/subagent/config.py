@@ -550,7 +550,6 @@ class SubagentProfile:
         provider: Optional provider override (e.g., 'anthropic', 'google_genai').
                   Allows subagents to use a different provider than the parent.
         max_turns: Maximum conversation turns before returning (default: 10).
-        auto_approved: Whether this subagent can be spawned without permission.
         gc: Optional garbage collection configuration for this subagent.
         env: Session-scoped environment variables for this profile.
             Values support ``${VAR}`` expansion and secret URI resolution
@@ -569,7 +568,6 @@ class SubagentProfile:
     model: Optional[str] = None
     provider: Optional[str] = None
     max_turns: int = 10
-    auto_approved: bool = False
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
 
@@ -694,7 +692,6 @@ def _scan_profiles_dir(
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
-            auto_approved=data.get('auto_approved', False),
             gc=gc_config,
             env=env,
         )
@@ -821,7 +818,6 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
-            auto_approved=data.get('auto_approved', False),
             gc=gc_config,
             env=env,
         )
@@ -885,12 +881,6 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
             errors.append("'max_turns' must be an integer")
         elif max_turns <= 0:
             errors.append("'max_turns' must be a positive integer")
-
-    # auto_approved: bool
-    auto_approved = data.get("auto_approved")
-    if auto_approved is not None:
-        if not isinstance(auto_approved, bool):
-            errors.append("'auto_approved' must be a boolean")
 
     # model: string or null
     model = data.get("model")
@@ -1038,7 +1028,6 @@ class SubagentConfig:
                 model=profile_data.get('model'),
                 provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),
-                auto_approved=profile_data.get('auto_approved', False),
                 gc=gc_config,
                 env=env,
             )

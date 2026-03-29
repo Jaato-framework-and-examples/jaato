@@ -1090,7 +1090,7 @@ class SubagentPlugin:
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
         # Read-only tools are safe and can be auto-approved
-        # spawn_subagent and send_to_subagent should require permission unless auto_approved
+        # spawn_subagent and send_to_subagent require permission
         return ['list_subagent_profiles', 'list_active_subagents', 'validateProfile']
 
     def get_user_commands(self) -> List[UserCommand]:
@@ -1379,7 +1379,6 @@ class SubagentPlugin:
                 'description': profile.description,
                 'plugins': profile.plugins,
                 'max_turns': profile.max_turns,
-                'auto_approved': profile.auto_approved,
             })
 
         result: Dict[str, Any] = {
