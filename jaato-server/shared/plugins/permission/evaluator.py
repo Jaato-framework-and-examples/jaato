@@ -39,15 +39,51 @@ logger = logging.getLogger(__name__)
 class PolicyDecision(Enum):
     """Decision returned by a permission evaluator.
 
+    Mirrors the script-relevant subset of ``ChannelDecision`` from the
+    permission channels, plus ``FALLBACK`` for deferring to the standard
+    policy pipeline.
+
     Attributes:
-        ALLOW: Permit the tool execution unconditionally.
-        DENY: Block the tool execution unconditionally.
+        ALLOW: Permit this tool execution (equivalent to user ``y``).
+        ALLOW_ONCE: Permit but don't remember (equivalent to ``once``).
+        ALLOW_TURN: Permit all remaining tools this turn (``t``).
+        ALLOW_UNTIL_IDLE: Permit until session goes idle (``i``).
+        ALLOW_SESSION: Add to session whitelist (``a``/``always``).
+        ALLOW_ALL: Pre-approve all future requests in session (``all``).
+        DENY: Block this tool execution (``n``).
+        DENY_SESSION: Add to session blacklist (``never``).
+        DENY_WITH_COMMENT: Deny and pass a comment to the model (``c:``).
+            When returning this, use ``EvalResult`` with the comment text.
         FALLBACK: Defer to the standard policy pipeline
             (blacklist/whitelist/default).
     """
     ALLOW = "allow"
+    ALLOW_ONCE = "allow_once"
+    ALLOW_TURN = "allow_turn"
+    ALLOW_UNTIL_IDLE = "allow_until_idle"
+    ALLOW_SESSION = "allow_session"
+    ALLOW_ALL = "allow_all"
     DENY = "deny"
+    DENY_SESSION = "deny_session"
+    DENY_WITH_COMMENT = "deny_with_comment"
     FALLBACK = "fallback"
+
+
+@dataclass
+class EvalResult:
+    """Result from a permission evaluator, pairing a decision with an
+    optional comment.
+
+    Evaluators can return either a bare ``PolicyDecision`` or an
+    ``EvalResult`` for richer responses (e.g. deny-with-comment).
+
+    Attributes:
+        decision: The permission decision.
+        comment: Optional comment text passed to the model when
+            ``decision`` is ``DENY_WITH_COMMENT``.
+    """
+    decision: PolicyDecision
+    comment: Optional[str] = None
 
 
 @dataclass
@@ -214,12 +250,18 @@ def run_evaluator(
     tool_name: str,
     args: Dict[str, Any],
     context: EvalContext,
-) -> PolicyDecision:
+) -> EvalResult:
     """Run the appropriate evaluator for a tool.
 
     Checks for a tool-specific evaluator first, then falls back to
     the ``"default"`` evaluator.  If no evaluator matches or the
     evaluator raises an exception, returns FALLBACK.
+
+    Evaluators can return:
+    - A ``PolicyDecision`` enum value
+    - An ``EvalResult`` (for richer responses like deny-with-comment)
+    - A string (``"allow"``, ``"deny"``, ``"fallback"``)
+    - A tuple ``(decision, comment)`` for deny-with-comment
 
     Args:
         evaluators: Loaded evaluator dict from ``load_evaluators()``.
@@ -228,31 +270,56 @@ def run_evaluator(
         context: Evaluation context.
 
     Returns:
-        PolicyDecision from the evaluator, or FALLBACK on error/miss.
+        EvalResult from the evaluator, or FALLBACK on error/miss.
     """
+    _FALLBACK = EvalResult(PolicyDecision.FALLBACK)
+
     # Tool-specific evaluator takes precedence
     fn = evaluators.get(tool_name) or evaluators.get("default")
     if fn is None:
-        return PolicyDecision.FALLBACK
+        return _FALLBACK
 
     try:
         result = fn(tool_name, args, context)
-        if isinstance(result, PolicyDecision):
+
+        # Already an EvalResult
+        if isinstance(result, EvalResult):
             return result
-        # Accept string values too ("allow", "deny", "fallback")
+
+        # Bare PolicyDecision
+        if isinstance(result, PolicyDecision):
+            return EvalResult(result)
+
+        # Tuple (decision, comment) for deny-with-comment
+        if isinstance(result, tuple) and len(result) == 2:
+            decision, comment = result
+            if isinstance(decision, PolicyDecision):
+                return EvalResult(decision, comment=str(comment) if comment else None)
+            if isinstance(decision, str):
+                try:
+                    return EvalResult(
+                        PolicyDecision(decision.lower()),
+                        comment=str(comment) if comment else None,
+                    )
+                except ValueError:
+                    pass
+
+        # Accept string values ("allow", "deny", "fallback")
         if isinstance(result, str):
             try:
-                return PolicyDecision(result.lower())
+                return EvalResult(PolicyDecision(result.lower()))
             except ValueError:
                 pass
+
         logger.warning(
-            "Evaluator for '%s' returned invalid result: %r (expected PolicyDecision)",
+            "Evaluator for '%s' returned invalid result: %r "
+            "(expected PolicyDecision, EvalResult, or (decision, comment) tuple)",
             tool_name, result,
         )
-        return PolicyDecision.FALLBACK
+        return _FALLBACK
     except Exception as exc:
         logger.warning(
             "Evaluator for '%s' raised %s: %s — falling back to policy",
             tool_name, type(exc).__name__, exc,
         )
-        return PolicyDecision.FALLBACK
+        return _FALLBACK

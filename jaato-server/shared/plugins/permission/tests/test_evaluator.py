@@ -9,6 +9,7 @@ import pytest
 
 from shared.plugins.permission.evaluator import (
     EvalContext,
+    EvalResult,
     PolicyDecision,
     _resolve_evaluator_path,
     load_evaluators,
@@ -145,21 +146,21 @@ class TestRunEvaluator:
             "default": lambda t, a, c: PolicyDecision.ALLOW,
         }
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.ALLOW
+        assert result.decision == PolicyDecision.ALLOW
 
     def test_deny_decision(self):
         evaluators = {
             "default": lambda t, a, c: PolicyDecision.DENY,
         }
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.DENY
+        assert result.decision == PolicyDecision.DENY
 
     def test_fallback_decision(self):
         evaluators = {
             "default": lambda t, a, c: PolicyDecision.FALLBACK,
         }
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.FALLBACK
+        assert result.decision == PolicyDecision.FALLBACK
 
     def test_tool_specific_takes_precedence(self):
         evaluators = {
@@ -167,7 +168,7 @@ class TestRunEvaluator:
             "cli_based_tool": lambda t, a, c: PolicyDecision.DENY,
         }
         result = run_evaluator(evaluators, "cli_based_tool", {}, self._ctx("cli_based_tool"))
-        assert result == PolicyDecision.DENY
+        assert result.decision == PolicyDecision.DENY
 
     def test_falls_back_to_default(self):
         evaluators = {
@@ -175,18 +176,18 @@ class TestRunEvaluator:
             "other_tool": lambda t, a, c: PolicyDecision.DENY,
         }
         result = run_evaluator(evaluators, "cli_based_tool", {}, self._ctx("cli_based_tool"))
-        assert result == PolicyDecision.ALLOW
+        assert result.decision == PolicyDecision.ALLOW
 
     def test_no_matching_evaluator_returns_fallback(self):
         evaluators = {
             "other_tool": lambda t, a, c: PolicyDecision.DENY,
         }
         result = run_evaluator(evaluators, "cli_based_tool", {}, self._ctx("cli_based_tool"))
-        assert result == PolicyDecision.FALLBACK
+        assert result.decision == PolicyDecision.FALLBACK
 
     def test_empty_evaluators_returns_fallback(self):
         result = run_evaluator({}, "cli", {}, self._ctx())
-        assert result == PolicyDecision.FALLBACK
+        assert result.decision == PolicyDecision.FALLBACK
 
     def test_exception_in_evaluator_returns_fallback(self):
         def bad_eval(t, a, c):
@@ -194,21 +195,55 @@ class TestRunEvaluator:
 
         evaluators = {"default": bad_eval}
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.FALLBACK
+        assert result.decision == PolicyDecision.FALLBACK
 
     def test_string_return_value_accepted(self):
         evaluators = {
             "default": lambda t, a, c: "deny",
         }
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.DENY
+        assert result.decision == PolicyDecision.DENY
 
     def test_invalid_return_value_returns_fallback(self):
         evaluators = {
             "default": lambda t, a, c: 42,
         }
         result = run_evaluator(evaluators, "cli", {}, self._ctx())
-        assert result == PolicyDecision.FALLBACK
+        assert result.decision == PolicyDecision.FALLBACK
+
+    def test_deny_with_comment_via_eval_result(self):
+        evaluators = {
+            "default": lambda t, a, c: EvalResult(
+                PolicyDecision.DENY_WITH_COMMENT,
+                comment="This command is blocked during maintenance window",
+            ),
+        }
+        result = run_evaluator(evaluators, "cli", {}, self._ctx())
+        assert result.decision == PolicyDecision.DENY_WITH_COMMENT
+        assert result.comment == "This command is blocked during maintenance window"
+
+    def test_deny_with_comment_via_tuple(self):
+        evaluators = {
+            "default": lambda t, a, c: (PolicyDecision.DENY_WITH_COMMENT, "Not allowed here"),
+        }
+        result = run_evaluator(evaluators, "cli", {}, self._ctx())
+        assert result.decision == PolicyDecision.DENY_WITH_COMMENT
+        assert result.comment == "Not allowed here"
+
+    def test_deny_with_comment_via_string_tuple(self):
+        evaluators = {
+            "default": lambda t, a, c: ("deny_with_comment", "Use a safer command"),
+        }
+        result = run_evaluator(evaluators, "cli", {}, self._ctx())
+        assert result.decision == PolicyDecision.DENY_WITH_COMMENT
+        assert result.comment == "Use a safer command"
+
+    def test_bare_decision_has_no_comment(self):
+        evaluators = {
+            "default": lambda t, a, c: PolicyDecision.DENY,
+        }
+        result = run_evaluator(evaluators, "cli", {}, self._ctx())
+        assert result.comment is None
 
     def test_evaluator_receives_correct_args(self):
         received = {}

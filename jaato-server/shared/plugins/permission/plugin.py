@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
-from .evaluator import EvalContext, load_evaluators
+from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators
 from .config_loader import load_config, PermissionConfig
 from .channels import (
     Channel,
@@ -986,8 +986,27 @@ class PermissionPlugin:
         match = self._policy.check(tool_name, args, eval_context=eval_context)
 
         if match.decision == PermissionDecision.ALLOW:
+            # Apply scoped side effects from evaluator decisions
+            if match.eval_result and match.rule_type == "evaluator":
+                ed = match.eval_result.decision
+                if ed == EvalDecision.ALLOW_TURN:
+                    self._turn_suspended = True
+                    method = 'evaluator_turn_suspension'
+                elif ed == EvalDecision.ALLOW_UNTIL_IDLE:
+                    self._idle_suspended = True
+                    method = 'evaluator_idle_suspension'
+                elif ed == EvalDecision.ALLOW_SESSION:
+                    if self._policy:
+                        self._policy.add_session_whitelist(tool_name)
+                    method = 'evaluator_session_whitelist'
+                elif ed == EvalDecision.ALLOW_ALL:
+                    self._allow_all = True
+                    method = 'evaluator_allow_all'
+                else:
+                    method = 'evaluator'
+            else:
+                method = match.rule_type or 'policy'
             self._log_decision(tool_name, args, "allow", match.reason)
-            method = match.rule_type or 'policy'
             # Emit resolved hook for auto-approved (whitelist)
             # SKIP in subagent mode
             if self._on_permission_resolved and not is_subagent_mode:
@@ -995,13 +1014,21 @@ class PermissionPlugin:
             return True, {'reason': match.reason, 'method': method}
 
         elif match.decision == PermissionDecision.DENY:
+            # Apply scoped side effects from evaluator decisions
+            if match.eval_result and match.eval_result.decision == EvalDecision.DENY_SESSION:
+                if self._policy:
+                    self._policy.add_session_blacklist(tool_name)
+                method = 'evaluator_session_blacklist'
+            elif match.rule_type == "evaluator_comment":
+                method = 'evaluator_comment'
+            else:
+                method = match.rule_type or 'policy'
             self._log_decision(tool_name, args, "deny", match.reason)
-            method = match.rule_type or 'policy'
             # Emit resolved hook for auto-denied (blacklist)
             # SKIP in subagent mode
             if self._on_permission_resolved and not is_subagent_mode:
                 self._on_permission_resolved(tool_name, "", False, method)
-            return False, {'reason': match.reason, 'method': method}
+            return False, {'reason': match.reason, 'method': method, 'comment': match.eval_result.comment if match.eval_result else None}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
             # Need to ask the channel (already retrieved above for subagent check)

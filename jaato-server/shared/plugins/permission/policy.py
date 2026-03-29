@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators, run_evaluator
+from .evaluator import EvalContext, EvalResult, PolicyDecision as EvalDecision, load_evaluators, run_evaluator
 from .sanitization import (
     SanitizationConfig,
     SanitizationResult,
@@ -37,8 +37,9 @@ class PolicyMatch:
     decision: PermissionDecision
     reason: str
     matched_rule: Optional[str] = None
-    rule_type: Optional[str] = None  # "blacklist", "whitelist", "default", "sanitization"
+    rule_type: Optional[str] = None  # "blacklist", "whitelist", "default", "sanitization", "evaluator"
     violations: Optional[List[str]] = None  # For sanitization failures
+    eval_result: Optional['EvalResult'] = None  # Evaluator result for scoped decisions
 
 
 @dataclass
@@ -112,22 +113,41 @@ class PermissionPolicy:
 
         # 0.5. Run permission evaluators (after sanitization, before blacklist)
         if self._evaluators and eval_context is not None:
-            eval_decision = run_evaluator(self._evaluators, tool_name, args, eval_context)
-            if eval_decision == EvalDecision.ALLOW:
-                return PolicyMatch(
-                    decision=PermissionDecision.ALLOW,
-                    reason="Evaluator granted access",
-                    matched_rule=None,
-                    rule_type="evaluator",
-                )
-            elif eval_decision == EvalDecision.DENY:
+            eval_result = run_evaluator(self._evaluators, tool_name, args, eval_context)
+            decision = eval_result.decision
+
+            if decision == EvalDecision.FALLBACK:
+                pass  # Continue to blacklist/whitelist
+
+            elif decision in (EvalDecision.DENY, EvalDecision.DENY_SESSION):
                 return PolicyMatch(
                     decision=PermissionDecision.DENY,
                     reason="Evaluator denied access",
-                    matched_rule=None,
                     rule_type="evaluator",
+                    eval_result=eval_result,
                 )
-            # FALLBACK — continue to blacklist/whitelist
+            elif decision == EvalDecision.DENY_WITH_COMMENT:
+                comment = eval_result.comment or "Denied by evaluator"
+                return PolicyMatch(
+                    decision=PermissionDecision.DENY,
+                    reason=f"Tool not executed. Evaluator comment: {comment}",
+                    rule_type="evaluator_comment",
+                    eval_result=eval_result,
+                )
+            elif decision in (
+                EvalDecision.ALLOW,
+                EvalDecision.ALLOW_ONCE,
+                EvalDecision.ALLOW_TURN,
+                EvalDecision.ALLOW_UNTIL_IDLE,
+                EvalDecision.ALLOW_SESSION,
+                EvalDecision.ALLOW_ALL,
+            ):
+                return PolicyMatch(
+                    decision=PermissionDecision.ALLOW,
+                    reason="Evaluator granted access",
+                    rule_type="evaluator",
+                    eval_result=eval_result,
+                )
 
         # 1. Check session blacklist first (highest priority)
         if self._matches_session_blacklist(tool_name, signature):
