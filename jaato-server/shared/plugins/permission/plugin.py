@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
+from .evaluator import EvalContext, load_evaluators
 from .config_loader import load_config, PermissionConfig
 from .channels import (
     Channel,
@@ -190,6 +191,14 @@ class PermissionPlugin:
             self._policy = PermissionPolicy.from_config(policy_dict)
         else:
             self._policy = PermissionPolicy.from_config(self._config.to_policy_dict())
+
+        # Load permission evaluators if configured
+        evaluator_config = config.get("evaluators") if config else None
+        if evaluator_config and isinstance(evaluator_config, dict):
+            workspace = config.get("workspace_path") or getattr(self, '_workspace_path', None)
+            evaluators = load_evaluators(evaluator_config, workspace_path=workspace)
+            if evaluators:
+                self._policy.set_evaluators(evaluators)
 
         # Initialize channel
         channel_type = config.get("channel_type") or self._config.channel_type
@@ -963,8 +972,18 @@ class PermissionPlugin:
         channel = self._get_channel()
         is_subagent_mode = isinstance(channel, ParentBridgedChannel)
 
+        # Build evaluator context for permission evaluators
+        eval_context = EvalContext(
+            tool_name=tool_name,
+            args=args,
+            agent_type=context.get("agent_type", "main") if context else "main",
+            agent_name=context.get("agent_name") if context else None,
+            session_id=context.get("session_id") if context else None,
+            workspace_path=getattr(self, '_workspace_path', None),
+        )
+
         # Evaluate against policy
-        match = self._policy.check(tool_name, args)
+        match = self._policy.check(tool_name, args, eval_context=eval_context)
 
         if match.decision == PermissionDecision.ALLOW:
             self._log_decision(tool_name, args, "allow", match.reason)

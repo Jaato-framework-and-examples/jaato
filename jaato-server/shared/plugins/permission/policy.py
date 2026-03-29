@@ -13,8 +13,9 @@ import fnmatch
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
+from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators, run_evaluator
 from .sanitization import (
     SanitizationConfig,
     SanitizationResult,
@@ -46,9 +47,10 @@ class PermissionPolicy:
 
     Evaluation order:
     1. Sanitization checks (if enabled) -> DENY if violations found
-    2. Check blacklist (tools, patterns, arguments) -> DENY if matched
-    3. Check whitelist (tools, patterns, arguments) -> ALLOW if matched
-    4. Apply default_policy
+    2. Permission evaluators (if configured) -> ALLOW/DENY/FALLBACK
+    3. Check blacklist (tools, patterns, arguments) -> DENY if matched
+    4. Check whitelist (tools, patterns, arguments) -> ALLOW if matched
+    5. Apply default_policy
 
     Blacklist ALWAYS takes priority over whitelist.
     """
@@ -74,12 +76,27 @@ class PermissionPolicy:
     sanitization_config: Optional[SanitizationConfig] = None
     cwd: Optional[str] = None  # Working directory for path checks
 
-    def check(self, tool_name: str, args: Dict[str, Any]) -> PolicyMatch:
+    # Permission evaluators (tool_name|"default" -> evaluate callable)
+    _evaluators: Dict[str, Callable] = field(default_factory=dict)
+
+    def set_evaluators(self, evaluators: Dict[str, Callable]) -> None:
+        """Set runtime permission evaluators.
+
+        Evaluators run after sanitization but before blacklist/whitelist checks.
+        They can return ALLOW, DENY, or FALLBACK (continue to normal policy).
+
+        Args:
+            evaluators: Dict mapping tool names (or "default") to evaluate callables.
+        """
+        self._evaluators = evaluators
+
+    def check(self, tool_name: str, args: Dict[str, Any], eval_context: Optional[EvalContext] = None) -> PolicyMatch:
         """Evaluate permission for a tool call.
 
         Args:
             tool_name: Name of the tool being called
             args: Arguments being passed to the tool
+            eval_context: Optional EvalContext for permission evaluators
 
         Returns:
             PolicyMatch with decision and reasoning
@@ -92,6 +109,25 @@ class PermissionPolicy:
             sanitization_match = self._check_sanitization(tool_name, args, signature)
             if sanitization_match:
                 return sanitization_match
+
+        # 0.5. Run permission evaluators (after sanitization, before blacklist)
+        if self._evaluators and eval_context is not None:
+            eval_decision = run_evaluator(self._evaluators, tool_name, args, eval_context)
+            if eval_decision == EvalDecision.ALLOW:
+                return PolicyMatch(
+                    decision=PermissionDecision.ALLOW,
+                    reason="Evaluator granted access",
+                    matched_rule=None,
+                    rule_type="evaluator",
+                )
+            elif eval_decision == EvalDecision.DENY:
+                return PolicyMatch(
+                    decision=PermissionDecision.DENY,
+                    reason="Evaluator denied access",
+                    matched_rule=None,
+                    rule_type="evaluator",
+                )
+            # FALLBACK — continue to blacklist/whitelist
 
         # 1. Check session blacklist first (highest priority)
         if self._matches_session_blacklist(tool_name, signature):
