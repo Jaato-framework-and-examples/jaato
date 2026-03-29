@@ -326,12 +326,12 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
    ```python
    # policies/cli_evaluator.py
    def evaluate(tool_name: str, args: dict, context: EvalContext) -> PolicyDecision:
-       """Called at permission-check time. Returns allow/deny/ask."""
+       """Called at permission-check time. Returns allow/deny/fallback."""
        if context.hour_of_day < 6 or context.hour_of_day > 22:
            return PolicyDecision.DENY  # no CLI tools outside business hours
        if "DROP" in args.get("command", "").upper():
            return PolicyDecision.DENY
-       return PolicyDecision.ASK
+       return PolicyDecision.FALLBACK  # proceed to standard approval mechanism
    ```
    This preserves jaato's declarative-first approach (evaluators are referenced from JSON, not hardcoded) while enabling ADK-style programmatic flexibility. Evaluator scripts are checked into the repo alongside profiles, keeping them auditable and portable.
 
