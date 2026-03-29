@@ -322,7 +322,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
      }
    }
    ```
-   The `"default"` key applies to all tools unless overridden by a tool-specific entry. Tool-specific evaluators take precedence over the default.
+   Evaluator paths are resolved using the standard discovery precedence: workspace `.jaato/` → user `~/.jaato/` → premium (entry points). Tool-specific evaluators take precedence over the default.
    ```python
    # policies/cli_evaluator.py
    def evaluate(tool_name: str, args: dict, context: EvalContext) -> PolicyDecision:
