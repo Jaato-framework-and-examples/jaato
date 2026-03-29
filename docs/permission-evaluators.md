@@ -244,6 +244,37 @@ Evaluators are fail-safe:
 
 An evaluator bug will never crash the server or silently block tools.
 
+## State persistence
+
+Evaluator scripts are loaded **once per session** during plugin initialization. The `evaluate` function reference is cached and reused for every permission check — the script is not re-executed each time.
+
+This means **module-level variables persist across calls** within the same session, giving evaluators a natural mechanism for maintaining state:
+
+```python
+from collections import defaultdict
+from shared.plugins.permission.evaluator import PolicyDecision
+
+# Module-level state — initialized once, persists across all calls
+_call_counts = defaultdict(int)
+_denied_tools = set()
+
+def evaluate(tool_name, args, context):
+    _call_counts[tool_name] += 1
+
+    # Rate limit: deny after 100 calls to the same tool
+    if _call_counts[tool_name] > 100:
+        return PolicyDecision.DENY
+
+    return PolicyDecision.FALLBACK
+```
+
+Key behaviors:
+- **Same session**: Module globals persist across all `evaluate()` calls. State accumulates naturally.
+- **Different sessions**: Each session loads its own module instance. State is isolated — one session's counters don't affect another.
+- **Server restart**: All state is lost. For durable state, write to a file in the workspace.
+
+This design means you don't need any special API for state — just use Python variables at module scope.
+
 ## Examples
 
 ### Time-based restrictions
