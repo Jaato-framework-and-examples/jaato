@@ -307,7 +307,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 
 ### Potential Improvements Inspired by Others
 1. **Global guardrail plugins** (from ADK) — jaato's permission plugin is per-profile; a Runner-level plugin that applies cross-cutting policies to all sessions could simplify enterprise governance
-2. **`request_credential()` in tool context** (from ADK) — jaato has auth plugins per-provider, but a standardized `tool_context.request_credential()` API would unify the pattern
+2. ~~**`request_credential()` in tool context**~~ (from ADK) — ADK's `request_credential()` targets interactive sessions where a user is present to complete an OAuth flow mid-conversation. Jaato targets automated setups (CI/CD, daemon mode, enterprise) where credentials are pre-provisioned via profile `env` vars with `${VAULT_SECRET_ID}` expansion. This is a deliberate design difference, not a gap.
 3. **Graph-based interruption** (from LangGraph) — jaato's approval is synchronous; async graph-style "pause and resume with modified state" could enable more complex approval workflows
 4. **Container/microVM sandbox integration** (from both) — jaato already has kernel-level confinement via AppArmor (premium), which is stronger than application-level sandboxing; adding container or microVM isolation (GKE, Docker) would complement AppArmor for full defense-in-depth in code execution scenarios
 
