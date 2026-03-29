@@ -317,10 +317,12 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
    {
      "defaultPolicy": "ask",
      "evaluators": {
+       "default": "policies/global_evaluator.py",
        "cli_based_tool": "policies/cli_evaluator.py"
      }
    }
    ```
+   The `"default"` key applies to all tools unless overridden by a tool-specific entry. Tool-specific evaluators take precedence over the default.
    ```python
    # policies/cli_evaluator.py
    def evaluate(tool_name: str, args: dict, context: EvalContext) -> PolicyDecision:
