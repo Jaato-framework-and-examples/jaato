@@ -337,7 +337,12 @@ class JaatoWSServer:
             if not sess or not sess.workspace_path:
                 return
 
-            argv_wrapper, shell_wrapper = ws_server.get_apparmor_wrappers(session_id)
+            # The AppArmor profile is keyed by workspace ID (e.g. ws_20b64eb1),
+            # not the session manager's session ID (e.g. 20260329_140505).
+            # Extract the workspace ID from the workspace path.
+            import os
+            workspace_id = os.path.basename(sess.workspace_path)
+            argv_wrapper, shell_wrapper = ws_server.get_apparmor_wrappers(workspace_id)
             if argv_wrapper or shell_wrapper:
                 server.set_apparmor_wrapper(
                     argv_wrapper=argv_wrapper,
