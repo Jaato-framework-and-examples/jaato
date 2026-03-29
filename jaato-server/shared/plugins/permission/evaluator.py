@@ -101,6 +101,10 @@ class EvalContext:
         agent_name: Optional agent/profile name.
         session_id: Daemon session manager ID (if available).
         workspace_path: Workspace directory path (if available).
+        turn_index: Current turn number within the session (1-based).
+        model_preamble: Text the model emitted before this tool call
+            in the current response.  May be None if the model called
+            the tool without any preamble text.
         extra: Extensible dict for future context fields.
     """
     tool_name: str
@@ -109,6 +113,8 @@ class EvalContext:
     agent_name: Optional[str] = None
     session_id: Optional[str] = None
     workspace_path: Optional[str] = None
+    turn_index: Optional[int] = None
+    model_preamble: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 

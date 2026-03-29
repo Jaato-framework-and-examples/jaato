@@ -138,6 +138,17 @@ class ToolExecutor:
         self._permission_plugin = plugin
         self._permission_context = context or {}
 
+    def update_permission_context(self, **kwargs) -> None:
+        """Update the permission context dict with additional fields.
+
+        Called by the session to inject per-turn state (turn_index,
+        model_preamble) that evaluators can inspect.
+
+        Args:
+            **kwargs: Key-value pairs to merge into the context.
+        """
+        self._permission_context.update(kwargs)
+
     def set_reliability_plugin(self, plugin: Optional['ReliabilityPlugin']) -> None:
         """Set the reliability plugin for tracking tool failures.
 

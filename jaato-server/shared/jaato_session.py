@@ -2699,6 +2699,13 @@ NOTES
         # Increment turn counter
         self._turn_index += 1
 
+        # Update permission context with turn index so evaluators can access it
+        if self._executor:
+            self._executor.update_permission_context(
+                turn_index=self._turn_index,
+                model_preamble=None,  # Reset at turn start
+            )
+
         # Notify reliability plugin of turn start
         if self._runtime.reliability_plugin:
             self._runtime.reliability_plugin.on_turn_start(self._turn_index)
@@ -3247,6 +3254,13 @@ NOTES
             from the previous response and call
             ``_inject_synthetic_cancelled_results`` for unexecuted tool calls.
         """
+        # Update permission context with model preamble so evaluators can
+        # inspect what the model said before calling tools.
+        if self._executor and accumulated_text:
+            self._executor.update_permission_context(
+                model_preamble=''.join(accumulated_text),
+            )
+
         # 1. Execute the tool group
         tool_results = self._execute_function_call_group(
             fc_group, turn_data, on_output, cancellation_notified

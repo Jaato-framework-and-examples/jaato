@@ -954,6 +954,8 @@ class PermissionPlugin:
             agent_name=context.get("agent_name") if context else None,
             session_id=context.get("session_id") if context else None,
             workspace_path=getattr(self, '_workspace_path', None),
+            turn_index=context.get("turn_index") if context else None,
+            model_preamble=context.get("model_preamble") if context else None,
         )
 
         # Run evaluators before pre-approval short-circuits.

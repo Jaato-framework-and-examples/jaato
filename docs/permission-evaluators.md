@@ -97,9 +97,13 @@ def evaluate(tool_name: str, args: dict, context: EvalContext) -> PolicyDecision
 | `agent_name` | `str` or `None` | Agent/profile name |
 | `session_id` | `str` or `None` | Daemon session manager ID |
 | `workspace_path` | `str` or `None` | Workspace directory path |
+| `turn_index` | `int` or `None` | Current turn number (1-based) |
+| `model_preamble` | `str` or `None` | Text the model emitted before this tool call |
 | `extra` | `dict` | Extensible dict for future fields |
 
 The context carries information the script can't obtain on its own. For anything else (current time, environment variables, file checks), import stdlib modules directly.
+
+`turn_index` is the 1-based turn counter within the session. `model_preamble` is the text the model output before calling this tool — useful for checking if the model explained its reasoning before taking an action.
 
 ## Return values
 
@@ -296,6 +300,38 @@ def evaluate(tool_name, args, context):
     command = args.get("command", "").strip()
     if command in SAFE_COMMANDS:
         return PolicyDecision.ALLOW
+    return PolicyDecision.FALLBACK
+```
+
+### Require explanation before destructive tools
+
+```python
+from shared.plugins.permission.evaluator import PolicyDecision, EvalResult
+
+def evaluate(tool_name, args, context):
+    # First turn: allow freely (model is still orienting)
+    if context.turn_index and context.turn_index <= 1:
+        return PolicyDecision.FALLBACK
+
+    # Require the model to explain before deleting files
+    if not context.model_preamble or len(context.model_preamble.strip()) < 20:
+        return EvalResult(
+            PolicyDecision.DENY_WITH_COMMENT,
+            comment="Explain why you need to delete this file before proceeding"
+        )
+
+    return PolicyDecision.FALLBACK
+```
+
+### Turn-based escalation
+
+```python
+from shared.plugins.permission.evaluator import PolicyDecision
+
+def evaluate(tool_name, args, context):
+    # After 15 turns, block new file creation to prevent runaway agents
+    if context.turn_index and context.turn_index > 15:
+        return PolicyDecision.DENY
     return PolicyDecision.FALLBACK
 ```
 
