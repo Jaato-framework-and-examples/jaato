@@ -558,6 +558,10 @@ class SubagentProfile:
             they are applied to ``os.environ`` for the duration of the
             subagent thread and restored on exit.  Never leaks to other
             sessions or agents.
+        inherits: Optional list of parent profile names. When set, this
+            profile inherits fields from its parents. Resolved during
+            ``discover_profiles()`` — after resolution, ``inherits`` is
+            cleared and the profile is fully flattened.
     """
     name: str
     description: str
@@ -570,6 +574,280 @@ class SubagentProfile:
     max_turns: int = 10
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
+    inherits: Optional[List[str]] = None
+
+
+def _normalize_inherits(value: Any) -> Optional[List[str]]:
+    """Normalize the ``inherits`` field to a list of strings or None.
+
+    Accepts a single string (``"readonly"``), a list of strings
+    (``["readonly", "web_capable"]``), or None/absent.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return None
+
+
+def resolve_profiles(
+    profiles: Dict[str, 'SubagentProfile'],
+) -> Tuple[Dict[str, 'SubagentProfile'], Dict[str, str]]:
+    """Resolve profile inheritance by merging parent fields into children.
+
+    Performs a topological traversal of the inheritance graph. Each profile
+    with an ``inherits`` field has its parents' fields merged in, following
+    the merge semantics from ``docs/design/profile-inheritance.md``:
+
+    - **Collection fields** (union): ``plugins``, ``preloaded_plugins``,
+      ``env``, ``plugin_configs``
+    - **Scalar fields** (agreement-or-override): ``model``, ``provider``,
+      ``max_turns``, ``gc``
+    - **Concatenation**: ``system_instructions`` (grandparent → parent → child)
+    - **Never inherited**: ``name``, ``description``
+
+    Conflicts between parents on scalar fields are hard errors unless the
+    child explicitly overrides.  Cycles are detected and reported.
+
+    After resolution, ``inherits`` is cleared on each profile (fully
+    flattened).
+
+    Args:
+        profiles: Dict of profile name → SubagentProfile (unresolved).
+
+    Returns:
+        Tuple of (resolved_profiles, errors). ``errors`` maps profile
+        names to error messages.  Profiles with errors are excluded from
+        the resolved dict.
+    """
+    resolved: Dict[str, SubagentProfile] = {}
+    errors: Dict[str, str] = {}
+    resolving: set = set()  # cycle detection
+
+    def _resolve(name: str) -> Optional[SubagentProfile]:
+        """Recursively resolve a single profile."""
+        if name in resolved:
+            return resolved[name]
+        if name in errors:
+            return None
+        if name in resolving:
+            errors[name] = f"Inheritance cycle detected involving '{name}'"
+            return None
+        if name not in profiles:
+            errors[name] = f"Profile '{name}' not found"
+            return None
+
+        profile = profiles[name]
+
+        # No inheritance — resolve immediately
+        if not profile.inherits:
+            resolved[name] = profile
+            return profile
+
+        # Resolve parents first
+        resolving.add(name)
+        parent_profiles: List[SubagentProfile] = []
+        for parent_name in profile.inherits:
+            parent = _resolve(parent_name)
+            if parent is None:
+                errors[name] = (
+                    f"Profile '{name}' inherits from '{parent_name}' "
+                    f"which failed to resolve"
+                )
+                resolving.discard(name)
+                return None
+            parent_profiles.append(parent)
+        resolving.discard(name)
+
+        # Merge parents then apply child overrides
+        merged = _merge_profiles(name, parent_profiles, profile, errors)
+        if merged is None:
+            return None
+
+        resolved[name] = merged
+        return merged
+
+    # Resolve all profiles
+    for name in list(profiles.keys()):
+        _resolve(name)
+
+    return resolved, errors
+
+
+def _merge_profiles(
+    child_name: str,
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+    errors: Dict[str, str],
+) -> Optional['SubagentProfile']:
+    """Merge parent profiles with a child profile.
+
+    Args:
+        child_name: Name of the child profile (for error messages).
+        parents: Resolved parent profiles in declaration order.
+        child: The child profile with its own overrides.
+        errors: Error dict to populate on conflict.
+
+    Returns:
+        Merged SubagentProfile, or None if conflicts detected.
+    """
+    # --- Collection fields: union ---
+
+    # plugins: parents first (in order), then child, deduplicated
+    seen_plugins: set = set()
+    merged_plugins: List[str] = []
+    for parent in parents:
+        for p in parent.plugins:
+            if p not in seen_plugins:
+                seen_plugins.add(p)
+                merged_plugins.append(p)
+    for p in child.plugins:
+        if p not in seen_plugins:
+            seen_plugins.add(p)
+            merged_plugins.append(p)
+
+    # preloaded_plugins: union
+    merged_preloaded: set = set()
+    for parent in parents:
+        merged_preloaded |= parent.preloaded_plugins
+    merged_preloaded |= child.preloaded_plugins
+
+    # env: merge with conflict detection
+    merged_env: Dict[str, str] = {}
+    env_sources: Dict[str, str] = {}  # key → source profile name
+    conflict_details: List[str] = []
+
+    for parent in parents:
+        for key, val in parent.env.items():
+            if key in merged_env and merged_env[key] != val:
+                # Conflict between parents
+                if key not in child.env:
+                    conflict_details.append(
+                        f"  env['{key}']: '{env_sources[key]}' sets "
+                        f"'{merged_env[key]}', '{parent.name}' sets '{val}'"
+                    )
+            else:
+                merged_env[key] = val
+                env_sources[key] = parent.name
+    # Child overrides last
+    merged_env.update(child.env)
+
+    # plugin_configs: deep merge by plugin name
+    merged_configs: Dict[str, Dict[str, Any]] = {}
+    config_sources: Dict[str, Dict[str, str]] = {}  # plugin → key → source
+
+    for parent in parents:
+        for plugin_name, config in parent.plugin_configs.items():
+            if plugin_name not in merged_configs:
+                merged_configs[plugin_name] = {}
+                config_sources[plugin_name] = {}
+            for key, val in config.items():
+                existing = merged_configs[plugin_name].get(key)
+                if existing is not None and existing != val:
+                    src = config_sources[plugin_name].get(key, "?")
+                    # Only conflict if child doesn't override this specific key
+                    child_plugin_config = child.plugin_configs.get(plugin_name, {})
+                    if key not in child_plugin_config:
+                        conflict_details.append(
+                            f"  plugin_configs['{plugin_name}']['{key}']: "
+                            f"'{src}' sets {existing!r}, '{parent.name}' sets {val!r}"
+                        )
+                else:
+                    merged_configs[plugin_name][key] = val
+                    config_sources[plugin_name][key] = parent.name
+    # Child overrides last (per-plugin, per-key)
+    for plugin_name, config in child.plugin_configs.items():
+        if plugin_name not in merged_configs:
+            merged_configs[plugin_name] = {}
+        merged_configs[plugin_name].update(config)
+
+    # --- Scalar fields: agreement-or-override ---
+
+    # Collect parent values for scalar fields
+    scalar_conflicts: List[str] = []
+
+    def _resolve_scalar(field_name: str, child_val, default=None):
+        """Resolve a scalar field across parents + child."""
+        parent_vals = {}
+        for parent in parents:
+            val = getattr(parent, field_name)
+            if val is not None and val != default:
+                parent_vals[parent.name] = val
+
+        # Child explicitly overrides
+        if child_val is not None and child_val != default:
+            return child_val
+
+        # No parents set it
+        if not parent_vals:
+            return child_val  # keep child default
+
+        # All parents agree
+        unique_vals = set(str(v) for v in parent_vals.values())
+        if len(unique_vals) == 1:
+            return next(iter(parent_vals.values()))
+
+        # Conflict
+        details = ", ".join(
+            f"'{name}': {val!r}" for name, val in parent_vals.items()
+        )
+        scalar_conflicts.append(
+            f"  {field_name}: {details}"
+        )
+        return child_val
+
+    merged_model = _resolve_scalar('model', child.model)
+    merged_provider = _resolve_scalar('provider', child.provider)
+
+    # max_turns: most restrictive (minimum) across parents, child can override
+    parent_max_turns = [p.max_turns for p in parents if p.max_turns != 10]
+    if child.max_turns != 10:
+        merged_max_turns = child.max_turns
+    elif parent_max_turns:
+        merged_max_turns = min(parent_max_turns)
+    else:
+        merged_max_turns = 10
+
+    # gc: agreement-or-override (compare as dicts for equality)
+    merged_gc = _resolve_scalar('gc', child.gc)
+
+    # --- Concatenation: system_instructions ---
+    instruction_parts = []
+    for parent in parents:
+        if parent.system_instructions:
+            instruction_parts.append(parent.system_instructions)
+    if child.system_instructions:
+        instruction_parts.append(child.system_instructions)
+    merged_instructions = "\n\n".join(instruction_parts) if instruction_parts else None
+
+    # --- Check for conflicts ---
+    all_conflicts = conflict_details + scalar_conflicts
+    if all_conflicts:
+        conflict_msg = (
+            f"Profile '{child_name}' inherits from "
+            f"{[p.name for p in parents]}.\n"
+            f"Conflicts (override in '{child_name}' to resolve):\n"
+            + "\n".join(all_conflicts)
+        )
+        errors[child_name] = conflict_msg
+        return None
+
+    return SubagentProfile(
+        name=child.name,
+        description=child.description,
+        plugins=merged_plugins,
+        preloaded_plugins=merged_preloaded,
+        plugin_configs=merged_configs,
+        system_instructions=merged_instructions,
+        model=merged_model,
+        provider=merged_provider,
+        max_turns=merged_max_turns,
+        gc=merged_gc,
+        env=merged_env,
+        inherits=None,  # Fully resolved
+    )
 
 
 def _parse_profile_file(
@@ -694,6 +972,7 @@ def _scan_profiles_dir(
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
             env=env,
+            inherits=_normalize_inherits(data.get('inherits')),
         )
         if data.get('system_instructions'):
             import warnings
@@ -768,7 +1047,11 @@ def discover_profiles(
         if name not in profiles:
             profiles[name] = profile
 
-    return ProfileDiscoveryResult(profiles=profiles, errors=errors)
+    # Resolve inheritance after all sources are scanned
+    resolved, inheritance_errors = resolve_profiles(profiles)
+    errors.update(inheritance_errors)
+
+    return ProfileDiscoveryResult(profiles=resolved, errors=errors)
 
 
 def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
@@ -820,6 +1103,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
             env=env,
+            inherits=_normalize_inherits(data.get('inherits')),
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -903,6 +1187,19 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
                     errors.append(f"env key {key!r} must be a string")
                 if not isinstance(val, str):
                     errors.append(f"env['{key}'] must be a string")
+
+    # inherits: string, list of strings, or null
+    inherits = data.get("inherits")
+    if inherits is not None:
+        if isinstance(inherits, str):
+            pass  # Single string is valid (normalized to list during parsing)
+        elif isinstance(inherits, list):
+            for item in inherits:
+                if not isinstance(item, str):
+                    errors.append("'inherits' must be a string or list of strings")
+                    break
+        else:
+            errors.append("'inherits' must be a string or list of strings")
 
     # GC sub-validation
     gc_data = data.get("gc")
@@ -1030,6 +1327,7 @@ class SubagentConfig:
                 max_turns=profile_data.get('max_turns', 10),
                 gc=gc_config,
                 env=env,
+                inherits=_normalize_inherits(profile_data.get('inherits')),
             )
 
         return cls(

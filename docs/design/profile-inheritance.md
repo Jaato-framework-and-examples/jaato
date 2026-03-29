@@ -1,7 +1,7 @@
 # Profile Inheritance
 
-**Status:** Brainstorm
-**Date:** 2026-03-17
+**Status:** Approved for implementation
+**Date:** 2026-03-17 (updated 2026-03-29)
 
 ## Problem
 
@@ -58,9 +58,7 @@ Fields fall into two categories based on their type:
 | `provider` | Same as `model`. |
 | `system_instructions` | Concatenation in inheritance order (grandparent → parent → child), separated by `\n\n`. No conflict possible — all layers contribute. |
 | `max_turns` | Most restrictive (minimum) across parents. Child can override. |
-| `auto_approved` | Most restrictive (`False` wins). Child can override to `True`. |
 | `gc` | If multiple parents define it, values must agree (field-by-field) or child must override the entire `gc` block. |
-| `icon` / `icon_name` | Last parent wins (presentational, not security-relevant). Child overrides. |
 | `description` | Child must define its own. Not inherited. |
 
 ### The Golden Rule
@@ -125,9 +123,6 @@ class SubagentProfile:
     model: Optional[str] = None
     provider: Optional[str] = None
     max_turns: int = 10
-    auto_approved: bool = False
-    icon: Optional[List[str]] = None
-    icon_name: Optional[str] = None
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
 ```

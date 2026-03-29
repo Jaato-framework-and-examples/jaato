@@ -53,6 +53,8 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
             'icon': profile.icon,
             'icon_name': profile.icon_name,
         }
+        if profile.inherits:
+            profile_data['inherits'] = profile.inherits
         # Serialize GC config if present
         if profile.gc:
             profile_data['gc'] = {
@@ -136,6 +138,7 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
             max_turns=profile_data.get('max_turns', 10),
             icon=profile_data.get('icon'),
             icon_name=profile_data.get('icon_name'),
+            inherits=profile_data.get('inherits'),
             gc=gc_config,
         )
 
