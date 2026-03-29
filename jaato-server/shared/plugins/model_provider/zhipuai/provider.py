@@ -91,34 +91,43 @@ THINKING_CAPABLE_MODELS = [
 ]
 
 # ── OpenAI-compatible models endpoint for dynamic discovery ───────────
-# Z.AI exposes GET /models on the OpenAI-compatible API surface.  The
-# Anthropic-compatible endpoint we use for chat does NOT have this, so
-# we derive the OpenAI base URL from the configured Anthropic base URL.
-_ANTHROPIC_TO_OPENAI_PATH = {
-    "/api/anthropic": "/api/paas/v4",
-    "/api/coding/anthropic": "/api/coding/paas/v4",
-}
+# Z.AI exposes GET /models on the OpenAI-compatible API surface at
+# open.bigmodel.cn (their main platform), NOT on the api.z.ai domain
+# used for the Anthropic-compatible chat endpoint.
+ZHIPUAI_MODELS_URL = "https://open.bigmodel.cn/api/paas/v4/models"
 
 
-def _openai_models_url(anthropic_base_url: str) -> str:
-    """Derive the OpenAI-compatible ``/models`` URL from the Anthropic base.
+def fetch_zhipuai_models(api_key: str) -> List[str]:
+    """Fetch available Z.AI models using the OpenAI-compatible endpoint.
 
-    Handles both the pay-per-token (``/api/paas/v4``) and coding-plan
-    (``/api/coding/paas/v4``) variants.
+    Low-level function used internally by the provider's ``list_models()``.
+    For cross-provider workspace-aware model listing, use
+    ``shared.plugins.model_provider.list_provider_models()`` instead.
 
     Args:
-        anthropic_base_url: The Anthropic-compat base URL
-            (e.g. ``https://api.z.ai/api/anthropic``).
+        api_key: Z.AI API key (Bearer token).
 
     Returns:
-        Full URL for the ``GET /models`` endpoint.
+        Sorted list of model ID strings, or empty list on failure.
     """
-    base = anthropic_base_url.rstrip("/")
-    for suffix, replacement in _ANTHROPIC_TO_OPENAI_PATH.items():
-        if base.endswith(suffix):
-            return base[: -len(suffix)] + replacement + "/models"
-    # Best-effort: assume sibling /paas/v4 next to whatever path is set
-    return base.rsplit("/", 1)[0] + "/paas/v4/models"
+    try:
+        from shared.http.proxy import get_httpx_client
+
+        client = get_httpx_client()
+        resp = client.get(
+            ZHIPUAI_MODELS_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        model_ids = [m["id"] for m in data.get("data", []) if "id" in m]
+        return sorted(model_ids)
+    except Exception:
+        return []
 
 
 class ZhipuAIAPIKeyNotFoundError(Exception):
@@ -371,51 +380,25 @@ class ZhipuAIProvider(AnthropicProvider):
         return sorted(models)
 
     def _fetch_remote_models(self) -> List[str]:
-        """Fetch model list from Z.AI's OpenAI-compatible ``GET /models`` endpoint.
+        """Fetch model list from Z.AI using ``fetch_zhipuai_models()``.
 
-        Derives the correct URL from the configured Anthropic base URL so
-        that both the pay-per-token and coding-plan endpoints are handled.
-        Uses the project's corporate-ready httpx client (``shared.http``)
-        for proxy, Kerberos, and custom CA-cert support.
+        Resolves the API key from the provider instance, environment
+        variables, or stored credentials.
 
         Returns:
             List of model ID strings, or an empty list on failure.
         """
         api_key = getattr(self, "_api_key", None)
         if not api_key:
-            # Try environment / stored credentials so listing works
-            # even on an uninitialized provider instance.
             api_key = resolve_api_key() or get_stored_api_key()
         if not api_key:
             self._trace("[_fetch_remote_models] No API key available, skipping")
             return []
 
-        base_url = getattr(self, "_base_url", DEFAULT_ZHIPUAI_BASE_URL)
-        url = _openai_models_url(base_url)
-        self._trace(f"[_fetch_remote_models] GET {url}")
-
-        try:
-            from shared.http.proxy import get_httpx_client
-
-            client = get_httpx_client()
-            resp = client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Accept": "application/json",
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            model_ids = [m["id"] for m in data.get("data", []) if "id" in m]
-            self._trace(f"[_fetch_remote_models] Got {len(model_ids)} models: {model_ids}")
-            return model_ids
-        except Exception as exc:
-            self._trace(f"[_fetch_remote_models] Failed: {exc}")
-            logger.debug("Failed to fetch Z.AI model list: %s", exc)
-            return []
+        self._trace(f"[_fetch_remote_models] GET {ZHIPUAI_MODELS_URL}")
+        models = fetch_zhipuai_models(api_key)
+        self._trace(f"[_fetch_remote_models] Got {len(models)} models")
+        return models
 
     def get_context_limit(self) -> int:
         """Get context window size.

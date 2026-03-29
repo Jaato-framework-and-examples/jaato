@@ -12,7 +12,7 @@ from ..provider import (
     MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
     THINKING_CAPABLE_MODELS,
-    _openai_models_url,
+    ZHIPUAI_MODELS_URL,
 )
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 from shared.plugins.model_provider.base import ProviderConfig
@@ -461,38 +461,12 @@ class TestThinkingSupport:
         assert provider._thinking_budget == 15000
 
 
-class TestOpenAIModelsURL:
-    """Tests for _openai_models_url helper.
+class TestModelsURL:
+    """Tests for ZHIPUAI_MODELS_URL constant."""
 
-    This function derives the OpenAI-compatible ``/models`` URL from the
-    Anthropic base URL so that both pay-per-token and coding-plan
-    endpoints are handled correctly.
-    """
-
-    def test_default_anthropic_url(self):
-        """Should map default Anthropic URL to /api/paas/v4/models."""
-        url = _openai_models_url("https://api.z.ai/api/anthropic")
-        assert url == "https://api.z.ai/api/paas/v4/models"
-
-    def test_coding_plan_anthropic_url(self):
-        """Should map coding plan Anthropic URL to /api/coding/paas/v4/models."""
-        url = _openai_models_url("https://api.z.ai/api/coding/anthropic")
-        assert url == "https://api.z.ai/api/coding/paas/v4/models"
-
-    def test_trailing_slash_stripped(self):
-        """Should handle trailing slash on input URL."""
-        url = _openai_models_url("https://api.z.ai/api/anthropic/")
-        assert url == "https://api.z.ai/api/paas/v4/models"
-
-    def test_china_endpoint(self):
-        """Should handle open.bigmodel.cn domain."""
-        url = _openai_models_url("https://open.bigmodel.cn/api/anthropic")
-        assert url == "https://open.bigmodel.cn/api/paas/v4/models"
-
-    def test_unknown_path_fallback(self):
-        """Should fall back to sibling /paas/v4 for unknown paths."""
-        url = _openai_models_url("https://custom.example.com/v1")
-        assert url == "https://custom.example.com/paas/v4/models"
+    def test_models_url_points_to_bigmodel(self):
+        """Models endpoint is on open.bigmodel.cn, not api.z.ai."""
+        assert ZHIPUAI_MODELS_URL == "https://open.bigmodel.cn/api/paas/v4/models"
 
 
 class TestFetchRemoteModels:
@@ -594,7 +568,7 @@ class TestFetchRemoteModels:
         with patch('shared.http.proxy.get_httpx_client', return_value=mock_client):
             models = provider._fetch_remote_models()
 
-        assert models == ["glm-5", "glm-4.7"]
+        assert models == ["glm-4.7", "glm-5"]
 
 
 class TestCreateProvider:

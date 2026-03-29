@@ -202,6 +202,59 @@ def load_provider(
     return provider
 
 
+def list_provider_models(
+    provider_name: str,
+    workspace_path: Optional[str] = None,
+    prefix: Optional[str] = None,
+) -> list:
+    """List available models for a provider, with workspace-aware credentials.
+
+    Cross-provider helper that instantiates a provider, temporarily sets
+    the workspace context so credential discovery finds workspace-specific
+    auth files, and calls ``list_models()``.
+
+    Works without a session — intended for daemon extensions, profile
+    managers, and other contexts outside the normal session lifecycle.
+
+    Args:
+        provider_name: Provider identifier (e.g. ``"zhipuai"``, ``"anthropic"``).
+        workspace_path: Workspace directory for credential file lookup.
+            If provided, temporarily sets ``JAATO_WORKSPACE_ROOT`` so the
+            provider's credential discovery finds workspace-specific auth.
+        prefix: Optional model name prefix filter.
+
+    Returns:
+        Sorted list of model name strings, or empty list on failure.
+
+    Example::
+
+        from shared.plugins.model_provider import list_provider_models
+
+        models = list_provider_models("zhipuai", workspace_path="/home/user/.jaato/workspaces/sessions/ws_abc")
+        # → ["glm-4.5", "glm-4.7", "glm-5", "glm-5.1", ...]
+    """
+    import os
+
+    providers = discover_providers()
+    if provider_name not in providers:
+        return []
+
+    old_ws = os.environ.get("JAATO_WORKSPACE_ROOT")
+    if workspace_path:
+        os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
+    try:
+        provider = providers[provider_name]()
+        return provider.list_models(prefix=prefix)
+    except Exception:
+        return []
+    finally:
+        if workspace_path:
+            if old_ws is not None:
+                os.environ["JAATO_WORKSPACE_ROOT"] = old_ws
+            else:
+                os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+
+
 __all__ = [
     # Protocol and config
     "ModelProviderPlugin",
@@ -220,6 +273,7 @@ __all__ = [
     # Discovery
     "discover_providers",
     "load_provider",
+    "list_provider_models",
     "get_provider_import_errors",
     "MODEL_PROVIDER_ENTRY_POINT",
 ]

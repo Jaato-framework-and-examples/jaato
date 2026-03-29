@@ -64,10 +64,12 @@ from .provider import (
     DEFAULT_CONTEXT_LIMIT,
     KNOWN_MODELS,
     MODEL_CONTEXT_LIMITS,
+    ZHIPUAI_MODELS_URL,
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     ZhipuAIProvider,
     create_provider,
+    fetch_zhipuai_models,
 )
 
 __all__ = [
@@ -88,6 +90,8 @@ __all__ = [
     "resolve_context_length",
     "DEFAULT_ZHIPUAI_BASE_URL",
     "DEFAULT_ZHIPUAI_MODEL",
+    "ZHIPUAI_MODELS_URL",
+    "fetch_zhipuai_models",
     # Authentication
     "ZhipuAICredentials",
     "login_interactive",

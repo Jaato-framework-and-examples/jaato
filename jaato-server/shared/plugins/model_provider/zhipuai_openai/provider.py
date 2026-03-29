@@ -397,10 +397,9 @@ class ZhipuAIOpenAIProvider:
         return sorted(models)
 
     def _fetch_remote_models(self) -> List[str]:
-        """Fetch model list from Z.AI's ``GET /models`` endpoint.
+        """Fetch model list from Z.AI using ``fetch_zhipuai_models()``.
 
-        Uses the project's corporate-ready httpx client for proxy,
-        Kerberos, and custom CA-cert support.
+        Resolves the API key from the provider instance or environment.
 
         Returns:
             List of model ID strings, or an empty list on failure.
@@ -412,31 +411,11 @@ class ZhipuAIOpenAIProvider:
             self._trace("[_fetch_remote_models] No API key available, skipping")
             return []
 
-        url = f"{self._base_url.rstrip('/')}/models"
-        self._trace(f"[_fetch_remote_models] GET {url}")
-
-        try:
-            from shared.http.proxy import get_httpx_client
-
-            client = get_httpx_client()
-            resp = client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Accept": "application/json",
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            model_ids = [m["id"] for m in data.get("data", []) if "id" in m]
-            self._trace(f"[_fetch_remote_models] Got {len(model_ids)} models: {model_ids}")
-            return model_ids
-        except Exception as exc:
-            self._trace(f"[_fetch_remote_models] Failed: {exc}")
-            logger.debug("Failed to fetch Z.AI model list: %s", exc)
-            return []
+        from ..zhipuai.provider import fetch_zhipuai_models, ZHIPUAI_MODELS_URL
+        self._trace(f"[_fetch_remote_models] GET {ZHIPUAI_MODELS_URL}")
+        models = fetch_zhipuai_models(api_key)
+        self._trace(f"[_fetch_remote_models] Got {len(models)} models")
+        return models
 
     # ==================== Stateless Completion ====================
 
