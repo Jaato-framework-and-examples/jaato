@@ -311,6 +311,28 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 3. ~~**Graph-based interruption**~~ (from LangGraph) — LangGraph pauses graph execution and lets humans modify agent state before resuming. Jaato already covers both aspects: **async pause/resume** via webhook/queue approval channels (agent blocks on permission request, external system responds asynchronously), and **state modification** via editable tool calls (tools flagged as modifiable let the user invoke an editor to modify the full tool call — e.g., `createPlan()`, `writeFile()` — before execution proceeds). Different mechanism, same capabilities.
 4. ~~**Container/microVM sandbox integration**~~ (from both) — jaato already has kernel-level confinement via AppArmor (premium), and its server-first architecture (daemon mode with IPC/WebSocket) means the server can be deployed inside a container for full container-level isolation. This is a deployment choice, not a missing framework feature. Combined with AppArmor, this provides defense-in-depth comparable to or exceeding GKE Code Executor and LangSmith Sandboxes.
 
+### New Opportunity Inspired by ADK
+5. **Runtime-injectable permission evaluators** (inspired by ADK's `before_tool_callback`) — Jaato's declarative JSON policies excel at static rules (patterns, globs, blacklists/whitelists), but some permission decisions require dynamic logic: checking an external policy service, evaluating argument combinations, applying time-based restrictions, or conditioning on session history. Support a `"evaluator"` field in permission configs that references a Python script:
+   ```json
+   {
+     "defaultPolicy": "ask",
+     "evaluators": {
+       "cli_based_tool": "policies/cli_evaluator.py"
+     }
+   }
+   ```
+   ```python
+   # policies/cli_evaluator.py
+   def evaluate(tool_name: str, args: dict, context: EvalContext) -> PolicyDecision:
+       """Called at permission-check time. Returns allow/deny/ask."""
+       if context.hour_of_day < 6 or context.hour_of_day > 22:
+           return PolicyDecision.DENY  # no CLI tools outside business hours
+       if "DROP" in args.get("command", "").upper():
+           return PolicyDecision.DENY
+       return PolicyDecision.ASK
+   ```
+   This preserves jaato's declarative-first approach (evaluators are referenced from JSON, not hardcoded) while enabling ADK-style programmatic flexibility. Evaluator scripts are checked into the repo alongside profiles, keeping them auditable and portable.
+
 ---
 
 ## Sources
