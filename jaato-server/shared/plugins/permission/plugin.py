@@ -945,6 +945,58 @@ class PermissionPlugin:
         """
         self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
 
+        # Build evaluator context early — evaluators run even for
+        # pre-approved tools so they can override approvals.
+        eval_context = EvalContext(
+            tool_name=tool_name,
+            args=args,
+            agent_type=context.get("agent_type", "main") if context else "main",
+            agent_name=context.get("agent_name") if context else None,
+            session_id=context.get("session_id") if context else None,
+            workspace_path=getattr(self, '_workspace_path', None),
+        )
+
+        # Run evaluators before pre-approval short-circuits.
+        # Evaluators can override pre-approvals (DENY overrides allow_all),
+        # but FALLBACK preserves the pre-approval.
+        if self._policy and self._policy._evaluators:
+            from .evaluator import run_evaluator
+            eval_result = run_evaluator(
+                self._policy._evaluators, tool_name, args, eval_context
+            )
+            if eval_result.decision not in (
+                EvalDecision.FALLBACK,
+                EvalDecision.ALLOW,
+                EvalDecision.ALLOW_ONCE,
+                EvalDecision.ALLOW_TURN,
+                EvalDecision.ALLOW_UNTIL_IDLE,
+                EvalDecision.ALLOW_SESSION,
+                EvalDecision.ALLOW_ALL,
+            ):
+                # Evaluator denied — override any pre-approval
+                if eval_result.decision == EvalDecision.DENY_WITH_COMMENT:
+                    comment = eval_result.comment or "Denied by evaluator"
+                    self._log_decision(tool_name, args, "deny", f"Evaluator comment: {comment}")
+                    return False, {
+                        'reason': f"Tool not executed. Evaluator comment: {comment}",
+                        'method': 'evaluator_comment',
+                        'comment': comment,
+                    }
+                elif eval_result.decision == EvalDecision.DENY_SESSION:
+                    if self._policy:
+                        self._policy.add_session_blacklist(tool_name)
+                    self._log_decision(tool_name, args, "deny", "Evaluator session blacklist")
+                    return False, {
+                        'reason': 'Evaluator denied access',
+                        'method': 'evaluator_session_blacklist',
+                    }
+                else:  # DENY
+                    self._log_decision(tool_name, args, "deny", "Evaluator denied access")
+                    return False, {
+                        'reason': 'Evaluator denied access',
+                        'method': 'evaluator',
+                    }
+
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
         # 2. turn suspension (clears on turn end)
@@ -972,18 +1024,13 @@ class PermissionPlugin:
         channel = self._get_channel()
         is_subagent_mode = isinstance(channel, ParentBridgedChannel)
 
-        # Build evaluator context for permission evaluators
-        eval_context = EvalContext(
-            tool_name=tool_name,
-            args=args,
-            agent_type=context.get("agent_type", "main") if context else "main",
-            agent_name=context.get("agent_name") if context else None,
-            session_id=context.get("session_id") if context else None,
-            workspace_path=getattr(self, '_workspace_path', None),
+        # Evaluate against policy. Pass eval_context=None if evaluators
+        # already ran above (for pre-approved tools) to avoid double execution.
+        already_evaluated = bool(self._policy and self._policy._evaluators)
+        match = self._policy.check(
+            tool_name, args,
+            eval_context=None if already_evaluated else eval_context,
         )
-
-        # Evaluate against policy
-        match = self._policy.check(tool_name, args, eval_context=eval_context)
 
         if match.decision == PermissionDecision.ALLOW:
             # Apply scoped side effects from evaluator decisions

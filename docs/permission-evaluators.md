@@ -205,6 +205,30 @@ Evaluators run after sanitization but before the blacklist/whitelist pipeline:
 
 If an evaluator returns `ALLOW` or `DENY`, the remaining steps are skipped. If it returns `FALLBACK`, evaluation continues from step 3.
 
+## Evaluators and pre-approved tools
+
+Evaluators run **even for pre-approved tools** (whitelisted tools, turn-suspended, idle-suspended, or `allow_all` sessions). This means an evaluator can override a pre-approval and deny a tool that would otherwise be automatically allowed.
+
+The key behavior:
+- If the evaluator returns **DENY**, **DENY_SESSION**, or **DENY_WITH_COMMENT**, the pre-approval is overridden and the tool is blocked.
+- If the evaluator returns **FALLBACK**, the pre-approval stands and the tool is allowed as before.
+- If the evaluator returns any **ALLOW** variant, the tool is allowed (same outcome as the pre-approval, but the evaluator confirmed it).
+
+This lets you set up broad pre-approvals (e.g. `allow_all` for a trusted profile) while still maintaining evaluator-enforced guardrails on specific tools or argument patterns.
+
+```python
+# This evaluator blocks dangerous commands even when the session
+# has allow_all or turn suspension active
+def evaluate(tool_name, args, context):
+    command = args.get("command", "")
+    if "DROP TABLE" in command.upper():
+        return EvalResult(
+            PolicyDecision.DENY_WITH_COMMENT,
+            comment="DROP TABLE is never allowed, even in pre-approved sessions"
+        )
+    return PolicyDecision.FALLBACK  # pre-approval stands
+```
+
 ## Error handling
 
 Evaluators are fail-safe:
