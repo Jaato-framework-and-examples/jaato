@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
-from jaato_sdk.plugins.base import PluginSetting, UserCommand
+from jaato_sdk.plugins.base import UserCommand
 from .channels import ClarificationChannel, create_channel
 from .models import (
     Choice,
@@ -93,23 +93,24 @@ class ClarificationPlugin:
         self._channel = None
         self._initialized = False
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="channel_type",
-                type="str",
-                default="console",
-                description="Clarification channel type",
-                choices=["console", "auto"],
-            ),
-            PluginSetting(
-                name="channel_config",
-                type="dict",
-                default={},
-                description="Channel-specific configuration",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "channel_type": {
+                    "type": "string",
+                    "default": "console",
+                    "description": "Clarification channel type",
+                    "enum": ["console", "auto"],
+                },
+                "channel_config": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Channel-specific configuration",
+                },
+            },
+        }
 
     def set_clarification_hooks(
         self,

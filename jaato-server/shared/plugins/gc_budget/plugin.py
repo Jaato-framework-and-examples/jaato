@@ -18,7 +18,6 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from jaato_sdk.plugins.base import PluginSetting
 from jaato_sdk.plugins.model_provider.types import Message, Role
 
 from ..gc import (
@@ -123,39 +122,33 @@ class BudgetGCPlugin:
         self._config = {}
         self._initialized = False
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return user-configurable settings for this plugin.
-
-        Returns:
-            List of PluginSetting describing each config key read
-            by initialize().
-        """
-        return [
-            PluginSetting(
-                name="preserve_recent_turns",
-                type="int",
-                default=5,
-                description="Number of recent turns to preserve during GC",
-            ),
-            PluginSetting(
-                name="target_percent",
-                type="float",
-                default=60.0,
-                description="Target context usage percentage after GC",
-            ),
-            PluginSetting(
-                name="pressure_percent",
-                type="float",
-                default=90.0,
-                description="Context pressure threshold for aggressive GC",
-            ),
-            PluginSetting(
-                name="notify_on_gc",
-                type="bool",
-                default=False,
-                description="Emit notification when GC runs",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "preserve_recent_turns": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of recent turns to preserve during GC",
+                },
+                "target_percent": {
+                    "type": "number",
+                    "default": 60.0,
+                    "description": "Target context usage percentage after GC",
+                },
+                "pressure_percent": {
+                    "type": "number",
+                    "default": 90.0,
+                    "description": "Context pressure threshold for aggressive GC",
+                },
+                "notify_on_gc": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Emit notification when GC runs",
+                },
+            },
+        }
 
     def set_plugin_registry(self, registry) -> None:
         """Set the plugin registry for looking up plugins.

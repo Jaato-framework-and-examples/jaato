@@ -39,7 +39,6 @@ from jaato_sdk.plugins.base import (
     CommandParameter,
     CommandCompletion,
     HelpLines,
-    PluginSetting,
     PromptEnrichmentResult,
     ToolResultEnrichmentResult,
 )
@@ -1107,60 +1106,56 @@ class ReferencesPlugin:
         if self._plugin_registry:
             self._plugin_registry.clear_authorized_paths(self._name)
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="lookup_strategy",
-                type="str",
-                default="hybrid",
-                description="Reference matching strategy",
-                choices=["hybrid", "tags_only", "semantic_only"],
-            ),
-            PluginSetting(
-                name="similarity_threshold",
-                type="float",
-                default=0.75,
-                description="Minimum cosine similarity for semantic matching",
-            ),
-            PluginSetting(
-                name="tag_similarity_threshold",
-                type="float",
-                default=0.4,
-                description="Minimum similarity for tag veto in hybrid mode",
-            ),
-            PluginSetting(
-                name="max_matches_per_piece",
-                type="int",
-                default=3,
-                description="Maximum semantic matches per content piece",
-            ),
-            PluginSetting(
-                name="channel_type",
-                type="str",
-                default="console",
-                description="Selection channel type",
-                choices=["console", "webhook", "file"],
-            ),
-            PluginSetting(
-                name="channel_config",
-                type="dict",
-                default={},
-                description="Channel-specific configuration",
-            ),
-            PluginSetting(
-                name="transitive_injection",
-                type="bool",
-                default=True,
-                description="Enable transitive reference detection",
-            ),
-            PluginSetting(
-                name="preselected",
-                type="list[str]",
-                default=[],
-                description="Source IDs to pre-select at startup",
-            ),
-        ]
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "lookup_strategy": {
+                    "type": "string",
+                    "default": "hybrid",
+                    "description": "Reference matching strategy",
+                    "enum": ["hybrid", "tags_only", "semantic_only"],
+                },
+                "similarity_threshold": {
+                    "type": "number",
+                    "default": 0.75,
+                    "description": "Minimum cosine similarity for semantic matching",
+                },
+                "tag_similarity_threshold": {
+                    "type": "number",
+                    "default": 0.4,
+                    "description": "Minimum similarity for tag veto in hybrid mode",
+                },
+                "max_matches_per_piece": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "Maximum semantic matches per content piece",
+                },
+                "channel_type": {
+                    "type": "string",
+                    "default": "console",
+                    "description": "Selection channel type",
+                    "enum": ["console", "webhook", "file"],
+                },
+                "channel_config": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Channel-specific configuration",
+                },
+                "transitive_injection": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Enable transitive reference detection",
+                },
+                "preselected": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Source IDs to pre-select at startup",
+                },
+            },
+        }
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool declarations for the references plugin.

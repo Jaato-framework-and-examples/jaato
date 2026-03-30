@@ -8,7 +8,6 @@ import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 from jaato import ToolSchema
-from jaato_sdk.plugins.base import PluginSetting
 from shared.trace import trace as _trace_write
 
 
@@ -44,16 +43,18 @@ class CalculatorPlugin:
         """Cleanup when plugin is disabled."""
         self._trace("shutdown")
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="precision",
-                type="int",
-                default=2,
-                description="Decimal precision for calculation results",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "precision": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "Decimal precision for calculation results",
+                },
+            },
+        }
 
     def get_tool_schemas(self):
         """Declare the tools this plugin provides."""

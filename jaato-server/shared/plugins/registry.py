@@ -568,23 +568,23 @@ class PluginRegistry:
         """Check if a plugin's tools are currently exposed to the model."""
         return name in self._exposed
 
-    def get_plugin_config_schema(self, name: str) -> list:
-        """Get the config schema for a plugin.
+    def get_plugin_config_schema(self, name: str) -> dict:
+        """Get the JSON Schema for a plugin's configuration.
 
-        Returns the list of ``PluginSetting`` descriptors declared by the
-        plugin's ``get_config_schema()`` method.  Returns an empty list
+        Returns the JSON Schema dict declared by the plugin's
+        ``get_config_schema()`` method.  Returns an empty dict
         if the plugin doesn't exist or doesn't implement the method.
 
         Args:
             name: Plugin name.
 
         Returns:
-            List of PluginSetting objects.
+            JSON Schema dict describing the plugin's config, or ``{}``.
         """
         plugin = self._plugins.get(name)
         if plugin and hasattr(plugin, 'get_config_schema'):
             return plugin.get_config_schema()
-        return []
+        return {}
 
     def get_plugin(self, name: str) -> Optional[AnyPlugin]:
         """Get a plugin by name, or None if not found.

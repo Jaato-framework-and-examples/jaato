@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
-from jaato_sdk.plugins.base import PluginSetting, UserCommand
+from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
@@ -291,34 +291,34 @@ class CLIToolPlugin(BackgroundCapableMixin):
         # Cleanup background executor
         self._shutdown_bg_executor()
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="extra_paths",
-                type="list[str]",
-                default=[],
-                description="Additional PATH entries to prepend",
-            ),
-            PluginSetting(
-                name="max_output_chars",
-                type="int",
-                default=50000,
-                description="Maximum characters to return from command output",
-            ),
-            PluginSetting(
-                name="auto_background_threshold",
-                type="float",
-                default=10.0,
-                description="Seconds before auto-backgrounding",
-            ),
-            PluginSetting(
-                name="background_max_workers",
-                type="int",
-                default=4,
-                description="Maximum concurrent background workers",
-            ),
-        ]
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "extra_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Additional PATH entries to prepend",
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "default": 50000,
+                    "description": "Maximum characters to return from command output",
+                },
+                "auto_background_threshold": {
+                    "type": "number",
+                    "default": 10.0,
+                    "description": "Seconds before auto-backgrounding",
+                },
+                "background_max_workers": {
+                    "type": "integer",
+                    "default": 4,
+                    "description": "Maximum concurrent background workers",
+                },
+            },
+        }
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""

@@ -354,8 +354,8 @@ class EnrichmentPlugin(Protocol):
     #
     # Configuration Schema:
     #
-    # def get_config_schema(self) -> List[PluginSetting]:
-    #     """Declare configurable settings. See ToolPlugin for details."""
+    # def get_config_schema(self) -> Dict[str, Any]:
+    #     """Return JSON Schema for this plugin's config. See ToolPlugin."""
     #     ...
 
     # ==================== Enrichment Methods ====================
@@ -496,34 +496,35 @@ class ToolPlugin(Protocol):
     #
     # Configuration Schema:
     #
-    # def get_config_schema(self) -> List[PluginSetting]:
-    #     """Declare configurable settings for this plugin.
+    # def get_config_schema(self) -> Dict[str, Any]:
+    #     """Return JSON Schema describing this plugin's configuration.
     #
-    #     Returns a list of PluginSetting descriptors describing the config
+    #     Returns a JSON Schema (draft 2020-12) object describing the config
     #     keys this plugin accepts in initialize(config).  Only include
     #     user/profile-configurable settings — omit internal wiring keys
     #     like agent_name or workspace_root.
     #
     #     Returns:
-    #         List of PluginSetting objects, or empty list if no settings.
+    #         JSON Schema dict, or empty dict if no configurable settings.
     #
     #     Example:
-    #         def get_config_schema(self) -> List[PluginSetting]:
-    #             return [
-    #                 PluginSetting(
-    #                     name="max_results",
-    #                     type="int",
-    #                     default=100,
-    #                     description="Maximum matches to return",
-    #                 ),
-    #                 PluginSetting(
-    #                     name="region",
-    #                     type="str",
-    #                     default="wt-wt",
-    #                     description="Region for search results",
-    #                     choices=["wt-wt", "us-en", "uk-en"],
-    #                 ),
-    #             ]
+    #         def get_config_schema(self) -> Dict[str, Any]:
+    #             return {
+    #                 "type": "object",
+    #                 "properties": {
+    #                     "max_results": {
+    #                         "type": "integer",
+    #                         "default": 100,
+    #                         "description": "Maximum matches to return",
+    #                     },
+    #                     "region": {
+    #                         "type": "string",
+    #                         "default": "wt-wt",
+    #                         "description": "Region for search results",
+    #                         "enum": ["wt-wt", "us-en", "uk-en"],
+    #                     },
+    #                 },
+    #             }
     #     """
     #     ...
     #

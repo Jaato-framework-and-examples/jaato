@@ -27,7 +27,7 @@ from .channels import (
     get_permission_options_with_edit,
     EDIT_PERMISSION_OPTION,
 )
-from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines, PluginSetting
+from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
 from ...ui_utils import format_permission_options, format_tool_args_summary
 from shared.trace import trace as _trace_write
 
@@ -238,23 +238,163 @@ class PermissionPlugin:
         self._turn_suspended = False
         self._idle_suspended = False
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="channel_type",
-                type="str",
-                default="console",
-                description="Permission channel type",
-                choices=["console", "webhook", "file"],
-            ),
-            PluginSetting(
-                name="channel_config",
-                type="dict",
-                default={},
-                description="Channel-specific configuration",
-            ),
-        ]
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "channel_type": {
+                    "type": "string",
+                    "default": "console",
+                    "description": "Permission approval channel type",
+                    "enum": ["console", "webhook", "file"],
+                },
+                "channel_config": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Channel-specific configuration (endpoint, auth, etc.)",
+                },
+                "evaluators": {
+                    "type": "object",
+                    "description": "Permission evaluator scripts. Maps tool names (or 'default') to script paths.",
+                    "additionalProperties": {"type": "string"},
+                },
+                "policy": {
+                    "type": "object",
+                    "description": "Permission policy rules",
+                    "properties": {
+                        "defaultPolicy": {
+                            "type": "string",
+                            "enum": ["allow", "deny", "ask"],
+                            "default": "deny",
+                            "description": "Default action when no rule matches",
+                        },
+                        "sanitization": {
+                            "type": "object",
+                            "description": "Input sanitization for CLI commands",
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "default": True,
+                                    "description": "Enable sanitization checks",
+                                },
+                                "block_shell_metacharacters": {
+                                    "type": "boolean",
+                                    "default": True,
+                                    "description": "Block shell metacharacters (;, |, &&, etc.)",
+                                },
+                                "block_dangerous_commands": {
+                                    "type": "boolean",
+                                    "default": True,
+                                    "description": "Block dangerous system commands",
+                                },
+                                "allowed_dangerous_commands": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": "Dangerous commands to allow (e.g. 'git')",
+                                },
+                                "path_scope": {
+                                    "type": "object",
+                                    "description": "Filesystem path restrictions",
+                                    "properties": {
+                                        "enabled": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": "Enable path scope enforcement",
+                                        },
+                                        "allowed_roots": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "default": ["."],
+                                            "description": "Allowed root directories",
+                                        },
+                                        "block_absolute": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": "Block absolute paths",
+                                        },
+                                        "block_parent_traversal": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": "Block parent directory traversal (../)",
+                                        },
+                                        "allow_home": {
+                                            "type": "boolean",
+                                            "default": False,
+                                            "description": "Allow home directory access (~)",
+                                        },
+                                        "allow_tmp": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": "Allow /tmp directory access",
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        "blacklist": {
+                            "type": "object",
+                            "description": "Tools and patterns to always deny",
+                            "properties": {
+                                "tools": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": "Tool names to blacklist",
+                                },
+                                "patterns": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": "Glob patterns to blacklist",
+                                },
+                                "arguments": {
+                                    "type": "object",
+                                    "description": "Per-tool argument patterns to blacklist",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        "whitelist": {
+                            "type": "object",
+                            "description": "Tools and patterns to always allow",
+                            "properties": {
+                                "tools": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": "Tool names to whitelist",
+                                },
+                                "patterns": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": "Glob patterns to whitelist",
+                                },
+                                "arguments": {
+                                    "type": "object",
+                                    "description": "Per-tool argument patterns to whitelist",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
 
     def add_whitelist_tools(self, tools: List[str]) -> None:
         """Add tools to the permission whitelist.

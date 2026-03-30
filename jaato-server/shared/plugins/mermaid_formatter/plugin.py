@@ -18,7 +18,6 @@ from typing import Any, Dict, Iterator, List, Optional
 from . import renderer
 from .backends import select_backend
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
-from jaato_sdk.plugins.base import PluginSetting
 
 logger = logging.getLogger(__name__)
 
@@ -161,30 +160,28 @@ class MermaidFormatterPlugin:
             self._artifact_dir = env_vision_dir
         # else: remains None until set_workspace_path() is called
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="theme",
-                type="str",
-                default="default",
-                description="Mermaid theme",
-                env_var="JAATO_MERMAID_THEME",
-            ),
-            PluginSetting(
-                name="scale",
-                type="int",
-                default=2,
-                description="Scale factor for rendering",
-                env_var="JAATO_MERMAID_SCALE",
-            ),
-            PluginSetting(
-                name="background",
-                type="str",
-                default="white",
-                description="Background color for diagrams",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "theme": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Mermaid theme",
+                },
+                "scale": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "Scale factor for rendering",
+                },
+                "background": {
+                    "type": "string",
+                    "default": "white",
+                    "description": "Background color for diagrams",
+                },
+            },
+        }
 
     def set_console_width(self, width: int) -> None:
         """Update console width for rendering."""

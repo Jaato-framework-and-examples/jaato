@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
-from jaato_sdk.plugins.base import PluginSetting, PromptEnrichmentResult, UserCommand
+from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
 
 from shared.trace import trace as _trace_write
 
@@ -120,16 +120,18 @@ class MultimodalPlugin:
         self._detected_images.clear()
         self._initialized = False
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="max_image_size_mb",
-                type="float",
-                default=10.0,
-                description="Maximum image file size in megabytes",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "max_image_size_mb": {
+                    "type": "number",
+                    "default": 10.0,
+                    "description": "Maximum image file size in megabytes",
+                },
+            },
+        }
 
     # ==================== Prompt Enrichment ====================
 

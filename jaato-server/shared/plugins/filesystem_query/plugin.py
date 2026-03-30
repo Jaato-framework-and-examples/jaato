@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
-from jaato_sdk.plugins.base import PluginSetting, UserCommand
+from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
@@ -158,16 +158,18 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         self._plugin_registry = None
         logger.info("FilesystemQueryPlugin shutdown")
 
-    def get_config_schema(self) -> List[PluginSetting]:
-        """Return the user-configurable settings for this plugin."""
-        return [
-            PluginSetting(
-                name="allow_tmp",
-                type="bool",
-                default=True,
-                description="Allow /tmp paths in queries",
-            ),
-        ]
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "allow_tmp": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Allow /tmp paths in queries",
+                },
+            },
+        }
 
     def set_plugin_registry(self, registry) -> None:
         """Set the plugin registry for checking external path authorization.
