@@ -1132,17 +1132,6 @@ class ReferencesPlugin:
                     "default": 3,
                     "description": "Maximum semantic matches per content piece",
                 },
-                "channel_type": {
-                    "type": "string",
-                    "default": "console",
-                    "description": "Selection channel type",
-                    "enum": ["console", "webhook", "file"],
-                },
-                "channel_config": {
-                    "type": "object",
-                    "default": {},
-                    "description": "Channel-specific configuration",
-                },
                 "transitive_injection": {
                     "type": "boolean",
                     "default": True,

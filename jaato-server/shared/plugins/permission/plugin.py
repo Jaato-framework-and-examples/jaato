@@ -243,17 +243,6 @@ class PermissionPlugin:
         return {
             "type": "object",
             "properties": {
-                "channel_type": {
-                    "type": "string",
-                    "default": "console",
-                    "description": "Permission approval channel type",
-                    "enum": ["console", "webhook", "file"],
-                },
-                "channel_config": {
-                    "type": "object",
-                    "default": {},
-                    "description": "Channel-specific configuration (endpoint, auth, etc.)",
-                },
                 "evaluators": {
                     "type": "object",
                     "description": "Permission evaluator scripts. Maps tool names (or 'default') to script paths.",

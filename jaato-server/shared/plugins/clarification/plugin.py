@@ -97,19 +97,7 @@ class ClarificationPlugin:
         """Return JSON Schema for this plugin's configuration."""
         return {
             "type": "object",
-            "properties": {
-                "channel_type": {
-                    "type": "string",
-                    "default": "console",
-                    "description": "Clarification channel type",
-                    "enum": ["console", "auto"],
-                },
-                "channel_config": {
-                    "type": "object",
-                    "default": {},
-                    "description": "Channel-specific configuration",
-                },
-            },
+            "properties": {},
         }
 
     def set_clarification_hooks(
