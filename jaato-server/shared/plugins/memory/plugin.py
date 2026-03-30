@@ -118,7 +118,6 @@ class MemoryPlugin:
                 },
             },
         }
-        self._indexer = None
 
     def set_workspace_path(self, path: str) -> None:
         """Re-initialize storage under the correct workspace directory.
