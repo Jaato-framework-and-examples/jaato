@@ -1022,6 +1022,7 @@ class JaatoServer:
                             permission_init_config: Dict[str, Any] = {
                                 "channel_type": "queue",
                                 "channel_config": {"use_colors": False},
+                                "workspace_path": self._workspace_path,
                                 "policy": {
                                     "defaultPolicy": "ask",
                                     "whitelist": {"tools": [], "patterns": []},
