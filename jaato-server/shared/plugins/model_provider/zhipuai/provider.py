@@ -153,6 +153,18 @@ class ZhipuAIConnectionError(Exception):
         )
 
 
+class ZhipuAIRateLimitError(Exception):
+    """Rate limit exceeded for Z.AI API.
+
+    Classified as transient by the retry system so ``with_retry()``
+    retries the call with exponential backoff.
+    """
+
+    def __init__(self, message: str = "", retry_after: Optional[float] = None):
+        self.retry_after = retry_after
+        super().__init__(message or "Zhipu AI rate limit exceeded. Please wait and try again.")
+
+
 class ZhipuAIProvider(AnthropicProvider):
     """Zhipu AI provider using Anthropic-compatible API.
 
@@ -446,7 +458,7 @@ class ZhipuAIProvider(AnthropicProvider):
         # Check for rate limiting
         if "429" in error_str or "rate limit" in error_str:
             self._trace("[API_ERROR] Rate limit exceeded (429)")
-            raise RuntimeError(
+            raise ZhipuAIRateLimitError(
                 f"Zhipu AI rate limit exceeded. Please wait and try again.\n"
                 f"Original error: {error}"
             ) from error
@@ -462,6 +474,22 @@ class ZhipuAIProvider(AnthropicProvider):
 
         # For other errors, use parent's handling
         super()._handle_api_error(error)
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry purposes.
+
+        ``ZhipuAIRateLimitError`` is transient and should be retried
+        with exponential backoff.
+        """
+        if isinstance(exc, ZhipuAIRateLimitError):
+            return {"transient": True, "rate_limit": True, "infra": False}
+        return None  # Fall back to global classification
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract retry-after hint from an exception."""
+        if isinstance(exc, ZhipuAIRateLimitError) and exc.retry_after:
+            return float(exc.retry_after)
+        return None
 
     @staticmethod
     def login(

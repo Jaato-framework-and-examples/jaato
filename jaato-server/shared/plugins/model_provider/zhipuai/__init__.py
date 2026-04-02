@@ -67,6 +67,7 @@ from .provider import (
     ZHIPUAI_MODELS_URL,
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
+    ZhipuAIRateLimitError,
     ZhipuAIProvider,
     create_provider,
     fetch_zhipuai_models,
@@ -79,6 +80,7 @@ __all__ = [
     # Errors
     "ZhipuAIAPIKeyNotFoundError",
     "ZhipuAIConnectionError",
+    "ZhipuAIRateLimitError",
     # Constants
     "DEFAULT_CONTEXT_LIMIT",
     "KNOWN_MODELS",

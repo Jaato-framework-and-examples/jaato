@@ -8,6 +8,7 @@ from ..provider import (
     ZhipuAIProvider,
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
+    ZhipuAIRateLimitError,
     DEFAULT_CONTEXT_LIMIT,
     MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
@@ -309,7 +310,7 @@ class TestErrorHandling:
         provider.initialize(ProviderConfig(api_key="test-key"))
         provider._model_name = "glm-4.7"
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(ZhipuAIRateLimitError) as exc_info:
             provider._handle_api_error(Exception("429 rate limit exceeded"))
 
         assert "rate limit" in str(exc_info.value).lower()
