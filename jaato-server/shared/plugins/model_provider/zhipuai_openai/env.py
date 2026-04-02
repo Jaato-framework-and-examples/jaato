@@ -38,8 +38,8 @@ DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
 # Default model
 DEFAULT_MODEL = "glm-4.7"
 
-# Default context window when no override is provided
-DEFAULT_CONTEXT_LENGTH = 131072
+# Default context window when no override is provided (matches GLM-5/4.7 generation)
+DEFAULT_CONTEXT_LENGTH = 204800
 
 
 def resolve_api_key() -> Optional[str]:

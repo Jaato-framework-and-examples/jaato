@@ -123,8 +123,9 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
 # Known GLM models with their context window sizes in tokens.
 # Used as metadata fallback when the dynamic /models endpoint is unavailable.
 MODEL_CONTEXT_LIMITS = {
-    # GLM-5 — 200K context, 128K output
+    # GLM-5 family — 200K context, 128K output
     "glm-5": 204800,
+    "glm-5-turbo": 204800,
     # GLM-4.7 family — 200K context
     "glm-4.7": 204800,
     "glm-4.7-flash": 204800,

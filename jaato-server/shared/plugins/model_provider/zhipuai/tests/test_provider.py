@@ -212,12 +212,12 @@ class TestContextLimit:
 
     @patch('anthropic.Anthropic')
     def test_default_context_limit(self, mock_anthropic):
-        """Should return fallback 128K when no model connected."""
+        """Should return fallback 200K when no model connected."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
 
         assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
-        assert provider.get_context_limit() == 131072
+        assert provider.get_context_limit() == 204800
 
     @patch('anthropic.Anthropic')
     def test_model_specific_context_limit(self, mock_anthropic):

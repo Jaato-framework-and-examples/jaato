@@ -61,8 +61,9 @@ logger = logging.getLogger(__name__)
 # Used as metadata fallback when the dynamic /models endpoint is unavailable.
 # Source: models.dev, Roo Code, lm-deluge, ekai-gateway, moai-adk, Z.AI docs.
 MODEL_CONTEXT_LIMITS = {
-    # GLM-5 — 200K context, 128K output
+    # GLM-5 family — 200K context, 128K output
     "glm-5": 204800,
+    "glm-5-turbo": 204800,
     # GLM-4.7 family — 200K context
     "glm-4.7": 204800,
     "glm-4.7-flash": 204800,
@@ -77,8 +78,8 @@ MODEL_CONTEXT_LIMITS = {
     "glm-4.5-x": 131072,
 }
 
-# Fallback for unknown models
-DEFAULT_CONTEXT_LIMIT = 131072
+# Fallback for unknown models (matches GLM-5/4.7 generation default)
+DEFAULT_CONTEXT_LIMIT = 204800
 
 KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
 
