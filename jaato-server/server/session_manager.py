@@ -632,7 +632,7 @@ class SessionManager:
             logger.debug(f"Applied presentation context to server for client {client_id}")
         if 'working_dir' in config:
             server.workspace_path = config['working_dir']
-            logger.debug(f"Applied workspace_path={config['working_dir']} to server for client {client_id}")
+            logger.debug(f"Applied working_dir={config['working_dir']} to server for client {client_id}")
 
     @staticmethod
     def _apply_presentation_to_server(event: 'ClientConfigRequest', server: 'JaatoServer') -> None:

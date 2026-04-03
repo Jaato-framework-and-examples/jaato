@@ -116,8 +116,11 @@ class FileSessionPlugin:
         storage = self._config.get('storage_path', '.jaato/sessions')
         self._storage_path = Path(storage)
 
-        # Ensure storage directory exists
-        self._storage_path.mkdir(parents=True, exist_ok=True)
+        # Storage directory is created lazily when saving, not eagerly at
+        # init.  The relative path is resolved per-workspace by the session
+        # manager's _session_storage_dir(workspace_path).  Creating it here
+        # against cwd() would pollute whichever directory the server was
+        # launched from.
 
         # Reset state
         self._current_session_id = None
