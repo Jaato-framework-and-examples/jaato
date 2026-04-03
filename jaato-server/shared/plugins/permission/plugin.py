@@ -80,6 +80,8 @@ class PermissionPlugin:
         self._channel_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Workspace path for evaluator resolution and EvalContext
+        self._workspace_path: Optional[str] = None
         # Permission lifecycle hooks for UI integration
         # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
         self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
@@ -192,11 +194,14 @@ class PermissionPlugin:
         else:
             self._policy = PermissionPolicy.from_config(self._config.to_policy_dict())
 
+        # Store workspace path for evaluator context
+        if config.get("workspace_path"):
+            self._workspace_path = config["workspace_path"]
+
         # Load permission evaluators if configured
         evaluator_config = config.get("evaluators") if config else None
         if evaluator_config and isinstance(evaluator_config, dict):
-            workspace = config.get("workspace_path") or getattr(self, '_workspace_path', None)
-            evaluators = load_evaluators(evaluator_config, workspace_path=workspace)
+            evaluators = load_evaluators(evaluator_config, workspace_path=self._workspace_path)
             if evaluators:
                 self._policy.set_evaluators(evaluators)
 
