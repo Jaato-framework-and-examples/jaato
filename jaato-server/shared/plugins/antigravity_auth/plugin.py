@@ -45,6 +45,7 @@ class AntigravityAuthPlugin:
     def __init__(self):
         """Initialize the plugin."""
         self._output_callback: Optional[OutputCallback] = None
+        self._workspace_path: Optional[str] = None
         # Store pending auth state for two-step flow
         self._pending_code_verifier: Optional[str] = None
         self._pending_state: Optional[str] = None

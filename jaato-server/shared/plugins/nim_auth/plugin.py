@@ -42,6 +42,7 @@ class NIMAuthPlugin:
     def __init__(self):
         """Initialize the plugin."""
         self._output_callback: Optional[OutputCallback] = None
+        self._workspace_path: Optional[str] = None
 
     @property
     def name(self) -> str:

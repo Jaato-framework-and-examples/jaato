@@ -42,6 +42,7 @@ class GitHubAuthPlugin:
     def __init__(self):
         """Initialize the plugin."""
         self._output_callback: Optional[OutputCallback] = None
+        self._workspace_path: Optional[str] = None
         # Store pending device code for polling
         self._pending_user_code: Optional[str] = None
         self._pending_verification_uri: Optional[str] = None
