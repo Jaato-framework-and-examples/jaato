@@ -89,8 +89,12 @@ class AnthropicAuthPlugin:
             return False
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the plugin."""
-        pass
+        """Initialize the plugin.
+
+        Stores ``workspace_path`` from config so credential storage functions
+        can resolve project-local vs user-global storage.
+        """
+        self._workspace_path = (config or {}).get("workspace_path")
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time output during commands."""
@@ -271,7 +275,7 @@ class AnthropicAuthPlugin:
         auth_url, code_verifier, state = build_auth_url()
         self._pending_code_verifier = code_verifier
         self._pending_state = state
-        save_pending_auth(code_verifier, state)  # Also save to file for cross-process access
+        save_pending_auth(code_verifier, state, workspace_path=self._workspace_path)  # Also save to file for cross-process access
 
         # Emit to output panel
         self._emit("Opening browser for authentication...\n\n")
@@ -295,7 +299,7 @@ class AnthropicAuthPlugin:
         state = self._pending_state
 
         if not code_verifier or not state:
-            code_verifier, state = load_pending_auth()
+            code_verifier, state = load_pending_auth(workspace_path=self._workspace_path)
 
         if not code_verifier or not state:
             self._emit(
@@ -310,7 +314,7 @@ class AnthropicAuthPlugin:
         def on_error(msg: str) -> None:
             self._emit(f"✗ {msg}\n")
 
-        tokens = complete_interactive_login(auth_code, on_message=on_error)
+        tokens = complete_interactive_login(auth_code, on_message=on_error, workspace_path=self._workspace_path)
 
         if tokens:
             # Clear in-memory state
@@ -330,12 +334,12 @@ class AnthropicAuthPlugin:
         try:
             from ..model_provider.anthropic.oauth import clear_tokens, load_tokens
 
-            tokens = load_tokens()
+            tokens = load_tokens(workspace_path=self._workspace_path)
             if not tokens:
                 self._emit("No OAuth tokens found. Already logged out.\n")
                 return ""
 
-            clear_tokens()
+            clear_tokens(workspace_path=self._workspace_path)
             self._emit(
                 "✓ OAuth tokens cleared.\n\n"
                 "You will need to use an API key (ANTHROPIC_API_KEY) or "
@@ -355,7 +359,7 @@ class AnthropicAuthPlugin:
             lines = ["Anthropic Authentication Status", "=" * 35, ""]
 
             # Check PKCE OAuth tokens
-            tokens = load_tokens()
+            tokens = load_tokens(workspace_path=self._workspace_path)
             if tokens:
                 expires_at = datetime.fromtimestamp(tokens.expires_at)
                 if tokens.is_expired:

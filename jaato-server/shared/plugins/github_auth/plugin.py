@@ -87,8 +87,12 @@ class GitHubAuthPlugin:
             return False
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the plugin."""
-        pass
+        """Initialize the plugin.
+
+        Stores ``workspace_path`` from config so credential storage functions
+        can resolve project-local vs user-global storage.
+        """
+        self._workspace_path = (config or {}).get("workspace_path")
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time output during commands."""
@@ -270,7 +274,7 @@ class GitHubAuthPlugin:
         try:
             # Start device code flow
             self._emit("Requesting device code from GitHub...\n\n")
-            device_response = start_device_flow()
+            device_response = start_device_flow(workspace_path=self._workspace_path)
 
             # Store for potential manual polling
             self._pending_user_code = device_response.user_code
@@ -299,7 +303,7 @@ class GitHubAuthPlugin:
             def on_progress(msg: str) -> None:
                 self._emit_progress(msg)
 
-            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress)
+            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress, workspace_path=self._workspace_path)
 
             if tokens:
                 # Mask the token for display
@@ -338,7 +342,7 @@ class GitHubAuthPlugin:
                 self._emit_progress(msg)
 
             self._emit("Polling for authorization...\n")
-            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress)
+            tokens = complete_device_flow(on_message=on_message, on_progress=on_progress, workspace_path=self._workspace_path)
 
             if tokens:
                 masked = f"{tokens.access_token[:10]}...{tokens.access_token[-4:]}"
@@ -363,12 +367,12 @@ class GitHubAuthPlugin:
         try:
             from ..model_provider.github_models.oauth import clear_tokens, load_tokens
 
-            tokens = load_tokens()
+            tokens = load_tokens(workspace_path=self._workspace_path)
             if not tokens:
                 self._emit("No OAuth tokens found. Already logged out.\n")
                 return ""
 
-            clear_tokens()
+            clear_tokens(workspace_path=self._workspace_path)
             self._emit(
                 "OAuth tokens cleared.\n\n"
                 "You will need to use GITHUB_TOKEN environment variable or "
@@ -392,7 +396,7 @@ class GitHubAuthPlugin:
             lines = ["GitHub Authentication Status", "=" * 35, ""]
 
             # Check stored OAuth tokens
-            tokens = load_tokens()
+            tokens = load_tokens(workspace_path=self._workspace_path)
             if tokens:
                 masked = f"{tokens.access_token[:10]}...{tokens.access_token[-4:]}"
                 lines.append("Device Code OAuth: Active")
@@ -405,7 +409,7 @@ class GitHubAuthPlugin:
             lines.append("")
 
             # Check Copilot token
-            copilot_token = load_copilot_token()
+            copilot_token = load_copilot_token(workspace_path=self._workspace_path)
             if copilot_token:
                 masked_copilot = f"{copilot_token.token[:10]}...{copilot_token.token[-4:]}"
                 if copilot_token.is_expired():

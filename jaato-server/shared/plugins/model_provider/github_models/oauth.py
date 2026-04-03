@@ -418,7 +418,7 @@ def poll_for_token(
 
 
 # Token storage location
-def _get_token_storage_path(for_write: bool = False) -> Path:
+def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
     """Get path to token storage file.
 
     Follows jaato convention:
@@ -439,7 +439,7 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
-    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
 
     # Project-level path
     project_path = Path(workspace) / ".jaato" / "github_oauth.json"
@@ -466,6 +466,7 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
 def save_tokens(
     oauth_tokens: OAuthTokens,
     copilot_token: Optional[CopilotToken] = None,
+    workspace_path: Optional[str] = None,
 ) -> None:
     """Save tokens to persistent storage.
 
@@ -473,7 +474,7 @@ def save_tokens(
         oauth_tokens: OAuth tokens from device code flow.
         copilot_token: Optional Copilot token from exchange.
     """
-    path = _get_token_storage_path(for_write=True)
+    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
@@ -490,9 +491,9 @@ def save_tokens(
         os.chmod(path, 0o600)
 
 
-def load_tokens() -> Optional[OAuthTokens]:
+def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
     """Load OAuth tokens from persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
         return None
@@ -545,9 +546,9 @@ def save_copilot_token(copilot_token: CopilotToken) -> None:
         pass
 
 
-def clear_tokens() -> None:
+def clear_tokens(workspace_path: Optional[str] = None) -> None:
     """Clear stored tokens."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
     if path.exists():
         path.unlink()
 

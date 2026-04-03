@@ -49,7 +49,7 @@ class ZhipuAICredentials:
         )
 
 
-def _get_token_storage_path(for_write: bool = False) -> Path:
+def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
     """Get path to credentials storage file.
 
     Follows jaato convention:
@@ -67,7 +67,7 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
         Path to credentials storage file.
     """
     # Use explicit workspace path if set (thread-safe for subagents)
-    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
     project_path = Path(workspace) / ".jaato" / "zhipuai_auth.json"
     home_path = Path.home() / ".jaato" / "zhipuai_auth.json"
 
@@ -83,9 +83,9 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
         return home_path
 
 
-def save_credentials(credentials: ZhipuAICredentials) -> None:
+def save_credentials(credentials: ZhipuAICredentials, workspace_path: Optional[str] = None) -> None:
     """Save credentials to persistent storage."""
-    path = _get_token_storage_path(for_write=True)
+    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -96,9 +96,9 @@ def save_credentials(credentials: ZhipuAICredentials) -> None:
         os.chmod(path, 0o600)
 
 
-def load_credentials() -> Optional[ZhipuAICredentials]:
+def load_credentials(workspace_path: Optional[str] = None) -> Optional[ZhipuAICredentials]:
     """Load credentials from persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
         return None
@@ -111,26 +111,26 @@ def load_credentials() -> Optional[ZhipuAICredentials]:
         return None
 
 
-def clear_credentials() -> None:
+def clear_credentials(workspace_path: Optional[str] = None) -> None:
     """Clear stored credentials."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
     if path.exists():
         path.unlink()
 
 
-def get_stored_api_key() -> Optional[str]:
+def get_stored_api_key(workspace_path: Optional[str] = None) -> Optional[str]:
     """Get stored API key if available.
 
     Returns:
         API key string, or None if not stored.
     """
-    creds = load_credentials()
+    creds = load_credentials(workspace_path=workspace_path)
     if creds:
         return creds.api_key
     return None
 
 
-def get_credential_file_path() -> Optional[str]:
+def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[str]:
     """Return the path of the credential file that would be loaded.
 
     Used by the provider to report which credential source was used
@@ -141,7 +141,7 @@ def get_credential_file_path() -> Optional[str]:
         String path like ``"~/.jaato/zhipuai_auth.json"`` or
         ``".jaato/zhipuai_auth.json"``, or None.
     """
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
     if not path.exists():
         return None
     home = Path.home()
@@ -318,6 +318,7 @@ def login_with_key(
     api_key: str,
     base_url: Optional[str] = None,
     on_message: Optional[Callable[[str], None]] = None,
+    workspace_path: Optional[str] = None,
 ) -> Optional[ZhipuAICredentials]:
     """Login with a provided API key (non-interactive).
 
@@ -339,7 +340,7 @@ def login_with_key(
             created_at=time.time(),
             base_url=base_url,
         )
-        save_credentials(credentials)
+        save_credentials(credentials, workspace_path=workspace_path)
 
         if on_message:
             on_message("API key validated and saved.")

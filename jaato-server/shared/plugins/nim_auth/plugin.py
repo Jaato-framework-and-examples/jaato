@@ -87,8 +87,12 @@ class NIMAuthPlugin:
             return False
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the plugin."""
-        pass
+        """Initialize the plugin.
+
+        Stores ``workspace_path`` from config so credential storage functions
+        can resolve project-local vs user-global storage.
+        """
+        self._workspace_path = (config or {}).get("workspace_path")
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time output during commands."""
@@ -322,7 +326,7 @@ class NIMAuthPlugin:
             def on_message(msg: str) -> None:
                 self._emit(f"{msg}\n")
 
-            result = login_with_key(api_key, base_url=base_url, on_message=on_message)
+            result = login_with_key(api_key, base_url=base_url, on_message=on_message, workspace_path=self._workspace_path)
             if result:
                 self._emit("\n")
                 self._emit("Successfully authenticated with NVIDIA NIM.\n")
@@ -358,12 +362,12 @@ class NIMAuthPlugin:
                 load_credentials,
             )
 
-            creds = load_credentials()
+            creds = load_credentials(workspace_path=self._workspace_path)
             if not creds:
                 self._emit("No stored credentials found. Already logged out.\n")
                 return ""
 
-            clear_credentials()
+            clear_credentials(workspace_path=self._workspace_path)
             self._emit(
                 "NIM credentials cleared.\n\n"
                 "You will need to set JAATO_NIM_API_KEY or run a new login "
@@ -390,7 +394,7 @@ class NIMAuthPlugin:
             lines = ["NVIDIA NIM Authentication Status", "=" * 35, ""]
 
             # Check stored credentials
-            creds = load_credentials()
+            creds = load_credentials(workspace_path=self._workspace_path)
             if creds:
                 masked_key = (
                     creds.api_key[:8] + "..." + creds.api_key[-4:]

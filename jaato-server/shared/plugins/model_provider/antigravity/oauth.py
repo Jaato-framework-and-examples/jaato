@@ -603,7 +603,7 @@ def load_code_assist_project(access_token: str) -> Optional[str]:
 # ==================== Token Storage ====================
 
 
-def _get_token_storage_path(for_write: bool = False) -> Path:
+def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
     """Get path to token storage file.
 
     Follows jaato convention:
@@ -624,7 +624,7 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
-    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
     project_path = Path(workspace) / ".jaato" / "antigravity_accounts.json"
     home_path = Path.home() / ".jaato" / "antigravity_accounts.json"
 
@@ -640,9 +640,9 @@ def _get_token_storage_path(for_write: bool = False) -> Path:
         return home_path
 
 
-def save_accounts(manager: AccountManager) -> None:
+def save_accounts(manager: AccountManager, workspace_path: Optional[str] = None) -> None:
     """Save account manager to persistent storage."""
-    path = _get_token_storage_path(for_write=True)
+    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -653,9 +653,9 @@ def save_accounts(manager: AccountManager) -> None:
         os.chmod(path, 0o600)
 
 
-def load_accounts() -> AccountManager:
+def load_accounts(workspace_path: Optional[str] = None) -> AccountManager:
     """Load account manager from persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
         return AccountManager()
@@ -668,9 +668,9 @@ def load_accounts() -> AccountManager:
         return AccountManager()
 
 
-def clear_accounts() -> None:
+def clear_accounts(workspace_path: Optional[str] = None) -> None:
     """Clear all stored accounts."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(workspace_path=workspace_path)
     if path.exists():
         path.unlink()
 

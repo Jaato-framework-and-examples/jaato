@@ -90,8 +90,12 @@ class AntigravityAuthPlugin:
             return False
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the plugin."""
-        pass
+        """Initialize the plugin.
+
+        Stores ``workspace_path`` from config so credential storage functions
+        can resolve project-local vs user-global storage.
+        """
+        self._workspace_path = (config or {}).get("workspace_path")
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time output during commands."""
@@ -294,7 +298,7 @@ class AntigravityAuthPlugin:
         auth_url, code_verifier, state = build_auth_url()
         self._pending_code_verifier = code_verifier
         self._pending_state = state
-        save_pending_auth(code_verifier, state)  # Also save to file for cross-process access
+        save_pending_auth(code_verifier, state, workspace_path=self._workspace_path)  # Also save to file for cross-process access
 
         # Emit to output panel
         self._emit("Opening browser for Google authentication...\n\n")
@@ -318,7 +322,7 @@ class AntigravityAuthPlugin:
         state = self._pending_state
 
         if not code_verifier or not state:
-            code_verifier, state = load_pending_auth()
+            code_verifier, state = load_pending_auth(workspace_path=self._workspace_path)
 
         if not code_verifier:
             self._emit(
@@ -333,7 +337,7 @@ class AntigravityAuthPlugin:
         def on_message(msg: str) -> None:
             self._emit(f"{msg}\n")
 
-        account = complete_interactive_login(auth_code, on_message=on_message)
+        account = complete_interactive_login(auth_code, on_message=on_message, workspace_path=self._workspace_path)
 
         if account:
             # Clear in-memory state
@@ -355,13 +359,13 @@ class AntigravityAuthPlugin:
         try:
             from ..model_provider.antigravity.oauth import clear_accounts, load_accounts
 
-            manager = load_accounts()
+            manager = load_accounts(workspace_path=self._workspace_path)
             if not manager.accounts:
                 self._emit("No accounts found. Already logged out.\n")
                 return ""
 
             num_accounts = len(manager.accounts)
-            clear_accounts()
+            clear_accounts(workspace_path=self._workspace_path)
             self._emit(
                 f"Cleared {num_accounts} account(s).\n\n"
                 "Run 'antigravity-auth login' to re-authenticate.\n"
@@ -380,7 +384,7 @@ class AntigravityAuthPlugin:
             lines = ["Antigravity Authentication Status", "=" * 35, ""]
 
             # Check OAuth accounts
-            manager = load_accounts()
+            manager = load_accounts(workspace_path=self._workspace_path)
             if manager.accounts:
                 active = manager.get_active_account()
                 total = len(manager.accounts)
@@ -430,7 +434,7 @@ class AntigravityAuthPlugin:
         try:
             from ..model_provider.antigravity.oauth import load_accounts
 
-            manager = load_accounts()
+            manager = load_accounts(workspace_path=self._workspace_path)
 
             if not manager.accounts:
                 self._emit("No accounts configured.\n\nRun 'antigravity-auth login' to add an account.\n")

@@ -988,6 +988,23 @@ class JaatoServer:
                             "sandbox_manager": {
                                 "session_id": self._session_id,
                             },
+                            # Auth plugins need workspace_path to store
+                            # credentials in the session workspace
+                            "anthropic_auth": {
+                                "workspace_path": self._workspace_path,
+                            },
+                            "github_auth": {
+                                "workspace_path": self._workspace_path,
+                            },
+                            "zhipuai_auth": {
+                                "workspace_path": self._workspace_path,
+                            },
+                            "antigravity_auth": {
+                                "workspace_path": self._workspace_path,
+                            },
+                            "nim_auth": {
+                                "workspace_path": self._workspace_path,
+                            },
                         }
                         if self._profile and self._profile.plugin_configs:
                             profile_sandbox_config = self._profile.plugin_configs.get(
