@@ -524,7 +524,7 @@ class JaatoSession:
 
         # Update executor permission context if already configured
         if self._executor and self._runtime.permission_plugin:
-            context = {"agent_type": agent_type}
+            context = {"agent_type": agent_type, "session_id": self._daemon_session_id}
             if agent_name:
                 context["agent_name"] = agent_name
             self._executor.set_permission_plugin(
@@ -1202,7 +1202,7 @@ class JaatoSession:
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
-            context = {"agent_type": self._agent_type}
+            context = {"agent_type": self._agent_type, "session_id": self._daemon_session_id}
             if self._agent_name:
                 context["agent_name"] = self._agent_name
             self._executor.set_permission_plugin(
