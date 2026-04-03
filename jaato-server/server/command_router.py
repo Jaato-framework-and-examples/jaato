@@ -652,6 +652,12 @@ class CommandRouter:
         from jaato_sdk.events import HelpTextEvent, SystemMessageEvent
         from jaato_sdk.plugins.base import parse_command_args, HelpLines
 
+        # Inject the client's workspace path into the plugin so credential
+        # storage functions resolve to the session workspace, not cwd.
+        workspace = self._event_sink.get_client_workspace(client_id)
+        if workspace and hasattr(plugin, '_workspace_path'):
+            plugin._workspace_path = workspace
+
         # Buffer plugin._emit() output — daemon commands run outside any agent
         # context, so we accumulate output and send as a SystemMessageEvent.
         output_parts = []
