@@ -327,6 +327,15 @@ class ServiceConnectorPlugin:
                                 "be reached directly. When used with a named service, "
                                 "marks it so future requests bypass the proxy automatically."
                             )
+                        },
+                        "save_to": {
+                            "type": "string",
+                            "description": (
+                                "Save the response body to a file instead of returning it "
+                                "in the tool result. Use for binary downloads (archives, "
+                                "images) to avoid context bloat. Returns a summary with "
+                                "saved_to, size_bytes, status_code, content_type."
+                            )
                         }
                     },
                     "required": ["method"]
@@ -1354,9 +1363,12 @@ class ServiceConnectorPlugin:
         insecure = bool(args.get("insecure", False))
         no_proxy = bool(args.get("no_proxy", False))
 
+        save_to = args.get("save_to", "").strip()
+
         self._trace(
             f"call_service: service={service_name}, url={url}, "
             f"{method} {path}, insecure={insecure}, no_proxy={no_proxy}"
+            f"{f', save_to={save_to}' if save_to else ''}"
         )
 
         if not method:
@@ -1450,12 +1462,17 @@ class ServiceConnectorPlugin:
                 body=body,
                 auth_override=auth_override,
                 timeout=timeout,
-                truncate_at=truncate_at,
+                truncate_at=None if save_to else truncate_at,
                 request_validation=request_validation,
                 response_validator=response_validator,
                 verify_ssl=verify_ssl,
                 use_proxy=use_proxy,
             )
+
+            # Save response body to file instead of returning it
+            if save_to:
+                return self._save_response_to_file(response, save_to)
+
             return response.to_dict()
 
         except AuthError as e:
@@ -1504,6 +1521,66 @@ class ServiceConnectorPlugin:
                     ),
                 }
             return {"error": f"Request failed: {e}"}
+
+    def _save_response_to_file(self, response, save_to: str) -> Dict[str, Any]:
+        """Save HTTP response body to a file and return a summary.
+
+        The response body is written as-is.  For JSON responses this
+        produces a UTF-8 text file; for binary responses (archives,
+        images) the content may be partially decoded by the HTTP client.
+        For true binary-safe downloads, the ``_execute_call_service_download``
+        path is used instead (handles raw bytes directly).
+
+        Args:
+            response: The ``HttpResponse`` from ``HttpClient.execute()``.
+            save_to: Target file path.
+
+        Returns:
+            Summary dict with saved_to, size_bytes, status_code, content_type.
+        """
+        from pathlib import Path
+
+        file_path = Path(save_to)
+
+        # Basic path safety: no parent traversal
+        try:
+            resolved = file_path.resolve()
+        except (ValueError, OSError) as e:
+            return {"error": f"Invalid save_to path: {e}"}
+
+        if ".." in file_path.parts:
+            return {"error": "Path traversal (..) not allowed in save_to"}
+
+        # Create parent directories
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"error": f"Cannot create directory for save_to: {e}"}
+
+        # Write response body
+        body = response.body
+        try:
+            if isinstance(body, bytes):
+                resolved.write_bytes(body)
+            elif isinstance(body, str):
+                resolved.write_text(body, encoding='utf-8')
+            else:
+                # JSON parsed body — serialize back
+                import json
+                resolved.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding='utf-8')
+        except OSError as e:
+            return {"error": f"Failed to write to {save_to}: {e}"}
+
+        size = resolved.stat().st_size
+        content_type = response.headers.get('content-type', 'unknown') if response.headers else 'unknown'
+
+        return {
+            "saved_to": str(resolved),
+            "size_bytes": size,
+            "status_code": response.status,
+            "content_type": content_type,
+            "elapsed_ms": response.elapsed_ms,
+        }
 
     def _execute_preview_request(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute preview_request tool."""
