@@ -386,6 +386,7 @@ class ServiceHttpClient:
                     data=body_str,
                     timeout=timeout_sec,
                     verify=verify_ssl,
+                    allow_redirects=True,
                     **proxy_kwargs
                 )
                 elapsed_ms = int((time.time() - start_time) * 1000)
@@ -415,7 +416,8 @@ class ServiceHttpClient:
 
             try:
                 with httpx.Client(
-                    timeout=timeout_sec, verify=verify_ssl, **proxy_kwargs
+                    timeout=timeout_sec, verify=verify_ssl,
+                    follow_redirects=True, **proxy_kwargs
                 ) as client:
                     response = client.request(
                         method=preview.method,
