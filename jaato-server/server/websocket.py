@@ -290,6 +290,11 @@ class JaatoWSServer:
         # Per-client provisioned workspace tracking
         self._client_provisioned: Dict[str, ProvisionedWorkspace] = {}
 
+        # Workspace ID → session manager session ID mapping for AppArmor
+        # teardown.  Profiles are provisioned under the session manager's ID
+        # but the workspace reaper only knows workspace IDs.
+        self._workspace_to_session_id: Dict[str, str] = {}
+
         # Core server (runs in thread)
         self._jaato_server: Optional[JaatoServer] = None
         self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -337,24 +342,38 @@ class JaatoWSServer:
             if not sess or not sess.workspace_path:
                 return
 
-            # The AppArmor profile is keyed by workspace ID (e.g. ws_20b64eb1),
-            # not the session manager's session ID (e.g. 20260329_140505).
-            # Extract the workspace ID from the workspace path.
-            import os
-            workspace_id = os.path.basename(sess.workspace_path)
-            argv_wrapper, shell_wrapper = ws_server.get_apparmor_wrappers(workspace_id)
+            apparmor = ws_server._apparmor
+            if not apparmor or not apparmor.is_available():
+                if apparmor is not None:
+                    sess.sandbox_mode = "soft"
+                return
+
+            # Provision the AppArmor profile using the session manager's
+            # session ID (e.g. 20260403_205126), NOT the workspace UUID
+            # (ws_abc123).  This ensures /tmp/jaato-{session_id}-** in
+            # the profile matches what get_environment() returns to the
+            # agent.
+            if not apparmor.provision_profile(session_id, sess.workspace_path):
+                sess.sandbox_mode = "soft"
+                return
+
+            argv_wrapper, shell_wrapper = ws_server.get_apparmor_wrappers(session_id)
             if argv_wrapper or shell_wrapper:
                 server.set_apparmor_wrapper(
                     argv_wrapper=argv_wrapper,
                     shell_wrapper=shell_wrapper,
                 )
                 sess.sandbox_mode = "apparmor"
+                # Record mapping so the workspace reaper can teardown
+                # the profile by workspace ID.
+                import os
+                workspace_id = os.path.basename(sess.workspace_path)
+                ws_server._workspace_to_session_id[workspace_id] = session_id
                 logger.info(
-                    "AppArmor confinement applied to session %s",
-                    session_id,
+                    "AppArmor confinement applied to session %s (workspace %s)",
+                    session_id, workspace_id,
                 )
-            elif ws_server._apparmor is not None:
-                # AppArmor manager exists but wrappers not available
+            else:
                 sess.sandbox_mode = "soft"
 
         sm.add_session_hook(_apparmor_session_hook)
@@ -478,9 +497,15 @@ class JaatoWSServer:
                 logger.info("AppArmor confinement enabled")
 
             # Start workspace reaper
-            def _on_workspace_reaped(session_id: str) -> None:
+            def _on_workspace_reaped(workspace_id: str) -> None:
                 if self._apparmor and self._apparmor.is_available():
-                    self._apparmor.teardown_profile(session_id)
+                    # Look up the session manager's session ID from the
+                    # workspace ID.  The profile was provisioned under the
+                    # session manager's ID, not the workspace UUID.
+                    profile_id = self._workspace_to_session_id.pop(
+                        workspace_id, workspace_id
+                    )
+                    self._apparmor.teardown_profile(profile_id)
 
             self._provisioner.start_reaper(
                 interval_seconds=3600,
@@ -1365,9 +1390,10 @@ class JaatoWSServer:
             logger.error("Workspace provision failed: %s", e)
             return None
 
-        # Set up AppArmor confinement
-        if self._apparmor and self._apparmor.is_available():
-            self._apparmor.provision_profile(session_id, workspace.path)
+        # AppArmor profile is provisioned later in the session hook
+        # (_apparmor_session_hook) using the session manager's session ID,
+        # not the workspace UUID.  This ensures /tmp/jaato-{session_id}-**
+        # matches what get_environment() returns to the agent.
 
         self._client_provisioned[client_id] = workspace
         return workspace
