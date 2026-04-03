@@ -1397,6 +1397,16 @@ class PermissionPlugin:
                 'comment': response.reason,
             }
 
+        elif decision == ChannelDecision.ALLOW_COMMENT:
+            # Allow with user feedback — the comment text is injected into
+            # the tool result so the model sees it alongside the output
+            self._log_decision(tool_name, args, "allow", f"User comment: {response.reason}")
+            return True, {
+                'reason': response.reason,
+                'method': 'user_comment',
+                'comment': response.reason,
+            }
+
         elif decision == ChannelDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
             return False, {'reason': response.reason, 'method': 'user_denied'}

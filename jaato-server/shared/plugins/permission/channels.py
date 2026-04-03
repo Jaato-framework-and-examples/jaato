@@ -81,6 +81,7 @@ class ChannelDecision(Enum):
     ALLOW_UNTIL_IDLE = "allow_until_idle"  # Allow until session goes idle (clears on IDLE)
     EDIT = "edit"                    # User wants to edit content before deciding
     COMMENT = "comment"              # Deny with user feedback that the model sees
+    ALLOW_COMMENT = "allow_comment"  # Allow with advisory feedback the model sees
     TIMEOUT = "timeout"              # Channel didn't respond in time
 
 
@@ -142,6 +143,7 @@ DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
     PermissionResponseOption("never", "never", "Deny and blacklist for session", ChannelDecision.DENY_SESSION),
     PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
     PermissionResponseOption("c", "comment", "Deny with feedback the model sees", ChannelDecision.COMMENT),
+    PermissionResponseOption("yc", "allow-comment", "Allow with feedback the model sees", ChannelDecision.ALLOW_COMMENT),
 ]
 
 # Edit option - added conditionally for tools with editable content
@@ -589,6 +591,17 @@ class ConsoleChannel(Channel):
                 reason="User cancelled input",
             )
 
+        # Check for allow-comment prefix (yc:comment text) before deny-comment
+        if response.startswith("yc:"):
+            comment_text = response[3:].strip()
+            if comment_text:
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.ALLOW_COMMENT,
+                    reason=comment_text,
+                )
+            # Empty comment — fall through to normal matching
+
         # Check for comment prefix (c:comment text) before option matching
         if response.startswith("c:"):
             comment_text = response[2:].strip()
@@ -633,6 +646,7 @@ class ConsoleChannel(Channel):
             ChannelDecision.ALLOW_TURN: self.ANSI_CYAN,  # Same as session-level
             ChannelDecision.ALLOW_UNTIL_IDLE: self.ANSI_CYAN,  # Same as session-level
             ChannelDecision.COMMENT: self.ANSI_YELLOW,  # Deny-adjacent
+            ChannelDecision.ALLOW_COMMENT: self.ANSI_GREEN,  # Allow-adjacent
         }
 
         parts = []
@@ -1047,7 +1061,18 @@ class QueueChannel(ConsoleChannel):
                 )
 
             # Parse response using request's response_options (uses parent's method)
-            # Check for comment prefix first (c:comment text) — the TUI sends
+            # Check for allow-comment prefix (yc:text) before deny-comment (c:text)
+            if response_text.startswith("yc:"):
+                comment_text = response_text[3:].strip()
+                if comment_text:
+                    return ChannelResponse(
+                        request_id=request.request_id,
+                        decision=ChannelDecision.ALLOW_COMMENT,
+                        reason=comment_text,
+                    )
+                # Empty comment after prefix — fall through to normal matching
+
+            # Check for comment prefix (c:comment text) — the TUI sends
             # comments in this format so the full text flows through the queue
             # as a single string without requiring extra protocol fields.
             if response_text.startswith("c:"):
