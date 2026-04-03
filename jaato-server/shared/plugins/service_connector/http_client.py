@@ -280,6 +280,7 @@ class ServiceHttpClient:
         response_validator: Optional[Any] = None,  # Callable for validation
         verify_ssl: bool = True,
         use_proxy: bool = True,
+        raw_bytes: bool = False,
     ) -> HttpResponse:
         """Execute an HTTP request.
 
@@ -395,11 +396,15 @@ class ServiceHttpClient:
                 response_headers = dict(response.headers)
                 status = response.status_code
 
-                # Try to parse as JSON
-                try:
-                    response_body = response.json()
-                except (json.JSONDecodeError, ValueError):
-                    response_body = response.text
+                if raw_bytes:
+                    # Return raw bytes for binary downloads (save_to)
+                    response_body = response.content
+                else:
+                    # Try to parse as JSON
+                    try:
+                        response_body = response.json()
+                    except (json.JSONDecodeError, ValueError):
+                        response_body = response.text
 
             except ImportError:
                 raise HttpClientError(
@@ -431,11 +436,15 @@ class ServiceHttpClient:
                     response_headers = dict(response.headers)
                     status = response.status_code
 
-                    # Try to parse as JSON
-                    try:
-                        response_body = response.json()
-                    except (json.JSONDecodeError, ValueError):
-                        response_body = response.text
+                    if raw_bytes:
+                        # Return raw bytes for binary downloads (save_to)
+                        response_body = response.content
+                    else:
+                        # Try to parse as JSON
+                        try:
+                            response_body = response.json()
+                        except (json.JSONDecodeError, ValueError):
+                            response_body = response.text
 
             except httpx.TimeoutException:
                 raise HttpClientError(f"Request timed out after {timeout_ms}ms")

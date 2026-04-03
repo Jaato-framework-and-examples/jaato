@@ -1467,6 +1467,7 @@ class ServiceConnectorPlugin:
                 response_validator=response_validator,
                 verify_ssl=verify_ssl,
                 use_proxy=use_proxy,
+                raw_bytes=bool(save_to),
             )
 
             # Save response body to file instead of returning it
