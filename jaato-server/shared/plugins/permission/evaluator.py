@@ -50,6 +50,9 @@ class PolicyDecision(Enum):
         ALLOW_UNTIL_IDLE: Permit until session goes idle (``i``).
         ALLOW_SESSION: Add to session whitelist (``a``/``always``).
         ALLOW_ALL: Pre-approve all future requests in session (``all``).
+        ALLOW_WITH_COMMENT: Permit and inject a comment into the tool
+            result so the model sees advisory feedback (e.g. drift
+            warnings).  Use ``EvalResult`` with the comment text.
         DENY: Block this tool execution (``n``).
         DENY_SESSION: Add to session blacklist (``never``).
         DENY_WITH_COMMENT: Deny and pass a comment to the model (``c:``).
@@ -63,6 +66,7 @@ class PolicyDecision(Enum):
     ALLOW_UNTIL_IDLE = "allow_until_idle"
     ALLOW_SESSION = "allow_session"
     ALLOW_ALL = "allow_all"
+    ALLOW_WITH_COMMENT = "allow_with_comment"
     DENY = "deny"
     DENY_SESSION = "deny_session"
     DENY_WITH_COMMENT = "deny_with_comment"

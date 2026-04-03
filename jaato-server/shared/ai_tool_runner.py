@@ -551,6 +551,8 @@ class ToolExecutor:
                 }
                 if perm_info.get('was_edited'):
                     permission_meta['was_edited'] = True
+                if perm_info.get('comment') and allowed:
+                    permission_meta['comment'] = perm_info['comment']
                 # Record permission check to ledger
                 if self._ledger is not None:
                     self._ledger._record('permission-check', {

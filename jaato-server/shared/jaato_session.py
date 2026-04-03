@@ -5314,13 +5314,24 @@ NOTES
         else:
             result_dict = {"result": result_data}
 
+        # Inject advisory comment from permission evaluator (ALLOW_WITH_COMMENT)
+        # before stripping internal metadata.  The comment becomes a visible
+        # field so the model sees the feedback alongside the tool result.
+        perm_meta = result_dict.get('_permission')
+        if isinstance(perm_meta, dict) and perm_meta.get('comment'):
+            result_dict['_permission_note'] = perm_meta['comment']
+
         # Strip internal metadata keys (prefixed with '_') before sending
         # to the model.  These carry scaffolding like _permission, _multimodal
-        # flags, etc. that are not meaningful to the model.
+        # flags, etc. that are not meaningful to the model.  The
+        # _permission_note is intentionally kept (renamed below).
+        permission_note = result_dict.pop('_permission_note', None)
         result_dict = {
             k: v for k, v in result_dict.items()
             if not k.startswith('_')
         }
+        if permission_note:
+            result_dict['permission_note'] = permission_note
 
         # For error results, extract a clean error string so provider
         # converters don't double-wrap a dict inside {"error": str(dict)}.

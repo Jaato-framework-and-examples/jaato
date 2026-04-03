@@ -141,11 +141,12 @@ class PermissionPolicy:
                 EvalDecision.ALLOW_UNTIL_IDLE,
                 EvalDecision.ALLOW_SESSION,
                 EvalDecision.ALLOW_ALL,
+                EvalDecision.ALLOW_WITH_COMMENT,
             ):
                 return PolicyMatch(
                     decision=PermissionDecision.ALLOW,
                     reason="Evaluator granted access",
-                    rule_type="evaluator",
+                    rule_type="evaluator_comment" if decision == EvalDecision.ALLOW_WITH_COMMENT else "evaluator",
                     eval_result=eval_result,
                 )
 

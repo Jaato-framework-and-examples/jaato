@@ -1100,6 +1100,15 @@ class PermissionPlugin:
             eval_result = run_evaluator(
                 self._policy._evaluators, tool_name, args, eval_context
             )
+            if eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT:
+                # Allow with advisory comment — proceed but inject feedback
+                comment = eval_result.comment or ""
+                self._log_decision(tool_name, args, "allow", f"Evaluator comment: {comment}")
+                return True, {
+                    'reason': 'Evaluator granted access with comment',
+                    'method': 'evaluator_comment',
+                    'comment': comment,
+                }
             if eval_result.decision not in (
                 EvalDecision.FALLBACK,
                 EvalDecision.ALLOW,
@@ -1194,7 +1203,13 @@ class PermissionPlugin:
             # SKIP in subagent mode
             if self._on_permission_resolved and not is_subagent_mode:
                 self._on_permission_resolved(tool_name, "", True, method)
-            return True, {'reason': match.reason, 'method': method}
+            result = {'reason': match.reason, 'method': method}
+            # Inject advisory comment for ALLOW_WITH_COMMENT
+            if (match.eval_result
+                    and match.eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT
+                    and match.eval_result.comment):
+                result['comment'] = match.eval_result.comment
+            return True, result
 
         elif match.decision == PermissionDecision.DENY:
             # Apply scoped side effects from evaluator decisions
