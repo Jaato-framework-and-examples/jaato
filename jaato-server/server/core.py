@@ -2069,7 +2069,8 @@ class JaatoServer:
             ))
 
         def on_permission_resolved(tool_name: str, request_id: str,
-                                   granted: bool, method: str):
+                                   granted: bool, method: str,
+                                   comment: str = ""):
             server._pending_permission_request_id = None
             server._waiting_for_channel_input = False
 
@@ -2082,6 +2083,7 @@ class JaatoServer:
                 tool_name=tool_name,
                 granted=granted,
                 method=method,
+                comment=comment,
             ))
 
             # Emit updated permission status (a/t/i responses change the policy)

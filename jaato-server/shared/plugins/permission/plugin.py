@@ -123,7 +123,7 @@ class PermissionPlugin:
     def set_permission_hooks(
         self,
         on_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None,
-        on_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+        on_resolved: Optional[Callable[[str, str, bool, str, str], None]] = None
     ) -> None:
         """Set hooks for permission lifecycle events.
 
@@ -1201,8 +1201,14 @@ class PermissionPlugin:
             self._log_decision(tool_name, args, "allow", match.reason)
             # Emit resolved hook for auto-approved (whitelist)
             # SKIP in subagent mode
+            # Extract comment for ALLOW_WITH_COMMENT
+            eval_comment = ""
+            if (match.eval_result
+                    and match.eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT
+                    and match.eval_result.comment):
+                eval_comment = match.eval_result.comment
             if self._on_permission_resolved and not is_subagent_mode:
-                self._on_permission_resolved(tool_name, "", True, method)
+                self._on_permission_resolved(tool_name, "", True, method, comment=eval_comment)
             result = {'reason': match.reason, 'method': method}
             # Inject advisory comment for ALLOW_WITH_COMMENT
             if (match.eval_result
@@ -1334,7 +1340,9 @@ class PermissionPlugin:
                     # SKIP in subagent mode
                     if self._on_permission_resolved and not is_subagent_mode:
                         self._on_permission_resolved(
-                            tool_name, request.request_id, allowed, info.get('method', 'unknown')
+                            tool_name, request.request_id, allowed,
+                            info.get('method', 'unknown'),
+                            comment=info.get('comment', ''),
                         )
 
                     return allowed, info

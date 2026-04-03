@@ -309,6 +309,7 @@ class PermissionResolvedPayload(TypedDict):
     tool_name: str
     granted: bool
     method: str
+    comment: str
 
 
 # =============================================================================

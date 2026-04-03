@@ -344,6 +344,7 @@ class PermissionResolvedEvent(Event):
     tool_name: str = ""
     granted: bool = False
     method: str = ""  # "user", "whitelist", "blacklist", "default"
+    comment: str = ""  # Advisory comment (from yc: or ALLOW_WITH_COMMENT evaluator)
 
 
 @dataclass
