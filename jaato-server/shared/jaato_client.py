@@ -464,9 +464,9 @@ class JaatoClient:
         if skip_model_test:
             kwargs["skip_model_test"] = True
         self._session = self._runtime.create_session(**kwargs)
-        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
         if self._daemon_session_id:
             self._session.set_daemon_session_id(self._daemon_session_id)
+        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
 
         # Pass UI hooks to session if they were set before configure_tools
         if self._ui_hooks:
@@ -496,9 +496,9 @@ class JaatoClient:
 
         # Create a minimal session with user commands but no provider
         self._session = self._runtime.create_session_without_provider(model=self._model_name)
-        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
         if self._daemon_session_id:
             self._session.set_daemon_session_id(self._daemon_session_id)
+        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
 
         # Pass UI hooks to session if they were set
         if self._ui_hooks:
@@ -534,9 +534,9 @@ class JaatoClient:
 
         # Create session manually
         self._session = JaatoSession(self._runtime, self._model_name)
-        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
         if self._daemon_session_id:
             self._session.set_daemon_session_id(self._daemon_session_id)
+        self._session.set_agent_context(agent_type="main", agent_name=self._agent_name)
         self._session._provider = provider
         self._session._tools = tools
         self._session._system_instruction = system_instruction
