@@ -657,10 +657,6 @@ class CommandRouter:
         workspace = self._event_sink.get_client_workspace(client_id)
         if workspace and hasattr(plugin, '_workspace_path'):
             plugin._workspace_path = workspace
-            logger.debug(
-                "Injected workspace_path=%s into daemon plugin %s for client %s",
-                workspace, plugin.name, client_id,
-            )
 
         # Buffer plugin._emit() output — daemon commands run outside any agent
         # context, so we accumulate output and send as a SystemMessageEvent.
