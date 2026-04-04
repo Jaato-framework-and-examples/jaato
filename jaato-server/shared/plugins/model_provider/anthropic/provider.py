@@ -1174,10 +1174,18 @@ class AnthropicProvider:
                                 finish_reason = FinishReason.STOP
                         if "usage" in delta_info:
                             delta_usage = delta_info["usage"]
-                            # Update output tokens; preserve all fields set by message_start
-                            # (cache_read_tokens, cache_creation_tokens, thinking_tokens, etc.)
+                            # message_delta usage is cumulative per Anthropic spec.
+                            # Update prompt_tokens if the delta provides them
+                            # (Z.AI sends input_tokens here; Anthropic may too
+                            # when web search increases input mid-stream).
+                            if delta_usage.prompt_tokens > 0:
+                                usage.prompt_tokens = delta_usage.prompt_tokens
+                            if delta_usage.cache_read_tokens is not None:
+                                usage.cache_read_tokens = delta_usage.cache_read_tokens
+                            if delta_usage.cache_creation_tokens is not None:
+                                usage.cache_creation_tokens = delta_usage.cache_creation_tokens
                             usage.output_tokens = delta_usage.output_tokens
-                            usage.total_tokens = usage.prompt_tokens + delta_usage.output_tokens
+                            usage.total_tokens = usage.prompt_tokens + usage.output_tokens
                             self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                             if on_usage_update and usage.total_tokens > 0:
                                 on_usage_update(usage)

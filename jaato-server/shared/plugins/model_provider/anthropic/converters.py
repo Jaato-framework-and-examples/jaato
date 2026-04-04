@@ -765,10 +765,19 @@ def extract_message_delta(event: Any) -> Optional[Dict[str, Any]]:
 
         usage = getattr(event, "usage", None)
         if usage:
+            # Per Anthropic spec, message_delta usage is cumulative.
+            # input_tokens may be present (e.g. Z.AI, or when web search
+            # increases input mid-stream).
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", None)
+            cache_creation = getattr(usage, "cache_creation_input_tokens", None)
             result["usage"] = TokenUsage(
-                prompt_tokens=0,  # Not available in delta
-                output_tokens=getattr(usage, "output_tokens", 0),
-                total_tokens=getattr(usage, "output_tokens", 0),
+                prompt_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_creation,
             )
 
         return result if result else None
