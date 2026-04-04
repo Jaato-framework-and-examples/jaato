@@ -95,9 +95,24 @@ def _agent_trace_path(base_path: Optional[str]) -> Optional[str]:
     return f"{root}_{agent_id}{ext}"
 
 
+def _resolve_trace_file(file_path: str) -> str:
+    """Resolve a trace file path, using JAATO_WORKSPACE_ROOT for relative paths.
+
+    Relative paths (like ``.jaato/logs/provider_trace.log`` from a ``.env``
+    file) should resolve against the session workspace, not the server
+    process's ``cwd()``.
+    """
+    if os.path.isabs(file_path):
+        return file_path
+    workspace = os.environ.get("JAATO_WORKSPACE_ROOT")
+    if workspace:
+        return os.path.join(workspace, file_path)
+    return os.path.abspath(file_path)
+
+
 def _ensure_parent_dirs(file_path: str) -> None:
     """Create parent directories for a file path if they don't exist."""
-    parent = os.path.dirname(os.path.abspath(file_path))
+    parent = os.path.dirname(file_path)
     if parent not in _ensured_dirs:
         os.makedirs(parent, exist_ok=True)
         _ensured_dirs.add(parent)
@@ -152,8 +167,9 @@ def trace_write(
     if not trace_path:
         return
     try:
-        _ensure_parent_dirs(trace_path)
-        with open(trace_path, "a") as f:
+        resolved = _resolve_trace_file(trace_path)
+        _ensure_parent_dirs(resolved)
+        with open(resolved, "a") as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] [{component}] {msg}\n")
             if include_traceback:
