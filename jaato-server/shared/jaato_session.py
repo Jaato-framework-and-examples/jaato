@@ -6427,10 +6427,26 @@ NOTES
     def _maybe_collect_before_send(self) -> Optional[GCResult]:
         """Check and perform GC if needed before sending."""
         if not self._gc_plugin or not self._gc_config:
+            logger.info(
+                "GC_CHECK: skipped — plugin=%s config=%s",
+                self._gc_plugin is not None, self._gc_config is not None,
+            )
             return None
 
         context_usage = self.get_context_usage()
+        logger.info(
+            "GC_CHECK: plugin=%s usage=%.1f%% threshold=%.1f%% target=%.1f%% continuous=%s",
+            type(self._gc_plugin).__name__,
+            context_usage.get('percent_used', 0),
+            self._gc_config.threshold_percent,
+            self._gc_config.target_percent,
+            getattr(self._gc_config, 'continuous_mode', '?'),
+        )
         should_gc, reason = self._gc_plugin.should_collect(context_usage, self._gc_config)
+        logger.info(
+            "GC_CHECK: should_gc=%s reason=%s",
+            should_gc, reason.value if reason else None,
+        )
 
         if should_gc and reason:
             self._trace(
