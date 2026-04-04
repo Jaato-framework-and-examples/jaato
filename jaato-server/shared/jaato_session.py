@@ -3277,6 +3277,16 @@ NOTES
             self._notify_model_of_cancellation(cancel_msg, partial)
             return None, TurnResult.cancelled(partial, context=f"after tool execution ({context})"), False
 
+        # 2.5. GC check between tool execution and next model call.
+        # In agentic mode, send_message() is called once and the session
+        # loops internally (tool → model → tool → ...) without returning.
+        # The check_before_send at the top of send_message only runs once.
+        # This intra-turn check ensures GC fires as context grows.
+        if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
+            # Refresh conversation budget so the GC sees current token usage
+            self._update_conversation_budget()
+            self._maybe_collect_before_send()
+
         # 3. Send results and get continuation
         response = self._send_tool_results_and_continue(
             tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
