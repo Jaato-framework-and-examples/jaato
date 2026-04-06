@@ -389,18 +389,27 @@ class JaatoServer:
         self,
         argv_wrapper: Optional[Callable[[List[str]], List[str]]] = None,
         shell_wrapper: Optional[Callable[[str], str]] = None,
+        confine_context: Optional[Callable] = None,
     ) -> None:
-        """Set AppArmor command wrappers and propagate to relevant plugins.
+        """Set AppArmor wrappers and propagate to relevant plugins.
 
         When configured, CLI and interactive-shell plugin subprocess calls
         are wrapped with ``aa-exec`` so they run under the session's
-        AppArmor profile.  This is called by the WebSocket server after
-        session creation for remote clients with AppArmor enabled.
+        AppArmor profile.  Additionally, the tool executor receives a
+        thread-level confinement context so that in-process file I/O
+        plugins (``readFile``, ``glob_files``, ``file_edit``) are also
+        confined.
+
+        Called by the WebSocket server after session creation for remote
+        clients with AppArmor enabled.
 
         Args:
             argv_wrapper: Wraps argv-style commands (for ``shell=False``).
             shell_wrapper: Wraps shell command strings (for ``shell=True``
                 and pexpect spawn).
+            confine_context: Zero-argument callable returning a context
+                manager that confines the current thread to the session's
+                AppArmor profile.
         """
         if not self.registry:
             logger.warning("set_apparmor_wrapper called before registry initialized")
@@ -416,6 +425,12 @@ class JaatoServer:
         shell_plugin = self.registry.get_plugin("interactive_shell")
         if shell_plugin and hasattr(shell_plugin, "set_apparmor_wrapper"):
             shell_plugin.set_apparmor_wrapper(shell_wrapper=shell_wrapper)
+
+        # Thread-level confinement for in-process file I/O tools
+        if confine_context and self._jaato:
+            session = self._jaato.get_session()
+            if session and session._executor:
+                session._executor.set_apparmor_context(confine_context)
 
     @property
     def auth_pending(self) -> bool:

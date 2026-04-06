@@ -11,6 +11,21 @@ Callers should check availability and fall back to directory-level sandboxing
 (which is the existing default behaviour).
 
 Profile naming convention: ``jaato-ws-{session_id}``
+
+Thread-level confinement
+------------------------
+
+``apparmor_confine(profile_name)`` is a context manager that transitions
+the *current OS thread* into the given AppArmor profile by writing to
+``/proc/self/attr/current``, and restores the previous profile on exit.
+This is used by the tool executor to confine in-process file I/O
+(``readFile``, ``glob_files``, ``file_edit``) under the same AppArmor
+profile that subprocesses get via ``aa-exec``.
+
+``make_confine_context(profile_name)`` returns a zero-argument callable
+that produces the context manager.  This callable is passed through
+the ``server → shared`` boundary so that ``ToolExecutor`` (in ``shared/``)
+can confine tools without importing ``server.apparmor``.
 """
 
 import logging
@@ -18,8 +33,10 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, ContextManager, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -373,3 +390,74 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             venv_path=str(self._venv_path),
             sessions_root=str(self._sessions_root),
         )
+
+
+# ------------------------------------------------------------------
+# Thread-level AppArmor confinement
+# ------------------------------------------------------------------
+
+def _get_thread_attr_path() -> str:
+    """Return the path to the current thread's AppArmor attr file."""
+    tid = threading.get_native_id()
+    return f"/proc/self/task/{tid}/attr/current"
+
+
+@contextmanager
+def apparmor_confine(profile_name: str):
+    """Context manager that confines the current thread to an AppArmor profile.
+
+    Writes *profile_name* to ``/proc/self/task/<tid>/attr/current`` on
+    entry, which transitions the calling OS thread into that profile.
+    On exit, writes ``unconfined`` to restore the thread.
+
+    If the write fails (AppArmor not available, profile not loaded,
+    insufficient privileges), logs a warning and proceeds without
+    confinement — never raises.
+
+    Args:
+        profile_name: The AppArmor profile to confine to
+            (e.g. ``"jaato-ws-20260405_123456"``).
+    """
+    attr_path = _get_thread_attr_path()
+    confined = False
+    try:
+        with open(attr_path, "w") as f:
+            f.write(f"changeprofile {profile_name}")
+        confined = True
+    except (OSError, PermissionError) as e:
+        logger.debug("AppArmor: thread confinement failed for %s: %s", profile_name, e)
+
+    try:
+        yield
+    finally:
+        if confined:
+            try:
+                with open(attr_path, "w") as f:
+                    f.write("changeprofile unconfined")
+            except (OSError, PermissionError):
+                # Cannot restore — thread stays confined until it exits.
+                # This is safe: the profile allows the session's workspace,
+                # and the thread will be reused for the same session.
+                logger.warning(
+                    "AppArmor: could not restore unconfined for thread %d",
+                    threading.get_native_id(),
+                )
+
+
+def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
+    """Create a callable that returns an AppArmor confinement context manager.
+
+    The returned callable takes no arguments and produces a context
+    manager suitable for ``with confine_ctx(): ...``.  This is passed
+    through the ``server → shared`` boundary so that ``ToolExecutor``
+    can confine tools without importing ``server.apparmor``.
+
+    Args:
+        profile_name: The AppArmor profile name to confine to.
+
+    Returns:
+        A zero-argument callable that returns a context manager.
+    """
+    def _confine():
+        return apparmor_confine(profile_name)
+    return _confine

@@ -109,6 +109,15 @@ class ToolExecutor:
         # Reliability plugin for tracking tool failures and adaptive trust
         self._reliability_plugin: Optional['ReliabilityPlugin'] = None
 
+        # AppArmor thread-level confinement context factory.
+        # When set, every tool execution is wrapped in this context
+        # manager, which confines the current OS thread to the session's
+        # AppArmor profile for the duration of the call.  This ensures
+        # in-process file I/O (readFile, glob_files, file_edit) is
+        # subject to the same AppArmor profile as subprocess commands.
+        # Set via set_apparmor_context() from the server layer.
+        self._apparmor_context: Optional[Callable] = None
+
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
@@ -166,6 +175,19 @@ class ToolExecutor:
             registry: PluginRegistry instance, or None to disable.
         """
         self._registry = registry
+
+    def set_apparmor_context(self, context_factory: Optional[Callable]) -> None:
+        """Set the AppArmor thread-level confinement context factory.
+
+        When set, every tool execution is wrapped in the context manager
+        returned by ``context_factory()``, which confines the current OS
+        thread to the session's AppArmor profile.
+
+        Args:
+            context_factory: A zero-argument callable returning a context
+                manager, or ``None`` to disable confinement.
+        """
+        self._apparmor_context = context_factory
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time plugin output.
@@ -677,10 +699,19 @@ class ToolExecutor:
         try:
             if debug:
                 print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
-            if fn.__name__ == 'mcp_based_tool':
-                result = fn(name, args)
-            else:
-                result = fn(args)
+            # AppArmor thread-level confinement: confine the current
+            # thread to the session's profile for the tool's duration.
+            ctx = self._apparmor_context() if self._apparmor_context else None
+            if ctx:
+                ctx.__enter__()
+            try:
+                if fn.__name__ == 'mcp_based_tool':
+                    result = fn(name, args)
+                else:
+                    result = fn(args)
+            finally:
+                if ctx:
+                    ctx.__exit__(None, None, None)
             # Unwrap plugin metadata tuples: (result_dict, metadata_dict)
             # Plugins can return (result, {"continuation_id": ...}) to pass
             # metadata through to the session layer. Merge metadata into result
