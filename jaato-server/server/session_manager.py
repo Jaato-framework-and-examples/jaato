@@ -18,6 +18,7 @@ Integration with Session Plugin:
 import json
 import logging
 import os
+import re
 import sys
 import pathlib
 import threading
@@ -856,6 +857,13 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+
+        # Wire SessionManager into the subagent plugin for cross-session
+        # interrogation (fork_ask on other daemon sessions).
+        if server.registry:
+            subagent_plugin = server.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_session_manager'):
+                subagent_plugin.set_session_manager(self)
 
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
@@ -1797,6 +1805,88 @@ class SessionManager:
         del self._sessions[session_id]
         logger.info(f"Unloaded session: {session_id}")
 
+    # ------------------------------------------------------------------
+    # Prompt skill expansion
+    # ------------------------------------------------------------------
+
+    _PROMPT_REF_PATTERN = re.compile(r'%([a-zA-Z][a-zA-Z0-9_-]*)')
+
+    def _expand_prompt_references(self, text: str, server: 'JaatoServer') -> str:
+        """Expand ``%prompt-name`` references in a message.
+
+        Scans *text* for ``%name`` tokens, resolves each via the prompt
+        library plugin, strips the ``%`` prefix from the message body,
+        and appends the prompt content in a ``--- Referenced Prompts ---``
+        section (same format as the TUI client).
+
+        This runs server-side so that **all** clients (TUI, WS, IPC)
+        get automatic prompt skill injection regardless of client-side
+        capabilities.
+
+        If the prompt library plugin is not available or a prompt is not
+        found, the ``%`` prefix is stripped but no content is appended
+        (same graceful degradation as the TUI).
+
+        Args:
+            text: Raw message text from the client.
+            server: The session's ``JaatoServer`` for plugin access.
+
+        Returns:
+            The message with prompt references expanded, or the
+            original text if no references are found.
+        """
+        if not text or '%' not in text:
+            return text
+
+        matches = list(self._PROMPT_REF_PATTERN.finditer(text))
+        if not matches:
+            return text
+
+        # Get prompt library plugin
+        prompt_plugin = None
+        if server._jaato:
+            runtime = server._jaato.get_runtime()
+            if runtime and runtime.registry:
+                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+
+        # Process matches in reverse to preserve positions
+        result = text
+        expanded = []
+        for match in reversed(matches):
+            # Skip if preceded by alphanumeric (not a standalone reference)
+            if match.start() > 0 and text[match.start() - 1].isalnum():
+                continue
+
+            prompt_name = match.group(1)
+
+            # Strip the % prefix regardless of whether we find the prompt
+            result = result[:match.start()] + prompt_name + result[match.end():]
+
+            # Try to expand via prompt library
+            if prompt_plugin and hasattr(prompt_plugin, '_execute_prompt_command'):
+                try:
+                    content = prompt_plugin._execute_prompt_command(
+                        {'args': [prompt_name]}
+                    )
+                    # _execute_prompt_command returns error strings for
+                    # missing prompts; only use content that doesn't
+                    # start with "Prompt not found"
+                    if content and not content.startswith('Prompt not found'):
+                        expanded.append({'name': prompt_name, 'content': content})
+                except Exception:
+                    pass  # Graceful degradation
+
+        if expanded:
+            # Reverse to restore original order
+            expanded.reverse()
+            parts = [result, "\n\n--- Referenced Prompts ---\n"]
+            for prompt in expanded:
+                parts.append(f"\n[Prompt: {prompt['name']}]\n")
+                parts.append(f"{prompt['content']}\n")
+            return ''.join(parts)
+
+        return result
+
     def detach_client(self, client_id: str) -> None:
         """Detach a client from its current session.
 
@@ -2316,6 +2406,13 @@ class SessionManager:
                 session.user_inputs.append(event.text)
                 session.is_dirty = True
 
+            # Server-side prompt skill expansion: expand %prompt-name
+            # references so all clients (TUI, WS, IPC) get automatic
+            # prompt content injection regardless of client capabilities.
+            message_text = self._expand_prompt_references(
+                event.text, server
+            )
+
             # Capture context for thread (ContextVars don't propagate to threads)
             ctx_session_id = session_id
             ctx_client_id = client_id
@@ -2340,7 +2437,7 @@ class SessionManager:
                     pass  # Older jaato_sdk without per-agent trace routing
                 try:
                     server.send_message(
-                        event.text,
+                        message_text,
                         event.attachments if event.attachments else None
                     )
                     # Auto-save after turn

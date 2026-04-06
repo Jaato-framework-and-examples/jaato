@@ -1029,6 +1029,68 @@ class ServiceConnectorPlugin:
     # === Tool Executors ===
 
     @staticmethod
+    def _build_auth_context(
+        service_config: 'ServiceConfig',
+        resolved: bool,
+    ) -> Dict[str, Any]:
+        """Build structured auth context for error diagnostics.
+
+        Included in tool results when a named service returns 401/403
+        or when an ``AuthError`` is raised before the request.  Gives
+        the model enough context to diagnose the failure accurately
+        instead of guessing (e.g. "env var not available in this
+        session" vs "credentials expired or revoked").
+
+        Args:
+            service_config: The service configuration with auth details.
+            resolved: ``True`` if the auth credentials were resolved
+                (env vars found) and the server rejected them.
+                ``False`` if resolution itself failed (env var missing).
+
+        Returns:
+            Dict with ``auth_type``, ``service_name``, ``resolved``,
+            and a ``hint`` explaining the failure mode.
+        """
+        auth = service_config.auth
+        ctx: Dict[str, Any] = {
+            "auth_type": auth.type.value,
+            "service_name": service_config.name,
+            "credentials_resolved": resolved,
+        }
+
+        # Include the env var name so the model can reference it
+        # accurately — but never include the actual value.
+        from .types import AuthType
+        if auth.type == AuthType.API_KEY and auth.value_env:
+            ctx["env_var"] = auth.value_env
+        elif auth.type == AuthType.BEARER and auth.value_env:
+            ctx["env_var"] = auth.value_env
+        elif auth.type == AuthType.BASIC:
+            if auth.username_env:
+                ctx["env_var_username"] = auth.username_env
+            if auth.password_env:
+                ctx["env_var_password"] = auth.password_env
+        elif auth.type == AuthType.OAUTH2_CLIENT:
+            ctx["auth_method"] = "oauth2_client_credentials"
+
+        if resolved:
+            ctx["hint"] = (
+                "The credentials were found and sent, but the server "
+                "rejected them (401/403). This usually means the token "
+                "is expired or revoked — not a framework configuration "
+                "problem. Do NOT tell the user their config is broken."
+            )
+        else:
+            ctx["hint"] = (
+                "The environment variable was not available in this "
+                "session context. This is a session/environment issue, "
+                "not a credential configuration problem. Report it as: "
+                "'environment variable not set in this session.'"
+            )
+
+        return ctx
+
+    @staticmethod
     def _is_ssl_error(exc: Exception) -> bool:
         """Check whether an exception is caused by an SSL certificate failure.
 
@@ -1474,10 +1536,28 @@ class ServiceConnectorPlugin:
             if save_to:
                 return self._save_response_to_file(response, save_to)
 
-            return response.to_dict()
+            result = response.to_dict()
+
+            # Augment 401/403 responses with auth context so the model
+            # can diagnose accurately (e.g. "env var not set in this
+            # session" vs "credentials expired").
+            if response.status in (401, 403) and service_config and service_config.auth:
+                result["auth_context"] = self._build_auth_context(
+                    service_config, resolved=True
+                )
+
+            return result
 
         except AuthError as e:
-            return {"error": f"Authentication error: {e}"}
+            # Auth failed before the request — env var missing or
+            # placeholder didn't resolve.  Include structured context
+            # so the model reports accurately.
+            result: Dict[str, Any] = {"error": f"Authentication error: {e}"}
+            if service_config and service_config.auth:
+                result["auth_context"] = self._build_auth_context(
+                    service_config, resolved=False
+                )
+            return result
         except HttpClientError as e:
             if self._is_ssl_error(e):
                 return {

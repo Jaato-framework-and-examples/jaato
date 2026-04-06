@@ -11,6 +11,7 @@ import re
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -371,6 +372,17 @@ class JaatoSession:
         # survives GC, while the original tool result in conversation
         # history remains EPHEMERAL and can be freely collected.
         self._pinned_references: Dict[str, _PinnedReference] = {}
+
+        # Provider exclusion for fork_ask — serializes provider.complete()
+        # calls so a fork cannot run concurrently with the session's own
+        # provider call.  _fork_gate is open by default (session runs freely);
+        # fork_ask() clears it to block the session's next provider call.
+        # _provider_idle is set when no provider call is in flight;
+        # fork_ask() waits on it before running its own call.
+        self._fork_gate = threading.Event()
+        self._fork_gate.set()
+        self._provider_idle = threading.Event()
+        self._provider_idle.set()
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -1000,6 +1012,23 @@ class JaatoSession:
             self._runtime.permission_plugin.clear_idle_suspension()
             # Also clear turn suspension (turn has ended)
             self._runtime.permission_plugin.clear_turn_suspension()
+
+    @contextmanager
+    def _provider_access(self):
+        """Context manager that serializes access to the provider.
+
+        Waits for ``_fork_gate`` (blocks while a fork owns the provider),
+        then signals ``_provider_idle`` clear/set around the body.  Used
+        by every ``provider.complete()`` call site in the turn loop so
+        that ``fork_ask()`` can safely pause the session and run its own
+        provider call without concurrent access.
+        """
+        self._fork_gate.wait()
+        self._provider_idle.clear()
+        try:
+            yield
+        finally:
+            self._provider_idle.set()
 
     def request_stop(self, reason: str = "") -> bool:
         """Request cancellation of the current message processing.
@@ -3478,37 +3507,39 @@ NOTES
                             self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
                             on_output("thinking", thinking, "write")
 
-                    turn_result, _retry_stats = with_retry(
-                        lambda: self._provider.complete(
-                            self._history.messages,
-                            system_instruction=self._system_instruction,
-                            tools=self._get_tools_for_provider(),
-                            on_chunk=streaming_callback,
+                    with self._provider_access():
+                        turn_result, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                                on_chunk=streaming_callback,
+                                cancel_token=self._cancel_token,
+                                on_usage_update=wrapped_usage_callback,
+                                on_thinking=thinking_callback,
+                                # Note: on_function_call is intentionally NOT used here.
+                                # The SDK may deliver function calls before preceding text,
+                                # which would cause tool trees to appear in wrong positions.
+                                # Tool trees are displayed during parts processing instead.
+                            ),
+                            context="complete_streaming",
+                            on_retry=self._on_retry,
                             cancel_token=self._cancel_token,
-                            on_usage_update=wrapped_usage_callback,
-                            on_thinking=thinking_callback,
-                            # Note: on_function_call is intentionally NOT used here.
-                            # The SDK may deliver function calls before preceding text,
-                            # which would cause tool trees to appear in wrong positions.
-                            # Tool trees are displayed during parts processing instead.
-                        ),
-                        context="complete_streaming",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token,
-                        provider=self._provider
-                    )
+                            provider=self._provider
+                        )
                 else:
-                    turn_result, _retry_stats = with_retry(
-                        lambda: self._provider.complete(
-                            self._history.messages,
-                            system_instruction=self._system_instruction,
-                            tools=self._get_tools_for_provider(),
-                        ),
-                        context="complete",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token,
-                        provider=self._provider
-                    )
+                    with self._provider_access():
+                        turn_result, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                            ),
+                            context="complete",
+                            on_retry=self._on_retry,
+                            cancel_token=self._cancel_token,
+                            provider=self._provider
+                        )
                 response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
@@ -4975,6 +5006,114 @@ NOTES
 
         return truncated
 
+    def _cap_tool_results(self, tool_results: List[ToolResult]) -> List[ToolResult]:
+        """Proactively cap tool results before they enter history.
+
+        Estimates the aggregate token size of all results and, if they
+        would push the context beyond 80% of the model's limit, truncates
+        the largest results with a hard character cap.
+
+        Uses a direct cap approach (not the removal-based math in
+        ``_truncate_results_to_fit()``) because a single oversized result
+        can be many times larger than the entire context window — the
+        removal formula underflows in that case.
+
+        Args:
+            tool_results: The tool results about to be appended to history.
+
+        Returns:
+            The original list (unchanged) if results fit, or a new list
+            with large results truncated.
+        """
+        budget = self._instruction_budget
+        if not budget or budget.context_limit == 0:
+            return tool_results
+
+        # Estimate per-result sizes
+        result_sizes = []
+        total_result_tokens = 0
+        for tr in tool_results:
+            result_str = str(tr.result) if tr.result is not None else ""
+            tokens = len(result_str) / 4  # ~4 chars per token
+            result_sizes.append((tr, result_str, tokens))
+            total_result_tokens += tokens
+
+        # Cap: available space to reach 80% of context limit
+        target = int(budget.context_limit * self._TRUNCATION_TARGET_PERCENT)
+        cap_tokens = max(0, target - budget.total_tokens())
+
+        if total_result_tokens <= cap_tokens:
+            self._trace(
+                f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
+                f"cap_tokens={int(cap_tokens)}, action=passed"
+            )
+            return tool_results
+
+        self._trace(
+            f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
+            f"cap_tokens={int(cap_tokens)}, action=truncating"
+        )
+
+        # Hard cap: each result gets at most cap_tokens (divided equally
+        # if multiple, but in practice one result dominates).
+        n_results = len(tool_results)
+        per_result_cap_tokens = max(
+            self._TRUNCATION_PRESERVE_CHARS // 4,
+            cap_tokens // max(1, n_results),
+        )
+        per_result_cap_chars = int(per_result_cap_tokens * 4)
+
+        truncated = []
+        for tr, result_str, tokens in result_sizes:
+            if tokens <= per_result_cap_tokens:
+                truncated.append(tr)
+                continue
+
+            # Truncate to hard character cap
+            kept_text = result_str[:per_result_cap_chars]
+
+            # Try to break at a word or line boundary
+            last_newline = kept_text.rfind('\n', max(0, per_result_cap_chars - 500))
+            if last_newline > per_result_cap_chars // 2:
+                kept_text = kept_text[:last_newline]
+            else:
+                last_space = kept_text.rfind(' ', max(0, per_result_cap_chars - 200))
+                if last_space > per_result_cap_chars // 2:
+                    kept_text = kept_text[:last_space]
+
+            # Determine units for the notice
+            original_lines = result_str.count('\n') + 1
+            kept_lines = kept_text.count('\n') + 1
+            if original_lines > 1:
+                unit_kept = f"{kept_lines} lines"
+                unit_total = f"{original_lines} lines"
+            else:
+                unit_kept = f"{len(kept_text):,} characters"
+                unit_total = f"{len(result_str):,} characters"
+
+            removed_tokens = int(tokens - len(kept_text) / 4)
+            notice = self._TRUNCATION_NOTICE.format(
+                kept=unit_kept,
+                total=unit_total,
+                removed_tokens=f"{removed_tokens:,}",
+            )
+
+            self._trace(
+                f"PROACTIVE_CAP: truncated result '{tr.name}' from "
+                f"{int(tokens)} to {int(len(kept_text)/4)} tokens "
+                f"(cap={per_result_cap_tokens})"
+            )
+
+            truncated.append(ToolResult(
+                call_id=tr.call_id,
+                name=tr.name,
+                result=kept_text + notice,
+                is_error=tr.is_error,
+                attachments=None,  # Drop attachments to reduce size
+            ))
+
+        return truncated
+
     def _sync_budget_after_truncation(
         self,
         original_results: List[ToolResult],
@@ -5037,6 +5176,8 @@ NOTES
         Appends tool results to session history as a TOOL message, then
         calls ``provider.complete()`` with the full history.
         """
+        # Proactive size guard: cap results before they enter history
+        tool_results = self._cap_tool_results(tool_results)
         # Append tool results to session history
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
@@ -5072,33 +5213,35 @@ NOTES
                         self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
-                turn_result, _retry_stats = with_retry(
-                    lambda: self._provider.complete(
-                        self._history.messages,
-                        system_instruction=self._system_instruction,
-                        tools=self._get_tools_for_provider(),
-                        on_chunk=streaming_callback,
+                with self._provider_access():
+                    turn_result, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback,
+                        ),
+                        context="complete_tool_results_streaming",
+                        on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback,
-                    ),
-                    context="complete_tool_results_streaming",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                        provider=self._provider
+                    )
             else:
-                turn_result, _retry_stats = with_retry(
-                    lambda: self._provider.complete(
-                        self._history.messages,
-                        system_instruction=self._system_instruction,
-                        tools=self._get_tools_for_provider(),
-                    ),
-                    context="complete_tool_results",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                with self._provider_access():
+                    turn_result, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_tool_results",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
             response = self._unwrap_turn_result(turn_result)
 
             # Record model response in session history
@@ -5217,35 +5360,37 @@ NOTES
                         on_output("thinking", thinking, "write")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
-                turn_result, _retry_stats = with_retry(
-                    lambda: self._provider.complete(
-                        self._history.messages,
-                        system_instruction=self._system_instruction,
-                        tools=self._get_tools_for_provider(),
-                        on_chunk=streaming_callback,
+                with self._provider_access():
+                    turn_result, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback,
+                        ),
+                        context="complete_mid_turn_streaming",
+                        on_retry=self._on_retry,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback,
-                        on_thinking=thinking_callback,
-                    ),
-                    context="complete_mid_turn_streaming",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                        provider=self._provider
+                    )
                 response = self._unwrap_turn_result(turn_result)
                 self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
-                turn_result, _retry_stats = with_retry(
-                    lambda: self._provider.complete(
-                        self._history.messages,
-                        system_instruction=self._system_instruction,
-                        tools=self._get_tools_for_provider(),
-                    ),
-                    context="complete_mid_turn",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token,
-                    provider=self._provider
-                )
+                with self._provider_access():
+                    turn_result, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_mid_turn",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
+                    )
                 response = self._unwrap_turn_result(turn_result)
 
                 # Emit thinking content if present
@@ -6118,7 +6263,8 @@ NOTES
             raise RuntimeError("Session not configured.")
 
         messages = [Message.from_text(Role.USER, prompt)]
-        turn_result = self._provider.complete(messages)
+        with self._provider_access():
+            turn_result = self._provider.complete(messages)
         response = self._unwrap_turn_result(turn_result)
         return response.get_text() or ''
 
@@ -6167,16 +6313,17 @@ NOTES
                 streaming=False,
             ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
-                turn_result, _retry_stats = with_retry(
-                    lambda: self._provider.complete(
-                        self._history.messages,
-                        system_instruction=self._system_instruction,
-                        tools=self._get_tools_for_provider(),
-                    ),
-                    context="complete_with_parts",
-                    on_retry=self._on_retry,
-                    provider=self._provider
-                )
+                with self._provider_access():
+                    turn_result, _retry_stats = with_retry(
+                        lambda: self._provider.complete(
+                            self._history.messages,
+                            system_instruction=self._system_instruction,
+                            tools=self._get_tools_for_provider(),
+                        ),
+                        context="complete_with_parts",
+                        on_retry=self._on_retry,
+                        provider=self._provider
+                    )
                 response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
@@ -6303,6 +6450,8 @@ NOTES
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
 
+                # Proactive size guard: cap results before they enter history
+                tool_results = self._cap_tool_results(tool_results)
                 # Append tool results to session history
                 tool_result_parts = [Part(function_response=r) for r in tool_results]
                 self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
@@ -6313,16 +6462,17 @@ NOTES
                     streaming=False,
                 ) as llm_telemetry:
                     self._record_input_messages_telemetry(llm_telemetry)
-                    turn_result, _retry_stats = with_retry(
-                        lambda: self._provider.complete(
-                            self._history.messages,
-                            system_instruction=self._system_instruction,
-                            tools=self._get_tools_for_provider(),
-                        ),
-                        context="complete_tool_results_parts",
-                        on_retry=self._on_retry,
-                        provider=self._provider
-                    )
+                    with self._provider_access():
+                        turn_result, _retry_stats = with_retry(
+                            lambda: self._provider.complete(
+                                self._history.messages,
+                                system_instruction=self._system_instruction,
+                                tools=self._get_tools_for_provider(),
+                            ),
+                            context="complete_tool_results_parts",
+                            on_retry=self._on_retry,
+                            provider=self._provider
+                        )
                     response = self._unwrap_turn_result(turn_result)
 
                     # Record model response in session history
@@ -6722,6 +6872,177 @@ NOTES
             self._session_plugin.increment_turn_count()
 
         self._session_plugin.on_turn_complete(state, self._session_config)
+
+    # ------------------------------------------------------------------
+    # Conversation fork
+    # ------------------------------------------------------------------
+
+    def fork_ask(
+        self,
+        question: str,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+        timeout: float = 120.0,
+    ) -> str:
+        """Fork the conversation at a specific point and ask a question.
+
+        Copies the session's history (truncated at the fork point), appends
+        the question as a user message, calls the provider, and returns the
+        response text.  The session's actual history is not modified.
+
+        Provider exclusion: if the session is mid-turn, ``fork_ask()``
+        waits for the current provider call to finish, pauses the
+        session's next call, runs the fork, then resumes the session.
+        This prevents concurrent provider calls that would hit rate
+        limits on providers with strict concurrency constraints.
+
+        Fork point specifiers (use exactly one, or none for full history):
+            after_message: Include messages 0..N (by index).
+            after_tool_call: Include up to and including the message
+                containing this tool call ID.
+            after_timestamp: Include messages whose ``message_id``
+                precedes this HH:MM:SS or ISO timestamp (best-effort
+                correlation — depends on session metadata).
+
+        Args:
+            question: The question to ask at the fork point.
+            timeout: Maximum seconds to wait for exclusive provider
+                access.  Covers both waiting for an in-flight call to
+                finish and the fork's own ``provider.complete()`` call.
+
+        Returns:
+            The model's text response.
+
+        Raises:
+            TimeoutError: If the provider is not available within
+                *timeout* seconds.
+            RuntimeError: If the session has no configured provider.
+        """
+        if not self._provider:
+            raise RuntimeError("Session not configured — cannot fork.")
+
+        # Snapshot history (get_history returns a copy)
+        history = self.get_history()
+        if not history:
+            raise RuntimeError("Cannot fork an empty session.")
+
+        index = self._resolve_fork_point(
+            history, after_message, after_tool_call, after_timestamp
+        )
+        forked = history[:index + 1]
+        forked.append(Message.from_text(Role.USER, question))
+
+        # Acquire exclusive provider access
+        self._fork_gate.clear()
+        if not self._provider_idle.wait(timeout=timeout):
+            self._fork_gate.set()
+            raise TimeoutError(
+                f"Target session provider busy for >{timeout}s"
+            )
+
+        try:
+            result = self._provider.complete(
+                forked,
+                system_instruction=self._system_instruction,
+            )
+            response = self._unwrap_turn_result(result)
+            return response.get_text() or ""
+        finally:
+            self._fork_gate.set()
+
+    def _resolve_fork_point(
+        self,
+        history: List[Message],
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+    ) -> int:
+        """Resolve a fork point specifier to a message index.
+
+        Exactly one specifier should be provided.  If none are given,
+        returns the last message index (full history fork).
+
+        Args:
+            history: The message list to search.
+            after_message: Direct message index.
+            after_tool_call: Tool call ID — returns the index of the
+                message containing this ``FunctionCall.id`` or the
+                corresponding ``ToolResult``.
+            after_timestamp: HH:MM:SS or ISO timestamp — returns the
+                index of the last message at or before this time
+                (best-effort, based on session turn accounting).
+
+        Returns:
+            Message index (0-based, inclusive).
+        """
+        last = len(history) - 1
+
+        if after_message is not None:
+            return max(0, min(after_message, last))
+
+        if after_tool_call is not None:
+            # Scan backwards — the most recent match is usually the one wanted
+            for i in range(last, -1, -1):
+                for part in history[i].parts:
+                    if part.function_call and part.function_call.id == after_tool_call:
+                        return i
+                    if part.function_response and part.function_response.call_id == after_tool_call:
+                        return i
+            raise ValueError(f"Tool call ID not found in history: {after_tool_call}")
+
+        if after_timestamp is not None:
+            # Best-effort: correlate with turn accounting timestamps
+            # Turn accounting stores ISO start_time per turn; find the
+            # last turn that started at or before the requested time.
+            target = self._parse_fork_timestamp(after_timestamp)
+            if target is not None and self._turn_accounting:
+                # Each turn maps to a range of messages.  Walk turns in
+                # reverse, find the last one whose start_time <= target,
+                # then return the last message index in that turn's range.
+                cumulative = 0
+                turn_boundaries = []
+                for ta in self._turn_accounting:
+                    # Count messages contributed by this turn (1 user + N model + tool results)
+                    fc_count = len(ta.get('function_calls', []))
+                    # user message + model response + (tool results + model response) per fc
+                    msgs_in_turn = 1 + 1 + fc_count * 2 if fc_count else 2
+                    turn_boundaries.append((cumulative, cumulative + msgs_in_turn - 1, ta))
+                    cumulative += msgs_in_turn
+
+                for start_idx, end_idx, ta in reversed(turn_boundaries):
+                    turn_start = ta.get('start_time', '')
+                    if turn_start and turn_start <= target:
+                        return min(end_idx, last)
+
+            # Fallback: return full history
+            return last
+
+        # No specifier — full history
+        return last
+
+    @staticmethod
+    def _parse_fork_timestamp(ts: str) -> Optional[str]:
+        """Normalize a fork timestamp to ISO format for comparison.
+
+        Accepts HH:MM:SS (interpreted as today) or full ISO format.
+        Returns an ISO string suitable for lexicographic comparison
+        with turn accounting ``start_time`` values, or ``None`` if
+        the timestamp cannot be parsed.
+        """
+        # Full ISO format — use as-is
+        if 'T' in ts or len(ts) > 8:
+            return ts
+
+        # HH:MM:SS — expand to today's date
+        try:
+            t = datetime.strptime(ts, "%H:%M:%S")
+            today = datetime.now().replace(
+                hour=t.hour, minute=t.minute, second=t.second, microsecond=0
+            )
+            return today.isoformat()
+        except ValueError:
+            return None
 
     def close_session(self) -> None:
         """Close the current session."""

@@ -2997,6 +2997,15 @@ class JaatoServer:
         """Check if model is currently processing."""
         return self._model_running
 
+    def fork_ask(self, question: str, **kwargs) -> str:
+        """Fork the session's conversation and ask a question.
+
+        See ``JaatoSession.fork_ask()`` for full documentation.
+        """
+        if not self._jaato or not self._jaato.get_session():
+            raise RuntimeError("No active session")
+        return self._jaato.get_session().fork_ask(question, **kwargs)
+
     @property
     def is_waiting_for_input(self) -> bool:
         """Check if waiting for permission/clarification input."""

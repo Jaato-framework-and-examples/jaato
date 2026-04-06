@@ -241,6 +241,15 @@ class JaatoClient:
             return self._session.is_running
         return False
 
+    def fork_ask(self, question: str, **kwargs) -> str:
+        """Fork the session's conversation and ask a question.
+
+        See ``JaatoSession.fork_ask()`` for full documentation.
+        """
+        if not self._session:
+            raise RuntimeError("No active session")
+        return self._session.fork_ask(question, **kwargs)
+
     @property
     def supports_stop(self) -> bool:
         """Check if the current provider supports mid-turn cancellation.

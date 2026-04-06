@@ -131,6 +131,11 @@ class SubagentPlugin:
         # Remote spawn handler registered by a daemon extension (e.g., gossip).
         # See ``register_remote_handler()`` for the protocol.
         self._remote_spawn_handler: Optional[Any] = None
+        # SessionManager reference for cross-session interrogation.
+        # Set by the daemon via ``set_session_manager()`` when available.
+        # Enables ``interrogate_session`` to target any daemon session,
+        # not just this plugin's own subagent sessions.
+        self._session_manager: Optional[Any] = None
 
     @property
     def name(self) -> str:
@@ -749,6 +754,56 @@ class SubagentPlugin:
                 discoverability="discoverable",
             ),
             ToolSchema(
+                name='interrogate_session',
+                description=(
+                    'Ask a question to another daemon session\'s model at a specific '
+                    'point in its conversation history. The target session\'s history '
+                    'is NOT modified — the question is asked on a temporary fork.\n\n'
+                    'USE CASES:\n'
+                    '- Ask another agent "why did you choose approach X?" at a decision point\n'
+                    '- Explore counterfactuals: "what would you have done if the tool failed?"\n'
+                    '- Introspect another agent\'s reasoning for fine-tuning/telemetry analysis\n\n'
+                    'PROVIDER EXCLUSION: If the target session is mid-turn, the fork '
+                    'waits for the current provider call to finish, pauses the session, '
+                    'runs the fork, then resumes. No concurrent provider calls.\n\n'
+                    'TARGETS: Any active daemon session (requires daemon mode with '
+                    'SessionManager). Use session IDs from the session manager.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": (
+                                "ID of the target session to interrogate "
+                                "(from list_active_subagents or spawn_subagent result)."
+                            )
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "The question to ask at the fork point."
+                        },
+                        "after_message": {
+                            "type": "integer",
+                            "description": (
+                                "Fork after this message index (0-based). "
+                                "If omitted, forks from the full current history."
+                            )
+                        },
+                        "after_tool_call": {
+                            "type": "string",
+                            "description": (
+                                "Fork after the message containing this tool call ID. "
+                                "Useful for interrogating a specific decision."
+                            )
+                        },
+                    },
+                    "required": ["session_id", "question"]
+                },
+                category="coordination",
+                discoverability="discoverable",
+            ),
+            ToolSchema(
                 name='validateProfile',
                 description=(
                     'Validate a subagent profile JSON file against the expected schema. '
@@ -780,6 +835,7 @@ class SubagentPlugin:
             'cancel_subagent': self._execute_cancel_subagent,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
+            'interrogate_session': self._execute_interrogate_session,
             'validateProfile': self._execute_validate_profile,
             # User command aliases
             'profiles': self._execute_list_profiles,
@@ -1042,6 +1098,59 @@ class SubagentPlugin:
             )
         ]
 
+    def _execute_interrogate_session(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Fork another session's conversation and ask a question.
+
+        Looks up the target session via the daemon's ``SessionManager``
+        (cross-session interrogation of other main agents).  Calls
+        ``fork_ask()`` on the target's ``JaatoServer``, which handles
+        provider exclusion (pausing the target if mid-turn) and returns
+        the model's response without modifying the target's history.
+
+        Args:
+            args: Tool call arguments containing ``session_id``,
+                ``question``, and optional ``after_message`` or
+                ``after_tool_call`` fork point specifiers.
+
+        Returns:
+            Dict with ``answer`` key containing the model's response,
+            or ``error`` key if the session is not found or the fork
+            fails.
+        """
+        session_id = args.get("session_id", "")
+        question = args.get("question", "")
+
+        if not session_id or not question:
+            return {"error": "Both session_id and question are required."}
+
+        if not self._session_manager:
+            return {"error": "Cross-session interrogation requires daemon mode (SessionManager not available)."}
+
+        # Build fork point kwargs
+        fork_kwargs: Dict[str, Any] = {}
+        if "after_message" in args:
+            fork_kwargs["after_message"] = args["after_message"]
+        if "after_tool_call" in args:
+            fork_kwargs["after_tool_call"] = args["after_tool_call"]
+
+        # Look up session via SessionManager
+        managed = self._session_manager.get_session(session_id)
+        if not managed:
+            return {"error": f"Session '{session_id}' not found."}
+        if not managed.server:
+            return {"error": f"Session '{session_id}' has no active server."}
+
+        try:
+            answer = managed.server.fork_ask(question, **fork_kwargs)
+            return {"answer": answer, "session_id": session_id}
+        except TimeoutError:
+            return {
+                "error": f"Session '{session_id}' provider busy — try again later.",
+                "session_id": session_id,
+            }
+        except (ValueError, RuntimeError) as e:
+            return {"error": str(e), "session_id": session_id}
+
     def _execute_validate_profile(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Validate a subagent profile JSON file against the expected schema.
 
@@ -1147,6 +1256,18 @@ class SubagentPlugin:
             runtime: JaatoRuntime instance from the parent agent.
         """
         self._runtime = runtime
+
+    def set_session_manager(self, session_manager: Any) -> None:
+        """Set the SessionManager reference for cross-session interrogation.
+
+        When set, ``interrogate_session`` can target any daemon-managed
+        session (not just this plugin's own subagent sessions).  Called
+        by the daemon at startup when the subagent plugin is wired.
+
+        Args:
+            session_manager: The daemon's ``SessionManager`` instance.
+        """
+        self._session_manager = session_manager
 
     def set_parent_session(self, session: Any) -> None:
         """Set the parent session reference for cancellation propagation.
