@@ -94,11 +94,21 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   @{{HOME}}/.jaato/profiles/**     r,
   @{{HOME}}/.jaato/prompts/        r,
   @{{HOME}}/.jaato/prompts/**      r,
+  @{{HOME}}/.jaato/skills/         r,
+  @{{HOME}}/.jaato/skills/**       r,
   @{{HOME}}/.jaato/themes/         r,
   @{{HOME}}/.jaato/themes/**       r,
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
   @{{HOME}}/.jaato/gc.json          r,
+
+  # ---- Claude Code interop (read-only) ----
+  # The prompt_library plugin reads ~/.claude/skills and ~/.claude/commands
+  # so jaato can use Claude Code skill/command definitions interchangeably.
+  @{{HOME}}/.claude/skills/        r,
+  @{{HOME}}/.claude/skills/**      r,
+  @{{HOME}}/.claude/commands/      r,
+  @{{HOME}}/.claude/commands/**    r,
 
   # ---- temp files scoped to session ----
   # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
