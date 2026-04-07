@@ -110,6 +110,15 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   @{{HOME}}/.claude/commands/      r,
   @{{HOME}}/.claude/commands/**    r,
 
+  # ---- ML model caches (read-write) ----
+  # The embedding provider (sentence-transformers, HuggingFace transformers,
+  # ONNX runtime) loads models from these caches. Read-write because the
+  # libraries write lockfiles and metadata even for cached models.
+  @{{HOME}}/.cache/huggingface/    rw,
+  @{{HOME}}/.cache/huggingface/**  rwk,
+  @{{HOME}}/.cache/torch/          rw,
+  @{{HOME}}/.cache/torch/**        rwk,
+
   # ---- temp files scoped to session ----
   # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
   # style (/tmp/jaato-<id>/foo) so plugins can use either layout.
