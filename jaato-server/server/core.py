@@ -391,30 +391,50 @@ class JaatoServer:
         shell_wrapper: Optional[Callable[[str], str]] = None,
         confine_context: Optional[Callable] = None,
     ) -> None:
-        """Set AppArmor wrappers and propagate to relevant plugins.
+        """Set AppArmor confinement and propagate to the tool executor.
 
-        When configured, CLI and interactive-shell plugin subprocess calls
-        are wrapped with ``aa-exec`` so they run under the session's
-        AppArmor profile.  Additionally, the tool executor receives a
-        thread-level confinement context so that in-process file I/O
-        plugins (``readFile``, ``glob_files``, ``file_edit``) are also
-        confined.
+        When *confine_context* is provided, the tool executor wraps every
+        tool call in a thread-level AppArmor confinement context.  This
+        confines the current OS thread to the session's profile, and
+        any subprocess spawned from that thread (CLI, interactive_shell,
+        pexpect) inherits the confinement automatically via fork+exec.
+
+        Note: when thread-level confinement is active, the ``aa-exec``
+        argv/shell wrappers are NOT propagated to plugins because they
+        would attempt a redundant profile transition that the kernel
+        denies (the parent thread is already confined, and the profile
+        has no ``change_profile`` rule for self-transition).  The
+        wrappers are accepted as parameters for API compatibility but
+        ignored when confinement is set.
 
         Called by the WebSocket server after session creation for remote
         clients with AppArmor enabled.
 
         Args:
-            argv_wrapper: Wraps argv-style commands (for ``shell=False``).
-            shell_wrapper: Wraps shell command strings (for ``shell=True``
-                and pexpect spawn).
+            argv_wrapper: Legacy aa-exec argv wrapper (ignored when
+                ``confine_context`` is set).
+            shell_wrapper: Legacy aa-exec shell wrapper (ignored when
+                ``confine_context`` is set).
             confine_context: Zero-argument callable returning a context
                 manager that confines the current thread to the session's
-                AppArmor profile.
+                AppArmor profile.  This is the canonical mechanism.
         """
         if not self.registry:
             logger.warning("set_apparmor_wrapper called before registry initialized")
             return
 
+        # Thread-level confinement supersedes aa-exec subprocess wrapping.
+        # When set, subprocess children inherit the parent thread's profile
+        # automatically via fork+exec — aa-exec wrapping would cause a
+        # redundant transition that the kernel denies.
+        if confine_context and self._jaato:
+            session = self._jaato.get_session()
+            if session and session._executor:
+                session._executor.set_apparmor_context(confine_context)
+            return
+
+        # Legacy fallback: aa-exec wrapping for CLI and interactive_shell.
+        # Used when thread-level confinement is unavailable.
         cli_plugin = self.registry.get_plugin("cli")
         if cli_plugin and hasattr(cli_plugin, "set_apparmor_wrapper"):
             cli_plugin.set_apparmor_wrapper(
@@ -425,12 +445,6 @@ class JaatoServer:
         shell_plugin = self.registry.get_plugin("interactive_shell")
         if shell_plugin and hasattr(shell_plugin, "set_apparmor_wrapper"):
             shell_plugin.set_apparmor_wrapper(shell_wrapper=shell_wrapper)
-
-        # Thread-level confinement for in-process file I/O tools
-        if confine_context and self._jaato:
-            session = self._jaato.get_session()
-            if session and session._executor:
-                session._executor.set_apparmor_context(confine_context)
 
     @property
     def auth_pending(self) -> bool:
