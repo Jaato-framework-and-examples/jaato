@@ -79,9 +79,11 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # ---- temp files scoped to session ----
   /tmp/jaato-{session_id}-** rw,
 
-  # ---- deny sibling workspaces ----
-  deny {sessions_root}/ rw,
-  deny {sessions_root}/** rw,
+  # Note: sibling workspaces are implicitly denied by AppArmor's
+  # default-deny policy.  An explicit deny on the sessions root would
+  # override the workspace allow rule above (deny wins over allow at
+  # the same specificity without priority annotations), blocking the
+  # agent from reading its own workspace.
 
   # ---- basic system access ----
   /usr/bin/**          ix,
@@ -379,16 +381,15 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
     def _render_profile(self, session_id: str, workspace_path: str) -> str:
         """Render the profile template with session-specific values.
 
-        The template uses Python ``str.format()`` placeholders.  The
-        workspace path's deny rule uses the ``sessions_root`` to block
-        access to sibling workspaces while allowing the specific session's
-        own workspace via the more-specific allow rule.
+        The template uses Python ``str.format()`` placeholders.
+        Sibling workspaces are implicitly denied by AppArmor's default-
+        deny policy — only the session's own ``workspace_path`` is in
+        the allow list.
         """
         return self.PROFILE_TEMPLATE.format(
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
-            sessions_root=str(self._sessions_root),
         )
 
 

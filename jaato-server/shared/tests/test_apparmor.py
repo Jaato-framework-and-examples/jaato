@@ -88,10 +88,19 @@ class TestRenderProfile:
         profile = manager._render_profile("s1", "/workspace")
         assert "/usr/local/venv/" in profile
 
-    def test_denies_sessions_root(self, manager, workspace_root):
+    def test_sibling_workspaces_implicitly_denied(self, manager, workspace_root):
+        """Sibling workspaces are denied by AppArmor's default-deny policy.
+
+        We must NOT emit an explicit deny on sessions_root because in
+        AppArmor a deny rule overrides an allow rule of equal specificity
+        (both end with /**), which would block the agent's own workspace.
+        """
         profile = manager._render_profile("s1", "/workspace")
         sessions_root = str(workspace_root / "sessions")
-        assert f"deny {sessions_root}/" in profile
+        # No explicit deny on sessions_root — implicit deny is sufficient
+        assert f"deny {sessions_root}" not in profile
+        # Only the session's own workspace is allowed
+        assert "/workspace/** rwkl" in profile
 
     def test_profile_name_in_output(self, manager):
         profile = manager._render_profile("test_session", "/workspace")
