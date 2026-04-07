@@ -21,7 +21,7 @@ from .config import (
     validate_profile,
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
 
@@ -616,6 +616,12 @@ class SubagentPlugin:
                 },
                 category="coordination",
                 discoverability="discoverable",
+                # Subagent initialization needs broad filesystem read
+                # access (plugin discovery, agent definitions, skill
+                # files) that the workspace AppArmor profile doesn't
+                # grant. Opt out of thread-level confinement so the
+                # spawn can read framework resources.
+                traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
             ),
             ToolSchema(
                 name='send_to_subagent',

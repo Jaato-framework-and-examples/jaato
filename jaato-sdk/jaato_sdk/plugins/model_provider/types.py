@@ -43,6 +43,37 @@ Usage::
 """
 
 
+TRAIT_FRAMEWORK_LEVEL = "framework_level"
+"""Trait for tools that perform framework-level operations and must run unconfined.
+
+By default, ALL tools execute under the session's AppArmor profile (when
+AppArmor is available), so any file I/O — direct or via subprocesses —
+is constrained to the workspace and other allowed paths.  This is the
+secure default: any tool that touches the filesystem (intentionally or
+as a side effect like ``save_to`` downloads) is automatically sandboxed.
+
+Tools that declare this trait OPT OUT of confinement.  Use ONLY for
+tools that legitimately need to read plugin code, skill definitions,
+agent templates, or other framework resources that live outside the
+workspace and outside the standard allowed paths.
+
+The canonical example is ``spawn_subagent``: subagent initialization
+runs plugin discovery, loads agent definitions, imports provider
+modules — all of which need broad filesystem read access that the
+workspace profile doesn't grant.
+
+Usage::
+
+    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+
+    ToolSchema(
+        name="spawn_subagent",
+        ...,
+        traits=frozenset({TRAIT_FRAMEWORK_LEVEL}),
+    )
+"""
+
+
 class Role(str, Enum):
     """Message role in a conversation."""
     USER = "user"

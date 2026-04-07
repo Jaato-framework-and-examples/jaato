@@ -699,9 +699,21 @@ class ToolExecutor:
         try:
             if debug:
                 print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
-            # AppArmor thread-level confinement: confine the current
-            # thread to the session's profile for the tool's duration.
-            ctx = self._apparmor_context() if self._apparmor_context else None
+            # AppArmor thread-level confinement: confine by default,
+            # opt out via TRAIT_FRAMEWORK_LEVEL.  Any tool that touches
+            # the filesystem (directly or via side effects like save_to
+            # downloads) is automatically sandboxed.  Only framework-
+            # setup tools (spawn_subagent) declare the opt-out trait.
+            from jaato_sdk.plugins.model_provider.types import TRAIT_FRAMEWORK_LEVEL
+            is_framework_tool = (
+                self._registry
+                and TRAIT_FRAMEWORK_LEVEL in self._registry.get_tool_traits(name)
+            )
+            ctx = (
+                self._apparmor_context()
+                if (self._apparmor_context and not is_framework_tool)
+                else None
+            )
             if ctx:
                 ctx.__enter__()
             try:
