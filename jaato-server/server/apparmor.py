@@ -77,7 +77,11 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   {venv_path}/bin/*      ix,
 
   # ---- temp files scoped to session ----
+  # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
+  # style (/tmp/jaato-<id>/foo) so plugins can use either layout.
   /tmp/jaato-{session_id}-** rw,
+  /tmp/jaato-{session_id}/   rw,
+  /tmp/jaato-{session_id}/** rw,
 
   # Note: sibling workspaces are implicitly denied by AppArmor's
   # default-deny policy.  An explicit deny on the sessions root would
