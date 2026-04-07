@@ -309,6 +309,12 @@ class JaatoServer:
         # The pipeline handles buffering internally for streaming
         self._formatter_pipeline = None
 
+        # Whether to disable width-based line truncation in formatters.
+        # Set from the presentation context when the client connects;
+        # propagated to every agent's formatter pipeline at creation
+        # time so subagents created later inherit the setting.
+        self._disable_formatter_truncation: bool = False
+
     # =========================================================================
     # Workspace Management
     # =========================================================================
@@ -389,13 +395,19 @@ class JaatoServer:
         # Browser dashboards re-flow content; the ▸ indicator and fixed-
         # width line trimming are TUI affordances that produce misleading
         # output when rendered in a non-terminal context.
+        # Store the flag on the server so subagent formatter pipelines
+        # created later (after this call) also inherit it.
         from jaato_sdk.events import ClientType
-        disable_truncation = ctx.client_type != ClientType.TERMINAL
+        self._disable_formatter_truncation = ctx.client_type != ClientType.TERMINAL
         if self._formatter_pipeline:
-            self._formatter_pipeline.set_disable_truncation(disable_truncation)
+            self._formatter_pipeline.set_disable_truncation(
+                self._disable_formatter_truncation
+            )
         for agent in self._agents.values():
             if agent.formatter_pipeline:
-                agent.formatter_pipeline.set_disable_truncation(disable_truncation)
+                agent.formatter_pipeline.set_disable_truncation(
+                    self._disable_formatter_truncation
+                )
 
     def set_apparmor_confinement(
         self,
@@ -1488,6 +1500,10 @@ class JaatoServer:
         if self._workspace_path:
             self._formatter_pipeline.set_workspace_path(self._workspace_path)
 
+        # Inherit truncation setting if presentation context was already set
+        if self._disable_formatter_truncation:
+            self._formatter_pipeline.set_disable_truncation(True)
+
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
     def _get_agent_pipeline(self, agent_id: str) -> Optional[Any]:
@@ -1529,6 +1545,11 @@ class JaatoServer:
             agent.formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
             if self._workspace_path:
                 agent.formatter_pipeline.set_workspace_path(self._workspace_path)
+            # Inherit truncation setting from the server (set by the
+            # presentation context when the client connected).  Subagents
+            # spawned after presentation_context was set need this here.
+            if self._disable_formatter_truncation:
+                agent.formatter_pipeline.set_disable_truncation(True)
             self._trace(f"Created formatter pipeline for agent {agent_id}")
         return agent.formatter_pipeline
 

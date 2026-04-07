@@ -85,6 +85,21 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   {source_root}/         r,
   {source_root}/**       r,
 
+  # ---- user-global jaato config (read-only) ----
+  # Allow agent/profile/prompt/theme definitions from ~/.jaato/.
+  # NOT allowed: credentials, *_auth.json, sibling workspaces.
+  @{{HOME}}/.jaato/agents/         r,
+  @{{HOME}}/.jaato/agents/**       r,
+  @{{HOME}}/.jaato/profiles/       r,
+  @{{HOME}}/.jaato/profiles/**     r,
+  @{{HOME}}/.jaato/prompts/        r,
+  @{{HOME}}/.jaato/prompts/**      r,
+  @{{HOME}}/.jaato/themes/         r,
+  @{{HOME}}/.jaato/themes/**       r,
+  @{{HOME}}/.jaato/keybindings.json r,
+  @{{HOME}}/.jaato/theme.json       r,
+  @{{HOME}}/.jaato/gc.json          r,
+
   # ---- temp files scoped to session ----
   # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
   # style (/tmp/jaato-<id>/foo) so plugins can use either layout.
