@@ -171,6 +171,11 @@ class CodeBlockFormatterPlugin:
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
 
+        # When True, skip width-based truncation and the ▸ indicator.
+        # Set for non-terminal clients (browser dashboards, web UIs)
+        # that re-flow text and don't need fixed-width line trimming.
+        self._disable_truncation = False
+
         # Streaming state
         self._buffer = ""
         self._in_code_block = False
@@ -297,6 +302,20 @@ class CodeBlockFormatterPlugin:
         """Update the console width for rendering."""
         self._console_width = max(20, width)
 
+    def set_disable_truncation(self, disabled: bool) -> None:
+        """Enable or disable width-based line truncation.
+
+        When disabled, code blocks are rendered without per-line trimming
+        and without the ``▸`` indicator.  Used for non-terminal clients
+        (browser dashboards) that re-flow content and don't need fixed-
+        width line trimming.
+
+        Args:
+            disabled: True to skip truncation, False (default) to apply
+                ``console_width``-based trimming.
+        """
+        self._disable_truncation = disabled
+
     def set_syntax_theme(self, theme_name: str) -> None:
         """Set the syntax highlighting theme based on UI theme.
 
@@ -376,6 +395,13 @@ class CodeBlockFormatterPlugin:
 
             rendered = capture.get()
             lines = rendered.split('\n')
+
+            # Non-terminal clients (browser dashboards) re-flow content,
+            # so emit raw rendered lines with indent only — no width-based
+            # trimming, no ▸ indicator.
+            if self._disable_truncation:
+                indented_lines = [indent + line for line in lines]
+                return '\n' + '\n'.join(indented_lines) + '\x1b[0m\n'
 
             # Find the natural width of content (max content width across all lines)
             # This ensures background styling only extends to the widest content line

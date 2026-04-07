@@ -105,6 +105,17 @@ class FormatterPipeline:
             if isinstance(formatter, ConfigurableFormatter):
                 formatter.set_console_width(width)
 
+    def set_disable_truncation(self, disabled: bool) -> None:
+        """Disable width-based line truncation across formatters.
+
+        Used for non-terminal clients (browser dashboards, web UIs) that
+        re-flow content and don't need fixed-width line trimming or the
+        ``▸`` truncation indicator.
+        """
+        for formatter in self._formatters:
+            if hasattr(formatter, "set_disable_truncation"):
+                formatter.set_disable_truncation(disabled)
+
     def set_workspace_path(self, path: str) -> None:
         """Propagate workspace path to formatters that accept it.
 

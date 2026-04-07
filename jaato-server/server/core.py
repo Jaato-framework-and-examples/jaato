@@ -385,6 +385,18 @@ class JaatoServer:
         if self._jaato:
             self._jaato.set_presentation_context(ctx)
 
+        # Disable width-based line truncation for non-terminal clients.
+        # Browser dashboards re-flow content; the ▸ indicator and fixed-
+        # width line trimming are TUI affordances that produce misleading
+        # output when rendered in a non-terminal context.
+        from jaato_sdk.events import ClientType
+        disable_truncation = ctx.client_type != ClientType.TERMINAL
+        if self._formatter_pipeline:
+            self._formatter_pipeline.set_disable_truncation(disable_truncation)
+        for agent in self._agents.values():
+            if agent.formatter_pipeline:
+                agent.formatter_pipeline.set_disable_truncation(disable_truncation)
+
     def set_apparmor_confinement(
         self,
         confine_context: Callable,
