@@ -78,6 +78,13 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   {venv_path}/**         r,
   {venv_path}/bin/*      ix,
 
+  # ---- jaato source tree (read-only, for editable installs) ----
+  # Required so plugin discovery and module imports work when jaato
+  # is installed via `pip install -e`. Python loads modules from the
+  # source tree, not from the venv site-packages, in editable mode.
+  {source_root}/         r,
+  {source_root}/**       r,
+
   # ---- temp files scoped to session ----
   # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
   # style (/tmp/jaato-<id>/foo) so plugins can use either layout.
@@ -148,6 +155,15 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         # User-local cache directory for apparmor_parser, avoiding the
         # system-level /var/cache/apparmor which requires root access.
         self._cache_dir = Path("~/.jaato/apparmor-cache").expanduser().resolve()
+
+        # Detect the jaato source root for editable installs.  When
+        # jaato is installed via ``pip install -e``, Python loads modules
+        # from the source tree (not the venv site-packages), so the
+        # source directory must be readable by the confined thread for
+        # plugin discovery, model_provider initialization, etc. to work.
+        # apparmor.py lives at jaato-server/server/apparmor.py, so the
+        # repo root is two levels up from this file.
+        self._source_root = Path(__file__).resolve().parents[2]
 
         self._available: Optional[bool] = None  # Lazy-checked
 
@@ -352,6 +368,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
+            source_root=str(self._source_root),
         )
 
 
