@@ -179,7 +179,7 @@ class TestReadFileSandboxing:
         assert "workspace file content" in result
 
     def test_read_file_outside_tmp_blocked(self, plugin_with_workspace):
-        """Test reading a file outside /tmp returns not found."""
+        """Test reading a file outside /tmp is blocked by the sandbox."""
         plugin, workspace, _ = plugin_with_workspace
 
         # Try to read a file outside /tmp - should be blocked
@@ -188,7 +188,7 @@ class TestReadFileSandboxing:
         })
 
         assert "error" in result
-        assert "not found" in result["error"].lower()
+        assert "denied by sandbox" in result["error"].lower()
 
     def test_read_file_tmp_outside_workspace_allowed(self, plugin_with_workspace):
         """Test reading a file under /tmp but outside workspace is allowed."""

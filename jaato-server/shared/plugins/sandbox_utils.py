@@ -49,19 +49,24 @@ SYSTEM_TEMP_PATHS = ["/tmp", tempfile.gettempdir()]
 
 
 def is_jaato_path(path: str, workspace_root: str) -> bool:
-    """Check if a path references the .jaato directory.
+    """Check if a path references the workspace's .jaato config directory.
 
-    This checks if the path goes through .jaato, even if it later escapes
-    via .. traversal. This is important because:
-    - .jaato/../secret.txt should be treated as a .jaato path attempt
-    - /workspace/.jaato/../../etc/passwd should be treated as .jaato path attempt
+    This checks if the path goes through ``<workspace>/.jaato/``, even if
+    it later escapes via ``..`` traversal.  Detects traversal attacks like:
+    - ``.jaato/../secret.txt``
+    - ``/workspace/.jaato/../../etc/passwd``
+
+    The check is **workspace-relative**: a ``.jaato`` component appearing
+    in the workspace path itself (e.g. WS-provisioned workspaces under
+    ``~/.jaato/workspaces/sessions/<id>/``) is NOT treated as accessing
+    the workspace's ``.jaato`` config.
 
     Args:
         path: Path to check (may contain .. traversal).
         workspace_root: The workspace root directory.
 
     Returns:
-        True if path references .jaato (directly or via traversal).
+        True if path references the workspace's ``.jaato`` config dir.
     """
     # Check the workspace-relative .jaato path
     jaato_dir = os.path.join(workspace_root, JAATO_CONFIG_DIR)
@@ -75,11 +80,26 @@ def is_jaato_path(path: str, workspace_root: str) -> bool:
     if norm_path == norm_jaato_dir or norm_path.startswith(norm_jaato_prefix):
         return True
 
-    # Also check if the path CONTAINS .jaato as a component
-    # This catches cases like /workspace/.jaato/../secret where abspath
-    # would normalize away the .jaato reference
-    path_parts = path.replace('\\', '/').split('/')
-    if JAATO_CONFIG_DIR in path_parts:
+    # Check for traversal attempts: compute the workspace-relative form
+    # (without abspath normalization, so .. components are preserved)
+    # and look for .jaato as a component there.  This catches
+    # ``.jaato/../secret`` and ``/workspace/.jaato/../../etc/passwd``
+    # without false-positiving on workspace paths that happen to contain
+    # ``.jaato`` as part of their location prefix (WS-provisioned
+    # workspaces under ``~/.jaato/workspaces/sessions/<id>/``).
+    norm_workspace = normalize_for_comparison(workspace_root)
+    if norm_path.startswith(norm_workspace + '/'):
+        relative = norm_path[len(norm_workspace) + 1:]
+    elif not os.path.isabs(path):
+        relative = norm_path
+    else:
+        # Absolute path outside the workspace — it's not accessing the
+        # workspace's .jaato config dir.  Other checks (sandbox bounds)
+        # will handle whether it's allowed at all.
+        return False
+
+    rel_parts = relative.split('/')
+    if JAATO_CONFIG_DIR in rel_parts:
         return True
 
     return False

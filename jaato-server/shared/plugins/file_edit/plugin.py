@@ -968,7 +968,7 @@ Backups are automatically created for file modifications."""
 
         # Check if resolved path is allowed (within workspace or authorized for reading)
         if not self._is_path_allowed(str(file_path), mode="read"):
-            return {"error": f"File not found: {path}"}
+            return {"error": f"Path denied by sandbox: {path}"}
 
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
@@ -1080,7 +1080,7 @@ Backups are automatically created for file modifications."""
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"File not found: {path}"}
+            return {"error": f"Path denied by sandbox (write): {path}"}
 
         if not file_path.exists():
             return {"error": f"File not found: {path}. Use writeNewFile for new files."}
@@ -1156,7 +1156,7 @@ Backups are automatically created for file modifications."""
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"File not found: {path}"}
+            return {"error": f"Path denied by sandbox (write): {path}"}
 
         if file_path.exists():
             return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
@@ -1193,7 +1193,7 @@ Backups are automatically created for file modifications."""
 
         # Check if path is allowed for writing (enforces readonly restrictions)
         if not self._is_path_allowed(str(file_path), mode="write"):
-            return {"error": f"File not found: {path}"}
+            return {"error": f"Path denied by sandbox (write): {path}"}
 
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
@@ -1242,9 +1242,9 @@ Backups are automatically created for file modifications."""
 
         # Check if both paths are allowed for writing (move = write on both ends)
         if not self._is_path_allowed(str(source), mode="write"):
-            return {"error": f"File not found: {source_path}", "source": source_path}
+            return {"error": f"Path denied by sandbox (write): {source_path}", "source": source_path}
         if not self._is_path_allowed(str(destination), mode="write"):
-            return {"error": f"File not found: {destination_path}", "source": source_path}
+            return {"error": f"Path denied by sandbox (write): {destination_path}", "source": source_path}
 
         if not source.exists():
             return {"error": "Source file does not exist", "source": source_path}
