@@ -75,6 +75,9 @@ class TestCodeBlockTruncation:
             "console_width": console_width,
         })
         plugin.set_console_width(console_width)
+        # Truncation is opt-in (default off) — explicitly enable for tests
+        # that exercise the legacy width-based trimming behavior.
+        plugin.set_disable_truncation(False)
         return plugin
 
     def _render(self, plugin, code, lang="python"):

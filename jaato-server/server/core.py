@@ -310,10 +310,12 @@ class JaatoServer:
         self._formatter_pipeline = None
 
         # Whether to disable width-based line truncation in formatters.
-        # Set from the presentation context when the client connects;
-        # propagated to every agent's formatter pipeline at creation
-        # time so subagents created later inherit the setting.
-        self._disable_formatter_truncation: bool = False
+        # Defaults to True — clients (TUI and dashboard) handle line
+        # width on their own; the server-side ▸ marker double-clips
+        # with misleading "more content" indicators.  Propagated to
+        # every agent's formatter pipeline at creation time so
+        # subagents created later inherit the setting.
+        self._disable_formatter_truncation: bool = True
 
     # =========================================================================
     # Workspace Management
@@ -391,23 +393,10 @@ class JaatoServer:
         if self._jaato:
             self._jaato.set_presentation_context(ctx)
 
-        # Disable width-based line truncation for non-terminal clients.
-        # Browser dashboards re-flow content; the ▸ indicator and fixed-
-        # width line trimming are TUI affordances that produce misleading
-        # output when rendered in a non-terminal context.
-        # Store the flag on the server so subagent formatter pipelines
-        # created later (after this call) also inherit it.
-        from jaato_sdk.events import ClientType
-        self._disable_formatter_truncation = ctx.client_type != ClientType.TERMINAL
-        if self._formatter_pipeline:
-            self._formatter_pipeline.set_disable_truncation(
-                self._disable_formatter_truncation
-            )
-        for agent in self._agents.values():
-            if agent.formatter_pipeline:
-                agent.formatter_pipeline.set_disable_truncation(
-                    self._disable_formatter_truncation
-                )
+        # Note: server-side line truncation is disabled by default
+        # (see __init__).  We no longer toggle it based on client_type
+        # because the TUI and dashboard both handle line width on
+        # their own — the server-side ▸ marker just gets in the way.
 
     def set_apparmor_confinement(
         self,

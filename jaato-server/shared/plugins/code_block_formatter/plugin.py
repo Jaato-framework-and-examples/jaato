@@ -171,10 +171,13 @@ class CodeBlockFormatterPlugin:
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
 
-        # When True, skip width-based truncation and the ▸ indicator.
-        # Set for non-terminal clients (browser dashboards, web UIs)
-        # that re-flow text and don't need fixed-width line trimming.
-        self._disable_truncation = False
+        # Whether to apply width-based line trimming with the ▸ indicator.
+        # Defaults to True (no trimming) — clients (TUI, dashboard) handle
+        # line width on their own, and the server-side ▸ marker ends up
+        # double-clipping with misleading "more content" indicators.
+        # The presentation context's client_type can override this if a
+        # client explicitly opts in.
+        self._disable_truncation = True
 
         # Streaming state
         self._buffer = ""
