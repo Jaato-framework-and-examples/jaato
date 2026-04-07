@@ -453,21 +453,44 @@ class PromptLibraryPlugin:
         return None
 
     def _discover_prompts(self) -> Dict[str, PromptInfo]:
-        """Discover all available prompts from all sources."""
+        """Discover all available prompts from all sources.
+
+        Source scans are best-effort: a source that doesn't exist or
+        is unreadable (e.g. blocked by AppArmor sandboxing) is skipped
+        silently. ``.claude/skills`` and ``.claude/commands`` are
+        Claude Code interop directories that may live outside the
+        session sandbox.
+        """
         prompts: Dict[str, PromptInfo] = {}
 
         for source in self._get_prompt_sources():
-            if not source.path.exists():
+            try:
+                if not source.path.exists():
+                    continue
+            except (OSError, PermissionError):
+                # exists() can raise EACCES when the parent dir is
+                # unreadable (e.g. AppArmor denying ~/.claude/).
+                self._trace(f"Skipping unreadable source: {source.path}")
                 continue
 
             self._trace(f"Scanning source: {source.path}")
 
-            for item in source.path.iterdir():
+            try:
+                items = list(source.path.iterdir())
+            except (OSError, PermissionError):
+                self._trace(f"Skipping unreadable source: {source.path}")
+                continue
+
+            for item in items:
                 # Skip hidden files
                 if item.name.startswith('.'):
                     continue
 
-                info = self._load_prompt_info(item, source.source_name, source.entry_file)
+                try:
+                    info = self._load_prompt_info(item, source.source_name, source.entry_file)
+                except (OSError, PermissionError):
+                    continue
+
                 if info and info.name not in prompts:
                     # First source wins (priority order)
                     prompts[info.name] = info

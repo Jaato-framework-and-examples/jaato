@@ -140,6 +140,20 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   deny capability sys_admin,
   deny capability net_admin,
   deny capability sys_ptrace,
+
+  # ---- profile transitions ----
+  # Allow the framework to restore the unconfined state on tool exit.
+  # Without this, apparmor_confine().__exit__ silently fails to restore,
+  # and the thread stays trapped in this profile across tool calls —
+  # breaking framework-level tools (like spawn_subagent) that rely on
+  # opting out of confinement via TRAIT_FRAMEWORK_LEVEL.
+  #
+  # Note: this does NOT let agent code escape confinement.  Writes to
+  # /proc/self/attr/current are gated by the change_profile capability,
+  # which only the framework's apparmor_confine context manager invokes.
+  # Agent tool code can't write to /proc/self/attr/current because file
+  # writes there are not in the workspace allow list.
+  change_profile -> unconfined,
 }}
 '''
 
