@@ -357,13 +357,9 @@ class JaatoWSServer:
                 sess.sandbox_mode = "soft"
                 return
 
-            argv_wrapper, shell_wrapper, confine_context = ws_server.get_apparmor_wrappers(session_id)
-            if argv_wrapper or shell_wrapper:
-                server.set_apparmor_wrapper(
-                    argv_wrapper=argv_wrapper,
-                    shell_wrapper=shell_wrapper,
-                    confine_context=confine_context,
-                )
+            confine_context = ws_server.get_apparmor_confinement(session_id)
+            if confine_context:
+                server.set_apparmor_confinement(confine_context)
                 sess.sandbox_mode = "apparmor"
                 # Record mapping so the workspace reaper can teardown
                 # the profile by workspace ID.
@@ -1402,37 +1398,27 @@ class JaatoWSServer:
         self._client_provisioned[client_id] = workspace
         return workspace
 
-    def get_apparmor_wrappers(
+    def get_apparmor_confinement(
         self,
         session_id: str,
-    ) -> tuple:
-        """Get AppArmor wrappers for a session.
+    ) -> Optional[Callable]:
+        """Get the AppArmor thread-level confinement context for a session.
 
-        Returns a ``(argv_wrapper, shell_wrapper, confine_context)``
-        tuple suitable for passing to
-        ``JaatoServer.set_apparmor_wrapper()``.  All are ``None`` if
-        AppArmor is not available or not configured.
+        Returns a zero-argument callable suitable for passing to
+        ``JaatoServer.set_apparmor_confinement()``, or ``None`` if
+        AppArmor is not available.
 
         Args:
             session_id: Session identifier.
 
         Returns:
-            Tuple of (argv_wrapper, shell_wrapper, confine_context).
+            Confinement context factory, or ``None``.
         """
         if not self._apparmor or not self._apparmor.is_available():
-            return None, None, None
-
-        def argv_wrapper(cmd):
-            return self._apparmor.wrap_command(session_id, cmd)
-
-        def shell_wrapper(cmd):
-            return self._apparmor.wrap_shell_command(session_id, cmd)
-
+            return None
         from .apparmor import make_confine_context
         profile_name = self._apparmor.get_profile_name(session_id)
-        confine_context = make_confine_context(profile_name)
-
-        return argv_wrapper, shell_wrapper, confine_context
+        return make_confine_context(profile_name)
 
     async def _handle_config_update(
         self,
@@ -1544,13 +1530,9 @@ class JaatoWSServer:
         # (In daemon mode this is handled by the session hook registered in
         # set_command_router; this branch covers standalone WS server mode.)
         if provisioned_ws:
-            argv_wrapper, shell_wrapper, confine_context = self.get_apparmor_wrappers(session_id)
-            if argv_wrapper or shell_wrapper:
-                server.set_apparmor_wrapper(
-                    argv_wrapper=argv_wrapper,
-                    shell_wrapper=shell_wrapper,
-                    confine_context=confine_context,
-                )
+            confine_context = self.get_apparmor_confinement(session_id)
+            if confine_context:
+                server.set_apparmor_confinement(confine_context)
                 logger.info(
                     "AppArmor confinement applied to session %s",
                     session_id,

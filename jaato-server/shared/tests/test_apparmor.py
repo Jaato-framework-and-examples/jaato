@@ -107,42 +107,22 @@ class TestRenderProfile:
         assert "jaato-ws-test_session" in profile
 
 
-class TestWrapCommand:
-    def test_wraps_when_available(self, manager):
-        manager._available = True
-        result = manager.wrap_command("s1", ["git", "status"])
-        assert result == ["aa-exec", "-p", "jaato-ws-s1", "--", "git", "status"]
+class TestMakeConfineContext:
+    def test_returns_callable(self):
+        from server.apparmor import make_confine_context
+        ctx_factory = make_confine_context("jaato-ws-test")
+        assert callable(ctx_factory)
+        # Calling it returns a context manager
+        ctx = ctx_factory()
+        assert hasattr(ctx, "__enter__")
+        assert hasattr(ctx, "__exit__")
 
-    def test_passthrough_when_unavailable(self, manager):
-        manager._available = False
-        cmd = ["git", "status"]
-        result = manager.wrap_command("s1", cmd)
-        assert result == cmd
-
-    def test_preserves_empty_command(self, manager):
-        manager._available = True
-        result = manager.wrap_command("s1", [])
-        assert result == ["aa-exec", "-p", "jaato-ws-s1", "--"]
-
-
-class TestWrapShellCommand:
-    def test_wraps_shell_command(self, manager):
-        manager._available = True
-        result = manager.wrap_shell_command("s1", "echo hello")
-        assert "aa-exec -p jaato-ws-s1 --" in result
-        assert "echo hello" in result
-
-    def test_escapes_single_quotes(self, manager):
-        manager._available = True
-        result = manager.wrap_shell_command("s1", "echo 'hello world'")
-        assert "aa-exec" in result
-        # Should be safely escaped
-        assert "hello world" in result
-
-    def test_passthrough_when_unavailable(self, manager):
-        manager._available = False
-        result = manager.wrap_shell_command("s1", "echo hello")
-        assert result == "echo hello"
+    def test_confine_unavailable_profile_no_raise(self):
+        """apparmor_confine() degrades gracefully when the profile is missing."""
+        from server.apparmor import apparmor_confine
+        # Use a profile name that doesn't exist — should not raise
+        with apparmor_confine("nonexistent-profile-xyz"):
+            pass  # body runs unconfined
 
 
 class TestProvisionProfile:

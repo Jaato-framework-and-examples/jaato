@@ -74,10 +74,6 @@ class InteractiveShellPlugin:
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
-        # Optional AppArmor shell command wrapper for workspace confinement.
-        # Wraps the spawn command string to run under an AppArmor profile.
-        self._apparmor_shell_wrapper: Optional[Callable[[str], str]] = None
-
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
         self._reaper_stop = threading.Event()
@@ -101,25 +97,6 @@ class InteractiveShellPlugin:
                     f.flush()
             except (IOError, OSError):
                 pass
-
-    def set_apparmor_wrapper(
-        self,
-        shell_wrapper: Optional[Callable[[str], str]] = None,
-    ) -> None:
-        """Set a shell command wrapper for AppArmor confinement.
-
-        When set, all spawn commands are transformed through the wrapper
-        before being passed to pexpect/wexpect.  This prepends ``aa-exec``
-        so the spawned process runs under the session's AppArmor profile.
-
-        Called by ``JaatoServer`` during session initialization when the
-        session belongs to a WebSocket client with AppArmor enabled.
-
-        Args:
-            shell_wrapper: Wraps shell command strings.
-                Signature: ``(command: str) -> str``.
-        """
-        self._apparmor_shell_wrapper = shell_wrapper
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the interactive shell plugin.
@@ -527,10 +504,9 @@ IMPORTANT NOTES:
                 session_id = f"session_{self._session_counter}"
                 self._session_counter += 1
 
-        # Apply AppArmor confinement wrapper if configured
+        # AppArmor confinement (if any) is inherited from the parent
+        # thread via fork+exec — see ToolExecutor.set_apparmor_context.
         spawn_command = command
-        if self._apparmor_shell_wrapper:
-            spawn_command = self._apparmor_shell_wrapper(command)
 
         self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
 

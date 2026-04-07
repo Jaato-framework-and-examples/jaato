@@ -36,7 +36,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, ContextManager, List, Optional
+from typing import Callable, ContextManager, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,10 @@ class AppArmorManager:
     1. ``provision_profile(session_id, workspace_path)`` — renders a
        profile from the template, writes it to the profile directory,
        and loads it via ``apparmor_parser -r``.
-    2. ``wrap_command(session_id, command)`` — prepends ``aa-exec`` to a
-       command so it runs under the session's profile.
+    2. Tool execution is confined via the thread-level
+       ``apparmor_confine()`` context manager (see below), which the
+       ``ToolExecutor`` wraps around every tool call.  Subprocesses
+       inherit the parent thread's confinement via fork+exec.
     3. ``teardown_profile(session_id)`` — unloads and removes the profile.
 
     All methods are safe to call even when AppArmor is unavailable; they
@@ -329,50 +331,6 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         logger.info("Removed AppArmor profile %s", profile_name)
         return True
-
-    # ------------------------------------------------------------------
-    # Command wrapping
-    # ------------------------------------------------------------------
-
-    def wrap_command(self, session_id: str, command: List[str]) -> List[str]:
-        """Wrap a command to run under the session's AppArmor profile.
-
-        Args:
-            session_id: Session whose profile to use.
-            command: The command as a list of arguments.
-
-        Returns:
-            ``["aa-exec", "-p", profile_name, "--"] + command``
-            if AppArmor is available, otherwise the original command
-            unchanged.
-        """
-        if not self.is_available():
-            return command
-
-        profile_name = self.get_profile_name(session_id)
-        return ["aa-exec", "-p", profile_name, "--"] + command
-
-    def wrap_shell_command(self, session_id: str, command: str) -> str:
-        """Wrap a shell command string to run under AppArmor.
-
-        For use with ``shell=True`` subprocess calls or pexpect, where
-        the command is a single string rather than an argv list.
-
-        Args:
-            session_id: Session whose profile to use.
-            command: The shell command string.
-
-        Returns:
-            ``aa-exec -p <profile> -- /bin/sh -c '<command>'``
-            if AppArmor is available, otherwise the original string.
-        """
-        if not self.is_available():
-            return command
-
-        profile_name = self.get_profile_name(session_id)
-        # Escape single quotes in the command for safe shell embedding
-        escaped = command.replace("'", "'\"'\"'")
-        return f"aa-exec -p {profile_name} -- /bin/sh -c '{escaped}'"
 
     # ------------------------------------------------------------------
     # Helpers
