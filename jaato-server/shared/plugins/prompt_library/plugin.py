@@ -2084,6 +2084,19 @@ description: {description}
                     if pname not in named_params:
                         named_params[pname] = value
 
+            # Apply frontmatter defaults for any param the user didn't
+            # provide.  Without this, prompts that declare defaults in
+            # frontmatter (e.g. ``output: .jaato/references``) would
+            # still leave the placeholder unresolved and bloat the
+            # rendered text on every turn the prompt is included.
+            if info.params:
+                for pname, pdef in info.params.items():
+                    if pname in named_params:
+                        continue
+                    default = getattr(pdef, 'default', None)
+                    if default is not None:
+                        named_params[pname] = str(default)
+
             substituted, missing = self._substitute_params(
                 content, named_params, prompt_positional,
             )
