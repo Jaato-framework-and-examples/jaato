@@ -2089,12 +2089,25 @@ description: {description}
             # frontmatter (e.g. ``output: .jaato/references``) would
             # still leave the placeholder unresolved and bloat the
             # rendered text on every turn the prompt is included.
+            #
+            # ``default: null`` is treated as "no value yet, render as
+            # empty string" rather than "skip this param" — leaving
+            # unresolved {{name}} literals in the template is worse
+            # than emitting nothing, because it pollutes every turn
+            # the prompt sits in history.
+            #
+            # Python booleans are normalized to lowercase strings so
+            # they match user-typed conventions (``false`` not ``False``).
             if info.params:
                 for pname, pdef in info.params.items():
                     if pname in named_params:
                         continue
                     default = getattr(pdef, 'default', None)
-                    if default is not None:
+                    if default is None:
+                        named_params[pname] = ""
+                    elif isinstance(default, bool):
+                        named_params[pname] = "true" if default else "false"
+                    else:
                         named_params[pname] = str(default)
 
             substituted, missing = self._substitute_params(
