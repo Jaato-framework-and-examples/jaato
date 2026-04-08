@@ -129,6 +129,25 @@ class ZhipuAICachePlugin:
             "cache_breakpoint_index": -1,
         }
 
+    # ==================== Telemetry / Introspection ====================
+
+    def get_cache_anchor_message_id(self) -> Optional[str]:
+        """ZhipuAI uses implicit caching — there's no explicit anchor.
+
+        Returns ``None`` always.  GC plugins that respect cache anchors
+        will run unrestricted on ZhipuAI sessions.
+        """
+        return None
+
+    def get_telemetry_attributes(self) -> Dict[str, Any]:
+        """Return current cache state as a flat attribute dict."""
+        return {
+            "cache.enabled": True,  # Implicit, always on
+            "cache.strategy": "implicit",
+            "cache.gc_invalidation_count": self._gc_invalidation_count,
+            "cache.total_read_tokens": self._total_cache_read_tokens,
+        }
+
     # ==================== Post-Response ====================
 
     def extract_cache_usage(self, usage: "TokenUsage") -> None:
@@ -142,13 +161,20 @@ class ZhipuAICachePlugin:
 
     # ==================== GC Coordination ====================
 
-    def on_gc_result(self, result: "GCResult") -> None:
+    def on_gc_result(
+        self,
+        result: "GCResult",
+        gc_span: Any = None,
+    ) -> None:
         """Track when GC potentially breaks the implicit cache prefix.
 
         Any content removal may disrupt the implicit prefix match.
 
         Args:
             result: The GC result.
+            gc_span: Optional active GC telemetry span — receives a
+                ``cache.implicit_prefix_disrupted`` event when GC frees
+                any tokens.
         """
         if result.tokens_freed > 0:
             self._gc_invalidation_count += 1
@@ -157,6 +183,18 @@ class ZhipuAICachePlugin:
                 "GC freed %d tokens",
                 result.tokens_freed,
             )
+            if gc_span is not None:
+                try:
+                    gc_span.add_event(
+                        "cache.implicit_prefix_disrupted",
+                        {
+                            "tokens_freed": int(result.tokens_freed),
+                            "items_collected": int(result.items_collected),
+                            "gc_invalidation_count": self._gc_invalidation_count,
+                        },
+                    )
+                except Exception:
+                    pass
 
     # ==================== Metrics ====================
 

@@ -216,6 +216,28 @@ class GoogleGenAICachePlugin:
 
         return base
 
+    # ==================== Telemetry / Introspection ====================
+
+    def get_cache_anchor_message_id(self) -> Optional[str]:
+        """Google GenAI caches system+tools via CachedContent, not history.
+
+        Returns ``None`` since there is no history-level anchor — the
+        explicit cached content stores system instructions and tools,
+        and conversation messages are sent fresh on every request.
+        """
+        return None
+
+    def get_telemetry_attributes(self) -> Dict[str, Any]:
+        """Return current cache state as a flat attribute dict."""
+        return {
+            "cache.enabled": self._enabled,
+            "cache.strategy": "explicit_system_tools",
+            "cache.cached_content_name": self._cached_content_name or "",
+            "cache.gc_invalidation_count": self._gc_invalidation_count,
+            "cache.total_read_tokens": self._total_cache_read_tokens,
+            "cache.total_creation_tokens": self._total_cache_creation_tokens,
+        }
+
     # ==================== Post-Response ====================
 
     def extract_cache_usage(self, usage: "TokenUsage") -> None:
@@ -238,7 +260,11 @@ class GoogleGenAICachePlugin:
 
     # ==================== GC Coordination ====================
 
-    def on_gc_result(self, result: "GCResult") -> None:
+    def on_gc_result(
+        self,
+        result: "GCResult",
+        gc_span: Any = None,
+    ) -> None:
         """Track when GC potentially disrupts the cached prefix.
 
         Content removal may invalidate the implicit or explicit cache.
@@ -247,6 +273,10 @@ class GoogleGenAICachePlugin:
 
         Args:
             result: The GC result with information about removed content.
+            gc_span: Optional active GC telemetry span — receives a
+                ``cache.history_disrupted`` event when GC frees any
+                tokens.  The explicit CachedContent (system+tools) is
+                unaffected, so only history-level cache benefit is lost.
         """
         if result.tokens_freed > 0:
             self._gc_invalidation_count += 1
@@ -255,6 +285,19 @@ class GoogleGenAICachePlugin:
                 "(explicit CachedContent unaffected — only system+tools cached)",
                 result.tokens_freed,
             )
+            if gc_span is not None:
+                try:
+                    gc_span.add_event(
+                        "cache.history_disrupted",
+                        {
+                            "tokens_freed": int(result.tokens_freed),
+                            "items_collected": int(result.items_collected),
+                            "gc_invalidation_count": self._gc_invalidation_count,
+                            "cached_content_unaffected": True,
+                        },
+                    )
+                except Exception:
+                    pass
 
     # ==================== Metrics ====================
 

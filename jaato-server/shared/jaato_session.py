@@ -2882,38 +2882,206 @@ NOTES
         context_usage = self.get_context_usage()
         history = self.get_history()
 
-        # Use THRESHOLD as the reason since it was triggered by threshold crossing
-        new_history, result = self._gc_plugin.collect(
-            history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD,
-            budget=self._instruction_budget,
+        # Build pre-GC telemetry attributes for span context
+        gc_attrs = self._build_gc_span_attributes(
+            context_usage, pre_collect=True,
         )
 
-        if result.success:
-            if result.items_collected == 0:
-                # GC ran but collected nothing - this is often surprising to users
-                self._trace(
-                    f"PROACTIVE_GC: WARNING - GC triggered but collected 0 items. "
-                    f"Check preserve_recent_turns setting vs actual turn count. "
-                    f"Details: {result.details}"
-                )
-            else:
-                self._trace(
-                    f"PROACTIVE_GC: Collected {result.items_collected} items, "
-                    f"freed {result.tokens_freed} tokens"
-                )
-            new_history = ensure_tool_call_integrity(
-                new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
+        with self._telemetry.gc_span(
+            trigger_reason=GCTriggerReason.THRESHOLD.value,
+            strategy=self._gc_plugin.name,
+            attributes=gc_attrs,
+        ) as gc_span:
+            # Use THRESHOLD as the reason since it was triggered by threshold crossing
+            new_history, result = self._gc_plugin.collect(
+                history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD,
+                budget=self._instruction_budget,
             )
-            self._history.replace(new_history)
-            self._gc_history.append(result)
 
-            # Sync budget with GC changes
-            self._apply_gc_removal_list(result)
-            self._emit_instruction_budget_update()
+            if result.success:
+                if result.items_collected == 0:
+                    # GC ran but collected nothing - this is often surprising to users
+                    self._trace(
+                        f"PROACTIVE_GC: WARNING - GC triggered but collected 0 items. "
+                        f"Check preserve_recent_turns setting vs actual turn count. "
+                        f"Details: {result.details}"
+                    )
+                else:
+                    self._trace(
+                        f"PROACTIVE_GC: Collected {result.items_collected} items, "
+                        f"freed {result.tokens_freed} tokens"
+                    )
+                new_history = ensure_tool_call_integrity(
+                    new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
+                )
+                self._history.replace(new_history)
+                self._gc_history.append(result)
+
+                # Sync budget with GC changes (publishes cache invalidation events
+                # on the active gc_span via on_gc_result callback)
+                self._apply_gc_removal_list(result, gc_span=gc_span)
+                self._emit_instruction_budget_update()
+
+            # Populate post-GC span attributes from the result
+            self._populate_gc_span_result(gc_span, result)
 
         return result
 
-    def _apply_gc_removal_list(self, result: GCResult) -> None:
+    def _build_llm_span_attributes(self) -> Dict[str, Any]:
+        """Build the attribute dict to attach to an LLM telemetry span.
+
+        Combines per-turn context (turn index) with cache plugin state
+        (anchor, BP3 strategy, totals) so external observers can
+        correlate LLM calls with the GC ↔ cache coordination dance.
+        """
+        attrs: Dict[str, Any] = {
+            "jaato.turn_index": int(self._turn_index),
+        }
+        cache = getattr(self, "_cache_plugin", None)
+        if cache and hasattr(cache, "get_telemetry_attributes"):
+            try:
+                cache_attrs = cache.get_telemetry_attributes() or {}
+                attrs.update(cache_attrs)
+            except Exception as e:
+                self._trace(f"LLM_TELEMETRY: cache attr fetch failed: {e}")
+        return attrs
+
+    def _classify_cache_outcome(
+        self,
+        prompt_tokens: int,
+        cache_read_tokens: Optional[int],
+        cache_creation_tokens: Optional[int],
+    ) -> str:
+        """Classify a request's cache hit/miss outcome.
+
+        Returns:
+            "hit"   — most prompt tokens served from cache (>= 80%)
+            "partial" — some prompt tokens served from cache (10-80%)
+            "warm"  — cache was being written but not read (creation only)
+            "miss"  — no cache reads, no creation
+            "unknown" — usage data missing
+        """
+        if not prompt_tokens or prompt_tokens <= 0:
+            return "unknown"
+        read = cache_read_tokens or 0
+        creation = cache_creation_tokens or 0
+        ratio = read / prompt_tokens if prompt_tokens else 0
+        if ratio >= 0.8:
+            return "hit"
+        if ratio >= 0.1:
+            return "partial"
+        if creation > 0:
+            return "warm"
+        return "miss"
+
+    def _populate_llm_span_outcome(
+        self,
+        llm_span: Any,
+        response: Optional['ProviderResponse'],
+    ) -> None:
+        """Populate an LLM span with cache outcome derived from the response.
+
+        Called after ``provider.complete()`` returns.  Extracts the
+        cache hit/miss classification from response.usage and sets it
+        as a span attribute.
+        """
+        if not llm_span or not response or not getattr(response, "usage", None):
+            return
+        try:
+            usage = response.usage
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            read = getattr(usage, "cache_read_tokens", None)
+            creation = getattr(usage, "cache_creation_tokens", None)
+            llm_span.set_attribute("cache.read_tokens", int(read or 0))
+            llm_span.set_attribute("cache.creation_tokens", int(creation or 0))
+            llm_span.set_attribute(
+                "cache.outcome",
+                self._classify_cache_outcome(prompt, read, creation),
+            )
+        except Exception as e:
+            self._trace(f"LLM_TELEMETRY: failed to populate cache outcome: {e}")
+
+    def _build_gc_span_attributes(
+        self, context_usage: Dict[str, Any], pre_collect: bool = True,
+    ) -> Dict[str, Any]:
+        """Build the initial attribute dict for a GC telemetry span.
+
+        Captures budget state, cache anchor (if a cache plugin is active),
+        and context usage at the moment GC is about to run.  These are
+        the "before" values; ``_populate_gc_span_result`` adds the "after"
+        values once GC completes.
+
+        Args:
+            context_usage: Output of ``get_context_usage()``.
+            pre_collect: Reserved for future divergence between pre/post
+                attribute sets.  Currently always True.
+
+        Returns:
+            Dict of OTel-friendly attributes.
+        """
+        attrs: Dict[str, Any] = {
+            "gc.percent_used": float(context_usage.get("percent_used", 0)),
+            "gc.tokens_total": int(context_usage.get("total_tokens", 0)),
+            "gc.context_limit": int(context_usage.get("context_limit", 0)),
+        }
+        if self._instruction_budget:
+            try:
+                attrs["gc.tokens_before"] = int(self._instruction_budget.total_tokens())
+            except Exception:
+                pass
+        # Cache anchor (if any cache plugin exposes it)
+        cache = getattr(self, "_cache_plugin", None)
+        if cache and hasattr(cache, "get_cache_anchor_message_id"):
+            try:
+                anchor = cache.get_cache_anchor_message_id()
+                if anchor:
+                    attrs["gc.cache_anchor_message_id"] = anchor
+            except Exception:
+                pass
+        return attrs
+
+    def _populate_gc_span_result(self, gc_span: Any, result: 'GCResult') -> None:
+        """Populate a GC span with attributes derived from the GC result.
+
+        Called after ``gc_plugin.collect()`` returns.  The span receives
+        per-phase counts and aggregate metrics so external observers can
+        correlate GC operations with subsequent cache hit/miss outcomes.
+
+        Args:
+            gc_span: The active OTel span (or no-op span when telemetry
+                is disabled).
+            result: The ``GCResult`` from ``gc_plugin.collect()``.
+        """
+        if not gc_span:
+            return
+        try:
+            gc_span.set_attribute("gc.success", bool(result.success))
+            gc_span.set_attribute("gc.items_collected", int(result.items_collected))
+            gc_span.set_attribute("gc.tokens_freed", int(result.tokens_freed))
+            gc_span.set_attribute("gc.tokens_after", int(result.tokens_after))
+            # Per-phase counts come from result.details
+            details = result.details or {}
+            for key in (
+                "ephemeral_removed",
+                "partial_removed",
+                "preservable_removed",
+                "enrichment_cleared",
+                "tokens_to_free",
+                "target_tokens",
+            ):
+                if key in details:
+                    val = details[key]
+                    # bool first to avoid being treated as int
+                    if isinstance(val, bool):
+                        gc_span.set_attribute(f"gc.{key}", val)
+                    elif isinstance(val, (int, float)):
+                        gc_span.set_attribute(f"gc.{key}", val)
+        except Exception as e:
+            self._trace(f"GC_TELEMETRY: failed to populate span attrs: {e}")
+
+    def _apply_gc_removal_list(
+        self, result: GCResult, gc_span: Any = None,
+    ) -> None:
         """Apply GC removal list to instruction budget.
 
         This synchronizes the budget with the actual history changes made by GC.
@@ -2921,6 +3089,9 @@ NOTES
 
         Args:
             result: The GCResult containing the removal_list.
+            gc_span: Optional active GC telemetry span; passed to the
+                cache plugin's ``on_gc_result`` so it can emit cache
+                invalidation events on the same span.
         """
         if not self._instruction_budget or not result.removal_list:
             return
@@ -2961,11 +3132,19 @@ NOTES
             f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
         )
 
-        # Notify cache plugin about GC so it can track prefix invalidation
+        # Notify cache plugin about GC so it can track prefix invalidation.
+        # The cache plugin may emit a 'cache.prefix_invalidated' event on
+        # the active gc_span (when provided) so the GC↔cache coordination
+        # is visible in the trace.
         _cache = getattr(self, '_cache_plugin', None)
         if _cache and hasattr(_cache, 'on_gc_result'):
             try:
-                _cache.on_gc_result(result)
+                # Try the span-aware signature first; fall back to legacy
+                # call if the cache plugin only accepts the result.
+                try:
+                    _cache.on_gc_result(result, gc_span=gc_span)
+                except TypeError:
+                    _cache.on_gc_result(result)
             except Exception as e:
                 self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
@@ -3461,6 +3640,7 @@ NOTES
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=use_streaming,
+                attributes=self._build_llm_span_attributes(),
             ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
                 if use_streaming:
@@ -5186,6 +5366,7 @@ NOTES
             model=self._model_name or "unknown",
             provider=self._provider.name if self._provider else "unknown",
             streaming=use_streaming,
+            attributes=self._build_llm_span_attributes(),
         ) as llm_telemetry:
             self._record_input_messages_telemetry(llm_telemetry)
             if use_streaming:
@@ -5341,6 +5522,7 @@ NOTES
             model=self._model_name or "unknown",
             provider=self._provider.name if self._provider else "unknown",
             streaming=use_streaming,
+            attributes=self._build_llm_span_attributes(),
         ) as llm_telemetry:
             self._record_input_messages_telemetry(llm_telemetry)
             if use_streaming:
@@ -5934,6 +6116,19 @@ NOTES
         if usage.reasoning_tokens is not None:
             span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
 
+        # Cache outcome classification (hit/partial/warm/miss/unknown)
+        # so external observers can correlate cache behavior with the
+        # GC ↔ cache coordination dance.
+        try:
+            outcome = self._classify_cache_outcome(
+                int(usage.prompt_tokens or 0),
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+            )
+            span.set_attribute("cache.outcome", outcome)
+        except Exception as e:
+            self._trace(f"LLM_TELEMETRY: cache outcome classification failed: {e}")
+
         # Accumulate on turn span so the root AGENT span shows totals
         turn_span = self._current_turn_span
         if turn_span:
@@ -6311,6 +6506,7 @@ NOTES
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=False,
+                attributes=self._build_llm_span_attributes(),
             ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
                 with self._provider_access():
@@ -6460,6 +6656,7 @@ NOTES
                     model=self._model_name or "unknown",
                     provider=self._provider.name if self._provider else "unknown",
                     streaming=False,
+                    attributes=self._build_llm_span_attributes(),
                 ) as llm_telemetry:
                     self._record_input_messages_telemetry(llm_telemetry)
                     with self._provider_access():
@@ -6614,33 +6811,48 @@ NOTES
                 f"usage={context_usage.get('percent_used', 0):.1f}%)"
             )
             history = self.get_history()
-            new_history, result = self._gc_plugin.collect(
-                history, context_usage, self._gc_config, reason,
-                budget=self._instruction_budget,
+
+            # Build pre-GC telemetry attributes
+            gc_attrs = self._build_gc_span_attributes(
+                context_usage, pre_collect=True,
             )
 
-            if result.success:
-                if result.items_collected == 0:
-                    # GC ran but collected nothing - this is often surprising to users
-                    self._trace(
-                        f"GC_BEFORE_SEND: WARNING - GC triggered but collected 0 items. "
-                        f"Check preserve_recent_turns setting vs actual turn count. "
-                        f"Details: {result.details}"
-                    )
-                else:
-                    self._trace(
-                        f"GC_BEFORE_SEND: collected {result.items_collected} items, "
-                        f"freed {result.tokens_freed} tokens"
-                    )
-                new_history = ensure_tool_call_integrity(
-                    new_history, trace_fn=lambda m: self._trace(f"GC_BEFORE_SEND: {m}"),
+            with self._telemetry.gc_span(
+                trigger_reason=reason.value,
+                strategy=self._gc_plugin.name,
+                attributes=gc_attrs,
+            ) as gc_span:
+                new_history, result = self._gc_plugin.collect(
+                    history, context_usage, self._gc_config, reason,
+                    budget=self._instruction_budget,
                 )
-                self._history.replace(new_history)
-                self._gc_history.append(result)
 
-                # Sync budget with GC changes
-                self._apply_gc_removal_list(result)
-                self._emit_instruction_budget_update()
+                if result.success:
+                    if result.items_collected == 0:
+                        # GC ran but collected nothing - this is often surprising to users
+                        self._trace(
+                            f"GC_BEFORE_SEND: WARNING - GC triggered but collected 0 items. "
+                            f"Check preserve_recent_turns setting vs actual turn count. "
+                            f"Details: {result.details}"
+                        )
+                    else:
+                        self._trace(
+                            f"GC_BEFORE_SEND: collected {result.items_collected} items, "
+                            f"freed {result.tokens_freed} tokens"
+                        )
+                    new_history = ensure_tool_call_integrity(
+                        new_history, trace_fn=lambda m: self._trace(f"GC_BEFORE_SEND: {m}"),
+                    )
+                    self._history.replace(new_history)
+                    self._gc_history.append(result)
+
+                    # Sync budget with GC changes (notifies cache plugin
+                    # via on_gc_result with the active span attached)
+                    self._apply_gc_removal_list(result, gc_span=gc_span)
+                    self._emit_instruction_budget_update()
+
+                # Populate post-GC span attributes from the result
+                self._populate_gc_span_result(gc_span, result)
 
             return result
 

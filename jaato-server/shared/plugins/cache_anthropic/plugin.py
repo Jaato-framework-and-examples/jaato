@@ -103,6 +103,16 @@ class AnthropicCachePlugin:
         self._total_cache_creation_tokens: int = 0
         self._gc_invalidation_count: int = 0
 
+        # BP3 placement tracking — set by _find_policy_boundary, read by
+        # get_telemetry_attributes() so external observers can see which
+        # strategy the cache plugin used to place the history breakpoint.
+        # Values: "budget" | "recency" | "none" | "disabled"
+        self._last_bp3_strategy: str = "none"
+        # Message ID of the last stable conversation child found by
+        # _find_policy_boundary. Set on every prepare_request call;
+        # reflects the cached prefix end position for telemetry / GC.
+        self._budget_bp3_message_id: Optional[str] = None
+
     # ==================== Protocol Properties ====================
 
     @property
@@ -336,15 +346,18 @@ class AnthropicCachePlugin:
             Message index for the breakpoint, or -1 to skip.
         """
         if not self._cache_history:
+            self._last_bp3_strategy = "disabled"
             return -1
 
         # Try budget-aware placement first
         if self._budget:
             bp = self._find_policy_boundary()
             if bp >= 0:
+                self._last_bp3_strategy = "budget"
                 return bp
 
         # Fallback: recency-based (original provider logic)
+        self._last_bp3_strategy = "recency"
         return -1  # Caller uses the existing recency logic as fallback
 
     def _find_policy_boundary(self) -> int:
@@ -399,7 +412,48 @@ class AnthropicCachePlugin:
         self._budget_bp3_message_id = (
             last_stable_message_ids[-1] if last_stable_message_ids else None
         )
+        if self._budget_bp3_message_id is None:
+            # No stable conversation child yet — caller will fall back
+            # to recency strategy.
+            return -1
         return -2  # Sentinel: budget-based breakpoint
+
+    # ==================== Telemetry / Introspection ====================
+
+    def get_cache_anchor_message_id(self) -> Optional[str]:
+        """Return the message_id at which the currently-cached prefix ends.
+
+        Set during ``prepare_request()`` based on the budget's last
+        LOCKED/PRESERVABLE conversation child.  External callers (GC
+        plugins, telemetry) read this to know where the cached prefix
+        ends in the message history.
+
+        Returns ``None`` when caching is disabled, before the first
+        request, or when the budget has no stable child yet.
+        """
+        return self._budget_bp3_message_id
+
+    def get_telemetry_attributes(self) -> Dict[str, Any]:
+        """Return current cache state as a flat attribute dict.
+
+        Used by the session to inject cache context into LLM spans so
+        external observers (Phoenix/Jaeger) can correlate GC operations
+        with cache hit/miss outcomes.
+
+        Returns:
+            Dict with stable string keys suitable for OTel attributes.
+        """
+        return {
+            "cache.enabled": self._enabled,
+            "cache.ttl": self._cache_ttl,
+            "cache.history_enabled": self._cache_history,
+            "cache.anchor_message_id": self._budget_bp3_message_id or "",
+            "cache.bp3_strategy": self._last_bp3_strategy,
+            "cache.prefix_invalidated": self._prefix_invalidated,
+            "cache.gc_invalidation_count": self._gc_invalidation_count,
+            "cache.total_read_tokens": self._total_cache_read_tokens,
+            "cache.total_creation_tokens": self._total_cache_creation_tokens,
+        }
 
     # ==================== Post-Response ====================
 
@@ -416,7 +470,11 @@ class AnthropicCachePlugin:
 
     # ==================== GC Coordination ====================
 
-    def on_gc_result(self, result: "GCResult") -> None:
+    def on_gc_result(
+        self,
+        result: "GCResult",
+        gc_span: Any = None,
+    ) -> None:
         """Track when GC may invalidate the cached prefix.
 
         Only PRESERVABLE removal risks disrupting the cached prefix.
@@ -425,15 +483,33 @@ class AnthropicCachePlugin:
 
         Args:
             result: The GC result with removal details.
+            gc_span: Optional active GC telemetry span.  When provided
+                and PRESERVABLE removal is detected, a
+                ``cache.prefix_invalidated`` event is added so external
+                observers can correlate the invalidation with the GC
+                operation that caused it.
         """
         preservable_removed = result.details.get("preservable_removed", 0)
         if preservable_removed > 0:
+            previous_anchor = self._budget_bp3_message_id
             self._prefix_invalidated = True
             self._gc_invalidation_count += 1
             logger.debug(
                 "Cache prefix may be invalidated: GC removed %d PRESERVABLE items",
                 preservable_removed,
             )
+            if gc_span is not None:
+                try:
+                    gc_span.add_event(
+                        "cache.prefix_invalidated",
+                        {
+                            "preservable_removed": int(preservable_removed),
+                            "previous_anchor": previous_anchor or "",
+                            "gc_invalidation_count": self._gc_invalidation_count,
+                        },
+                    )
+                except Exception:
+                    pass  # Telemetry must never break the GC path
 
     # ==================== Threshold Checking ====================
 
