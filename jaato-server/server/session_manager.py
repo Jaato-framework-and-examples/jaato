@@ -270,11 +270,10 @@ class SessionManager:
                 body = raw[match.end():]
 
         # Substitute params
-        effective_params = params or {}
-        missing = []
+        effective_params = dict(params or {})
         param_defs = frontmatter.get("params", {})
 
-        # Apply defaults for unset params
+        # Apply frontmatter defaults for params not provided
         if isinstance(param_defs, dict):
             for pname, pdef in param_defs.items():
                 if pname not in effective_params:
@@ -283,20 +282,45 @@ class SessionManager:
                         if default is not None:
                             effective_params[pname] = str(default)
 
+        # Pre-scan: collect inline ``{{name:default}}`` defaults declared
+        # anywhere in the body so a later bare ``{{name}}`` can fall back
+        # to the same default.  Without this, an agent that uses a
+        # parameter both with and without an inline default would mark it
+        # missing on the bare occurrences and leave literal ``{{name}}``
+        # placeholders in the rendered system instructions — which then
+        # bloat every turn's prompt.
+        inline_defaults: Dict[str, str] = {}
+        inline_pattern = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
+        for m in inline_pattern.finditer(body):
+            name = m.group(1)
+            default = m.group(2)
+            if default is not None and name not in inline_defaults:
+                inline_defaults[name] = default
+
+        # Use a set for O(1) dedup; the public missing list is built
+        # once at the end so the same name never appears twice.
+        missing_set: set = set()
+
         def replace_param(m: re.Match) -> str:
             name = m.group(1)
+            inline_default = m.group(2)
+
             if name in effective_params:
                 return effective_params[name]
-            missing.append(name)
-            return m.group(0)  # Keep unresolved
+            if inline_default is not None:
+                return inline_default
+            if name in inline_defaults:
+                return inline_defaults[name]
+            missing_set.add(name)
+            return m.group(0)  # Keep unresolved (debugging signal)
 
-        rendered = re.sub(r"\{\{(\w+)\}\}", replace_param, body)
+        rendered = inline_pattern.sub(replace_param, body)
 
         return {
             "system_instructions": rendered,
             "description": frontmatter.get("description", ""),
             "default_profile": frontmatter.get("default_profile"),
-            "missing_params": missing,
+            "missing_params": sorted(missing_set),
             "source_path": str(agent_path),
         }
 
