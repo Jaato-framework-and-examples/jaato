@@ -33,7 +33,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Callable, Optional, TYPE_CHECKING
+from typing import Dict, List, Any, Callable, Optional, Set, TYPE_CHECKING
 
 import yaml
 
@@ -507,6 +507,13 @@ class PromptLibraryPlugin:
     ) -> tuple[str, List[str]]:
         """Substitute parameters in prompt content.
 
+        A placeholder is "missing" if it has no value AND no default.
+        Each missing parameter is reported **once** even if its
+        placeholder appears multiple times in the template.  A
+        parameter is also considered satisfied if ANY of its
+        placeholder occurrences in the template provided a default —
+        the template author opted into that default.
+
         Args:
             content: The prompt content with template variables
             named_params: Dict of named parameter values
@@ -515,7 +522,28 @@ class PromptLibraryPlugin:
         Returns:
             Tuple of (substituted_content, list of missing required params)
         """
-        missing_params = []
+        # Pre-scan: collect the set of names that have at least one
+        # default specified anywhere in the template.  Later, even
+        # placeholders without an inline default for that name are
+        # treated as satisfied (and replaced with the default).
+        named_defaults: Dict[str, str] = {}
+        for m in NAMED_PARAM_PATTERN.finditer(content):
+            name = m.group(1)
+            default = m.group(2)
+            if default is not None and name not in named_defaults:
+                named_defaults[name] = default
+
+        positional_defaults: Dict[int, str] = {}
+        for m in POSITIONAL_PARAM_PATTERN.finditer(content):
+            index = int(m.group(1))
+            default = m.group(2)
+            if default is not None and index not in positional_defaults:
+                positional_defaults[index] = default
+
+        # Use sets for O(1) dedup, then convert to list at the end
+        # so the public contract (List[str]) is preserved.
+        missing_named: Set[str] = set()
+        missing_positional: Set[int] = set()
 
         # Handle Claude Code $ARGUMENTS placeholder
         content = ARGUMENTS_PLACEHOLDER.sub('{{$0}}', content)
@@ -527,11 +555,15 @@ class PromptLibraryPlugin:
 
             if name in named_params:
                 return named_params[name]
-            elif default is not None:
+            if default is not None:
                 return default
-            else:
-                missing_params.append(name)
-                return f'{{{{{name}}}}}'  # Leave unreplaced
+            # No inline default at this occurrence — fall back to
+            # any default specified for the same name elsewhere
+            # in the template before reporting missing.
+            if name in named_defaults:
+                return named_defaults[name]
+            missing_named.add(name)
+            return f'{{{{{name}}}}}'  # Leave unreplaced
 
         content = NAMED_PARAM_PATTERN.sub(replace_named, content)
 
@@ -547,14 +579,20 @@ class PromptLibraryPlugin:
             # 1-indexed positional parameter
             if index <= len(positional_args):
                 return positional_args[index - 1]
-            elif default is not None:
+            if default is not None:
                 return default
-            else:
-                missing_params.append(f'${index}')
-                return f'{{{{${index}}}}}'  # Leave unreplaced
+            if index in positional_defaults:
+                return positional_defaults[index]
+            missing_positional.add(index)
+            return f'{{{{${index}}}}}'  # Leave unreplaced
 
         content = POSITIONAL_PARAM_PATTERN.sub(replace_positional, content)
 
+        # Build a deterministic, deduplicated missing list:
+        # named params first (sorted), then positional ($1, $2, ...)
+        missing_params: List[str] = sorted(missing_named) + [
+            f'${i}' for i in sorted(missing_positional)
+        ]
         return content, missing_params
 
     def resolve_agent(
