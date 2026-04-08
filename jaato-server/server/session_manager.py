@@ -1883,6 +1883,19 @@ class SessionManager:
 
             prompt_name = match.group(1)
 
+            # Capture args after the prompt name on the same line so the
+            # expansion can substitute them.  Args run from the end of the
+            # name match to the next newline (or end of text), supporting
+            # both positional tokens and ``key=value`` named tokens.  The
+            # original args are LEFT in the message body — they remain
+            # visible to the user, while the expansion gets a fully
+            # populated copy via _execute_prompt_command.
+            args_start = match.end()
+            newline_pos = text.find('\n', args_start)
+            args_end = newline_pos if newline_pos != -1 else len(text)
+            args_text = text[args_start:args_end].strip()
+            prompt_args = args_text.split() if args_text else []
+
             # Strip the % prefix regardless of whether we find the prompt
             result = result[:match.start()] + prompt_name + result[match.end():]
 
@@ -1890,7 +1903,7 @@ class SessionManager:
             if prompt_plugin and hasattr(prompt_plugin, '_execute_prompt_command'):
                 try:
                     content = prompt_plugin._execute_prompt_command(
-                        {'args': [prompt_name]}
+                        {'args': [prompt_name] + prompt_args}
                     )
                     # _execute_prompt_command returns error strings for
                     # missing prompts; only use content that doesn't

@@ -2031,7 +2031,32 @@ description: {description}
 
         # Otherwise, first arg is prompt name
         prompt_name = positional_args[0]
-        prompt_args = positional_args[1:]
+        prompt_args_raw = positional_args[1:]
+
+        # Caller-supplied named params take precedence over anything
+        # parsed from positional ``key=value`` tokens.
+        explicit_named: Dict[str, str] = dict(args.get('named') or {})
+
+        # Split positional args into pure positional vs ``key=value`` named.
+        # A token is treated as named when it matches IDENTIFIER=anything,
+        # where IDENTIFIER is [A-Za-z_][A-Za-z0-9_]*. URLs and shell-style
+        # values like ``foo=bar=baz`` go to named (key=foo, value=bar=baz)
+        # only if the leading token before the first ``=`` is a valid
+        # identifier — protocols like ``https://`` are NOT identifiers and
+        # stay positional.
+        prompt_positional: List[str] = []
+        parsed_named: Dict[str, str] = {}
+        for token in prompt_args_raw:
+            key, sep, val = token.partition('=')
+            if sep and key and key[0].isalpha() and all(
+                c.isalnum() or c == '_' for c in key
+            ):
+                parsed_named[key] = val
+            else:
+                prompt_positional.append(token)
+
+        # Explicit named (from caller) wins over parsed
+        named_params: Dict[str, str] = {**parsed_named, **explicit_named}
 
         # Get the prompt and substitute parameters
         prompts = self._discover_prompts()
@@ -2044,8 +2069,24 @@ description: {description}
 
         try:
             content = self._get_prompt_content(info)
-            # User command uses positional args
-            substituted, missing = self._substitute_params(content, {}, prompt_args)
+
+            # Map positional args to named placeholders using the order
+            # declared in the prompt's frontmatter ``params`` block.  This
+            # lets users invoke ``%name val1 val2 key=val`` and have val1
+            # and val2 land in the right named placeholders.  Explicit
+            # named (parsed key=value or caller-supplied) takes precedence.
+            if prompt_positional and info.params:
+                ordered_param_names = list(info.params.keys())
+                for i, value in enumerate(prompt_positional):
+                    if i >= len(ordered_param_names):
+                        break
+                    pname = ordered_param_names[i]
+                    if pname not in named_params:
+                        named_params[pname] = value
+
+            substituted, missing = self._substitute_params(
+                content, named_params, prompt_positional,
+            )
 
             if missing:
                 substituted += f"\n\n[Note: Missing parameters: {', '.join(missing)}]"
