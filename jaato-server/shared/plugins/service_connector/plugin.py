@@ -7,11 +7,14 @@ Provides tools for:
 - Importing API collections from Bruno
 """
 
+import logging
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import CommandCompletion, CommandParameter, HelpLines, UserCommand
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema
@@ -1090,6 +1093,146 @@ class ServiceConnectorPlugin:
 
         return ctx
 
+    # Transient HTTP statuses worth retrying with backoff.
+    # 408 Request Timeout, 425 Too Early, 429 Too Many Requests,
+    # 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable,
+    # 504 Gateway Timeout.
+    _TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+    # Retry policy for transient HTTP failures.  Kept smaller than the
+    # LLM provider retry budget — call_service is invoked from agent
+    # tools, where 3 attempts is enough to ride out a brief blip but
+    # short enough not to block the agent for too long on a real outage.
+    _HTTP_RETRY_MAX_ATTEMPTS = 3
+    _HTTP_RETRY_BASE_DELAY = 1.0
+    _HTTP_RETRY_MAX_DELAY = 8.0
+
+    def _is_transient_http_error(self, exc: Exception) -> bool:
+        """Decide whether an HttpClientError should trigger a retry.
+
+        SSL and proxy errors are NOT transient — they need explicit
+        user intervention (insecure=true / no_proxy=true), and retrying
+        them just delays the actionable error.  Everything else
+        (timeouts, connection resets, generic request failures) is
+        treated as transient and retried with backoff.
+        """
+        if self._is_ssl_error(exc) or self._is_proxy_error(exc):
+            return False
+        return True
+
+    def _retry_http_call(self, fn, save_to: Optional[str]) -> "HttpResponse":
+        """Run an HTTP call with retry on transient errors.
+
+        Retries:
+          - HttpClientError (timeouts, connection resets, generic failures)
+            EXCEPT SSL/proxy errors which need user intervention
+          - HTTP responses with status in _TRANSIENT_HTTP_STATUSES (5xx + 408/425/429)
+
+        Does NOT retry when ``save_to`` is set, because we'd be retrying
+        a partial download — the file would be reset to the new attempt
+        and any progress lost.
+
+        Args:
+            fn: Zero-argument callable that calls self._http_client.execute(...)
+            save_to: The save_to value from the original tool call; when
+                non-None, retry is disabled.
+
+        Returns:
+            The HttpResponse from a successful attempt.
+
+        Raises:
+            HttpClientError: After max_attempts transient failures.
+        """
+        # Bail out of retry for downloads — partial state would be
+        # corrupted by a retry attempt rewinding the destination file.
+        if save_to:
+            return fn()
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self._HTTP_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                response = fn()
+            except HttpClientError as exc:
+                if not self._is_transient_http_error(exc):
+                    raise
+                last_exc = exc
+                if attempt >= self._HTTP_RETRY_MAX_ATTEMPTS:
+                    raise
+                delay = min(
+                    self._HTTP_RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self._HTTP_RETRY_MAX_DELAY,
+                )
+                logger.warning(
+                    "call_service transient error (attempt %d/%d): %s. "
+                    "Retrying in %.1fs",
+                    attempt, self._HTTP_RETRY_MAX_ATTEMPTS, exc, delay,
+                )
+                import time as _time
+                _time.sleep(delay)
+                continue
+
+            # Success path: check if the HTTP status itself is transient
+            if response.status in self._TRANSIENT_HTTP_STATUSES:
+                if attempt >= self._HTTP_RETRY_MAX_ATTEMPTS:
+                    return response  # Last attempt — return whatever we got
+                # Honor Retry-After header when present, else use backoff
+                retry_after = self._extract_retry_after(response)
+                if retry_after is not None:
+                    delay = retry_after
+                else:
+                    delay = min(
+                        self._HTTP_RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                        self._HTTP_RETRY_MAX_DELAY,
+                    )
+                logger.warning(
+                    "call_service got transient HTTP %d (attempt %d/%d). "
+                    "Retrying in %.1fs",
+                    response.status, attempt, self._HTTP_RETRY_MAX_ATTEMPTS, delay,
+                )
+                import time as _time
+                _time.sleep(delay)
+                continue
+
+            return response
+
+        # Should be unreachable — both branches above either return or raise.
+        if last_exc is not None:
+            raise last_exc
+        raise HttpClientError("call_service retry exhausted with no result")
+
+    @staticmethod
+    def _extract_retry_after(response: "HttpResponse") -> Optional[float]:
+        """Extract the Retry-After header from a response, if present.
+
+        Returns the value as seconds.  Supports both numeric (delta-seconds)
+        and HTTP-date formats; HTTP-date is converted to a delta from now.
+        Returns None if the header is missing or unparseable.
+        """
+        try:
+            headers = getattr(response, "headers", {}) or {}
+            # Headers may be case-insensitive dicts or plain dicts
+            value = (
+                headers.get("Retry-After")
+                or headers.get("retry-after")
+                or headers.get("RETRY-AFTER")
+            )
+            if not value:
+                return None
+            # Try numeric (delta-seconds) first
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+            # Fall back to HTTP-date format
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+            target = parsedate_to_datetime(value)
+            now = datetime.now(timezone.utc)
+            delta = (target - now).total_seconds()
+            return max(0.0, delta)
+        except Exception:
+            return None
+
     @staticmethod
     def _is_ssl_error(exc: Exception) -> bool:
         """Check whether an exception is caused by an SSL certificate failure.
@@ -1511,9 +1654,13 @@ class ServiceConnectorPlugin:
                 endpoint_schema
             )
 
-        # Execute request
-        try:
-            response = self._http_client.execute(
+        # Execute request, with retry/backoff for transient network
+        # failures (timeouts, 5xx, 408/425/429).  Retries are skipped
+        # entirely when ``save_to`` is set so a partial download isn't
+        # silently restarted.  SSL/proxy errors are NOT retried —
+        # those need explicit user intervention.
+        def _do_execute():
+            return self._http_client.execute(
                 method=method,
                 url=url or None,
                 service_config=service_config,
@@ -1531,6 +1678,9 @@ class ServiceConnectorPlugin:
                 use_proxy=use_proxy,
                 raw_bytes=bool(save_to),
             )
+
+        try:
+            response = self._retry_http_call(_do_execute, save_to=save_to)
 
             # Save response body to file instead of returning it
             if save_to:
