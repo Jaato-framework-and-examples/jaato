@@ -139,7 +139,12 @@ class FileSessionPlugin:
         state: SessionState,
         storage_dir: Optional[Path] = None,
     ) -> None:
-        """Save session state to a JSON file.
+        """Save session state to a JSON file atomically.
+
+        Writes to a temporary sibling file, fsyncs the data and the
+        directory, then renames into place.  This prevents the destination
+        file from being left half-written if the process is killed or the
+        system loses power mid-write.
 
         Args:
             state: The complete session state to persist.
@@ -155,8 +160,39 @@ class FileSessionPlugin:
         file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Atomic write: tmp file → fsync → rename → fsync directory.
+        # The tmp file lives in the same directory as the target so the
+        # rename is atomic on POSIX (same filesystem).
+        tmp_path = target_dir / f"{state.session_id}.json.tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # fsync may not be supported (e.g. some virtualised FS).
+                    # The atomic rename below still gives us crash safety
+                    # for most failure modes; we just lose the durability
+                    # guarantee on a hard kernel-level crash.
+                    pass
+            os.replace(tmp_path, file_path)
+            # Best-effort directory fsync so the rename is durable.
+            try:
+                dir_fd = os.open(str(target_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass  # Not all platforms (Windows) support directory fsync
+        except OSError:
+            # Best-effort cleanup of the tmp file on any failure
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
         self._current_session_id = state.session_id
 

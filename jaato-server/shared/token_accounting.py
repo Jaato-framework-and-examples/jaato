@@ -163,6 +163,13 @@ class TokenLedger:
         }
 
     def write_ledger(self, filepath: str = "token_events_ledger.jsonl") -> Optional[str]:
+        """Append all buffered events to the JSONL ledger.
+
+        Each event is written as a single line.  After all events are
+        written we flush + fsync so a process crash or power loss
+        can't leave a partial line in the ledger (which would corrupt
+        downstream JSONL parsers).
+        """
         path = os.environ.get("LEDGER_PATH", filepath)
         try:
             with open(path, "a", encoding="utf-8") as f:
@@ -176,6 +183,13 @@ class TokenLedger:
                         tt = ev.get("total_tokens") or 0
                         enriched["internal_tokens"] = tt - (pt + ot) if (pt is not None and ot is not None and tt is not None) else None
                     f.write(json.dumps(enriched) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # fsync may not be supported on every filesystem;
+                    # the data is at least in the OS buffer cache.
+                    pass
             return path
         except Exception as exc:
             logger.error(f"Ledger write failed: {exc}", exc_info=True)

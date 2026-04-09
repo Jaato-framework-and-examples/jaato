@@ -124,6 +124,11 @@ class PluginRegistry:
         self._configs: Dict[str, Dict[str, Any]] = {}
         self._model_name: Optional[str] = model_name
         self._skipped_plugins: Dict[str, List[str]] = {}  # name -> required patterns
+        # Plugins that raised during initialize() / shutdown(). Tracked
+        # so callers can introspect lifecycle failures and so we don't
+        # silently leave the registry in an inconsistent state.
+        # name -> (lifecycle_phase, error_message)
+        self._failed_plugins: Dict[str, tuple] = {}
         self._disabled_tools: Set[str] = set()  # Individual tools disabled by user
         self._output_callback: Optional[OutputCallback] = None
         self._terminal_width: int = 80
@@ -503,8 +508,33 @@ class PluginRegistry:
                 module = importlib.import_module(f".{name}", package="shared.plugins")
                 import_ms = (time.perf_counter() - t0) * 1000
 
-                # Check plugin kind - only load plugins matching requested kind
+                # Check plugin kind - only load plugins matching requested kind.
+                # Distinguish "kind mismatch" (legitimate skip — we're
+                # discovering a different kind) from "PLUGIN_KIND missing"
+                # (likely a plugin author bug — log a warning).
                 module_kind = getattr(module, 'PLUGIN_KIND', None)
+                if module_kind is None:
+                    # Only warn once per (module, plugin_kind) pair so we
+                    # don't spam every discovery pass.
+                    if not hasattr(self, '_warned_missing_kind'):
+                        self._warned_missing_kind: Set[str] = set()
+                    if name not in self._warned_missing_kind:
+                        self._warned_missing_kind.add(name)
+                        # Suppress for plugins that legitimately have no
+                        # PLUGIN_KIND yet (e.g., test fixtures, README dirs).
+                        # The warning targets real plugin directories with
+                        # a create_plugin() factory but no kind marker.
+                        if hasattr(module, 'create_plugin'):
+                            logger.warning(
+                                "Plugin module '%s' has no PLUGIN_KIND in "
+                                "__init__.py — it will be silently skipped "
+                                "by directory discovery. Add "
+                                "'PLUGIN_KIND = \"tool\"' (or \"enrichment\", "
+                                "\"gc\", \"session\", \"model_provider\") to "
+                                "%s/__init__.py and export it in __all__.",
+                                name, name,
+                            )
+                    continue
                 if module_kind != plugin_kind:
                     continue
 
@@ -725,7 +755,19 @@ class PluginRegistry:
         # Initialize if not already exposed, or if new config provided
         if name not in self._exposed:
             t0 = time.perf_counter()
-            plugin.initialize(config)
+            try:
+                plugin.initialize(config)
+            except Exception as exc:
+                # Don't let one broken plugin take down the whole session.
+                # Record the failure and skip exposing the plugin so the
+                # rest of expose_all() can continue.
+                logger.error(
+                    "Plugin '%s' initialize() failed: %s. "
+                    "Plugin will not be exposed.",
+                    name, exc, exc_info=True,
+                )
+                self._failed_plugins[name] = ("initialize", str(exc))
+                return False
             init_ms = (time.perf_counter() - t0) * 1000
             self._init_timings[name] = {"init_ms": round(init_ms, 2)}
             if init_ms > 5.0:  # Log plugins taking >5ms to initialize
@@ -754,9 +796,30 @@ class PluginRegistry:
                 if src == name
             }
 
-            # Re-initialize with new config
-            plugin.shutdown()
-            plugin.initialize(config)
+            # Re-initialize with new config.  Both shutdown and
+            # initialize are wrapped so a failure in one doesn't leave
+            # the registry in an inconsistent state.
+            try:
+                plugin.shutdown()
+            except Exception as exc:
+                logger.warning(
+                    "Plugin '%s' shutdown() during re-init failed: %s. "
+                    "Continuing with re-initialize.",
+                    name, exc, exc_info=True,
+                )
+            try:
+                plugin.initialize(config)
+            except Exception as exc:
+                logger.error(
+                    "Plugin '%s' initialize() during re-init failed: %s. "
+                    "Plugin will be unexposed.",
+                    name, exc, exc_info=True,
+                )
+                self._failed_plugins[name] = ("re-initialize", str(exc))
+                self._exposed.discard(name)
+                self._configs.pop(name, None)
+                self._tool_plugin_cache.clear()
+                return False
             self._configs[name] = config
             self._tool_plugin_cache.clear()
             # Re-wire after re-initialization
@@ -782,12 +845,26 @@ class PluginRegistry:
         """Stop exposing a plugin's tools to the model.
 
         Calls the plugin's shutdown() method to clean up resources.
+        Shutdown failures are caught and logged so they don't leave
+        the registry in an inconsistent state — the plugin is always
+        removed from the exposed set regardless of whether shutdown
+        succeeded.
 
         Args:
             name: Plugin name to unexpose.
         """
         if name in self._exposed:
-            self._plugins[name].shutdown()
+            try:
+                self._plugins[name].shutdown()
+            except Exception as exc:
+                logger.warning(
+                    "Plugin '%s' shutdown() failed: %s. "
+                    "Continuing with unexpose.",
+                    name, exc, exc_info=True,
+                )
+                self._failed_plugins[name] = ("shutdown", str(exc))
+            # Always discard from exposed set so the registry stays
+            # consistent even if shutdown raised.
             self._exposed.discard(name)
             self._configs.pop(name, None)
             self._tool_plugin_cache.clear()

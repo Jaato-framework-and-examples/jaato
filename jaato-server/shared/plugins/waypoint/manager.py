@@ -7,9 +7,13 @@ the path ahead becomes treacherous.
 """
 
 import json
+import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Waypoint,
@@ -128,18 +132,41 @@ class WaypointManager:
             self._next_id = 1
 
     def _save(self) -> None:
-        """Save waypoints and next_id counter to storage."""
+        """Save waypoints and next_id counter to storage atomically.
+
+        Uses tmp file + fsync + rename so a crash during save can't
+        leave the waypoint file half-written.  On failure, logs an
+        error — silent swallowing previously hid the case where a
+        waypoint was created in memory but never persisted to disk.
+        """
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
 
+        data = {
+            "waypoints": [wp.to_dict() for wp in self._waypoints.values()],
+            "next_id": self._next_id,
+        }
+        tmp_path = self._storage_path.with_suffix(
+            self._storage_path.suffix + ".tmp"
+        )
         try:
-            data = {
-                "waypoints": [wp.to_dict() for wp in self._waypoints.values()],
-                "next_id": self._next_id,
-            }
-            with open(self._storage_path, 'w') as f:
+            with open(tmp_path, 'w') as f:
                 json.dump(data, f, indent=2)
-        except IOError:
-            pass
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp_path, self._storage_path)
+        except OSError as exc:
+            logger.error(
+                "Failed to save waypoints to %s: %s. "
+                "Newly created waypoints exist only in memory.",
+                self._storage_path, exc,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _generate_id(self) -> str:
         """Generate the next sequential waypoint ID.

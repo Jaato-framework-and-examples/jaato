@@ -12,6 +12,7 @@ Features:
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -60,6 +61,9 @@ class BackupInfo:
             "diverged_from": self.diverged_from,
             "next_waypoint": self.next_waypoint,
         }
+
+
+logger = logging.getLogger(__name__)
 
 
 class BackupManager:
@@ -151,18 +155,42 @@ class BackupManager:
             self._backup_metadata = {}
 
     def _save_metadata(self) -> None:
-        """Save backup metadata to disk."""
+        """Save backup metadata to disk atomically.
+
+        Uses tmp file + fsync + rename so a crash during save can't
+        leave the metadata file half-written.  On failure, logs an
+        error — silent swallowing previously hid orphaned-backup
+        scenarios where the backup file existed but the metadata
+        pointing to it was lost.
+        """
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
+        data = {
+            str(bp): info.to_dict()
+            for bp, info in self._backup_metadata.items()
+        }
+        tmp_path = self._metadata_path.with_suffix(
+            self._metadata_path.suffix + ".tmp"
+        )
         try:
-            data = {
-                str(bp): info.to_dict()
-                for bp, info in self._backup_metadata.items()
-            }
-            with open(self._metadata_path, 'w', encoding='utf-8') as f:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
-        except IOError:
-            pass
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp_path, self._metadata_path)
+        except OSError as exc:
+            logger.error(
+                "Failed to save backup metadata to %s: %s. "
+                "Existing backup files may become orphaned.",
+                self._metadata_path, exc,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def set_current_waypoint(self, waypoint_id: str) -> None:
         """Set the current waypoint ID for tagging new backups.
