@@ -8,6 +8,7 @@ from ..policy_config import (
     generate_default_config_safe,
     get_default_policy_config_path,
     load_policy_config,
+    parse_policy_data,
     resolve_policy_config_path,
 )
 from ..types import (
@@ -1082,3 +1083,132 @@ class TestSeverityThresholdsDetectorIntegration:
         assert len(detected) == 4
         for p in detected:
             assert p.severity == PatternSeverity.MINOR
+
+
+class TestProfileSuppliedConfig:
+    """Tests for ``plugin_configs.reliability`` from a SubagentProfile.
+
+    Profile config is delivered to the plugin via ``initialize(config)``.
+    It must:
+      - override file-supplied ``pattern_detection`` fields one at a time
+        (not whole-config replacement)
+      - replace any file-supplied prerequisite policy with the same id
+      - survive a subsequent ``load_file_policies()`` reload
+    """
+
+    def test_parse_policy_data_returns_kwargs_only(self):
+        """parse_policy_data returns only the fields explicitly present."""
+        kwargs, policies, warnings = parse_policy_data({
+            "pattern_detection": {"error_retry_threshold": 7},
+        })
+        assert kwargs == {"error_retry_threshold": 7}
+        assert policies == []
+        assert warnings == []
+
+    def test_parse_policy_data_handles_none(self):
+        kwargs, policies, warnings = parse_policy_data(None)
+        assert kwargs == {}
+        assert policies == []
+        assert warnings == []
+
+    def test_profile_pattern_detection_overrides_field_by_field(self, tmp_path):
+        """Profile field overrides apply on top of file fields, not replacing them."""
+        # File config sets two fields.
+        config_dir = tmp_path / ".jaato"
+        config_dir.mkdir()
+        (config_dir / "reliability-policies.json").write_text(json.dumps({
+            "pattern_detection": {
+                "error_retry_threshold": 5,
+                "repetitive_call_threshold": 6,
+            }
+        }))
+
+        plugin = ReliabilityPlugin()
+        plugin.set_workspace_path(str(tmp_path))
+
+        # Profile only overrides one of those fields.
+        plugin.initialize({
+            "pattern_detection": {"error_retry_threshold": 9},
+        })
+
+        # File field that profile didn't touch must still be present.
+        assert plugin._pattern_config.error_retry_threshold == 9
+        assert plugin._pattern_config.repetitive_call_threshold == 6
+
+    def test_profile_policy_replaces_file_policy_with_same_id(self, tmp_path):
+        """Profile policy with the same policy_id wins over the file one."""
+        config_dir = tmp_path / ".jaato"
+        config_dir.mkdir()
+        (config_dir / "reliability-policies.json").write_text(json.dumps({
+            "prerequisite_policies": [{
+                "policy_id": "plan_before_edit",
+                "prerequisite_tool": "createPlan",
+                "gated_tools": ["writeFile"],
+                "lookback_turns": 2,
+            }]
+        }))
+
+        plugin = ReliabilityPlugin()
+        plugin.set_workspace_path(str(tmp_path))
+        plugin.enable_pattern_detection(True)
+
+        plugin.initialize({
+            "prerequisite_policies": [{
+                "policy_id": "plan_before_edit",
+                "prerequisite_tool": "createPlan",
+                "gated_tools": ["writeFile", "Edit"],
+                "lookback_turns": 8,
+            }]
+        })
+
+        registered = plugin._pattern_detector._prerequisite_policies
+        assert "plan_before_edit" in registered
+        winning = registered["plan_before_edit"]
+        # Profile version had lookback 8 and an extra gated tool.
+        assert winning.lookback_turns == 8
+        assert "Edit" in winning.gated_tools
+
+    def test_profile_config_survives_file_reload(self, tmp_path):
+        """A subsequent load_file_policies() must not wipe profile config."""
+        config_dir = tmp_path / ".jaato"
+        config_dir.mkdir()
+        config_path = config_dir / "reliability-policies.json"
+        config_path.write_text(json.dumps({
+            "pattern_detection": {"error_retry_threshold": 5}
+        }))
+
+        plugin = ReliabilityPlugin()
+        plugin.set_workspace_path(str(tmp_path))
+        plugin.initialize({
+            "pattern_detection": {"error_retry_threshold": 11},
+            "prerequisite_policies": [{
+                "policy_id": "from_profile",
+                "prerequisite_tool": "createPlan",
+                "gated_tools": ["writeFile"],
+            }],
+        })
+        plugin.enable_pattern_detection(True)
+
+        assert plugin._pattern_config.error_retry_threshold == 11
+        assert "from_profile" in plugin._pattern_detector._prerequisite_policies
+
+        # Edit the file and reload — profile config must still win.
+        config_path.write_text(json.dumps({
+            "pattern_detection": {"error_retry_threshold": 3}
+        }))
+        plugin.load_file_policies()
+
+        assert plugin._pattern_config.error_retry_threshold == 11
+        assert "from_profile" in plugin._pattern_detector._prerequisite_policies
+
+    def test_profile_config_ignores_unrelated_keys(self, tmp_path):
+        """Framework-injected wiring keys in config dict are ignored cleanly."""
+        plugin = ReliabilityPlugin()
+        plugin.set_workspace_path(str(tmp_path))
+        # Mix wiring keys with reliability keys — must not crash.
+        plugin.initialize({
+            "agent_name": "fine_tuner",
+            "workspace_path": str(tmp_path),
+            "pattern_detection": {"error_retry_threshold": 4},
+        })
+        assert plugin._pattern_config.error_retry_threshold == 4

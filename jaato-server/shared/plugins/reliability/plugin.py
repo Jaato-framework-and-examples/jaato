@@ -1,5 +1,6 @@
 """Reliability plugin for tracking tool failures and adaptive trust."""
 
+import dataclasses
 import logging
 import os
 import subprocess
@@ -51,6 +52,7 @@ from .policy_config import (
     generate_default_config_safe,
     get_default_policy_config_path,
     load_policy_config,
+    parse_policy_data,
     resolve_policy_config_path,
 )
 
@@ -115,6 +117,18 @@ class ReliabilityPlugin:
         # Tracked separately so they can be unregistered on reload.
         self._file_policies: List[PrerequisitePolicy] = []
         self._file_policy_warnings: List[str] = []
+
+        # Profile-supplied prerequisite policies (from
+        # ``plugin_configs.reliability`` in the active SubagentProfile).
+        # Tracked separately so they survive ``load_file_policies()`` reloads
+        # and always take precedence over file-supplied policies with the
+        # same ``policy_id``.
+        self._profile_policies: List[PrerequisitePolicy] = []
+        # Field-level overrides for ``PatternDetectionConfig`` from the
+        # profile.  Only the fields explicitly present in the profile are
+        # stored here, so they can be re-applied via ``dataclasses.replace``
+        # whenever the file config is (re)loaded.
+        self._profile_pattern_kwargs: Dict[str, Any] = {}
 
         # Nudge injection
         self._nudge_config = NudgeConfig()
@@ -357,9 +371,23 @@ class ReliabilityPlugin:
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin.
 
-        Loads file-based policies from ``reliability-policies.json`` if
-        the config file exists at the workspace or user level.
+        Loads policies from two sources, in precedence order:
+
+        1. **Profile** (``plugin_configs.reliability`` in the active
+           ``SubagentProfile``) — passed via the ``config`` argument.
+        2. **File** (``.jaato/reliability-policies.json`` in the
+           workspace, falling back to ``~/.jaato/reliability-policies.json``).
+
+        Profile-supplied policies override file-supplied ones at the
+        ``policy_id`` level. Profile-supplied ``pattern_detection`` fields
+        override file-supplied fields one at a time (not whole-config
+        replacement), so a profile can tweak a single threshold without
+        having to redeclare the rest.
         """
+        # Capture profile-supplied policies first so they are applied on top
+        # of any file policies loaded below.
+        self._capture_profile_policies(config)
+
         count, warnings = self.load_file_policies()
         if count > 0:
             logger.info(
@@ -367,7 +395,53 @@ class ReliabilityPlugin:
             )
         for w in warnings:
             logger.warning("reliability-policies.json: %s", w)
+
+        if self._profile_policies or self._profile_pattern_kwargs:
+            logger.info(
+                "Reliability profile config: %d prerequisite policies, %d pattern_detection overrides",
+                len(self._profile_policies),
+                len(self._profile_pattern_kwargs),
+            )
+
         logger.info("Reliability plugin initialized")
+
+    def _capture_profile_policies(self, config: Optional[Dict[str, Any]]) -> None:
+        """Parse profile-supplied reliability config from ``initialize()``.
+
+        Reads the ``pattern_detection`` and ``prerequisite_policies`` keys
+        out of the plugin-config dict (if any) using the same parser the
+        file loader uses, and stashes them in ``self._profile_pattern_kwargs``
+        and ``self._profile_policies``.
+
+        These are *captured* here but only *applied* by
+        ``_apply_profile_overrides()`` — which runs after every file load,
+        ensuring profile config always wins regardless of when files are
+        (re)loaded.
+        """
+        if not config:
+            self._profile_pattern_kwargs = {}
+            self._profile_policies = []
+            return
+
+        # Accept either a flat dict matching the reliability-policies.json
+        # schema, or framework-injected wiring keys mixed in.  We only care
+        # about the two known top-level keys.
+        relevant = {
+            k: v
+            for k, v in config.items()
+            if k in ("pattern_detection", "prerequisite_policies")
+        }
+        if not relevant:
+            self._profile_pattern_kwargs = {}
+            self._profile_policies = []
+            return
+
+        pattern_kwargs, policies, warnings = parse_policy_data(relevant)
+        for w in warnings:
+            logger.warning("profile reliability config: %s", w)
+
+        self._profile_pattern_kwargs = pattern_kwargs
+        self._profile_policies = policies
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
@@ -627,7 +701,66 @@ class ReliabilityPlugin:
         if policies:
             logger.info("Loaded %d prerequisite policies from config file", len(policies))
 
+        # Profile-supplied config always wins — re-apply on top of whatever
+        # the file load just installed.  Cheap when the profile is empty.
+        self._apply_profile_overrides()
+
         return len(policies), warnings
+
+    def _apply_profile_overrides(self) -> None:
+        """Re-apply profile-supplied reliability config on top of file config.
+
+        Called after every file (re)load so that profile-supplied
+        ``pattern_detection`` field overrides and ``prerequisite_policies``
+        always take precedence.
+
+        For pattern detection: applies stored ``_profile_pattern_kwargs`` as
+        field-level overrides via ``dataclasses.replace`` on top of the
+        current ``_pattern_config`` (which already reflects file config if
+        any).  This is per-field, not whole-config replacement.
+
+        For prerequisite policies: registers each profile policy. If a
+        file policy with the same ``policy_id`` was just registered, it is
+        unregistered first so the profile entry replaces it.
+        """
+        # Pattern detection: field-level merge.
+        if self._profile_pattern_kwargs:
+            try:
+                merged = dataclasses.replace(
+                    self._pattern_config, **self._profile_pattern_kwargs
+                )
+            except TypeError as exc:
+                logger.warning(
+                    "Cannot apply profile pattern_detection overrides: %s", exc
+                )
+            else:
+                self.set_pattern_detection_config(merged)
+
+        # Prerequisite policies: replace any file policies with the same id,
+        # then register profile policies.
+        if not self._profile_policies:
+            return
+
+        profile_ids = {p.policy_id for p in self._profile_policies}
+        if self._pattern_detector and profile_ids:
+            for pid in profile_ids:
+                self._pattern_detector._prerequisite_policies.pop(pid, None)
+                # Clean up gated tool reverse index
+                for tool, plist in list(
+                    self._pattern_detector._gated_tool_to_policies.items()
+                ):
+                    self._pattern_detector._gated_tool_to_policies[tool] = [
+                        p for p in plist if p.policy_id != pid
+                    ]
+
+        # Also drop any queued (pre-detector) file policies with the same id.
+        if hasattr(self, "_queued_policies") and profile_ids:
+            self._queued_policies = [
+                p for p in self._queued_policies if p.policy_id not in profile_ids
+            ]
+
+        for policy in self._profile_policies:
+            self.register_prerequisite_policy(policy)
 
     def _unregister_file_policies(self) -> None:
         """Remove previously loaded file-based policies from the detector.

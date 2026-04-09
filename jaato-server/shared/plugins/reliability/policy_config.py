@@ -113,6 +113,44 @@ def get_default_policy_config_path(workspace_path: Optional[str] = None) -> Path
     return Path.home() / ".jaato" / POLICY_CONFIG_FILENAME
 
 
+def parse_policy_data(
+    data: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[PrerequisitePolicy], List[str]]:
+    """Parse a reliability-policies dict into structured pieces.
+
+    This is the pure (no file I/O) parsing entry point used by both the
+    file loader and the profile-config loader (``plugin_configs.reliability``
+    from a ``SubagentProfile``). Sharing one parser means both sources
+    accept identical schemas and produce identical validation warnings.
+
+    Args:
+        data: A dict matching the ``reliability-policies.json`` schema,
+            or None / empty dict (in which case nothing is parsed).
+
+    Returns:
+        A 3-tuple of:
+        - **pattern_kwargs** — a dict of *only* the ``PatternDetectionConfig``
+          fields explicitly present in ``data``. Empty if ``pattern_detection``
+          is absent. Callers can apply this on top of an existing config via
+          ``dataclasses.replace`` to get field-level overrides instead of
+          full-config replacement.
+        - **policies** — list of parsed ``PrerequisitePolicy`` objects from
+          ``prerequisite_policies`` (may be empty).
+        - **warnings** — list of human-readable warning/error strings
+          encountered during parsing (non-fatal).
+    """
+    if data is None:
+        return {}, [], []
+
+    if not isinstance(data, dict):
+        return {}, [], ["root element must be a JSON object"]
+
+    warnings: List[str] = []
+    pattern_kwargs = _parse_pattern_detection_kwargs(data.get("pattern_detection"), warnings)
+    policies = _parse_prerequisite_policies(data.get("prerequisite_policies"), warnings)
+    return pattern_kwargs, policies, warnings
+
+
 def load_policy_config(
     workspace_path: Optional[str] = None,
     config_path: Optional[Path] = None,
@@ -136,8 +174,6 @@ def load_policy_config(
     if path is None:
         return None, [], []
 
-    warnings: List[str] = []
-
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -148,11 +184,8 @@ def load_policy_config(
     except json.JSONDecodeError as exc:
         return None, [], [f"Invalid JSON in {path}: {exc}"]
 
-    if not isinstance(data, dict):
-        return None, [], [f"{path}: root element must be a JSON object"]
-
-    pattern_config = _parse_pattern_detection(data.get("pattern_detection"), warnings)
-    policies = _parse_prerequisite_policies(data.get("prerequisite_policies"), warnings)
+    pattern_kwargs, policies, warnings = parse_policy_data(data)
+    pattern_config = PatternDetectionConfig(**pattern_kwargs) if pattern_kwargs else None
 
     if warnings:
         for w in warnings:
@@ -251,17 +284,22 @@ def generate_default_config_safe() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _parse_pattern_detection(
+def _parse_pattern_detection_kwargs(
     section: Any,
     warnings: List[str],
-) -> Optional[PatternDetectionConfig]:
-    """Parse the ``pattern_detection`` section into a PatternDetectionConfig."""
+) -> Dict[str, Any]:
+    """Parse the ``pattern_detection`` section into a kwargs dict.
+
+    Returns only the fields explicitly present in ``section``, so callers
+    can decide whether to construct a fresh ``PatternDetectionConfig`` or
+    apply the kwargs as field-level overrides on top of an existing config.
+    """
     if section is None:
-        return None
+        return {}
 
     if not isinstance(section, dict):
         warnings.append("'pattern_detection' must be an object; ignored")
-        return None
+        return {}
 
     kwargs: Dict[str, Any] = {}
 
@@ -327,10 +365,7 @@ def _parse_pattern_detection(
         else:
             warnings.append("'error_retry_overrides' must be an object mapping tool names to integers")
 
-    if not kwargs:
-        return None
-
-    return PatternDetectionConfig(**kwargs)
+    return kwargs
 
 
 def _parse_prerequisite_policies(
