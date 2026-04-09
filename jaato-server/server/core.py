@@ -3014,14 +3014,17 @@ class JaatoServer:
         """Check if model is currently processing."""
         return self._model_running
 
-    def fork_ask(self, question: str, **kwargs) -> str:
-        """Fork the session's conversation and ask a question.
+    def get_session(self):
+        """Return the underlying ``JaatoSession`` for direct API access.
 
-        See ``JaatoSession.fork_ask()`` for full documentation.
+        Used by session-manipulation tools (e.g. the ``session_ops``
+        plugin's ``interrogate_session``) that compose ``get_history()``,
+        ``resolve_fork_point()``, and ``replay_messages()`` to drive
+        forks and replays from outside the session.
         """
-        if not self._jaato or not self._jaato.get_session():
+        if not self._jaato:
             raise RuntimeError("No active session")
-        return self._jaato.get_session().fork_ask(question, **kwargs)
+        return self._jaato.get_session()
 
     @property
     def is_waiting_for_input(self) -> bool:

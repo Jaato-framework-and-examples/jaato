@@ -58,6 +58,27 @@ def _trace(msg: str, include_traceback: bool = False) -> None:
         logger.debug(msg)
 
 
+def _missing_protocol_methods(plugin: Any, protocol_cls: type) -> List[str]:
+    """Return method/property names the protocol declares but ``plugin`` lacks.
+
+    Used to produce a useful error when a plugin fails an
+    ``isinstance(plugin, SomeProtocol)`` check — instead of just saying
+    "doesn't implement the protocol", we tell the developer exactly which
+    methods are missing.
+
+    Only inspects attributes declared directly on ``protocol_cls`` (not
+    inherited from ``Protocol`` itself), so the result is the *plugin
+    author's* contract, not Python's protocol machinery.
+    """
+    required: List[str] = []
+    for attr_name, attr_val in vars(protocol_cls).items():
+        if attr_name.startswith("_"):
+            continue
+        if callable(attr_val) or isinstance(attr_val, property):
+            required.append(attr_name)
+    return sorted(name for name in required if not hasattr(plugin, name))
+
+
 class PluginRegistry:
     """Manages plugin discovery, lifecycle, and tool exposure state.
 
@@ -543,12 +564,34 @@ class PluginRegistry:
                     plugin = module.create_plugin()
                     create_ms = (time.perf_counter() - t1) * 1000
 
-                    # Verify protocol implementation
+                    # Verify protocol implementation.  Failing the
+                    # protocol check used to be a debug-only trace, which
+                    # made the plugin invisibly disappear from the
+                    # registry — same footgun as missing PLUGIN_KIND.
+                    # Promote to a real warning that names the missing
+                    # methods so the author knows exactly what to add.
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        _trace(f" {name}: plugin does not implement ToolPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, ToolPlugin)
+                        logger.warning(
+                            "Plugin '%s' does not implement the ToolPlugin "
+                            "protocol — it will be silently skipped. Missing "
+                            "methods: %s. Add them to %s/plugin.py.",
+                            name,
+                            ", ".join(missing) if missing else "(unknown)",
+                            name,
+                        )
                         continue
                     if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
-                        _trace(f" {name}: plugin does not implement EnrichmentPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, EnrichmentPlugin)
+                        logger.warning(
+                            "Plugin '%s' does not implement the "
+                            "EnrichmentPlugin protocol — it will be "
+                            "silently skipped. Missing methods: %s. "
+                            "Add them to %s/plugin.py.",
+                            name,
+                            ", ".join(missing) if missing else "(unknown)",
+                            name,
+                        )
                         continue
 
                     self._plugins[plugin.name] = plugin

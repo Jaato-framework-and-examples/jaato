@@ -373,12 +373,13 @@ class JaatoSession:
         # history remains EPHEMERAL and can be freely collected.
         self._pinned_references: Dict[str, _PinnedReference] = {}
 
-        # Provider exclusion for fork_ask — serializes provider.complete()
-        # calls so a fork cannot run concurrently with the session's own
-        # provider call.  _fork_gate is open by default (session runs freely);
-        # fork_ask() clears it to block the session's next provider call.
+        # Provider exclusion for replay_messages() — serializes
+        # provider.complete() calls so an external replay/fork cannot run
+        # concurrently with the session's own provider call.
+        # _fork_gate is open by default (session runs freely);
+        # replay_messages() clears it to block the session's next provider call.
         # _provider_idle is set when no provider call is in flight;
-        # fork_ask() waits on it before running its own call.
+        # replay_messages() waits on it before running its own call.
         self._fork_gate = threading.Event()
         self._fork_gate.set()
         self._provider_idle = threading.Event()
@@ -1017,11 +1018,11 @@ class JaatoSession:
     def _provider_access(self):
         """Context manager that serializes access to the provider.
 
-        Waits for ``_fork_gate`` (blocks while a fork owns the provider),
-        then signals ``_provider_idle`` clear/set around the body.  Used
-        by every ``provider.complete()`` call site in the turn loop so
-        that ``fork_ask()`` can safely pause the session and run its own
-        provider call without concurrent access.
+        Waits for ``_fork_gate`` (blocks while an external replay owns the
+        provider), then signals ``_provider_idle`` clear/set around the
+        body.  Used by every ``provider.complete()`` call site in the turn
+        loop so that ``replay_messages()`` can safely pause the session
+        and run its own provider call without concurrent access.
         """
         self._fork_gate.wait()
         self._provider_idle.clear()
@@ -7089,42 +7090,42 @@ NOTES
     # Conversation fork
     # ------------------------------------------------------------------
 
-    def fork_ask(
+    def replay_messages(
         self,
-        question: str,
-        after_message: Optional[int] = None,
-        after_tool_call: Optional[str] = None,
-        after_timestamp: Optional[str] = None,
+        messages: List[Message],
+        *,
         timeout: float = 120.0,
     ) -> str:
-        """Fork the conversation at a specific point and ask a question.
+        """Run a one-shot completion against an arbitrary message list.
 
-        Copies the session's history (truncated at the fork point), appends
-        the question as a user message, calls the provider, and returns the
-        response text.  The session's actual history is not modified.
+        Public *capability primitive* for session-manipulation tools that
+        live outside the session (fork/interrogate/replay).  Acquires
+        exclusive provider access (so concurrent in-flight turn calls are
+        serialized — important for providers with strict concurrency
+        limits), runs ``provider.complete()`` against the supplied
+        ``messages``, and returns the model's text response.
 
-        Provider exclusion: if the session is mid-turn, ``fork_ask()``
-        waits for the current provider call to finish, pauses the
-        session's next call, runs the fork, then resumes the session.
-        This prevents concurrent provider calls that would hit rate
-        limits on providers with strict concurrency constraints.
+        Does **not** modify session history, ``_turn_accounting``, or any
+        other turn-loop state.  Callers are expected to have already
+        constructed the message list they want to replay (typically by
+        snapshotting ``get_history()``, slicing at a point returned by
+        ``resolve_fork_point()``, and appending whatever new messages
+        the replay should contain).
 
-        Fork point specifiers (use exactly one, or none for full history):
-            after_message: Include messages 0..N (by index).
-            after_tool_call: Include up to and including the message
-                containing this tool call ID.
-            after_timestamp: Include messages whose ``message_id``
-                precedes this HH:MM:SS or ISO timestamp (best-effort
-                correlation — depends on session metadata).
+        Provider exclusion: if the session is mid-turn, this waits for
+        the current provider call to finish, pauses the session's next
+        call, runs the replay, then resumes the session.
 
         Args:
-            question: The question to ask at the fork point.
+            messages: The full message list to send to the provider.
+                Caller owns construction; this method does not snapshot
+                or mutate session history.
             timeout: Maximum seconds to wait for exclusive provider
-                access.  Covers both waiting for an in-flight call to
-                finish and the fork's own ``provider.complete()`` call.
+                access.
 
         Returns:
-            The model's text response.
+            The model's text response (empty string if the response had
+            no text content).
 
         Raises:
             TimeoutError: If the provider is not available within
@@ -7132,20 +7133,8 @@ NOTES
             RuntimeError: If the session has no configured provider.
         """
         if not self._provider:
-            raise RuntimeError("Session not configured — cannot fork.")
+            raise RuntimeError("Session not configured — cannot replay.")
 
-        # Snapshot history (get_history returns a copy)
-        history = self.get_history()
-        if not history:
-            raise RuntimeError("Cannot fork an empty session.")
-
-        index = self._resolve_fork_point(
-            history, after_message, after_tool_call, after_timestamp
-        )
-        forked = history[:index + 1]
-        forked.append(Message.from_text(Role.USER, question))
-
-        # Acquire exclusive provider access
         self._fork_gate.clear()
         if not self._provider_idle.wait(timeout=timeout):
             self._fork_gate.set()
@@ -7155,7 +7144,7 @@ NOTES
 
         try:
             result = self._provider.complete(
-                forked,
+                messages,
                 system_instruction=self._system_instruction,
             )
             response = self._unwrap_turn_result(result)
@@ -7163,7 +7152,7 @@ NOTES
         finally:
             self._fork_gate.set()
 
-    def _resolve_fork_point(
+    def resolve_fork_point(
         self,
         history: List[Message],
         after_message: Optional[int] = None,

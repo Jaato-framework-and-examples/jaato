@@ -882,12 +882,12 @@ class SessionManager:
 
         logger.info(f"Server initialized successfully for session {session_id}")
 
-        # Wire SessionManager into the subagent plugin for cross-session
-        # interrogation (fork_ask on other daemon sessions).
+        # Wire SessionManager into the session_ops plugin so its
+        # interrogate_session tool can fork_ask other daemon sessions.
         if server.registry:
-            subagent_plugin = server.registry.get_plugin("subagent")
-            if subagent_plugin and hasattr(subagent_plugin, 'set_session_manager'):
-                subagent_plugin.set_session_manager(self)
+            session_ops_plugin = server.registry.get_plugin("session_ops")
+            if session_ops_plugin and hasattr(session_ops_plugin, 'set_session_manager'):
+                session_ops_plugin.set_session_manager(self)
 
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
