@@ -175,6 +175,10 @@ class CommandRouter:
                 self._handle_session_help(client_id)
                 return
 
+            elif cmd == "session.snapshot_workspace":
+                self._handle_snapshot_workspace(client_id, event.args, workspace_path)
+                return
+
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
                 self._handle_tools_command(client_id, cmd, event.args)
@@ -465,6 +469,65 @@ class CommandRouter:
             ("    reset             Clear current session history", "dim"),
         ]
         self._event_sink.send_event(client_id, HelpTextEvent(lines=help_lines))
+
+    # ------------------------------------------------------------------
+    # Workspace snapshot
+    # ------------------------------------------------------------------
+
+    def _handle_snapshot_workspace(
+        self,
+        client_id: str,
+        args: list,
+        requester_workspace: Optional[str],
+    ) -> None:
+        """Handle ``session.snapshot_workspace`` command.
+
+        Creates a read-only copy of a target session's workspace inside
+        the requesting session's workspace.  Runs outside any session's
+        AppArmor confinement (daemon-level command), so it can read the
+        target workspace even though the requester's confined tools
+        cannot.
+
+        Args:
+            client_id: The requesting client.
+            args: ``[target_session_id]`` — the session whose workspace
+                to snapshot.  Destination defaults to
+                ``<requester_workspace>/.jaato/replay/<uuid>/``.
+            requester_workspace: The requesting client's workspace path
+                (for computing the destination).
+        """
+        from jaato_sdk.events import SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, SystemMessageEvent(
+                message="Usage: session.snapshot_workspace <target_session_id>",
+                style="warning",
+            ))
+            return
+
+        target_session_id = args[0]
+        if not requester_workspace:
+            self._event_sink.send_event(client_id, SystemMessageEvent(
+                message="Cannot snapshot: requester has no workspace.",
+                style="error",
+            ))
+            return
+
+        try:
+            result = self._session_manager.snapshot_workspace(
+                target_session_id, requester_workspace,
+            )
+        except (ValueError, TimeoutError, OSError) as exc:
+            self._event_sink.send_event(client_id, SystemMessageEvent(
+                message=f"Snapshot failed: {exc}",
+                style="error",
+            ))
+            return
+
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=json.dumps(result),
+            style="info",
+        ))
 
     # ------------------------------------------------------------------
     # Tools commands

@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
 
 from jaato_sdk.plugins.base import UserCommand
 from .channels import ClarificationChannel, create_channel
@@ -217,6 +217,7 @@ class ClarificationPlugin:
                 },
                 category="communication",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             )
         ]
 

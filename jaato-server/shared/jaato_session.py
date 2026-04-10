@@ -208,6 +208,10 @@ class JaatoSession:
         self._runtime = runtime
         self._model_name = model
         self._provider_name_override = provider_name
+        # Session-level workspace path override.  When set, this session
+        # operates against a different workspace than the runtime's
+        # default (e.g. a worktree snapshot for fork-replay).
+        self._workspace_path: Optional[str] = None
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
@@ -384,6 +388,16 @@ class JaatoSession:
         self._fork_gate.set()
         self._provider_idle = threading.Event()
         self._provider_idle.set()
+
+        # Observation pause — blocks new send_message() calls while an
+        # external observer is inspecting the session's workspace or
+        # snapshotting its state.  Open (set) by default.
+        self._observation_lock = threading.Event()
+        self._observation_lock.set()
+        # Fires whenever a turn finishes (_is_running goes False).
+        # Used by pause_for_observation to wait for an in-progress turn.
+        self._turn_complete = threading.Event()
+        self._turn_complete.set()  # No turn in progress initially.
 
         # Streaming tool support
         self._stream_manager: Optional[StreamManager] = None
@@ -946,6 +960,37 @@ class JaatoSession:
 
         return collected_text
 
+    # ==================== Public Accessors ====================
+
+    @property
+    def workspace_path(self) -> Optional[str]:
+        """Return the workspace path for this session.
+
+        If a session-level override was provided via ``configure()``
+        (e.g. for a fork-replay worktree), returns that.  Otherwise
+        falls back to the runtime's registry workspace path.
+        """
+        if self._workspace_path is not None:
+            return self._workspace_path
+        if self._runtime and self._runtime.registry:
+            return getattr(self._runtime.registry, '_workspace_path', None)
+        return None
+
+    def get_system_instruction(self) -> Optional[str]:
+        """Return the materialised system instruction for this session.
+
+        After ``configure()`` this is the fully-assembled prompt that
+        the provider receives as ``system_instruction`` on every
+        ``provider.complete()`` call.  It incorporates base instructions,
+        plugin contributions, formatter guidance, and any
+        ``system_instruction_override`` that was supplied at configure time.
+
+        External tools (e.g. session interrogation, fork-replay) read
+        this to let the fine-tuner inspect or edit the materialised
+        prompt without having to reverse-engineer the assembly pipeline.
+        """
+        return self._system_instruction
+
     # ==================== Cancellation Support ====================
 
     @property
@@ -1030,6 +1075,42 @@ class JaatoSession:
             yield
         finally:
             self._provider_idle.set()
+
+    @contextmanager
+    def pause_for_observation(self, timeout: float = 30.0):
+        """Pause the session for external observation.
+
+        Waits for any in-progress turn to complete, then blocks new
+        ``send_message()`` calls and provider access until the context
+        manager exits.  Used by workspace snapshot, session
+        interrogation, and fork-replay primitives that need a stable
+        view of session state.
+
+        Within the paused window, the session's history, workspace
+        files, and plugin state are guaranteed not to change from
+        session-driven activity (the user can still type — their input
+        queues behind the observation lock and proceeds when the
+        context manager exits).
+
+        Args:
+            timeout: Maximum seconds to wait for the current turn
+                to finish before raising ``TimeoutError``.
+
+        Raises:
+            TimeoutError: If the session does not become idle within
+                *timeout* seconds.
+        """
+        if not self._turn_complete.wait(timeout=timeout):
+            raise TimeoutError(
+                f"Session still running after {timeout}s — cannot pause"
+            )
+        self._observation_lock.clear()
+        self._fork_gate.clear()
+        try:
+            yield
+        finally:
+            self._fork_gate.set()
+            self._observation_lock.set()
 
     def request_stop(self, reason: str = "") -> bool:
         """Request cancellation of the current message processing.
@@ -1118,6 +1199,8 @@ class JaatoSession:
         skip_provider: bool = False,
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
+        system_instruction_override: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1134,9 +1217,24 @@ class JaatoSession:
                               discoverable) are loaded into the initial context.
             skip_model_test: If True, skip the network call that verifies the
                 model responds during provider creation.
+            system_instruction_override: If provided, replaces the assembled
+                system instruction entirely — the multi-layer pipeline
+                (base + additional + plugins + formatters + presentation) is
+                still run (for side effects like instruction budget accounting)
+                but its result is discarded in favour of this string.  Used by
+                session-manipulation tools that want to replay a session with
+                an edited version of the materialised prompt.
+            workspace_path: If provided, overrides the runtime's workspace
+                path for this session.  Used by fork-replay to point a
+                temp session at a worktree snapshot without affecting other
+                sessions sharing the same runtime.
         """
         import time as _time
         _t_configure_start = _time.perf_counter()
+
+        # Session-level workspace override
+        if workspace_path is not None:
+            self._workspace_path = workspace_path
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
@@ -1293,6 +1391,8 @@ class JaatoSession:
             additional=system_instructions,
             presentation_context=self._presentation_context,
         )
+        if system_instruction_override is not None:
+            self._system_instruction = system_instruction_override
 
         # Store user commands
         if self._runtime.registry:
@@ -2724,6 +2824,11 @@ NOTES
         if not self._provider:
             raise RuntimeError("Session not configured. Call configure() first.")
 
+        # Block while an observation pause is active.  The observer
+        # holds the lock briefly (snapshot, interrogation, etc.) and
+        # releases it when done — the turn then proceeds normally.
+        self._observation_lock.wait()
+
         self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
 
         # Increment turn counter
@@ -3571,6 +3676,7 @@ NOTES
         # Initialize cancellation support
         self._cancel_token = CancelToken()
         self._is_running = True
+        self._turn_complete.clear()
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
 
@@ -4046,6 +4152,7 @@ NOTES
 
             # Clean up cancellation state and activity phase
             self._is_running = False
+            self._turn_complete.set()
             self._cancel_token = None
             self._set_activity_phase(ActivityPhase.IDLE)
 

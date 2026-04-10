@@ -2304,6 +2304,140 @@ class SessionManager:
         return None
 
     # =========================================================================
+    # Workspace Snapshot
+    # =========================================================================
+
+    def snapshot_workspace(
+        self,
+        target_session_id: str,
+        requester_workspace: str,
+    ) -> Dict[str, Any]:
+        """Copy a target session's workspace to the requester's replay area.
+
+        Pauses the target session for the duration of the copy, then
+        resumes it.  For git-managed workspaces, uses ``git archive``
+        for committed content and manually copies untracked files.  For
+        non-git workspaces, uses ``shutil.copytree``.
+
+        The snapshot is created inside the requester's workspace at
+        ``<requester_workspace>/.jaato/replay/<uuid>/`` so the
+        requester's AppArmor profile can access it without any
+        confinement changes.
+
+        Args:
+            target_session_id: The session whose workspace to snapshot.
+            requester_workspace: The requesting session's workspace
+                path (destination parent).
+
+        Returns:
+            Dict with ``snapshot_path``, ``source_session_id``, and
+            ``source_commit`` (``None`` if not a git repo).
+
+        Raises:
+            ValueError: If the target session is not found, has no
+                workspace, or if the workspace doesn't exist.
+            TimeoutError: If the target session cannot be paused.
+            OSError: If file operations fail.
+        """
+        import shutil
+        import subprocess
+        import uuid as _uuid
+
+        session = self.get_session(target_session_id)
+        if session is None:
+            raise ValueError(f"Session '{target_session_id}' not found")
+        workspace = session.workspace_path
+        if not workspace:
+            raise ValueError(
+                f"Session '{target_session_id}' has no workspace"
+            )
+        if not os.path.isdir(workspace):
+            raise ValueError(f"Workspace does not exist: {workspace}")
+
+        # Resolve the JaatoSession for pausing
+        jaato_session = session.server.get_session() if session.server else None
+
+        dest_dir = os.path.join(
+            requester_workspace, ".jaato", "replay", str(_uuid.uuid4()),
+        )
+        os.makedirs(dest_dir, exist_ok=True)
+
+        source_commit: Optional[str] = None
+        is_git = os.path.isdir(os.path.join(workspace, ".git"))
+
+        # Pause the target session while we copy
+        if jaato_session:
+            ctx = jaato_session.pause_for_observation(timeout=30.0)
+            ctx.__enter__()
+        else:
+            ctx = None
+
+        try:
+            if is_git:
+                # Committed files via git archive
+                archive = subprocess.run(
+                    ["git", "-C", workspace, "archive", "HEAD"],
+                    capture_output=True,
+                    check=True,
+                )
+                subprocess.run(
+                    ["tar", "-x", "-C", dest_dir],
+                    input=archive.stdout,
+                    check=True,
+                )
+                # Capture current commit
+                rev = subprocess.run(
+                    ["git", "-C", workspace, "rev-parse", "HEAD"],
+                    capture_output=True, text=True,
+                )
+                source_commit = rev.stdout.strip() if rev.returncode == 0 else None
+
+                # Copy untracked files
+                status = subprocess.run(
+                    ["git", "-C", workspace, "status", "--porcelain"],
+                    capture_output=True, text=True,
+                )
+                if status.returncode == 0:
+                    for line in status.stdout.splitlines():
+                        if line.startswith("??"):
+                            rel_path = line[3:].strip()
+                            src = os.path.join(workspace, rel_path)
+                            dst = os.path.join(dest_dir, rel_path)
+                            if os.path.isdir(src):
+                                shutil.copytree(
+                                    src, dst,
+                                    ignore=shutil.ignore_patterns(
+                                        "__pycache__", "*.pyc",
+                                    ),
+                                )
+                            elif os.path.isfile(src):
+                                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                                shutil.copy2(src, dst)
+            else:
+                # Non-git: plain copytree
+                shutil.copytree(
+                    workspace, dest_dir,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(
+                        ".git", ".venv", "__pycache__", "node_modules",
+                        "*.pyc",
+                    ),
+                )
+        finally:
+            if ctx is not None:
+                ctx.__exit__(None, None, None)
+
+        logger.info(
+            "Snapshot workspace '%s' → '%s' (commit=%s)",
+            workspace, dest_dir, source_commit,
+        )
+        return {
+            "snapshot_path": dest_dir,
+            "source_session_id": target_session_id,
+            "source_commit": source_commit,
+        }
+
+    # =========================================================================
     # Turn Tracking for Recovery
     # =========================================================================
 

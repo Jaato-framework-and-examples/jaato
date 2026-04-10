@@ -21,7 +21,7 @@ from jaato_sdk.plugins.todo.models import (
     PlanStatus, StepStatus, TodoPlan, TodoStep,
     TaskEventType, TaskEvent, TaskRef, EventFilter, Subscription
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
+from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent, TRAIT_REPLAY_SAFE
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
@@ -345,6 +345,7 @@ class TodoPlugin:
                     format="yaml",
                     template="# Edit the plan below. Steps are executed in order.\n",
                 ),
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="startPlan",
@@ -364,6 +365,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="setStepStatus",
@@ -399,6 +401,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="getPlanStatus",
@@ -415,6 +418,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="completePlan",
@@ -438,6 +442,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="addStep",
@@ -462,6 +467,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             # === Cross-agent collaboration tools ===
             ToolSchema(
@@ -546,6 +552,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="completeStepWithOutput",
@@ -589,6 +596,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="getBlockedSteps",
@@ -612,6 +620,7 @@ class TodoPlugin:
                 },
                 category="coordination",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 

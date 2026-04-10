@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.utils.gitignore import GitignoreParser
@@ -347,6 +347,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                 },
                 category="search",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="grep_content",
@@ -408,6 +409,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                 },
                 category="search",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 

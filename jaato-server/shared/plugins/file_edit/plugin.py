@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
@@ -320,6 +320,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="updateFile",
@@ -386,7 +387,7 @@ class FileEditPlugin:
                     parameters=["old", "new", "new_content"],
                     format="diff",
                 ),
-                traits=frozenset({TRAIT_FILE_WRITER}),
+                traits=frozenset({TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="writeNewFile",
@@ -424,7 +425,7 @@ class FileEditPlugin:
                     format="text",
                     template="# Edit the file content below. Save and exit to continue.\n",
                 ),
-                traits=frozenset({TRAIT_FILE_WRITER}),
+                traits=frozenset({TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="removeFile",
@@ -442,6 +443,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="moveFile",
@@ -468,6 +470,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="renameFile",
@@ -494,6 +497,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="undoFileChange",
@@ -511,6 +515,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="multiFileEdit",
@@ -573,6 +578,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="findAndReplace",
@@ -607,6 +613,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="restoreFile",
@@ -628,6 +635,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="listBackups",
@@ -644,6 +652,7 @@ class FileEditPlugin:
                 },
                 category="filesystem",
                 discoverability="discoverable",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 

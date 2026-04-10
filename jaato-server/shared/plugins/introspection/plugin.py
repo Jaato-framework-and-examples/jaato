@@ -12,7 +12,7 @@ The plugin supports deferred tool loading for token economy:
 import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TOOL_CATEGORIES
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TOOL_CATEGORIES, TRAIT_REPLAY_SAFE
 from ..streaming import StreamingCapable
 
 # Thread-local storage for session reference per agent context
@@ -128,6 +128,7 @@ class IntrospectionPlugin:
                 },
                 category="system",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="get_tool_schemas",
@@ -148,6 +149,7 @@ class IntrospectionPlugin:
                 },
                 category="system",
                 discoverability="core",
+                traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 

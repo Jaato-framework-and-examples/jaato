@@ -74,6 +74,35 @@ Usage::
 """
 
 
+TRAIT_REPLAY_SAFE = "replay_safe"
+"""Trait for tools safe to include in replay / fork sessions.
+
+Tools declaring this trait produce only workspace-scoped side effects
+(file reads and writes inside the session's workspace directory) or
+no side effects at all.  Session-manipulation primitives use the trait
+to filter the tool set when spawning disposable replay sessions —
+tools without the trait are excluded so the replay cannot trigger
+irreversible external actions (network calls, MCP mutations, messages
+sent to external services, etc.).
+
+Safe examples: filesystem reads, introspection, file edits
+(worktree-scoped), todo management, clarification, reliability checks.
+
+Unsafe examples: CLI (arbitrary commands), web_search, web_fetch, MCP,
+interactive_shell, webhook, service_connector.
+
+Usage::
+
+    from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+
+    ToolSchema(
+        name="readFile",
+        ...,
+        traits=frozenset({TRAIT_REPLAY_SAFE}),
+    )
+"""
+
+
 class Role(str, Enum):
     """Message role in a conversation."""
     USER = "user"

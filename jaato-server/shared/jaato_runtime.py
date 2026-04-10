@@ -793,6 +793,8 @@ class JaatoRuntime:
         provider_name: Optional[str] = None,
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
+        system_instruction_override: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -816,6 +818,16 @@ class JaatoRuntime:
                               discoverable) are loaded into the initial context.
             skip_model_test: If True, skip the network call that verifies the
                 model responds during provider creation.
+            system_instruction_override: If provided, replaces the fully-assembled
+                system instruction with this exact string.  The normal assembly
+                pipeline still runs (for side effects like instruction budget
+                accounting) but its output is discarded.  Used by
+                session-manipulation tools that replay a session with an
+                edited version of the materialised prompt.
+            workspace_path: If provided, overrides the runtime's workspace
+                path for this session.  Used by fork-replay to point a temp
+                session at a worktree snapshot without affecting other sessions
+                sharing the same runtime.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -844,6 +856,8 @@ class JaatoRuntime:
             plugin_configs=plugin_configs,
             preloaded_plugins=preloaded_plugins,
             skip_model_test=skip_model_test,
+            system_instruction_override=system_instruction_override,
+            workspace_path=workspace_path,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 
