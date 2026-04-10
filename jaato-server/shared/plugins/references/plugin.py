@@ -133,6 +133,7 @@ class ReferencesPlugin:
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("knowledge", "Reference sources, documentation, context retrieval")
         self._trace(f"set_plugin_registry: registry set")
 
     def set_workspace_path(self, path: str) -> None:

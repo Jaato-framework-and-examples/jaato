@@ -178,6 +178,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("search", "Search files, content, patterns across the codebase")
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.

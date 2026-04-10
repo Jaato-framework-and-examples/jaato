@@ -1126,6 +1126,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("memory", "Persistent memory, notes, context storage across sessions")
         self._trace(f"set_plugin_registry: registry set")
 
     # ==================== Tool Result Enrichment ====================

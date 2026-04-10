@@ -336,6 +336,10 @@ class MCPToolPlugin:
             # Note: Unlike LSP, we don't force reload here since MCP servers
             # may already be connected. Use 'mcp reload' to apply changes.
 
+    def set_plugin_registry(self, registry) -> None:
+        """Called during expose_tool(). Registers the MCP category."""
+        registry.register_category("MCP", "Tools from external MCP (Model Context Protocol) servers")
+
     def shutdown(self) -> None:
         """Shutdown the MCP plugin and clean up resources."""
         self._trace("shutdown: cleaning up")

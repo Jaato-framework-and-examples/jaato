@@ -87,6 +87,10 @@ class ClarificationPlugin:
         self._initialized = True
         self._trace(f"initialize: channel={channel_type}")
 
+    def set_plugin_registry(self, registry) -> None:
+        """Called during expose_tool(). Registers the communication category."""
+        registry.register_category("communication", "Ask user questions, request clarification, get input")
+
     def shutdown(self) -> None:
         """Clean up plugin resources."""
         self._trace("shutdown: cleaning up")

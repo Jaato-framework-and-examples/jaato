@@ -253,6 +253,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("system", "Shell commands, environment, system operations")
         self._trace("set_plugin_registry: registry set")
 
     def shutdown(self) -> None:

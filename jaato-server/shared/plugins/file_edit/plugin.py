@@ -171,6 +171,7 @@ class FileEditPlugin:
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("filesystem", "Read, write, search, and navigate files and directories")
         self._trace("set_plugin_registry: registry set")
 
     @property

@@ -122,6 +122,10 @@ class WebhookPlugin:
             workspace_path=self._workspace_path,
         )
 
+    def set_plugin_registry(self, registry) -> None:
+        """Called during expose_tool(). Registers the integration category."""
+        registry.register_category("integration", "Webhooks, external event listeners, inbound triggers")
+
     def shutdown(self) -> None:
         """Stop HTTP server and clean up all subscriptions."""
         if self._http_server:

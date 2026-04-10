@@ -195,6 +195,7 @@ class PromptLibraryPlugin:
         (e.g., after fetching new prompts).
         """
         self._plugin_registry = registry
+        registry.register_category("prompt", "Reusable prompt templates and skills")
         self._trace(f"set_plugin_registry: {type(registry).__name__}")
 
     def set_on_tools_changed(self, callback: Callable[[List[str]], None]) -> None:

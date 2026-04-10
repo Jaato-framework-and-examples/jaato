@@ -134,6 +134,7 @@ class WaypointPlugin:
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("coordination", "Task tracking, TODO, DELEGATE work, SUBAGENTS, PARALLEL execution")
 
     def _ensure_manager(self) -> bool:
         """Ensure the manager is created, lazily initializing if needed.

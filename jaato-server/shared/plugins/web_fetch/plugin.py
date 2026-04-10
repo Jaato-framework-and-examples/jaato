@@ -118,6 +118,10 @@ class WebFetchPlugin(BackgroundCapableMixin):
         self._initialized = True
         self._trace(f"initialize: timeout={self._timeout}, max_length={self._max_length}")
 
+    def set_plugin_registry(self, registry) -> None:
+        """Called during expose_tool(). Registers the web category."""
+        registry.register_category("web", "Fetch URLs, web search, external API access")
+
     def shutdown(self) -> None:
         """Shutdown the web fetch plugin."""
         self._trace("shutdown: clearing cache")

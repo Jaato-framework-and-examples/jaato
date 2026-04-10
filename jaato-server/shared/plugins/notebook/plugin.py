@@ -277,6 +277,7 @@ class NotebookPlugin(StreamingCapable):
             registry: The PluginRegistry instance.
         """
         self._plugin_registry = registry
+        registry.register_category("code", "Code analysis, editing, refactoring, and LSP diagnostics")
         self._rebuild_code_analyzer()
         self._maybe_build_tool_bindings()
         self._trace("set_plugin_registry: registry set")

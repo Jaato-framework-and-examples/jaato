@@ -169,6 +169,12 @@ class PluginRegistry:
         # Bootstrap timing: plugin name -> timing data
         self._discovery_timings: Dict[str, dict] = {}
         self._init_timings: Dict[str, dict] = {}
+        # Category descriptions: category name -> human-readable description.
+        # Starts empty — each plugin registers its own category via
+        # ``register_category()`` in its ``set_plugin_registry()`` hook.
+        # This ensures premium and third-party plugins can introduce new
+        # categories without touching the registry's source code.
+        self._category_descriptions: Dict[str, str] = {}
 
     def set_output_callback(
         self,
@@ -658,6 +664,37 @@ class PluginRegistry:
         if plugin and hasattr(plugin, 'get_config_schema'):
             return plugin.get_config_schema()
         return {}
+
+    def register_category(self, name: str, description: str) -> None:
+        """Register (or update) a tool category description.
+
+        Plugins call this during ``initialize()`` when they introduce
+        tools in a category not covered by the built-in list.  The
+        introspection plugin reads ``get_category_descriptions()`` to
+        populate the ``list_tools`` category summary, so registering
+        here ensures new categories get a human-readable description
+        instead of an empty string.
+
+        Calling with a ``name`` that already exists overwrites the
+        description — last-register-wins.  This lets premium plugins
+        refine a built-in category's description if needed.
+
+        Args:
+            name: Category name (must match the ``category`` field on
+                the plugin's ``ToolSchema`` declarations).
+            description: Short human-readable description shown in the
+                ``list_tools`` category summary.
+        """
+        self._category_descriptions[name] = description
+
+    def get_category_descriptions(self) -> Dict[str, str]:
+        """Return all registered category descriptions.
+
+        Includes built-in categories seeded at registry creation time
+        and any additional categories registered by plugins via
+        ``register_category()``.
+        """
+        return dict(self._category_descriptions)
 
     def get_plugin(self, name: str) -> Optional[AnyPlugin]:
         """Get a plugin by name, or None if not found.

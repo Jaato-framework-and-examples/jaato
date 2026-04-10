@@ -81,6 +81,7 @@ class IntrospectionPlugin:
             registry: The PluginRegistry instance.
         """
         self._registry = registry
+        registry.register_category("system", "Shell commands, environment, system operations")
 
     def set_session(self, session) -> None:
         """Receive the session for tool activation.
@@ -315,19 +316,14 @@ class IntrospectionPlugin:
 
         # If no category specified, return category summary only
         if not category:
-            # Category descriptions to help models understand what's available
-            category_hints = {
-                "filesystem": "Read, write, search, and navigate files and directories",
-                "code": "Code analysis, editing, refactoring, and LSP diagnostics",
-                "search": "Search files, content, patterns across the codebase",
-                "memory": "Persistent memory, notes, context storage across sessions",
-                "coordination": "Task tracking, TODO, DELEGATE work, SUBAGENTS, PARALLEL execution",
-                "system": "Shell commands, environment, system operations",
-                "web": "Fetch URLs, web search, external API access",
-                "communication": "Ask user questions, request clarification, get input",
-                "prompt": "Reusable prompt templates and skills",
-                "MCP": "Tools from external MCP (Model Context Protocol) servers",
-            }
+            # Read category descriptions from the registry (seeded with
+            # built-in categories at init, extended by plugins via
+            # registry.register_category() during their initialize()).
+            category_hints = (
+                self._registry.get_category_descriptions()
+                if self._registry
+                else {}
+            )
 
             category_counts: Dict[str, int] = {}
             for schema in all_schemas:
