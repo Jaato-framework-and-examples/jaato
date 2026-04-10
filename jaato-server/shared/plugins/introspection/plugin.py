@@ -314,17 +314,17 @@ class IntrospectionPlugin:
         # Get tool schemas filtered by session's allowed plugins
         all_schemas = self._get_session_allowed_schemas()
 
+        # Read category descriptions from the registry — needed by both
+        # the summary path (no category) and the validation path (category
+        # specified) so it must be computed before the branch.
+        category_hints = (
+            self._registry.get_category_descriptions()
+            if self._registry
+            else {}
+        )
+
         # If no category specified, return category summary only
         if not category:
-            # Read category descriptions from the registry (seeded with
-            # built-in categories at init, extended by plugins via
-            # registry.register_category() during their initialize()).
-            category_hints = (
-                self._registry.get_category_descriptions()
-                if self._registry
-                else {}
-            )
-
             category_counts: Dict[str, int] = {}
             for schema in all_schemas:
                 cat = schema.category or "uncategorized"
