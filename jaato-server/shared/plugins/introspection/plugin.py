@@ -347,7 +347,21 @@ class IntrospectionPlugin:
                 },
             }
 
-        # Category specified - return tools in that category
+        # Category specified - return tools in that category.
+        # Validate that the category exists (either has tools or is
+        # registered via register_category) to help the model catch
+        # typos and discover that some categories may only appear
+        # after deferred tool loading.
+        known_categories = set(category_hints.keys())
+        for schema in all_schemas:
+            known_categories.add(schema.category or "uncategorized")
+        if category not in known_categories:
+            return {
+                "error": f"Unknown category '{category}'.",
+                "available_categories": sorted(known_categories),
+                "hint": "Call list_tools() without arguments to see all categories.",
+            }
+
         tools = []
         for schema in all_schemas:
             # Apply category filter (treat None as "uncategorized")
