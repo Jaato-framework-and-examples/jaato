@@ -330,14 +330,22 @@ class IntrospectionPlugin:
                 cat = schema.category or "uncategorized"
                 category_counts[cat] = category_counts.get(cat, 0) + 1
 
+            # Merge in registered categories that have no loaded tools
+            # yet (e.g. deferred/discoverable tools from premium plugins).
+            # They appear with tool_count=0 so the model knows they exist
+            # and can call list_tools(category='<name>') to trigger loading.
+            all_categories = dict.fromkeys(
+                sorted(set(category_counts.keys()) | set(category_hints.keys()))
+            )
+
             return {
                 "categories": [
                     {
                         "name": cat,
-                        "tool_count": count,
+                        "tool_count": category_counts.get(cat, 0),
                         "description": category_hints.get(cat, ""),
                     }
-                    for cat, count in sorted(category_counts.items())
+                    for cat in all_categories
                 ],
                 "total_tools": len(all_schemas),
                 "hint": "Call list_tools(category='<name>') to see tools in a specific category.",
