@@ -1036,9 +1036,11 @@ class JaatoWSServer:
                 if not hasattr(self, '_pending_client_tools'):
                     self._pending_client_tools = {}
                 self._pending_client_tools[client_id] = event.tools
+                self._pending_client_categories = getattr(self, '_pending_client_categories', {})
+                self._pending_client_categories[client_id] = event.categories
                 logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
             else:
-                self._register_client_tools(client_id, event.tools)
+                self._register_client_tools(client_id, event.tools, event.categories)
             return
 
         # Handle client-side tool execution result
@@ -1123,7 +1125,8 @@ class JaatoWSServer:
                     and hasattr(self, '_pending_client_tools')
                     and client_id in self._pending_client_tools):
                 pending = self._pending_client_tools.pop(client_id)
-                self._register_client_tools(client_id, pending)
+                pending_cats = getattr(self, '_pending_client_categories', {}).pop(client_id, None)
+                self._register_client_tools(client_id, pending, pending_cats)
                 # (runtime refresh happens inside _register_client_tools)
 
         except Exception as exc:
@@ -1154,12 +1157,23 @@ class JaatoWSServer:
     # Client-side tool execution
     # =========================================================================
 
-    def _register_client_tools(self, client_id: str, tools: list) -> None:
+    def _register_client_tools(
+        self,
+        client_id: str,
+        tools: list,
+        categories: Optional[Dict[str, str]] = None,
+    ) -> None:
         """Register client-provided tools as proxies in the session's registry.
 
         Each tool becomes a real tool in the model's tool list. When the model
         calls it, the executor sends a ``tool.execute_request`` to the WS
         client and waits for ``tool.execute_result``.
+
+        Args:
+            client_id: The WebSocket client that owns the tools.
+            tools: List of tool definition dicts.
+            categories: Optional mapping of category name → description
+                for categories introduced by these client tools.
         """
         if not self._event_sink_adapter:
             return
@@ -1268,6 +1282,13 @@ class JaatoWSServer:
                 "Registered client tool '%s' for client %s (timeout=%ss, auto_approve=%s)",
                 tool_name, client_id, timeout, auto_approve,
             )
+
+        # Register client-provided category descriptions so list_tools
+        # shows them instead of empty strings.
+        if categories and isinstance(categories, dict):
+            for cat_name, cat_desc in categories.items():
+                if cat_name and cat_desc:
+                    registry.register_category(cat_name, cat_desc)
 
         # Refresh the runtime's tool schema list so the model sees new tools
         if session.server and session.server._jaato:

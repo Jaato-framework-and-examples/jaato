@@ -1065,6 +1065,10 @@ class ToolsRegisterClientRequest(Event):
     type: EventType = field(default=EventType.TOOLS_REGISTER_CLIENT)
     tools: List[Dict[str, Any]] = field(default_factory=list)
     # ^ List of {name, description, parameters: {type:'object', properties, required}, timeout}
+    categories: Dict[str, str] = field(default_factory=dict)
+    # ^ Optional mapping of category name → description for categories
+    # introduced by client-side tools.  Registered via
+    # registry.register_category() so list_tools shows descriptions.
 
 
 @dataclass
