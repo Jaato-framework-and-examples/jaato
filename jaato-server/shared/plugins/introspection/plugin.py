@@ -115,17 +115,25 @@ class IntrospectionPlugin:
             ToolSchema(
                 name="list_tools",
                 description="Discover available tools. "
-                           "Without a category: returns available categories with tool counts. "
-                           "With a category: returns tools in that category with brief descriptions.",
+                           "Without a category: returns available categories with tool counts and indices. "
+                           "With a category (by name or index): returns tools in that category.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "category": {
                             "type": "string",
-                            "description": f"Category to list tools from. "
+                            "description": f"Category name to list tools from. "
                                          f"If omitted, returns category summary. "
                                          f"Categories: {', '.join(known_cats)}",
                             "enum": known_cats,
+                        },
+                        "category_index": {
+                            "type": "integer",
+                            "description": (
+                                "Alternative to 'category': use the numeric index "
+                                "from the category summary (1-based). Useful when "
+                                "the category name is hard to pass as a string."
+                            ),
                         },
                         "verbose": {
                             "type": "boolean",
@@ -317,6 +325,7 @@ class IntrospectionPlugin:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
         category = args.get("category")
+        category_index = args.get("category_index")
         verbose = args.get("verbose", False)
 
         # Get tool schemas filtered by session's allowed plugins
@@ -330,6 +339,23 @@ class IntrospectionPlugin:
             if self._registry
             else {}
         )
+
+        # Resolve category_index → category name.  The index is 1-based
+        # and corresponds to the sorted order shown in the summary.
+        if category_index is not None and category is None:
+            # Build the sorted category list (same order as the summary)
+            global_cats: Set[str] = set(category_hints.keys())
+            for schema in self._registry.get_exposed_tool_schemas():
+                global_cats.add(schema.category or "uncategorized")
+            sorted_cats = sorted(global_cats)
+            idx = int(category_index) - 1  # convert 1-based → 0-based
+            if 0 <= idx < len(sorted_cats):
+                category = sorted_cats[idx]
+            else:
+                return {
+                    "error": f"Invalid category_index {category_index} "
+                             f"(valid range: 1–{len(sorted_cats)}).",
+                }
 
         # If no category specified, return category summary only
         if not category:
@@ -369,11 +395,12 @@ class IntrospectionPlugin:
             )
 
             categories_list = []
-            for cat in all_categories:
+            for idx, cat in enumerate(all_categories, 1):
                 available = session_counts.get(cat, 0)
                 total = global_counts.get(cat, 0)
 
                 entry: Dict[str, Any] = {
+                    "index": idx,
                     "name": cat,
                     "tool_count": available,
                     "description": category_hints.get(cat, ""),
@@ -409,7 +436,7 @@ class IntrospectionPlugin:
             return {
                 "categories": categories_list,
                 "total_tools": len(all_schemas),
-                "hint": "Call list_tools(category='<name>') to see tools in a specific category.",
+                "hint": "Call list_tools(category='<name>') or list_tools(category_index=<N>) to see tools in a specific category.",
                 "_telemetry": {
                     "jaato.introspection.operation": "list_tools",
                     "jaato.introspection.total_tools": len(all_schemas),
