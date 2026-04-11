@@ -409,12 +409,12 @@ class IntrospectionPlugin:
             }
 
         # Category specified - return tools in that category.
-        # Validate that the category exists (either has tools or is
-        # registered via register_category) to help the model catch
-        # typos and discover that some categories may only appear
-        # after deferred tool loading.
+        # Validate that the category exists using the GLOBAL schema set
+        # (not the session-filtered one) so categories from plugins not
+        # in this session's profile are still recognised — they showed
+        # up in the summary and the model may want to drill into them.
         known_categories = set(category_hints.keys())
-        for schema in all_schemas:
+        for schema in self._registry.get_exposed_tool_schemas():
             known_categories.add(schema.category or "uncategorized")
         if category not in known_categories:
             return {
@@ -423,8 +423,15 @@ class IntrospectionPlugin:
                 "hint": "Call list_tools() without arguments to see all categories.",
             }
 
+        # Build the set of tool names visible to THIS session so we can
+        # mark tools from non-profile plugins as "not available".
+        session_tool_names = {s.name for s in all_schemas}
+
+        # Iterate the GLOBAL schema set so tools from plugins not in
+        # this session's profile are still listed (with an availability
+        # note).  This matches the summary which also uses global counts.
         tools = []
-        for schema in all_schemas:
+        for schema in self._registry.get_exposed_tool_schemas():
             # Apply category filter (treat None as "uncategorized")
             schema_category = schema.category or "uncategorized"
             if schema_category != category:
@@ -452,6 +459,11 @@ class IntrospectionPlugin:
                 "enabled": is_enabled,
                 "streaming": supports_streaming,
             }
+
+            # Mark tools the session can't call
+            if schema.name not in session_tool_names:
+                tool_entry["available"] = False
+                tool_entry["reason"] = f"requires plugin '{plugin_source}'"
 
             if verbose:
                 tool_entry["description"] = schema.description
