@@ -103,6 +103,14 @@ class IntrospectionPlugin:
         Both tools are marked as 'core' discoverability since they're required
         for the deferred tool loading mechanism to work.
         """
+        # Build the category enum dynamically from the registry so it
+        # includes categories registered by premium / third-party plugins.
+        # Falls back to the static SDK list if the registry isn't wired yet.
+        if self._registry:
+            known_cats = sorted(self._registry.get_category_descriptions().keys())
+        else:
+            known_cats = list(TOOL_CATEGORIES)
+
         return [
             ToolSchema(
                 name="list_tools",
@@ -116,8 +124,8 @@ class IntrospectionPlugin:
                             "type": "string",
                             "description": f"Category to list tools from. "
                                          f"If omitted, returns category summary. "
-                                         f"Categories: {', '.join(TOOL_CATEGORIES)}",
-                            "enum": TOOL_CATEGORIES,
+                                         f"Categories: {', '.join(known_cats)}",
+                            "enum": known_cats,
                         },
                         "verbose": {
                             "type": "boolean",
