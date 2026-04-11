@@ -2314,15 +2314,20 @@ class SessionManager:
     ) -> Dict[str, Any]:
         """Copy a target session's workspace to the requester's replay area.
 
-        Pauses the target session for the duration of the copy, then
-        resumes it.  For git-managed workspaces, uses ``git archive``
-        for committed content and manually copies untracked files.  For
-        non-git workspaces, uses ``shutil.copytree``.
+        For git-managed workspaces, uses ``git archive`` for committed
+        content and manually copies untracked files.  For non-git
+        workspaces, uses ``shutil.copytree``.
 
         The snapshot is created inside the requester's workspace at
         ``<requester_workspace>/.jaato/replay/<uuid>/`` so the
         requester's AppArmor profile can access it without any
         confinement changes.
+
+        The target session is NOT paused during the copy.  The files
+        the fine-tuner cares about (profiles, agent markdown, prompts,
+        service configs) are written once at session creation and never
+        modified during a turn, so a consistent snapshot does not
+        require pausing.
 
         Args:
             target_session_id: The session whose workspace to snapshot.
@@ -2336,7 +2341,6 @@ class SessionManager:
         Raises:
             ValueError: If the target session is not found, has no
                 workspace, or if the workspace doesn't exist.
-            TimeoutError: If the target session cannot be paused.
             OSError: If file operations fail.
         """
         import shutil
@@ -2354,9 +2358,6 @@ class SessionManager:
         if not os.path.isdir(workspace):
             raise ValueError(f"Workspace does not exist: {workspace}")
 
-        # Resolve the JaatoSession for pausing
-        jaato_session = session.server.get_session() if session.server else None
-
         dest_dir = os.path.join(
             requester_workspace, ".jaato", "replay", str(_uuid.uuid4()),
         )
@@ -2364,13 +2365,6 @@ class SessionManager:
 
         source_commit: Optional[str] = None
         is_git = os.path.isdir(os.path.join(workspace, ".git"))
-
-        # Pause the target session while we copy
-        if jaato_session:
-            ctx = jaato_session.pause_for_observation(timeout=30.0)
-            ctx.__enter__()
-        else:
-            ctx = None
 
         try:
             if is_git:
@@ -2423,9 +2417,11 @@ class SessionManager:
                         "*.pyc",
                     ),
                 )
-        finally:
-            if ctx is not None:
-                ctx.__exit__(None, None, None)
+        except Exception:
+            # Clean up partial snapshot on failure
+            if os.path.isdir(dest_dir):
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            raise
 
         logger.info(
             "Snapshot workspace '%s' → '%s' (commit=%s)",
