@@ -420,9 +420,15 @@ class ServiceHttpClient:
             proxy_kwargs = get_httpx_kwargs(full_url) if use_proxy else {"proxy": None}
 
             try:
+                # Disable httpx's built-in redirect following so we can
+                # strip the Authorization header on cross-domain redirects.
+                # httpx forwards all headers (including auth) to redirect
+                # targets, unlike requests which strips auth on domain
+                # change per RFC 9110.  GitHub's tarball endpoint redirects
+                # to codeload.github.com which rejects api.github.com tokens.
                 with httpx.Client(
                     timeout=timeout_sec, verify=verify_ssl,
-                    follow_redirects=True, **proxy_kwargs
+                    follow_redirects=False, **proxy_kwargs
                 ) as client:
                     response = client.request(
                         method=preview.method,
@@ -430,6 +436,26 @@ class ServiceHttpClient:
                         headers=request_headers,
                         content=body_str,
                     )
+                    # Manual redirect following with auth header stripping
+                    original_host = urlparse(full_url).netloc
+                    max_redirects = 10
+                    while response.is_redirect and max_redirects > 0:
+                        max_redirects -= 1
+                        redirect_url = str(response.next_request.url) if response.next_request else response.headers.get("location", "")
+                        if not redirect_url:
+                            break
+                        redirect_headers = dict(request_headers)
+                        # Strip auth headers on cross-domain redirects
+                        redirect_host = urlparse(redirect_url).netloc
+                        if redirect_host != original_host:
+                            redirect_headers.pop("Authorization", None)
+                            redirect_headers.pop("Proxy-Authorization", None)
+                        response = client.request(
+                            method="GET",
+                            url=redirect_url,
+                            headers=redirect_headers,
+                            content=None,
+                        )
                     elapsed_ms = int((time.time() - start_time) * 1000)
 
                     # Parse response
