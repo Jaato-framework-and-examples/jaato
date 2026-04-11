@@ -67,12 +67,23 @@ class MemoryPlugin:
         self._name = "memory"
         self._storage: Optional[MemoryStorage] = None
         self._indexer: Optional[MemoryIndexer] = None
+        self._global_storage: Optional[MemoryStorage] = None
+        self._global_indexer: Optional[MemoryIndexer] = None
         self._agent_name: Optional[str] = None
+        self._session_id: Optional[str] = None
         self._storage_path_template: str = ".jaato/memories.jsonl"
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("MEMORY", msg)
+
+    def _get_session_id(self) -> Optional[str]:
+        """Return the current session ID if available."""
+        return self._session_id
+
+    def set_session_context(self, session_id: str) -> None:
+        """Set the session ID for provenance tracking on stored memories."""
+        self._session_id = session_id
 
     @property
     def name(self) -> str:
@@ -98,6 +109,16 @@ class MemoryPlugin:
         existing_memories = self._storage.load_all()
         self._indexer.build_index(existing_memories)
         self._trace(f"initialize: storage_path={self._storage_path_template}, memories={len(existing_memories)}")
+
+        # Global storage at ~/.jaato/memories.jsonl — cross-session
+        # knowledge shared by all agents.  Fixed path, no workspace
+        # dependency.  AppArmor profile grants rw access.
+        global_path = str(Path.home() / ".jaato" / "memories.jsonl")
+        self._global_storage = MemoryStorage(global_path)
+        self._global_indexer = MemoryIndexer()
+        global_memories = self._global_storage.load_all()
+        self._global_indexer.build_index(global_memories)
+        self._trace(f"initialize: global_path={global_path}, global_memories={len(global_memories)}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
@@ -218,7 +239,8 @@ class MemoryPlugin:
                 description=(
                     'Retrieve previously stored memories by tags. '
                     'Call this when you notice hints about available memories in the prompt, '
-                    'or when the user asks about a topic you may have explained before.'
+                    'or when the user asks about a topic you may have explained before. '
+                    'By default searches both workspace-local and global (cross-session) memories.'
                 ),
                 parameters={
                     "type": "object",
@@ -231,6 +253,23 @@ class MemoryPlugin:
                         "limit": {
                             "type": "integer",
                             "description": "Max number of memories to retrieve (default: 3)"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["project", "universal"],
+                            "description": (
+                                "Filter by scope: 'project' (workspace-local only), "
+                                "'universal' (global cross-session only). "
+                                "If omitted, searches both."
+                            )
+                        },
+                        "maturity": {
+                            "type": "string",
+                            "enum": ["raw", "validated", "escalated", "dismissed"],
+                            "description": (
+                                "Filter by maturity state. If omitted, returns "
+                                "active memories only (raw + validated)."
+                            )
                         }
                     },
                     "required": ["tags"]
@@ -251,7 +290,67 @@ class MemoryPlugin:
                 },
                 category="memory",
                 discoverability="core",
-            )
+            ),
+            ToolSchema(
+                name='update_memory',
+                description=(
+                    'Update fields on an existing memory. '
+                    'Used by the advisor agent to curate memories: '
+                    'promote (maturity="validated"), dismiss (maturity="dismissed"), '
+                    'or adjust confidence/tags/content.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "ID of the memory to update"
+                        },
+                        "maturity": {
+                            "type": "string",
+                            "enum": ["raw", "validated", "escalated", "dismissed"],
+                            "description": "New maturity state"
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Updated confidence score"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Replacement tags (overwrites existing)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Replacement content (for merge operations)"
+                        }
+                    },
+                    "required": ["id"]
+                },
+                category="memory",
+                discoverability="discoverable",
+            ),
+            ToolSchema(
+                name='delete_memory',
+                description=(
+                    'Permanently delete a memory by ID. '
+                    'Used for cleanup after merging duplicate memories.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "ID of the memory to delete"
+                        }
+                    },
+                    "required": ["id"]
+                },
+                category="memory",
+                discoverability="discoverable",
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -264,6 +363,8 @@ class MemoryPlugin:
             "store_memory": self._execute_store,
             "retrieve_memories": self._execute_retrieve,
             "list_memory_tags": self._execute_list_tags,
+            "update_memory": self._execute_update,
+            "delete_memory": self._execute_delete,
             # User command
             "memory": self.execute_memory,
         }
@@ -280,37 +381,53 @@ class MemoryPlugin:
         """
         return (
             "# Persistent Memory\n\n"
-            "You have access to a persistent memory system that stores information across sessions.\n\n"
-            "**When to store memories:**\n"
-            "- After providing comprehensive explanations of architecture, patterns, or concepts\n"
-            "- When documenting project-specific conventions or decisions\n"
-            "- After analyzing complex code structures or workflows\n"
-            "- After discovering non-obvious behaviors, gotchas, or workarounds\n"
-            "- After a significant debugging session with a hard-to-find root cause\n\n"
-            "**How to use:**\n"
-            "- Use `store_memory` to save valuable insights for future sessions\n"
-            "- When you see memory hints in prompts (💡 **Available Memories**), "
-            "use `retrieve_memories` to access stored context\n"
-            "- Use `list_memory_tags` to discover what topics have been stored\n\n"
-            "**Knowledge curation lifecycle:**\n"
-            "Your memories are part of a learning pipeline. When you store a memory:\n"
-            "1. It is created as **raw** — awaiting review by the advisor agent\n"
-            "2. The advisor may **validate** it (confirmed valuable, kept as memory)\n"
-            "3. The advisor may **escalate** it to a permanent reference (becomes knowledge)\n"
-            "4. The advisor may **dismiss** it (incorrect, trivial, or superseded)\n\n"
-            "To help the advisor assess your memories effectively:\n"
-            "- Set `confidence` honestly — how sure are you this is correct?\n"
-            "- Set `scope` — is this specific to this project or universally applicable?\n"
-            "- Provide `evidence` — what happened that led to this learning?\n\n"
-            "**Best practices:**\n"
+            "You have access to a persistent memory system with two tiers:\n"
+            "- **Project memories** (`scope=\"project\"`, default) — stored in the "
+            "workspace, available within this session and future sessions in the "
+            "same workspace.\n"
+            "- **Universal memories** (`scope=\"universal\"`) — stored globally at "
+            "`~/.jaato/memories.jsonl`, shared across all sessions and workspaces. "
+            "Use this for knowledge that benefits any future session or agent.\n\n"
+            "## Two use cases\n\n"
+            "**Context snapshots** (keeping your context clean):\n"
+            "When your context is getting large and you need to preserve data for "
+            "later retrieval within this session, store it as a project-scoped "
+            "memory. This offloads data from your active context while keeping it "
+            "accessible via `retrieve_memories`. Good for: large tool outputs, "
+            "intermediate analysis results, file inventories.\n\n"
+            "**Cross-session knowledge** (persistent learning):\n"
+            "When you discover something genuinely useful for future sessions or "
+            "other agents — a non-obvious pattern, a gotcha, a successful approach "
+            "— store it with `scope=\"universal\"`. Tag it with your agent name "
+            "(e.g. `\"agent:gen-references\"`) and set `confidence` honestly.\n\n"
+            "## How to use\n\n"
+            "- `store_memory` — save a new memory (project or universal scope)\n"
+            "- `retrieve_memories` — search by tags, optionally filtering by "
+            "`scope` and `maturity`\n"
+            "- `list_memory_tags` — discover what topics have been stored\n"
+            "- `update_memory` — update maturity, confidence, tags, or content "
+            "on an existing memory (used by the advisor agent for curation)\n"
+            "- `delete_memory` — permanently delete a memory (for merge cleanup)\n\n"
+            "When you see 💡 **Available Memories** hints in prompts, use "
+            "`retrieve_memories` to access the full content.\n\n"
+            "## Knowledge curation lifecycle\n\n"
+            "Your memories are part of a learning pipeline:\n"
+            "1. Created as **raw** — awaiting review by the advisor agent\n"
+            "2. Advisor may **validate** it (confirmed valuable, kept as memory)\n"
+            "3. Advisor may **escalate** it to a permanent reference\n"
+            "4. Advisor may **dismiss** it (incorrect, trivial, or superseded)\n\n"
+            "To help the advisor assess effectively:\n"
+            "- Set `confidence` honestly (0.0–1.0)\n"
+            "- Set `scope` — project-specific or universally applicable?\n"
+            "- Provide `evidence` — what triggered this learning?\n\n"
+            "## Best practices\n\n"
             "- Only store substantial, reusable information (not ephemeral responses)\n"
-            "- Use **specific, distinctive** tags that uniquely identify the topic. "
-            "Each tag should narrow retrieval to relevant memories only. "
-            "Good: 'oauth_pkce_flow', 'postgresql_indexing', 'celery_retry_policy'. "
-            "Bad: generic tags like 'code', 'error', 'fix', 'bug', 'config', 'api' — "
-            "these match too many unrelated memories\n"
-            "- Write clear descriptions to help future retrieval\n"
+            "- Use **specific, distinctive** tags: 'oauth_pkce_flow', "
+            "'postgresql_indexing', 'celery_retry_policy'. "
+            "Avoid generic tags like 'code', 'error', 'fix' that match too broadly\n"
+            "- Write clear descriptions for future retrieval\n"
             "- Include evidence: error messages, command outputs, or observations\n"
+            "- For universal memories: tag with `\"agent:<your-name>\"` for provenance\n"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -453,8 +570,15 @@ class MemoryPlugin:
         # Extract potential keywords
         keywords = self._indexer.extract_keywords(prompt)
 
-        # Find matching memories (just metadata, not full content)
+        # Find matching memories from BOTH workspace and global stores
         matches = self._indexer.find_matches(keywords, limit=5)
+        if self._global_indexer:
+            global_matches = self._global_indexer.find_matches(keywords, limit=3)
+            # Deduplicate by ID and merge (workspace takes priority)
+            seen_ids = {m.id for m in matches}
+            for gm in global_matches:
+                if gm.id not in seen_ids:
+                    matches.append(gm)
 
         if not matches:
             return PromptEnrichmentResult(
@@ -570,13 +694,16 @@ class MemoryPlugin:
             scope=scope,
             evidence=args.get("evidence"),
             source_agent=self._agent_name,
+            source_session=self._get_session_id(),
         )
 
-        # Save to storage
-        self._storage.save(memory)
-
-        # Update index
-        self._indexer.index_memory(memory)
+        # Route to the appropriate store based on scope
+        if scope == SCOPE_UNIVERSAL and self._global_storage and self._global_indexer:
+            self._global_storage.save(memory)
+            self._global_indexer.index_memory(memory)
+        else:
+            self._storage.save(memory)
+            self._indexer.index_memory(memory)
 
         return {
             "status": "success",
@@ -602,28 +729,48 @@ class MemoryPlugin:
     def _execute_retrieve(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute retrieve_memories tool.
 
-        Only returns active memories (raw, validated) by default.
+        Returns active memories (raw, validated) by default, from both
+        workspace and global stores.  Optional ``scope`` and ``maturity``
+        parameters narrow the search.
 
         Args:
-            args: Tool arguments (tags, limit)
+            args: Tool arguments (tags, limit, scope, maturity)
 
         Returns:
             Result dict with memories list including lifecycle metadata
         """
         tags = args.get("tags", [])
         limit = args.get("limit", 3)
-        self._trace(f"retrieve_memories: tags={tags}, limit={limit}")
+        scope = args.get("scope")  # None = both, "project", "universal"
+        maturity = args.get("maturity")  # None = active only, or specific maturity
+        self._trace(f"retrieve_memories: tags={tags}, limit={limit}, scope={scope}, maturity={maturity}")
         if not self._storage:
             return {
                 "status": "error",
                 "message": "Memory plugin not initialized"
             }
 
-        tags = args["tags"]
-        limit = args.get("limit", 3)
+        # Determine active_only based on maturity filter
+        active_only = maturity is None  # default: only active (raw, validated)
 
-        # Search storage by tags (active_only=True by default)
-        memories = self._storage.search_by_tags(tags, limit=limit)
+        # Search the appropriate store(s)
+        memories: List[Memory] = []
+        if scope != SCOPE_UNIVERSAL and self._storage:
+            memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
+        if scope != SCOPE_PROJECT and self._global_storage:
+            memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
+
+        # Filter by specific maturity if requested
+        if maturity is not None:
+            memories = [m for m in memories if m.maturity == maturity]
+
+        # Filter by specific scope if requested
+        if scope is not None:
+            memories = [m for m in memories if m.scope == scope]
+
+        # Sort by recency (newest first) and truncate to limit
+        memories.sort(key=lambda m: m.timestamp, reverse=True)
+        memories = memories[:limit]
 
         if not memories:
             return {
@@ -708,6 +855,105 @@ class MemoryPlugin:
                 "jaato.memory.count_dismissed": maturity_counts.get(MATURITY_DISMISSED, 0),
             },
         }
+
+    def _execute_update(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute update_memory tool.
+
+        Finds the memory by ID in either workspace or global storage,
+        applies the requested field updates, and persists.
+
+        Args:
+            args: Tool arguments (id required, plus optional maturity,
+                confidence, tags, content).
+
+        Returns:
+            Result dict with updated memory status.
+        """
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return {"status": "error", "message": "'id' is required"}
+
+        # Find the memory in either store
+        memory = None
+        target_storage = None
+        target_indexer = None
+
+        if self._storage:
+            memory = self._storage.get_by_id(memory_id)
+            if memory:
+                target_storage = self._storage
+                target_indexer = self._indexer
+
+        if memory is None and self._global_storage:
+            memory = self._global_storage.get_by_id(memory_id)
+            if memory:
+                target_storage = self._global_storage
+                target_indexer = self._global_indexer
+
+        if memory is None:
+            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
+
+        # Apply updates
+        if "maturity" in args:
+            new_maturity = args["maturity"]
+            if new_maturity in VALID_MATURITIES:
+                memory.maturity = new_maturity
+            else:
+                return {"status": "error", "message": f"Invalid maturity: {new_maturity}"}
+
+        if "confidence" in args:
+            try:
+                memory.confidence = max(0.0, min(1.0, float(args["confidence"])))
+            except (TypeError, ValueError):
+                pass
+
+        if "tags" in args and isinstance(args["tags"], list):
+            memory.tags = [t.strip() for t in args["tags"] if isinstance(t, str) and len(t.strip()) >= 2]
+
+        if "content" in args and isinstance(args["content"], str):
+            memory.content = args["content"]
+
+        target_storage.update(memory)
+        if target_indexer:
+            target_indexer.index_memory(memory)
+
+        self._trace(f"update_memory: id={memory_id}, maturity={memory.maturity}")
+        return {
+            "status": "success",
+            "memory_id": memory_id,
+            "maturity": memory.maturity,
+            "confidence": memory.confidence,
+            "message": f"Memory updated: {memory.description}",
+        }
+
+    def _execute_delete(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute delete_memory tool.
+
+        Finds and deletes the memory by ID from whichever store
+        (workspace or global) contains it.
+
+        Args:
+            args: Tool arguments (id required).
+
+        Returns:
+            Result dict with deletion status.
+        """
+        memory_id = args.get("id", "")
+        if not memory_id:
+            return {"status": "error", "message": "'id' is required"}
+
+        # Try workspace store first, then global
+        deleted = False
+        if self._storage and self._storage.delete(memory_id):
+            deleted = True
+        elif self._global_storage and self._global_storage.delete(memory_id):
+            deleted = True
+
+        if deleted:
+            self._trace(f"delete_memory: id={memory_id}")
+            return {"status": "success", "message": f"Memory '{memory_id}' deleted"}
+        else:
+            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
 
     # ===== User Command Executor =====
 

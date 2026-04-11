@@ -102,6 +102,12 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   @{{HOME}}/.jaato/theme.json       r,
   @{{HOME}}/.jaato/gc.json          r,
 
+  # ---- global memories (read-write) ----
+  # All sessions can propose and read cross-session memories.
+  # The maturity lifecycle (raw → validated) is the quality gate,
+  # not filesystem permissions.
+  @{{HOME}}/.jaato/memories.jsonl  rw,
+
   # ---- Claude Code interop (read-only) ----
   # The prompt_library plugin reads ~/.claude/skills and ~/.claude/commands
   # so jaato can use Claude Code skill/command definitions interchangeably.
