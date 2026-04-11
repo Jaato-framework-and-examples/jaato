@@ -325,28 +325,53 @@ class IntrospectionPlugin:
 
         # If no category specified, return category summary only
         if not category:
-            category_counts: Dict[str, int] = {}
+            # Count tools visible to THIS session (profile-filtered)
+            session_counts: Dict[str, int] = {}
             for schema in all_schemas:
                 cat = schema.category or "uncategorized"
-                category_counts[cat] = category_counts.get(cat, 0) + 1
+                session_counts[cat] = session_counts.get(cat, 0) + 1
 
-            # Merge in registered categories that have no loaded tools
-            # yet (e.g. deferred/discoverable tools from premium plugins).
-            # They appear with tool_count=0 so the model knows they exist
-            # and can call list_tools(category='<name>') to trigger loading.
+            # Count ALL tools across ALL exposed plugins (unfiltered)
+            # to detect partially-available categories.
+            global_counts: Dict[str, int] = {}
+            for schema in self._registry.get_exposed_tool_schemas():
+                cat = schema.category or "uncategorized"
+                global_counts[cat] = global_counts.get(cat, 0) + 1
+
+            # Merge all known categories: from schemas + registered descriptions
             all_categories = dict.fromkeys(
-                sorted(set(category_counts.keys()) | set(category_hints.keys()))
+                sorted(
+                    set(session_counts.keys())
+                    | set(global_counts.keys())
+                    | set(category_hints.keys())
+                )
             )
 
+            categories_list = []
+            for cat in all_categories:
+                available = session_counts.get(cat, 0)
+                total = global_counts.get(cat, 0)
+
+                entry: Dict[str, Any] = {
+                    "name": cat,
+                    "tool_count": available,
+                    "description": category_hints.get(cat, ""),
+                }
+
+                # Add availability hint when the session doesn't have
+                # access to all tools in the category.
+                if available == 0 and total == 0:
+                    entry["availability"] = "no tools loaded"
+                elif available == 0 and total > 0:
+                    entry["availability"] = f"not enabled ({total} tools require additional plugins)"
+                elif available < total:
+                    entry["availability"] = f"partial ({available}/{total} tools enabled)"
+                # else: fully available — no extra annotation needed
+
+                categories_list.append(entry)
+
             return {
-                "categories": [
-                    {
-                        "name": cat,
-                        "tool_count": category_counts.get(cat, 0),
-                        "description": category_hints.get(cat, ""),
-                    }
-                    for cat in all_categories
-                ],
+                "categories": categories_list,
                 "total_tools": len(all_schemas),
                 "hint": "Call list_tools(category='<name>') to see tools in a specific category.",
                 "_telemetry": {
