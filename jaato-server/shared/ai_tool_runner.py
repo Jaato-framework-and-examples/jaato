@@ -709,6 +709,20 @@ class ToolExecutor:
                 self._registry
                 and TRAIT_FRAMEWORK_LEVEL in self._registry.get_tool_traits(name)
             )
+
+            if is_framework_tool and self._apparmor_context:
+                # Framework-level tools must run unconfined.  The thread
+                # may be stuck in a session profile from a prior tool
+                # call whose exit failed ("could not restore unconfined").
+                # Actively try to escape confinement before executing.
+                try:
+                    import threading as _threading
+                    attr_path = f"/proc/self/task/{_threading.get_native_id()}/attr/current"
+                    with open(attr_path, "w") as _f:
+                        _f.write("changeprofile unconfined")
+                except (OSError, PermissionError):
+                    pass  # Best effort — if we can't unconfine, the tool may still work
+
             ctx = (
                 self._apparmor_context()
                 if (self._apparmor_context and not is_framework_tool)
