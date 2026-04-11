@@ -12,7 +12,7 @@ The plugin supports deferred tool loading for token economy:
 import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TOOL_CATEGORIES, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
 from ..streaming import StreamingCapable
 
 # Thread-local storage for session reference per agent context
@@ -103,36 +103,21 @@ class IntrospectionPlugin:
         Both tools are marked as 'core' discoverability since they're required
         for the deferred tool loading mechanism to work.
         """
-        # Build the category enum dynamically from the registry so it
-        # includes categories registered by premium / third-party plugins.
-        # Falls back to the static SDK list if the registry isn't wired yet.
-        if self._registry:
-            known_cats = sorted(self._registry.get_category_descriptions().keys())
-        else:
-            known_cats = list(TOOL_CATEGORIES)
-
         return [
             ToolSchema(
                 name="list_tools",
                 description="Discover available tools. "
-                           "Without a category: returns available categories with tool counts and indices. "
-                           "With a category (by name or index): returns tools in that category.",
+                           "Without arguments: returns available categories with tool counts and indices. "
+                           "With category_index: returns tools in that category.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "category": {
-                            "type": "string",
-                            "description": f"Category name to list tools from. "
-                                         f"If omitted, returns category summary. "
-                                         f"Categories: {', '.join(known_cats)}",
-                            "enum": known_cats,
-                        },
                         "category_index": {
                             "type": "integer",
                             "description": (
-                                "Alternative to 'category': use the numeric index "
-                                "from the category summary (1-based). Useful when "
-                                "the category name is hard to pass as a string."
+                                "1-based index of the category to list tools from "
+                                "(from the 'index' field in the category summary). "
+                                "If omitted, returns the category summary."
                             ),
                         },
                         "verbose": {
@@ -315,16 +300,15 @@ class IntrospectionPlugin:
         """Execute the list_tools tool.
 
         Args:
-            args: Dictionary with optional 'category' and 'verbose' keys.
+            args: Dictionary with optional 'category_index' and 'verbose' keys.
 
         Returns:
-            - If no category: returns available categories with tool counts
-            - If category specified: returns tools in that category
+            - If no category_index: returns available categories with tool counts
+            - If category_index specified: returns tools in that category
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        category = args.get("category")
         category_index = args.get("category_index")
         verbose = args.get("verbose", False)
 
@@ -332,23 +316,24 @@ class IntrospectionPlugin:
         all_schemas = self._get_session_allowed_schemas()
 
         # Read category descriptions from the registry — needed by both
-        # the summary path (no category) and the validation path (category
-        # specified) so it must be computed before the branch.
+        # the summary path and the category-detail path.
         category_hints = (
             self._registry.get_category_descriptions()
             if self._registry
             else {}
         )
 
-        # Resolve category_index → category name.  The index is 1-based
-        # and corresponds to the sorted order shown in the summary.
-        if category_index is not None and category is None:
-            # Build the sorted category list (same order as the summary)
-            global_cats: Set[str] = set(category_hints.keys())
-            for schema in self._registry.get_exposed_tool_schemas():
-                global_cats.add(schema.category or "uncategorized")
-            sorted_cats = sorted(global_cats)
-            idx = int(category_index) - 1  # convert 1-based → 0-based
+        # Build the sorted category list (same order as the summary).
+        # Used for index resolution and unknown-category validation.
+        global_cats: Set[str] = set(category_hints.keys())
+        for schema in self._registry.get_exposed_tool_schemas():
+            global_cats.add(schema.category or "uncategorized")
+        sorted_cats = sorted(global_cats)
+
+        # Resolve category_index → category name (1-based).
+        category: Optional[str] = None
+        if category_index is not None:
+            idx = int(category_index) - 1
             if 0 <= idx < len(sorted_cats):
                 category = sorted_cats[idx]
             else:
@@ -436,7 +421,7 @@ class IntrospectionPlugin:
             return {
                 "categories": categories_list,
                 "total_tools": len(all_schemas),
-                "hint": "Call list_tools(category='<name>') or list_tools(category_index=<N>) to see tools in a specific category.",
+                "hint": "Call list_tools(category_index=<N>) to see tools in a specific category.",
                 "_telemetry": {
                     "jaato.introspection.operation": "list_tools",
                     "jaato.introspection.total_tools": len(all_schemas),
@@ -444,19 +429,8 @@ class IntrospectionPlugin:
             }
 
         # Category specified - return tools in that category.
-        # Validate that the category exists using the GLOBAL schema set
-        # (not the session-filtered one) so categories from plugins not
-        # in this session's profile are still recognised — they showed
-        # up in the summary and the model may want to drill into them.
-        known_categories = set(category_hints.keys())
-        for schema in self._registry.get_exposed_tool_schemas():
-            known_categories.add(schema.category or "uncategorized")
-        if category not in known_categories:
-            return {
-                "error": f"Unknown category '{category}'.",
-                "available_categories": sorted(known_categories),
-                "hint": "Call list_tools() without arguments to see all categories.",
-            }
+        # No string-based validation needed — category was resolved from
+        # category_index which is already validated against sorted_cats.
 
         # Build the set of tool names visible to THIS session so we can
         # mark tools from non-profile plugins as "not available".
