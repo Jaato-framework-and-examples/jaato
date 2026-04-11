@@ -31,10 +31,13 @@ class TestMemoryPlugin(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.storage_path = str(Path(self.temp_dir) / "test_memories.jsonl")
 
-        # Initialize plugin
+        self.global_storage_path = str(Path(self.temp_dir) / "global_memories.jsonl")
+
+        # Initialize plugin with both storage paths in temp dir
         self.plugin = MemoryPlugin()
         self.plugin.initialize({
-            "storage_path": self.storage_path
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
         })
 
     def tearDown(self):
@@ -202,17 +205,21 @@ class TestMemoryPlugin(unittest.TestCase):
         self.assertIn("database", result["tags"])
 
     def test_prompt_enrichment(self):
-        """Test prompt enrichment with memory hints."""
-        # Store a memory first
+        """Test prompt enrichment with memory hints.
+
+        Requires at least 2 tag overlaps (min_overlap=2 in the indexer)
+        to prevent false-positive matches from large prompts.
+        """
+        # Store a memory with tags that overlap the prompt keywords
         self.plugin.get_executors()["store_memory"]({
             "content": "Detailed subagent explanation",
             "description": "How to spawn subagents efficiently",
-            "tags": ["subagent", "spawning", "efficiency"]
+            "tags": ["subagent", "spawn", "efficiently"]
         })
 
-        # Test enrichment
+        # Prompt must contain at least 2 keywords matching tags
         result = self.plugin.enrich_prompt(
-            "How do I create a subagent efficiently?"
+            "How do I spawn a subagent efficiently?"
         )
 
         # Should find the memory and add hints
@@ -279,7 +286,7 @@ class TestMemoryPlugin(unittest.TestCase):
         result = executors["store_memory"]({
             "content": "Validated insight about patterns",
             "description": "Confirmed pattern usage",
-            "tags": ["validated_pattern_test"]
+            "tags": ["validated", "pattern", "usage"]
         })
 
         memory = self.plugin._storage.get_by_id(result["memory_id"])
@@ -290,7 +297,7 @@ class TestMemoryPlugin(unittest.TestCase):
         self.plugin._indexer.build_index(self.plugin._storage.load_all())
 
         enrichment = self.plugin.enrich_prompt(
-            "How to use validated_pattern_test?"
+            "How to use validated pattern correctly?"
         )
         self.assertEqual(enrichment.metadata["memory_matches"], 1)
 

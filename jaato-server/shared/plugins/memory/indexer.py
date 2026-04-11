@@ -112,14 +112,19 @@ class MemoryIndexer:
         limit: int = 5,
         *,
         active_only: bool = True,
+        min_overlap: int = 2,
     ) -> List[MemoryMetadata]:
         """Find memories with tags matching the provided keywords.
 
-        Matching strategy:
-        1. Exact tag matches (keyword == tag)
-        2. Partial matches (keyword in tag or tag in keyword)
+        Uses **exact tag matching only** — a keyword must exactly equal
+        a tag (case-insensitive) to count as a match.  Memories must
+        have at least ``min_overlap`` matching tags to be returned.
+        This prevents false positives from substring matches against
+        large prompts where short tags like ``"test"`` would match
+        thousands of unrelated words.
 
-        Results are sorted by recency (most recent first).
+        Results are ranked by overlap count (most matches first), then
+        by recency within the same overlap count.
 
         Args:
             keywords: List of keywords to match against tags.
@@ -127,41 +132,39 @@ class MemoryIndexer:
             active_only: When True (default), only return memories whose
                 maturity is in ``ACTIVE_MATURITIES`` (raw, validated).
                 Set to False to include all maturity states.
+            min_overlap: Minimum number of tag matches required for a
+                memory to be considered relevant (default: 2).
 
         Returns:
             List of MemoryMetadata objects (lightweight, no full content)
         """
-        matched_ids: Set[str] = set()
+        # Normalize keywords to a set for O(1) lookup
+        keywords_set = {kw.lower() for kw in keywords}
 
-        # Normalize keywords to lowercase for matching
-        keywords_lower = [kw.lower() for kw in keywords]
-
-        # Exact tag matches first
-        for kw in keywords_lower:
+        # Count exact tag matches per memory
+        overlap_counts: Dict[str, int] = {}
+        for kw in keywords_set:
             if kw in self._tag_index:
-                matched_ids.update(self._tag_index[kw])
+                for memory_id in self._tag_index[kw]:
+                    overlap_counts[memory_id] = overlap_counts.get(memory_id, 0) + 1
 
-        # Partial matches (substring matching)
-        for tag in self._tag_index:
-            for kw in keywords_lower:
-                # Check if keyword is substring of tag or vice versa
-                if kw in tag or tag in kw:
-                    matched_ids.update(self._tag_index[tag])
-                    break  # Don't need to check other keywords for this tag
-
-        # Get metadata, apply maturity filter, and sort by recency
+        # Filter by min_overlap, maturity, and build result list
         matches = []
-        for mid in matched_ids:
+        for mid, count in overlap_counts.items():
+            if count < min_overlap:
+                continue
             meta = self._memories.get(mid)
             if meta is None:
                 continue
             if active_only and meta.maturity not in ACTIVE_MATURITIES:
                 continue
-            matches.append(meta)
+            matches.append((count, meta))
 
-        matches.sort(key=lambda m: m.timestamp, reverse=True)
+        # Sort by overlap count descending, then by recency (newest first)
+        matches.sort(key=lambda pair: pair[1].timestamp, reverse=True)  # recency first
+        matches.sort(key=lambda pair: pair[0], reverse=True)  # stable: overlap count wins
 
-        return matches[:limit]
+        return [meta for _, meta in matches[:limit]]
 
     def get_all_tags(self, *, active_only: bool = False) -> List[str]:
         """Return all unique tags in the index.
