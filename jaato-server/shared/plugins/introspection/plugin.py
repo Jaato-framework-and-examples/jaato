@@ -332,11 +332,24 @@ class IntrospectionPlugin:
                 session_counts[cat] = session_counts.get(cat, 0) + 1
 
             # Count ALL tools across ALL exposed plugins (unfiltered)
-            # to detect partially-available categories.
+            # and track which plugins contribute to each category.
             global_counts: Dict[str, int] = {}
+            category_plugins: Dict[str, Set[str]] = {}
             for schema in self._registry.get_exposed_tool_schemas():
                 cat = schema.category or "uncategorized"
                 global_counts[cat] = global_counts.get(cat, 0) + 1
+                plugin = self._registry.get_plugin_for_tool(schema.name)
+                if plugin:
+                    category_plugins.setdefault(cat, set()).add(plugin.name)
+
+            # Determine which plugins the session has enabled
+            session = self._session
+            allowed_plugins: Optional[Set[str]] = None
+            if session:
+                raw = getattr(session, '_tool_plugins', None)
+                if raw is not None:
+                    allowed_plugins = set(raw)
+                    allowed_plugins.add("introspection")
 
             # Merge all known categories: from schemas + registered descriptions
             all_categories = dict.fromkeys(
@@ -359,13 +372,28 @@ class IntrospectionPlugin:
                 }
 
                 # Add availability hint when the session doesn't have
-                # access to all tools in the category.
+                # access to all tools in the category, including which
+                # plugins would need to be enabled.
                 if available == 0 and total == 0:
                     entry["availability"] = "no tools loaded"
-                elif available == 0 and total > 0:
-                    entry["availability"] = f"not enabled ({total} tools require additional plugins)"
-                elif available < total:
-                    entry["availability"] = f"partial ({available}/{total} tools enabled)"
+                elif available < total and allowed_plugins is not None:
+                    missing = sorted(
+                        category_plugins.get(cat, set()) - allowed_plugins
+                    )
+                    if available == 0:
+                        entry["availability"] = (
+                            f"not enabled ({total} tools available "
+                            f"via plugins: {', '.join(missing)})"
+                            if missing
+                            else f"not enabled ({total} tools)"
+                        )
+                    else:
+                        entry["availability"] = (
+                            f"partial ({available}/{total} tools — "
+                            f"enable {', '.join(missing)} for full access)"
+                            if missing
+                            else f"partial ({available}/{total} tools)"
+                        )
                 # else: fully available — no extra annotation needed
 
                 categories_list.append(entry)
