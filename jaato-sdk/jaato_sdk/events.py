@@ -1389,6 +1389,9 @@ class ClientConfigRequest(Event):
     #        supports_unicode, supports_mermaid, supports_expandable_content,
     #        client_type.
     presentation: Optional[Dict[str, Any]] = None
+    # Permission timeout override (seconds). 0 = wait forever.
+    # WS clients typically set 0 since the user may not be watching.
+    permission_timeout: Optional[int] = None
 
 
 # =============================================================================

@@ -630,6 +630,11 @@ class SessionManager:
             self._client_config[client_id]['env_file'] = event.env_file
             logger.info(f"Client {client_id} set env_file={event.env_file}")
 
+        # Store permission timeout override
+        if event.permission_timeout is not None:
+            self._client_config[client_id]['permission_timeout'] = event.permission_timeout
+            logger.info(f"Client {client_id} set permission_timeout={event.permission_timeout}")
+
         # Apply to current session if client is attached to one
         session_id = self._client_to_session.get(client_id)
         if session_id:
@@ -639,6 +644,8 @@ class SessionManager:
                 if event.working_dir:
                     session.server.workspace_path = event.working_dir
                     session.workspace_path = event.working_dir
+                if event.permission_timeout is not None:
+                    self._apply_permission_timeout(session.server, event.permission_timeout)
 
     def _apply_client_config_to_server(self, client_id: str, server: 'JaatoServer') -> None:
         """Apply stored client configuration to a server.
@@ -658,6 +665,22 @@ class SessionManager:
         if 'working_dir' in config:
             server.workspace_path = config['working_dir']
             logger.debug(f"Applied working_dir={config['working_dir']} to server for client {client_id}")
+        if 'permission_timeout' in config:
+            self._apply_permission_timeout(server, config['permission_timeout'])
+
+    @staticmethod
+    def _apply_permission_timeout(server: 'JaatoServer', timeout: int) -> None:
+        """Apply a permission timeout override to the session's permission plugin.
+
+        Args:
+            server: The server whose permission config to update.
+            timeout: Timeout in seconds. 0 means wait forever.
+        """
+        if server.permission_plugin and hasattr(server.permission_plugin, '_config'):
+            config = server.permission_plugin._config
+            if config:
+                config.channel_timeout = timeout
+                logger.debug(f"Applied permission_timeout={timeout} to session {server.session_id}")
 
     @staticmethod
     def _apply_presentation_to_server(event: 'ClientConfigRequest', server: 'JaatoServer') -> None:
