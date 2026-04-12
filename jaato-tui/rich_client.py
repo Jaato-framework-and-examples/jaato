@@ -1295,7 +1295,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     name=event.agent_name,
                     profile_name=event.profile_name,
                     parent_agent_id=event.parent_agent_id,
-                    icon_lines=event.icon_lines,
                 )
                 # Register agent name in budget panel for display
                 if hasattr(display, 'register_agent_name'):
