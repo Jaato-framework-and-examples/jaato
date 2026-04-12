@@ -637,11 +637,29 @@ class JaatoServer:
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
         self._emit_subagent_state(emit)
 
-        # Emit tool ID registry so clients can resolve hash IDs
-        from shared.tool_id_map import _reverse
-        if _reverse:
-            from jaato_sdk.events import ToolIdRegistryEvent
-            emit(ToolIdRegistryEvent(mappings=dict(_reverse)))
+        # Emit tool ID registry so clients can resolve hash IDs.
+        # Built eagerly from current tool schemas rather than from the
+        # lazily-populated _reverse map, because provider.complete()
+        # (which triggers name_to_id calls in converters) may not have
+        # run yet on the first turn.
+        if self._jaato:
+            session = self._jaato.get_session()
+            if session:
+                from shared.tool_id_map import name_to_id
+                from jaato_sdk.events import ToolIdRegistryEvent
+                mappings = {}
+                for schema in (session._tools or []):
+                    mappings[name_to_id(schema.name)] = schema.name
+                    if schema.category:
+                        mappings[name_to_id(schema.category, prefix="c")] = schema.category
+                # Also include globally exposed tools (deferred/undiscovered)
+                if self.registry:
+                    for schema in self.registry.get_exposed_tool_schemas():
+                        mappings[name_to_id(schema.name)] = schema.name
+                        if schema.category:
+                            mappings[name_to_id(schema.category, prefix="c")] = schema.category
+                if mappings:
+                    emit(ToolIdRegistryEvent(mappings=mappings))
 
         # Clear stale pending requests on client if requested
         # This is used after session recovery when the server has no pending requests
