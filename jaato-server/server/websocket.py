@@ -1300,6 +1300,11 @@ class JaatoWSServer:
                         runtime._all_tool_schemas.append(schema)
                 logger.info("Refreshed runtime tool list for client %s", client_id)
 
+        # Emit updated tool ID registry so clients can resolve IDs for
+        # the newly-registered client-provided tools.
+        if session.server:
+            session.server._emit_tool_id_registry_from_schemas()
+
     def _handle_tool_execute_result(self, client_id: str, event) -> None:
         """Route a tool execution result back to the waiting executor thread."""
         if not hasattr(self, '_client_tool_waiters'):
