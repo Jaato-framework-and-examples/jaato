@@ -48,7 +48,6 @@ from .converters import (
     extract_message_start,
     extract_text_from_stream_event,
     extract_thinking_from_stream_event,
-    get_original_tool_name,
     messages_to_anthropic,
     response_from_anthropic,
     serialize_history,
@@ -1145,11 +1144,10 @@ class AnthropicProvider:
                             # Flush text before adding function call
                             flush_text_block()
 
-                            # Restore original tool name if it was sanitized
-                            original_name = get_original_tool_name(tc["name"])
+                            from shared.tool_id_map import id_to_name
                             fc = FunctionCall(
                                 id=tc["id"],
-                                name=original_name,
+                                name=id_to_name(tc["name"]),
                                 args=args,
                             )
                             self._trace(f"STREAM_FUNC_CALL name={fc.name}")
@@ -1228,9 +1226,8 @@ class AnthropicProvider:
                     args = json.loads(json_str) if json_str else {}
                 except json.JSONDecodeError:
                     args = {}
-                # Restore original tool name if it was sanitized
-                original_name = get_original_tool_name(tc["name"])
-                fc = FunctionCall(id=tc["id"], name=original_name, args=args)
+                from shared.tool_id_map import id_to_name
+                fc = FunctionCall(id=tc["id"], name=id_to_name(tc["name"]), args=args)
                 # Notify caller about function call detection
                 if on_function_call:
                     on_function_call(fc)

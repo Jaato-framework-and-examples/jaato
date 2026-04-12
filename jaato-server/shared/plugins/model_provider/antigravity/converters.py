@@ -26,6 +26,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
 )
 
+from shared.tool_id_map import id_to_name, name_to_id
+
 
 # ==================== Role Conversion ====================
 
@@ -55,7 +57,7 @@ def role_from_api(role: str) -> Role:
 def tool_schema_to_api(schema: ToolSchema) -> Dict[str, Any]:
     """Convert ToolSchema to API function declaration format."""
     return {
-        "name": schema.name,
+        "name": name_to_id(schema.name),
         "description": schema.description,
         "parameters": schema.parameters,
     }
@@ -85,7 +87,7 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
         fc = part.function_call
         return {
             "functionCall": {
-                "name": fc.name,
+                "name": name_to_id(fc.name),
                 "args": fc.args,
             }
         }
@@ -95,7 +97,7 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
         response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
         return {
             "functionResponse": {
-                "name": fr.name,
+                "name": name_to_id(fr.name),
                 "response": response,
             }
         }
@@ -130,7 +132,7 @@ def part_from_api(part_data: Dict[str, Any]) -> Part:
         call_id = str(uuid.uuid4())[:8]
         return Part(function_call=FunctionCall(
             id=call_id,
-            name=fc.get("name", ""),
+            name=id_to_name(fc.get("name", "")),
             args=fc.get("args", {}),
         ))
 
@@ -139,7 +141,7 @@ def part_from_api(part_data: Dict[str, Any]) -> Part:
         fr = part_data["functionResponse"]
         return Part(function_response=ToolResult(
             call_id="",
-            name=fr.get("name", ""),
+            name=id_to_name(fr.get("name", "")),
             result=fr.get("response", {}),
         ))
 
@@ -461,7 +463,7 @@ def extract_function_calls_from_stream_chunk(
             call_id = str(uuid.uuid4())[:8]
             calls.append(FunctionCall(
                 id=call_id,
-                name=fc.get("name", ""),
+                name=id_to_name(fc.get("name", "")),
                 args=fc.get("args", {}),
             ))
 

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re
-import threading
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -29,76 +27,38 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
 )
 
-
-# ==================== Tool Name Sanitization ====================
-
-# OpenAI API requires function names to match ^[a-zA-Z0-9_-]{1,64}$
-_OPENAI_TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
-
-# Thread-local storage for tool name mapping (sanitized -> original).
-# Each session's model thread gets its own isolated mapping, preventing
-# cross-session contamination when multiple sessions share the same process.
-_thread_local = threading.local()
+from shared.tool_id_map import id_to_name, name_to_id
 
 
-def _get_tool_name_mapping() -> Dict[str, str]:
-    """Get the thread-local tool name mapping dict.
-
-    Returns:
-        Per-thread dict mapping sanitized tool names to original names.
-    """
-    if not hasattr(_thread_local, 'tool_name_mapping'):
-        _thread_local.tool_name_mapping = {}
-    return _thread_local.tool_name_mapping
+# ==================== Tool Name Mapping ====================
 
 
 def sanitize_tool_name(name: str) -> str:
-    """Sanitize tool name to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
+    """Map a tool name to its hash-derived ID.
 
-    Replaces invalid characters (like dots, colons, spaces) with underscores
-    and truncates to 64 characters if needed.
-
-    Args:
-        name: Original tool name.
-
-    Returns:
-        Sanitized tool name safe for OpenAI-compatible APIs.
+    Legacy alias kept so downstream imports (e.g., ZhipuAI provider)
+    continue to work without change.
     """
-    if _OPENAI_TOOL_NAME_PATTERN.match(name):
-        return name
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
-    return sanitized[:64]
+    return name_to_id(name)
 
 
-def get_original_tool_name(sanitized_name: str) -> str:
-    """Get the original tool name from a sanitized name.
+def get_original_tool_name(tool_id: str) -> str:
+    """Resolve a hash-derived ID back to the original tool name.
 
-    Args:
-        sanitized_name: The sanitized tool name received from the API.
-
-    Returns:
-        Original tool name if mapping exists, otherwise returns the input unchanged.
+    Legacy alias kept so downstream imports (e.g., ZhipuAI provider)
+    continue to work without change.
     """
-    return _get_tool_name_mapping().get(sanitized_name, sanitized_name)
+    return id_to_name(tool_id)
 
 
 def clear_tool_name_mapping() -> None:
-    """Clear the tool name mapping for the current thread.
-
-    Call when tools are reconfigured.
-    """
-    _get_tool_name_mapping().clear()
+    """No-op. Hash-derived IDs are deterministic and need no clearing."""
+    pass
 
 
 def register_tool_name_mapping(sanitized: str, original: str) -> None:
-    """Register a mapping from sanitized to original tool name.
-
-    Args:
-        sanitized: The sanitized tool name sent to the API.
-        original: The original tool name used internally.
-    """
-    if sanitized != original:
-        _get_tool_name_mapping()[sanitized] = original
+    """No-op. Hash-derived IDs handle reverse mapping automatically."""
+    pass
 
 
 # ==================== ToolSchema Conversion ====================
@@ -106,22 +66,12 @@ def register_tool_name_mapping(sanitized: str, original: str) -> None:
 def tool_schema_to_openai(schema: ToolSchema) -> Dict[str, Any]:
     """Convert ToolSchema to OpenAI tool definition dict.
 
-    Tool names are sanitized to match OpenAI's pattern ^[a-zA-Z0-9_-]{1,64}$.
-    A mapping from sanitized to original names is maintained for reverse lookup.
-
-    Args:
-        schema: Internal tool schema.
-
-    Returns:
-        Dict in OpenAI tool format.
+    Tool names are replaced with hash-derived IDs.
     """
-    sanitized_name = sanitize_tool_name(schema.name)
-    register_tool_name_mapping(sanitized_name, schema.name)
-
     return {
         "type": "function",
         "function": {
-            "name": sanitized_name,
+            "name": name_to_id(schema.name),
             "description": schema.description,
             "parameters": schema.parameters,
         },

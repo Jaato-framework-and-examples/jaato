@@ -31,6 +31,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
 )
 
+from shared.tool_id_map import id_to_name, name_to_id
+
 
 # ==================== Role Conversion ====================
 
@@ -58,7 +60,7 @@ def role_from_sdk(role: str) -> Role:
 def tool_schema_to_sdk(schema: ToolSchema) -> get_types().FunctionDeclaration:
     """Convert ToolSchema to SDK FunctionDeclaration."""
     return get_types().FunctionDeclaration(
-        name=schema.name,
+        name=name_to_id(schema.name),
         description=schema.description,
         parameters_json_schema=schema.parameters
     )
@@ -103,7 +105,7 @@ def part_to_sdk(part: Part) -> get_types().Part:
         fc = part.function_call
         return get_types().Part(
             function_call=get_types().FunctionCall(
-                name=fc.name,
+                name=name_to_id(fc.name),
                 args=fc.args
             )
         )
@@ -112,7 +114,7 @@ def part_to_sdk(part: Part) -> get_types().Part:
         fr = part.function_response
         response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
         return get_types().Part.from_function_response(
-            name=fr.name,
+            name=name_to_id(fr.name),
             response=response
         )
 
@@ -137,11 +139,10 @@ def part_from_sdk(part: get_types().Part) -> Part:
     # Function call part
     if hasattr(part, 'function_call') and part.function_call is not None:
         fc = part.function_call
-        # Generate a unique ID for the function call
         call_id = str(uuid.uuid4())[:8]
         return Part(function_call=FunctionCall(
             id=call_id,
-            name=fc.name,
+            name=id_to_name(fc.name),
             args=dict(fc.args) if fc.args else {}
         ))
 
@@ -152,8 +153,8 @@ def part_from_sdk(part: get_types().Part) -> Part:
         if hasattr(response, 'items'):
             response = dict(response)
         return Part(function_response=ToolResult(
-            call_id="",  # SDK doesn't track call IDs
-            name=fr.name,
+            call_id="",
+            name=id_to_name(fr.name),
             result=response
         ))
 

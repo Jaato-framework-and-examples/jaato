@@ -13,6 +13,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from shared.tool_id_map import name_to_id
 from ..streaming import StreamingCapable
 
 # Thread-local storage for session reference per agent context
@@ -107,16 +108,15 @@ class IntrospectionPlugin:
             ToolSchema(
                 name="list_tools",
                 description="Discover available tools. "
-                           "Without arguments: returns available categories with tool counts and indices. "
-                           "With category_index: returns tools in that category.",
+                           "Without arguments: returns available categories with tool counts and IDs. "
+                           "With category_id: returns tools in that category.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "category_index": {
-                            "type": "integer",
+                        "category_id": {
+                            "type": "string",
                             "description": (
-                                "1-based index of the category to list tools from "
-                                "(from the 'index' field in the category summary). "
+                                "Category ID (from the 'id' field in the category summary). "
                                 "If omitted, returns the category summary."
                             ),
                         },
@@ -141,13 +141,13 @@ class IntrospectionPlugin:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "names": {
+                        "tool_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Names of the tools to get schemas for."
+                            "description": "IDs of the tools to get schemas for (from list_tools output)."
                         }
                     },
-                    "required": ["names"]
+                    "required": ["tool_ids"]
                 },
                 category="system",
                 discoverability="core",
@@ -229,9 +229,9 @@ class IntrospectionPlugin:
             "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
             "CRITICAL: Before saying 'I cannot do X', ALWAYS explore available tools first!\n\n"
             "TOOL DISCOVERY WORKFLOW:\n"
-            "1. `list_tools()` - See all categories with descriptions and tool counts\n"
-            "2. `list_tools(category='...')` - See tools in a specific category\n"
-            "3. `get_tool_schemas(names=[...])` - Get full schemas for tools you need\n"
+            "1. `list_tools()` - See all categories with IDs and tool counts\n"
+            "2. `list_tools(category_id='...')` - See tools in a specific category\n"
+            "3. `get_tool_schemas(tool_ids=[...])` - Get full schemas for tools you need\n"
             "4. Call the tools using the schema information\n\n"
             "CATEGORY QUICK REFERENCE:\n"
             "- coordination: Task tracking, TODO, DELEGATE work, SUBAGENTS, parallel execution\n"
@@ -300,16 +300,16 @@ class IntrospectionPlugin:
         """Execute the list_tools tool.
 
         Args:
-            args: Dictionary with optional 'category_index' and 'verbose' keys.
+            args: Dictionary with optional 'category_id' and 'verbose' keys.
 
         Returns:
-            - If no category_index: returns available categories with tool counts
-            - If category_index specified: returns tools in that category
+            - If no category_id: returns available categories with tool counts
+            - If category_id specified: returns tools in that category
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        category_index = args.get("category_index")
+        category_id = args.get("category_id")
         verbose = args.get("verbose", False)
 
         # Get tool schemas filtered by session's allowed plugins
@@ -323,23 +323,21 @@ class IntrospectionPlugin:
             else {}
         )
 
-        # Build the sorted category list (same order as the summary).
-        # Used for index resolution and unknown-category validation.
+        # Build the set of all known categories.
         global_cats: Set[str] = set(category_hints.keys())
         for schema in self._registry.get_exposed_tool_schemas():
             global_cats.add(schema.category or "uncategorized")
-        sorted_cats = sorted(global_cats)
 
-        # Resolve category_index → category name (1-based).
+        # Build reverse lookup: category hash ID → category name.
+        cat_id_to_name = {name_to_id(c, prefix="c"): c for c in global_cats}
+
+        # Resolve category_id → category name.
         category: Optional[str] = None
-        if category_index is not None:
-            idx = int(category_index) - 1
-            if 0 <= idx < len(sorted_cats):
-                category = sorted_cats[idx]
-            else:
+        if category_id is not None:
+            category = cat_id_to_name.get(str(category_id))
+            if category is None:
                 return {
-                    "error": f"Invalid category_index {category_index} "
-                             f"(valid range: 1–{len(sorted_cats)}).",
+                    "error": f"Unknown category_id '{category_id}'.",
                 }
 
         # If no category specified, return category summary only
@@ -380,13 +378,12 @@ class IntrospectionPlugin:
             )
 
             categories_list = []
-            for idx, cat in enumerate(all_categories, 1):
+            for cat in all_categories:
                 available = session_counts.get(cat, 0)
                 total = global_counts.get(cat, 0)
 
                 entry: Dict[str, Any] = {
-                    "index": idx,
-                    "name": cat,
+                    "id": name_to_id(cat, prefix="c"),
                     "tool_count": available,
                     "description": category_hints.get(cat, ""),
                 }
@@ -421,7 +418,7 @@ class IntrospectionPlugin:
             return {
                 "categories": categories_list,
                 "total_tools": len(all_schemas),
-                "hint": "Call list_tools(category_index=<N>) to see tools in a specific category.",
+                "hint": "Call list_tools(category_id='<id>') to see tools in a specific category.",
                 "_telemetry": {
                     "jaato.introspection.operation": "list_tools",
                     "jaato.introspection.total_tools": len(all_schemas),
@@ -463,8 +460,7 @@ class IntrospectionPlugin:
 
             # Build tool entry
             tool_entry = {
-                "name": schema.name,
-                "plugin_source": plugin_source,
+                "id": name_to_id(schema.name),
                 "enabled": is_enabled,
                 "streaming": supports_streaming,
             }
@@ -472,7 +468,6 @@ class IntrospectionPlugin:
             # Mark tools the session can't call
             if schema.name not in session_tool_names:
                 tool_entry["available"] = False
-                tool_entry["reason"] = f"requires plugin '{plugin_source}'"
 
             if verbose:
                 tool_entry["description"] = schema.description
@@ -489,8 +484,8 @@ class IntrospectionPlugin:
 
             tools.append(tool_entry)
 
-        # Sort by name for consistent output
-        tools.sort(key=lambda t: t["name"])
+        # Sort by ID for consistent output
+        tools.sort(key=lambda t: t["id"])
 
         result = {
             "category": category,
@@ -499,14 +494,14 @@ class IntrospectionPlugin:
         }
 
         if tools:
-            result["hint"] = "Call get_tool_schemas(names=['<tool_name>']) to get full parameter details."
+            result["hint"] = "Call get_tool_schemas(tool_ids=['<id>']) to get full parameter details."
 
             # Add streaming hint if any tools support streaming
-            streaming_tools = [t["name"] for t in tools if t.get("streaming")]
+            streaming_tools = [t["id"] for t in tools if t.get("streaming")]
             if streaming_tools:
                 result["streaming_hint"] = (
                     f"Tools with streaming=true support incremental results. "
-                    f"Call '<tool_name>:stream' (e.g., '{streaming_tools[0]}:stream') "
+                    f"Call '<tool_id>:stream' (e.g., '{streaming_tools[0]}:stream') "
                     f"to receive results as they're found. Use dismiss_stream(stream_id) when done."
                 )
 
@@ -522,25 +517,26 @@ class IntrospectionPlugin:
         """Execute the get_tool_schemas tool.
 
         Args:
-            args: Dictionary with required 'names' key (array of tool names).
+            args: Dictionary with required 'tool_ids' key (array of tool IDs).
 
         Returns:
             Dictionary with schemas for requested tools and tracking info.
         """
+        from shared.tool_id_map import id_to_name as _id_to_name
+
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        names = args.get("names", [])
-        if not names:
-            return {"error": "names is required (array of tool names)"}
+        tool_ids = args.get("tool_ids", [])
+        if not tool_ids:
+            return {"error": "tool_ids is required (array of tool IDs)"}
 
-        if not isinstance(names, list):
-            names = [names]  # Handle single name as array
+        if not isinstance(tool_ids, list):
+            tool_ids = [tool_ids]
 
         # Get schemas filtered by session's allowed plugins
         all_schemas = self._get_session_allowed_schemas()
         schema_map = {s.name: s for s in all_schemas}
-        available_tools = list(schema_map.keys())
 
         # Build results
         schemas = []
@@ -549,7 +545,8 @@ class IntrospectionPlugin:
         # Collect tools that need activation (discoverable tools not yet in provider)
         tools_to_activate = []
 
-        for tool_name in names:
+        for tool_id in tool_ids:
+            tool_name = _id_to_name(tool_id)
             if tool_name in schema_map:
                 target_schema = schema_map[tool_name]
 
@@ -562,18 +559,16 @@ class IntrospectionPlugin:
 
                 # Find plugin source
                 plugin = self._registry.get_plugin_for_tool(tool_name)
-                plugin_source = plugin.name if plugin else "unknown"
 
                 # Build detailed schema response
                 schema_entry = {
-                    "name": target_schema.name,
+                    "id": name_to_id(target_schema.name),
                     "description": target_schema.description,
-                    "plugin_source": plugin_source,
                     "enabled": self._registry.is_tool_enabled(tool_name),
                 }
 
                 if target_schema.category:
-                    schema_entry["category"] = target_schema.category
+                    schema_entry["category_id"] = name_to_id(target_schema.category, prefix="c")
 
                 # Format parameters in a more readable way
                 params = target_schema.parameters
@@ -582,7 +577,7 @@ class IntrospectionPlugin:
 
                 schemas.append(schema_entry)
             else:
-                not_found.append(tool_name)
+                not_found.append(tool_id)
 
         # Build response
         result = {
@@ -591,17 +586,8 @@ class IntrospectionPlugin:
         }
 
         if not_found:
-            # Provide helpful suggestions for not found tools
-            suggestions = {}
-            for tool_name in not_found:
-                similar = [t for t in available_tools if tool_name.lower() in t.lower()]
-                if similar:
-                    suggestions[tool_name] = similar[:3]
-
             result["not_found"] = not_found
-            if suggestions:
-                result["suggestions"] = suggestions
-            result["hint"] = "Use list_tools() to see available tools."
+            result["hint"] = "Use list_tools() to see available tool IDs."
 
         # Activate discovered tools so the model can actually call them
         # This adds the tool schemas to the provider's declared tools

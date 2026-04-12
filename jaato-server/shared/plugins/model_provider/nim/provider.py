@@ -56,7 +56,6 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
 )
 from .converters import (
-    clear_tool_name_mapping,
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,
@@ -393,9 +392,6 @@ class NIMProvider:
         """
         if not self._client or not self._model_name:
             raise RuntimeError("Provider not connected. Call initialize() and connect() first.")
-
-        # Clear tool name mapping (sanitized ↔ original) on each call
-        clear_tool_name_mapping()
 
         # Build OpenAI-format messages from explicit parameters
         openai_messages: List[Dict[str, Any]] = []

@@ -1,0 +1,54 @@
+"""Deterministic name-to-ID mapping for model-facing tool and category names.
+
+Tools and categories are identified to the model by short hash-derived IDs
+(e.g., ``t_a3f2b1c0`` for tools, ``c_7e4d9f12`` for categories) instead of
+their human-readable names. This prevents the model from deriving semantic
+meaning from the name string and forces it to rely on the description.
+
+The mapping is a **pure function of the name** — the same tool always
+produces the same ID regardless of session, plugin configuration, or load
+order. This guarantees telemetry stability across deployments.
+
+User-facing surfaces (TUI, events, logs, permissions) always show the
+real name. The ID exists only at the provider boundary.
+"""
+
+import hashlib
+from typing import Dict
+
+
+_reverse: Dict[str, str] = {}
+
+
+def name_to_id(name: str, prefix: str = "t") -> str:
+    """Derive a stable, opaque ID from a human-readable name.
+
+    Uses the first 8 hex characters of the SHA-256 hash, giving ~4 billion
+    possible values — collision probability is negligible for <10K names.
+
+    Args:
+        name: Human-readable tool or category name.
+        prefix: ID prefix (``"t"`` for tools, ``"c"`` for categories).
+
+    Returns:
+        Stable ID string, e.g. ``"t_a3f2b1c0"``.
+    """
+    h = hashlib.sha256(name.encode()).hexdigest()[:8]
+    id_str = f"{prefix}_{h}"
+    _reverse[id_str] = name
+    return id_str
+
+
+def id_to_name(id_str: str) -> str:
+    """Resolve an ID back to the original human-readable name.
+
+    Returns the input unchanged if the ID is not recognized (e.g., when
+    the model hallucinates a tool ID that was never issued).
+
+    Args:
+        id_str: The hash-derived ID from the model's response.
+
+    Returns:
+        Original name, or the input if not found.
+    """
+    return _reverse.get(id_str, id_str)

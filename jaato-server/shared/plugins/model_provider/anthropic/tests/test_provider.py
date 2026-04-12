@@ -571,7 +571,8 @@ class TestComplete:
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
         assert 'tools' in call_kwargs
-        assert call_kwargs['tools'][0]['name'] == 'get_weather'
+        from shared.tool_id_map import name_to_id
+        assert call_kwargs['tools'][0]['name'] == name_to_id('get_weather')
 
     @patch('anthropic.Anthropic')
     def test_complete_extracts_function_calls(self, mock_client_class):

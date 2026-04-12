@@ -65,7 +65,6 @@ from .converters import (
     extract_reasoning_from_stream_delta,
     get_original_tool_name,
     history_to_sdk,
-    register_tool_name_mapping,
     response_from_sdk,
     sanitize_tool_name,
     serialize_history,
@@ -1568,12 +1567,11 @@ class GitHubModelsProvider:
 
         result = []
         for tool in tools:
-            sanitized_name = sanitize_tool_name(tool.name)
-            register_tool_name_mapping(sanitized_name, tool.name)
+            tool_id = sanitize_tool_name(tool.name)
             tool_dict: Dict[str, Any] = {
                 "type": "function",
                 "function": {
-                    "name": sanitized_name,
+                    "name": tool_id,
                     "description": tool.description or "",
                 }
             }

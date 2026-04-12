@@ -138,44 +138,30 @@ class TestEnvironment:
 
 # ==================== Converter Tests ====================
 
-class TestToolNameSanitization:
-    """Tests for tool name sanitization and reverse mapping."""
+class TestToolNameMapping:
+    """Tests for hash-derived tool name IDs and reverse mapping."""
 
-    def setup_method(self):
-        clear_tool_name_mapping()
+    def test_returns_hash_id(self):
+        result = sanitize_tool_name("my_tool")
+        assert result.startswith("t_")
+        assert len(result) == 10
 
-    def test_valid_name_unchanged(self):
-        assert sanitize_tool_name("my_tool") == "my_tool"
-        assert sanitize_tool_name("tool-name") == "tool-name"
+    def test_deterministic(self):
+        assert sanitize_tool_name("my_tool") == sanitize_tool_name("my_tool")
 
-    def test_dots_replaced(self):
-        assert sanitize_tool_name("mcp.server.tool") == "mcp_server_tool"
-
-    def test_colons_replaced(self):
-        assert sanitize_tool_name("ns:tool") == "ns_tool"
-
-    def test_truncation(self):
-        long_name = "a" * 100
-        assert len(sanitize_tool_name(long_name)) == 64
+    def test_different_names_produce_different_ids(self):
+        assert sanitize_tool_name("read_file") != sanitize_tool_name("write_file")
 
     def test_reverse_mapping(self):
-        register_tool_name_mapping("mcp_server_tool", "mcp.server.tool")
-        assert get_original_tool_name("mcp_server_tool") == "mcp.server.tool"
+        tool_id = sanitize_tool_name("mcp.server.tool")
+        assert get_original_tool_name(tool_id) == "mcp.server.tool"
 
     def test_reverse_mapping_unknown(self):
-        assert get_original_tool_name("unknown_tool") == "unknown_tool"
-
-    def test_clear_mapping(self):
-        register_tool_name_mapping("sanitized", "original")
-        clear_tool_name_mapping()
-        assert get_original_tool_name("sanitized") == "sanitized"
+        assert get_original_tool_name("t_nonexist") == "t_nonexist"
 
 
 class TestToolSchemaConversion:
     """Tests for ToolSchema to OpenAI format conversion."""
-
-    def setup_method(self):
-        clear_tool_name_mapping()
 
     def test_basic_schema(self):
         schema = ToolSchema(
@@ -186,11 +172,11 @@ class TestToolSchemaConversion:
         result = tool_schema_to_openai(schema)
 
         assert result["type"] == "function"
-        assert result["function"]["name"] == "read_file"
+        assert result["function"]["name"] == sanitize_tool_name("read_file")
         assert result["function"]["description"] == "Read a file"
         assert result["function"]["parameters"]["type"] == "object"
 
-    def test_schema_with_sanitization(self):
+    def test_schema_roundtrip(self):
         schema = ToolSchema(
             name="mcp.server.tool",
             description="A tool",
@@ -198,16 +184,13 @@ class TestToolSchemaConversion:
         )
         result = tool_schema_to_openai(schema)
 
-        assert result["function"]["name"] == "mcp_server_tool"
-        # Reverse mapping should work
-        assert get_original_tool_name("mcp_server_tool") == "mcp.server.tool"
+        tool_id = result["function"]["name"]
+        assert tool_id.startswith("t_")
+        assert get_original_tool_name(tool_id) == "mcp.server.tool"
 
 
 class TestMessageConversion:
     """Tests for Message <-> OpenAI format conversion."""
-
-    def setup_method(self):
-        clear_tool_name_mapping()
 
     def test_user_message(self):
         msg = Message.from_text(Role.USER, "Hello")
@@ -232,7 +215,7 @@ class TestMessageConversion:
         assert result["content"] is None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["id"] == "call_1"
-        assert result["tool_calls"][0]["function"]["name"] == "read_file"
+        assert result["tool_calls"][0]["function"]["name"] == sanitize_tool_name("read_file")
 
     def test_tool_result_message(self):
         tr = ToolResult(call_id="call_1", name="read_file", result={"content": "file data"})
