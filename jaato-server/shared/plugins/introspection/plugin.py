@@ -117,7 +117,8 @@ class IntrospectionPlugin:
                             "type": "string",
                             "description": (
                                 "The 'id' field (NOT the 'name') from the category summary. "
-                                "Example: 'c_a3f2b1c0'. If omitted, returns the category summary."
+                                "Must be obtained from a prior list_tools() call. "
+                                "If omitted, returns the category summary."
                             ),
                         },
                         "verbose": {
@@ -144,7 +145,7 @@ class IntrospectionPlugin:
                         "tool_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "The 'id' field (NOT the 'name') of tools from list_tools output. Example: ['t_a3f2b1c0']."
+                            "description": "The 'id' field (NOT the 'name') of tools. Must be obtained from a prior list_tools() call."
                         }
                     },
                     "required": ["tool_ids"]
