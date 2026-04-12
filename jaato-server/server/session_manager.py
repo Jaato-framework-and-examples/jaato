@@ -967,6 +967,62 @@ class SessionManager:
 
         return session_id
 
+    # ------------------------------------------------------------------
+    # Headless session creation (for daemon extensions / reactors)
+    # ------------------------------------------------------------------
+
+    _HEADLESS_CLIENT_ID = "_headless"
+
+    def create_headless_session(
+        self,
+        profile_name: str,
+        workspace_path: Optional[str] = None,
+        initial_prompt: Optional[str] = None,
+        session_name: Optional[str] = None,
+    ) -> str:
+        """Create a top-level session not attached to any real client.
+
+        Intended for daemon extensions (e.g., reactor rules) that need to
+        spawn an independent session in response to an event.  The session
+        is fully initialized and runs like any other, but its client-facing
+        events are silently dropped — the transport layer ignores events
+        addressed to the synthetic ``_headless`` client (IPC: unknown
+        client → silent return; WS: same).
+
+        The session **is** visible on the EventBus, so any reactor
+        subscriptions (via the session hook) observe it normally.
+
+        Args:
+            profile_name: Agent profile to use (resolved from
+                ``.jaato/profiles/``).
+            workspace_path: Workspace directory.  Defaults to the daemon's
+                cwd if not provided.
+            initial_prompt: If set, a ``SendMessageRequest`` is dispatched
+                to the new session immediately after creation.
+            session_name: Optional human-readable name.
+
+        Returns:
+            The session ID (empty string on failure).
+        """
+        session_id = self.create_session(
+            client_id=self._HEADLESS_CLIENT_ID,
+            session_name=session_name,
+            workspace_path=workspace_path,
+            profile_name=profile_name,
+        )
+        if not session_id:
+            return ""
+
+        if initial_prompt:
+            from jaato_sdk.events import SendMessageRequest
+            self.handle_request(
+                self._HEADLESS_CLIENT_ID,
+                session_id,
+                SendMessageRequest(text=initial_prompt),
+            )
+
+        return session_id
+
     def get_session_workspace(self, session_id: str) -> Optional[str]:
         """Get the workspace path of a session.
 
