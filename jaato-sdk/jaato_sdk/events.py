@@ -794,6 +794,8 @@ class SessionInfoEvent(Event):
     # ^ [{path, description}, ...] for @@ sandbox completion
     services: List[Dict[str, Any]] = field(default_factory=list)
     # ^ [{name, methods}, ...] for services command completions
+    tool_id_mappings: Dict[str, str] = field(default_factory=dict)
+    # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
 
 
 @dataclass

@@ -1892,6 +1892,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     _update_sandbox_paths(event.sandbox_paths)
                 if event.services:
                     available_services = event.services
+                if event.tool_id_mappings:
+                    from ui_utils import set_tool_id_registry
+                    set_tool_id_registry(event.tool_id_mappings)
 
                 # Track session ID for recovery reattachment
                 if event.session_id:

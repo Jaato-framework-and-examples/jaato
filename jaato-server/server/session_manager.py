@@ -2331,6 +2331,11 @@ class SessionManager:
             if svc_plugin and hasattr(svc_plugin, 'get_service_metadata'):
                 services_data = svc_plugin.get_service_metadata()
 
+        # Build tool ID mappings for client-side display resolution
+        tool_id_mappings = {}
+        if session.server:
+            tool_id_mappings = session.server._build_tool_id_mappings()
+
         return SessionInfoEvent(
             session_id=session.session_id,
             session_name=session.name,
@@ -2344,6 +2349,7 @@ class SessionManager:
             memories=memories_data,
             sandbox_paths=sandbox_paths_data,
             services=services_data,
+            tool_id_mappings=tool_id_mappings,
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:
