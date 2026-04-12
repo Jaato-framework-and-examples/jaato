@@ -637,29 +637,8 @@ class JaatoServer:
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
         self._emit_subagent_state(emit)
 
-        # Emit tool ID registry so clients can resolve hash IDs.
-        # Built eagerly from current tool schemas rather than from the
-        # lazily-populated _reverse map, because provider.complete()
-        # (which triggers name_to_id calls in converters) may not have
-        # run yet on the first turn.
-        if self._jaato:
-            session = self._jaato.get_session()
-            if session:
-                from shared.tool_id_map import name_to_id
-                from jaato_sdk.events import ToolIdRegistryEvent
-                mappings = {}
-                for schema in (session._tools or []):
-                    mappings[name_to_id(schema.name)] = schema.name
-                    if schema.category:
-                        mappings[name_to_id(schema.category, prefix="c")] = schema.category
-                # Also include globally exposed tools (deferred/undiscovered)
-                if self.registry:
-                    for schema in self.registry.get_exposed_tool_schemas():
-                        mappings[name_to_id(schema.name)] = schema.name
-                        if schema.category:
-                            mappings[name_to_id(schema.category, prefix="c")] = schema.category
-                if mappings:
-                    emit(ToolIdRegistryEvent(mappings=mappings))
+        # Emit tool ID registry so clients can resolve hash IDs
+        self._emit_tool_id_registry_from_schemas(emit_fn=emit)
 
         # Clear stale pending requests on client if requested
         # This is used after session recovery when the server has no pending requests
@@ -858,6 +837,48 @@ class JaatoServer:
                 selected_ids=[],
             ))
             logger.debug("Emitted ReferenceSelectionResolvedEvent to clear stale client state")
+
+    # =========================================================================
+    # Tool ID Registry
+    # =========================================================================
+
+    def _build_tool_id_mappings(self) -> Dict[str, str]:
+        """Build the complete tool/category ID → name mapping from current schemas.
+
+        Iterates session tools and the full registry to cover both active
+        and deferred tools. Calls ``name_to_id`` eagerly so the reverse map
+        is populated as a side effect.
+        """
+        from shared.tool_id_map import name_to_id
+        mappings: Dict[str, str] = {}
+        if self._jaato:
+            session = self._jaato.get_session()
+            if session:
+                for schema in (session._tools or []):
+                    mappings[name_to_id(schema.name)] = schema.name
+                    if schema.category:
+                        mappings[name_to_id(schema.category, prefix="c")] = schema.category
+        if self.registry:
+            for schema in self.registry.get_exposed_tool_schemas():
+                mappings[name_to_id(schema.name)] = schema.name
+                if schema.category:
+                    mappings[name_to_id(schema.category, prefix="c")] = schema.category
+        return mappings
+
+    def _emit_tool_id_registry_from_schemas(
+        self,
+        emit_fn: Optional[EventCallback] = None,
+    ) -> None:
+        """Emit the tool ID registry to clients.
+
+        Used during ``initialize()`` (new sessions) and
+        ``emit_current_state()`` (reconnects).
+        """
+        from jaato_sdk.events import ToolIdRegistryEvent
+        mappings = self._build_tool_id_mappings()
+        if mappings:
+            emit = emit_fn or self._on_event
+            emit(ToolIdRegistryEvent(mappings=mappings))
 
     # =========================================================================
     # Initialization
@@ -1309,6 +1330,10 @@ class JaatoServer:
                         ))
 
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
+
+        # Emit tool ID registry to the client so it can resolve hash IDs
+        # from the first turn onwards. Built eagerly from configured schemas.
+        self._emit_tool_id_registry_from_schemas()
 
         # Step 6: Set up session
         self._emit_init_progress("Setting up session", "running", 6, total_steps)
