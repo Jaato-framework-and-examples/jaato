@@ -30,6 +30,29 @@ class TestNameToId:
         assert result.startswith("t_")
 
 
+class TestNameToIdSuffix:
+
+    def test_stream_suffix_preserves_base_hash(self):
+        base_id = name_to_id("grep_content")
+        stream_id = name_to_id("grep_content:stream")
+        assert stream_id == f"{base_id}:stream"
+
+    def test_stream_suffix_roundtrip(self):
+        stream_id = name_to_id("grep_content:stream")
+        assert id_to_name(stream_id) == "grep_content:stream"
+
+    def test_base_still_resolves_after_suffix_registration(self):
+        base_id = name_to_id("some_tool")
+        name_to_id("some_tool:stream")
+        assert id_to_name(base_id) == "some_tool"
+
+    def test_suffix_id_length(self):
+        stream_id = name_to_id("readFile:stream")
+        # "t_" + 8 hex + ":stream" = 17
+        assert stream_id.startswith("t_")
+        assert stream_id.endswith(":stream")
+
+
 class TestIdToName:
 
     def test_roundtrip(self):
@@ -48,6 +71,15 @@ class TestIdToName:
         for name in tools:
             tool_id = name_to_id(name)
             assert id_to_name(tool_id) == name
+
+    def test_suffix_resolves_even_without_explicit_registration(self):
+        """Model appends :stream to a base ID it knows — should still resolve."""
+        base_id = name_to_id("find_files")
+        # Simulate model appending :stream to the base hash ID
+        assert id_to_name(f"{base_id}:stream") == "find_files:stream"
+
+    def test_unknown_suffix_id_returns_input(self):
+        assert id_to_name("t_nonexistent:stream") == "t_nonexistent:stream"
 
 
 class TestStability:

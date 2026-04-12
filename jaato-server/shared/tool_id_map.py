@@ -26,21 +26,38 @@ def name_to_id(name: str, prefix: str = "t") -> str:
     Uses the first 8 hex characters of the SHA-256 hash, giving ~4 billion
     possible values — collision probability is negligible for <10K names.
 
+    Tool-name suffixes (e.g. ``:stream``) are preserved through the mapping:
+    ``grep_content:stream`` → ``t_<hash-of-grep_content>:stream``.  This
+    ensures the model sees a consistent relationship between base tools and
+    their variants.
+
     Args:
         name: Human-readable tool or category name.
         prefix: ID prefix (``"t"`` for tools, ``"c"`` for categories).
 
     Returns:
-        Stable ID string, e.g. ``"t_a3f2b1c0"``.
+        Stable ID string, e.g. ``"t_a3f2b1c0"`` or ``"t_a3f2b1c0:stream"``.
     """
-    h = hashlib.sha256(name.encode()).hexdigest()[:8]
-    id_str = f"{prefix}_{h}"
-    _reverse[id_str] = name
-    return id_str
+    # Preserve suffixes (e.g. ":stream") so the model-facing ID keeps the
+    # same base hash as the unsuffixed tool.
+    suffix = ""
+    base_name = name
+    colon = name.rfind(":")
+    if colon > 0:
+        suffix = name[colon:]   # e.g. ":stream"
+        base_name = name[:colon]
+
+    h = hashlib.sha256(base_name.encode()).hexdigest()[:8]
+    base_id = f"{prefix}_{h}"
+    _reverse[base_id] = base_name
+    return f"{base_id}{suffix}"
 
 
 def id_to_name(id_str: str) -> str:
     """Resolve an ID back to the original human-readable name.
+
+    Handles suffixes transparently: ``t_a3f2b1c0:stream`` is resolved by
+    looking up ``t_a3f2b1c0`` and re-appending ``:stream``.
 
     Returns the input unchanged if the ID is not recognized (e.g., when
     the model hallucinates a tool ID that was never issued).
@@ -51,4 +68,18 @@ def id_to_name(id_str: str) -> str:
     Returns:
         Original name, or the input if not found.
     """
-    return _reverse.get(id_str, id_str)
+    # Fast path: direct lookup (covers all unsuffixed IDs).
+    resolved = _reverse.get(id_str)
+    if resolved is not None:
+        return resolved
+
+    # Suffix-aware lookup: strip suffix, resolve base, re-append.
+    colon = id_str.rfind(":")
+    if colon > 0:
+        base_id = id_str[:colon]
+        suffix = id_str[colon:]
+        base_name = _reverse.get(base_id)
+        if base_name is not None:
+            return f"{base_name}{suffix}"
+
+    return id_str
