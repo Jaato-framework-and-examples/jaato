@@ -6,6 +6,7 @@ depending on the full server package.
 """
 
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Union
 
@@ -303,6 +304,40 @@ def _looks_like_path(value: str) -> bool:
     return False
 
 
+_TOOL_ID_PATTERN = re.compile(r'^[tc]_[0-9a-f]{8}$')
+
+
+def _resolve_tool_id(value: str) -> str:
+    """Resolve a hash-derived tool/category ID to its human-readable name.
+
+    Lazily imports the shared reverse map (populated by the server process).
+    Returns the input unchanged if not a recognized ID.
+    """
+    if not _TOOL_ID_PATTERN.match(value):
+        return value
+    try:
+        from shared.tool_id_map import id_to_name
+        return id_to_name(value)
+    except ImportError:
+        return value
+
+
+def resolve_tool_ids(value: Any) -> Any:
+    """Recursively resolve hash-derived IDs in tool argument values.
+
+    Walks dicts, lists, and scalar strings, replacing recognized ID
+    patterns (``t_XXXXXXXX``, ``c_XXXXXXXX``) with human-readable names.
+    Non-string leaves pass through unchanged.
+    """
+    if isinstance(value, str):
+        return _resolve_tool_id(value)
+    if isinstance(value, list):
+        return [resolve_tool_ids(v) for v in value]
+    if isinstance(value, dict):
+        return {k: resolve_tool_ids(v) for k, v in value.items()}
+    return value
+
+
 def format_tool_args_summary(
     tool_args: Dict[str, Any],
     max_length: int = 60,
@@ -315,6 +350,7 @@ def format_tool_args_summary(
 
     processed: Dict[str, Any] = {}
     for key, value in tool_args.items():
+        value = resolve_tool_ids(value)
         if isinstance(value, str) and (
             key.lower() in _PATH_ARG_NAMES or _looks_like_path(value)
         ):
@@ -333,6 +369,7 @@ def format_tool_arg_value(value: Any, max_width: int) -> str:
     if max_width < 4:
         return "..."[:max_width]
 
+    value = resolve_tool_ids(value)
     s = str(value)
 
     if "\n" in s:
