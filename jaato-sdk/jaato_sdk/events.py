@@ -112,6 +112,7 @@ class EventType(str, Enum):
 
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
+    TOOL_ID_REGISTRY = "tools.id_registry"  # Hash-derived ID → name mapping for display
 
     # Tool management (Client -> Server)
     TOOL_DISABLE_REQUEST = "tools.disable"
@@ -1044,6 +1045,21 @@ class ToolStatusEvent(Event):
 
 
 @dataclass
+class ToolIdRegistryEvent(Event):
+    """Hash-derived ID → human-readable name mapping for client display.
+
+    Sent after tool configuration and when deferred tools are activated.
+    Clients use this to resolve opaque tool/category IDs in tool arguments
+    and model output without pattern-matching or reverse engineering.
+
+    The mapping is cumulative — each event carries the full current set,
+    not a delta. Clients should replace their local lookup on each receive.
+    """
+    type: EventType = field(default=EventType.TOOL_ID_REGISTRY)
+    mappings: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ToolDisableRequest(Event):
     """Client request to disable a tool.
 
@@ -1628,6 +1644,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
+    EventType.TOOL_ID_REGISTRY.value: ToolIdRegistryEvent,
     EventType.TOOL_DISABLE_REQUEST.value: ToolDisableRequest,
     EventType.TOOLS_REGISTER_CLIENT.value: ToolsRegisterClientRequest,
     EventType.TOOL_EXECUTE_REQUEST.value: ToolExecuteRequestEvent,

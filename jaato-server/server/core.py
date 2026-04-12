@@ -637,6 +637,12 @@ class JaatoServer:
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
         self._emit_subagent_state(emit)
 
+        # Emit tool ID registry so clients can resolve hash IDs
+        from shared.tool_id_map import _reverse
+        if _reverse:
+            from jaato_sdk.events import ToolIdRegistryEvent
+            emit(ToolIdRegistryEvent(mappings=dict(_reverse)))
+
         # Clear stale pending requests on client if requested
         # This is used after session recovery when the server has no pending requests
         # but the client might still have stale UI state from before the crash
@@ -855,6 +861,18 @@ class JaatoServer:
             total_steps=total_steps,
             message=message,
         ))
+
+    def _emit_tool_id_registry(self) -> None:
+        """Emit the current tool/category ID → name mapping to clients.
+
+        Sends the full ``tool_id_map`` reverse lookup so clients can
+        resolve hash-derived IDs in tool arguments and results without
+        pattern matching.
+        """
+        from shared.tool_id_map import _reverse
+        from jaato_sdk.events import ToolIdRegistryEvent
+        if _reverse:
+            self.emit(ToolIdRegistryEvent(mappings=dict(_reverse)))
 
     def initialize(self) -> bool:
         """Initialize the server.
@@ -1285,6 +1303,8 @@ class JaatoServer:
                         ))
 
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
+
+        self._emit_tool_id_registry()
 
         # Step 6: Set up session
         self._emit_init_progress("Setting up session", "running", 6, total_steps)

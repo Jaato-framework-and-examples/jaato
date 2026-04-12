@@ -304,33 +304,30 @@ def _looks_like_path(value: str) -> bool:
     return False
 
 
-_TOOL_ID_PATTERN = re.compile(r'^[tc]_[0-9a-f]{8}$')
+_tool_id_registry: Dict[str, str] = {}
 
 
-def _resolve_tool_id(value: str) -> str:
-    """Resolve a hash-derived tool/category ID to its human-readable name.
+def set_tool_id_registry(mappings: Dict[str, str]) -> None:
+    """Replace the local tool ID → name registry.
 
-    Lazily imports the shared reverse map (populated by the server process).
-    Returns the input unchanged if not a recognized ID.
+    Called by the client when it receives a ``ToolIdRegistryEvent``
+    from the server. The registry is a flat dict mapping hash-derived
+    IDs (e.g., ``t_a3f2b1c0``) to human-readable names (e.g.,
+    ``readFile``).
     """
-    if not _TOOL_ID_PATTERN.match(value):
-        return value
-    try:
-        from shared.tool_id_map import id_to_name
-        return id_to_name(value)
-    except ImportError:
-        return value
+    _tool_id_registry.clear()
+    _tool_id_registry.update(mappings)
 
 
 def resolve_tool_ids(value: Any) -> Any:
     """Recursively resolve hash-derived IDs in tool argument values.
 
-    Walks dicts, lists, and scalar strings, replacing recognized ID
-    patterns (``t_XXXXXXXX``, ``c_XXXXXXXX``) with human-readable names.
-    Non-string leaves pass through unchanged.
+    Walks dicts, lists, and scalar strings, replacing recognized IDs
+    with human-readable names from the registry populated by
+    ``ToolIdRegistryEvent``. Unrecognized values pass through unchanged.
     """
     if isinstance(value, str):
-        return _resolve_tool_id(value)
+        return _tool_id_registry.get(value, value)
     if isinstance(value, list):
         return [resolve_tool_ids(v) for v in value]
     if isinstance(value, dict):

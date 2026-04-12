@@ -866,6 +866,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ServiceListEvent,
         CommandListEvent,
         ToolStatusEvent,
+        ToolIdRegistryEvent,
         HistoryEvent,
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
@@ -2051,6 +2052,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             lines.append((f"    {status} {name}: {desc}", status_style if not enabled else "dim"))
 
                     display.show_lines(lines)
+
+            elif isinstance(event, ToolIdRegistryEvent):
+                from ui_utils import set_tool_id_registry
+                set_tool_id_registry(event.mappings)
+                ipc_trace(f"  ToolIdRegistryEvent: {len(event.mappings)} mappings")
 
             elif isinstance(event, HistoryEvent):
                 # Format and display conversation history
