@@ -177,13 +177,14 @@ class TestListTools:
         assert "total_tools" in result
         assert result["total_tools"] == 4
 
-        cat_ids = [c["id"] for c in result["categories"]]
-        assert name_to_id("filesystem", prefix="c") in cat_ids
-        assert name_to_id("search", prefix="c") in cat_ids
-        assert name_to_id("coordination", prefix="c") in cat_ids
+        cat_names = [c["name"] for c in result["categories"]]
+        assert "filesystem" in cat_names
+        assert "search" in cat_names
+        assert "coordination" in cat_names
 
-        fs_cat = next(c for c in result["categories"] if c["id"] == name_to_id("filesystem", prefix="c"))
+        fs_cat = next(c for c in result["categories"] if c["name"] == "filesystem")
         assert fs_cat["tool_count"] == 2
+        assert fs_cat["id"] == name_to_id("filesystem", prefix="c")
 
     def test_list_tools_with_category_returns_tools(self):
         cat_id = name_to_id("filesystem", prefix="c")
@@ -193,9 +194,9 @@ class TestListTools:
         assert result["tool_count"] == 2
         assert "tools" in result
 
-        tool_ids = [t["id"] for t in result["tools"]]
-        assert name_to_id("readFile") in tool_ids
-        assert name_to_id("writeFile") in tool_ids
+        tool_names = [t["name"] for t in result["tools"]]
+        assert "readFile" in tool_names
+        assert "writeFile" in tool_names
 
     def test_list_tools_includes_plugin_source(self):
         cat_id = name_to_id("filesystem", prefix="c")
@@ -225,7 +226,7 @@ class TestListTools:
         for tool in result["tools"]:
             assert "enabled" in tool
 
-        read_tool = next(t for t in result["tools"] if t["id"] == name_to_id("readFile"))
+        read_tool = next(t for t in result["tools"] if t["name"] == "readFile")
         assert read_tool["enabled"] is False
 
     def test_list_tools_sorted_by_id(self):
@@ -297,8 +298,10 @@ class TestGetToolSchemas:
         assert result["count"] == 1
         schema = result["schemas"][0]
         assert schema["id"] == tool_id
+        assert schema["name"] == "testTool"
         assert schema["description"] == "A test tool for unit testing."
         assert schema["category_id"] == name_to_id("code", prefix="c")
+        assert schema["category"] == "code"
         assert schema["enabled"] is True
         assert "parameters" in schema
 
@@ -307,9 +310,9 @@ class TestGetToolSchemas:
         result = self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": ids})
 
         assert result["count"] == 2
-        schema_ids = [s["id"] for s in result["schemas"]]
-        assert name_to_id("testTool") in schema_ids
-        assert name_to_id("anotherTool") in schema_ids
+        schema_names = [s["name"] for s in result["schemas"]]
+        assert "testTool" in schema_names
+        assert "anotherTool" in schema_names
 
     def test_get_tool_schemas_formats_parameters(self):
         tool_id = name_to_id("testTool")
