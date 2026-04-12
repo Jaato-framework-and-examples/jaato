@@ -1,9 +1,10 @@
-"""Tests for runtime-injectable permission evaluators."""
+"""Tests for runtime-injectable permission evaluators.
 
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock
+Path resolution is now owned by ``shared.script_loader`` and covered by
+``shared/tests/test_script_loader.py``. Tests here focus on the evaluator-
+specific contract: loading the ``evaluate`` symbol, decision coercion,
+and the run_evaluator dispatch pipeline.
+"""
 
 import pytest
 
@@ -11,7 +12,6 @@ from shared.plugins.permission.evaluator import (
     EvalContext,
     EvalResult,
     PolicyDecision,
-    _resolve_evaluator_path,
     load_evaluators,
     run_evaluator,
 )
@@ -44,36 +44,6 @@ class TestEvalContext:
         )
         assert ctx.agent_type == "subagent"
         assert ctx.extra["custom"] is True
-
-
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
-
-class TestResolveEvaluatorPath:
-
-    def test_absolute_path_exists(self, tmp_path):
-        script = tmp_path / "eval.py"
-        script.write_text("def evaluate(t, a, c): pass")
-        assert _resolve_evaluator_path(str(script)) == script
-
-    def test_absolute_path_missing(self):
-        assert _resolve_evaluator_path("/nonexistent/eval.py") is None
-
-    def test_relative_workspace_path(self, tmp_path):
-        ws = tmp_path / "workspace"
-        jaato_dir = ws / ".jaato" / "policies"
-        jaato_dir.mkdir(parents=True)
-        script = jaato_dir / "eval.py"
-        script.write_text("def evaluate(t, a, c): pass")
-        result = _resolve_evaluator_path("policies/eval.py", workspace_path=str(ws))
-        assert result == script
-
-    def test_relative_no_workspace_no_home(self, tmp_path):
-        # No workspace, no ~/.jaato match
-        result = _resolve_evaluator_path("nonexistent/eval.py")
-        # May or may not find in ~/.jaato — just verify no crash
-        assert result is None or result.is_file()
 
 
 # ---------------------------------------------------------------------------
