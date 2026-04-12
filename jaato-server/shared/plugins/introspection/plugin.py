@@ -116,8 +116,8 @@ class IntrospectionPlugin:
                         "category_id": {
                             "type": "string",
                             "description": (
-                                "Category ID (from the 'id' field in the category summary). "
-                                "If omitted, returns the category summary."
+                                "The 'id' field (NOT the 'name') from the category summary. "
+                                "Example: 'c_a3f2b1c0'. If omitted, returns the category summary."
                             ),
                         },
                         "verbose": {
@@ -144,7 +144,7 @@ class IntrospectionPlugin:
                         "tool_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "IDs of the tools to get schemas for (from list_tools output)."
+                            "description": "The 'id' field (NOT the 'name') of tools from list_tools output. Example: ['t_a3f2b1c0']."
                         }
                     },
                     "required": ["tool_ids"]
@@ -384,6 +384,7 @@ class IntrospectionPlugin:
 
                 entry: Dict[str, Any] = {
                     "id": name_to_id(cat, prefix="c"),
+                    "name": cat,
                     "tool_count": available,
                     "description": category_hints.get(cat, ""),
                 }
@@ -461,6 +462,7 @@ class IntrospectionPlugin:
             # Build tool entry
             tool_entry = {
                 "id": name_to_id(schema.name),
+                "name": schema.name,
                 "enabled": is_enabled,
                 "streaming": supports_streaming,
             }
@@ -563,12 +565,14 @@ class IntrospectionPlugin:
                 # Build detailed schema response
                 schema_entry = {
                     "id": name_to_id(target_schema.name),
+                    "name": target_schema.name,
                     "description": target_schema.description,
                     "enabled": self._registry.is_tool_enabled(tool_name),
                 }
 
                 if target_schema.category:
                     schema_entry["category_id"] = name_to_id(target_schema.category, prefix="c")
+                    schema_entry["category"] = target_schema.category
 
                 # Format parameters in a more readable way
                 params = target_schema.parameters
