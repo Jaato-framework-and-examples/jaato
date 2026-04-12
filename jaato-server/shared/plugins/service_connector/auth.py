@@ -5,6 +5,7 @@ handles OAuth2 token lifecycle.
 """
 
 import base64
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..subagent.config import expand_variables
 from .types import AuthConfig, AuthType, ParameterLocation
+
+logger = logging.getLogger(__name__)
 
 
 class AuthError(Exception):
@@ -113,6 +116,10 @@ class AuthManager:
                     f"Bearer token not found in environment variable: {auth_config.value_env}"
                 )
 
+            logger.info(
+                "BEARER auth: env=%s len=%d prefix=%s",
+                auth_config.value_env, len(token), token[:4] + "...",
+            )
             headers["Authorization"] = f"Bearer {token}"
 
         elif auth_config.type == AuthType.BASIC:

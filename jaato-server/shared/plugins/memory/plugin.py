@@ -113,7 +113,11 @@ class MemoryPlugin:
         # Global storage at ~/.jaato/memories.jsonl — cross-session
         # knowledge shared by all agents.  Fixed path, no workspace
         # dependency.  AppArmor profile grants rw access.
-        global_path = str(Path.home() / ".jaato" / "memories.jsonl")
+        # Configurable via "global_storage_path" for testing.
+        global_path = config.get(
+            "global_storage_path",
+            str(Path.home() / ".jaato" / "memories.jsonl"),
+        )
         self._global_storage = MemoryStorage(global_path)
         self._global_indexer = MemoryIndexer()
         global_memories = self._global_storage.load_all()
