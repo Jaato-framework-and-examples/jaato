@@ -13,6 +13,7 @@ from ..plugin import (
     PromptParam,
     PROMPT_ENTRY_FILE,
     SKILL_ENTRY_FILE,
+    COMMAND_TIMEOUT,
 )
 
 
@@ -1461,3 +1462,174 @@ class TestDeletePrompt:
         auto_approved = plugin.get_auto_approved_tools()
 
         assert "deletePrompt" not in auto_approved
+
+
+class TestCommandSubstitution:
+    """Tests for {{!command}} command substitution in prompt templates."""
+
+    def test_expand_simple_command(self):
+        """Basic command substitution replaces placeholder with stdout."""
+        plugin = PromptLibraryPlugin()
+        content = "Today is {{!echo hello world}}."
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "Today is hello world."
+
+    def test_expand_no_commands_passthrough(self):
+        """Content without {{!...}} is returned unchanged."""
+        plugin = PromptLibraryPlugin()
+        content = "No commands here, just {{param}} placeholders."
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == content
+
+    def test_expand_multiple_commands(self):
+        """Multiple command placeholders are all expanded."""
+        plugin = PromptLibraryPlugin()
+        content = "A={{!echo aaa}} B={{!echo bbb}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "A=aaa B=bbb"
+
+    def test_expand_command_failure_embeds_error(self):
+        """Non-zero exit embeds the error message."""
+        plugin = PromptLibraryPlugin()
+        content = "Result: {{!false}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert "[command failed: false]" in result
+        assert "[exit code 1]" in result
+
+    def test_expand_command_stderr_in_error(self):
+        """stderr from a failing command is included in the error message."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!bash -c 'echo oops >&2; exit 1'}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert "oops" in result
+        assert "[command failed:" in result
+
+    def test_expand_command_timeout(self):
+        """Commands exceeding the timeout produce a timeout message."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!sleep 999}}"
+        # Patch COMMAND_TIMEOUT to something tiny for the test
+        with patch("shared.plugins.prompt_library.plugin.COMMAND_TIMEOUT", 1):
+            result = plugin._expand_commands(content, "/tmp")
+        assert "[command timed out" in result
+
+    def test_expand_command_uses_cwd(self):
+        """Commands run in the provided working directory."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            content = "{{!pwd}}"
+            result = plugin._expand_commands(content, tmpdir)
+            # pwd output should match the tmpdir (resolve symlinks)
+            assert Path(result.strip()).resolve() == Path(tmpdir).resolve()
+
+    def test_expand_command_multiword(self):
+        """Commands with arguments and pipes work."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!echo hello | tr a-z A-Z}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "HELLO"
+
+    def test_expand_preserves_surrounding_text(self):
+        """Text around command placeholders is preserved."""
+        plugin = PromptLibraryPlugin()
+        content = "Before\n{{!echo middle}}\nAfter"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "Before\nmiddle\nAfter"
+
+    def test_expand_command_nonexistent_binary(self):
+        """Missing binaries produce a command error."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!nonexistent_binary_xyz_12345}}"
+        result = plugin._expand_commands(content, "/tmp")
+        # Should embed an error — either a command failure or exception
+        assert "[command failed:" in result or "[command error:" in result
+
+    def test_expand_with_script_in_skill_dir(self):
+        """Commands can reference scripts relative to the skill directory."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scripts_dir = Path(tmpdir) / "scripts"
+            scripts_dir.mkdir()
+            script = scripts_dir / "greet.sh"
+            script.write_text("#!/bin/bash\necho \"hello from script\"")
+            script.chmod(0o755)
+
+            content = "{{!bash scripts/greet.sh}}"
+            result = plugin._expand_commands(content, tmpdir)
+            assert result == "hello from script"
+
+    def test_expand_before_param_substitution_in_tool(self):
+        """Command expansion runs before param substitution in prompt tool execution."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "test-cmd.md").write_text(
+                "---\nname: test-cmd\ndescription: test\n---\n"
+                "Version: {{!echo 1.2.3}}\nFile: {{file}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin._execute_prompt_tool("test-cmd", {"file": "main.py"})
+
+            assert "1.2.3" in result["content"]
+            assert "main.py" in result["content"]
+
+    def test_expand_before_param_substitution_in_user_command(self):
+        """Command expansion runs before param substitution in user command."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "cmd-test.md").write_text(
+                "---\nname: cmd-test\ndescription: test\n---\n"
+                "Host: {{!hostname}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin._execute_prompt_command({"args": ["cmd-test"]})
+
+            # Should contain actual hostname output, not the placeholder
+            assert "{{!" not in result
+            assert len(result.strip()) > 0
+
+    def test_expand_in_resolve_agent(self):
+        """Command expansion runs when resolving an agent."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agents_dir = Path(tmpdir) / ".jaato" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "test-agent").mkdir()
+            (agents_dir / "test-agent" / "PROMPT.md").write_text(
+                "---\nname: test-agent\ndescription: test agent\n---\n"
+                "System date: {{!date +%Y}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin.resolve_agent("test-agent")
+
+            assert result is not None
+            assert "{{!" not in result["system_instructions"]
+            # Should contain a 4-digit year
+            assert "202" in result["system_instructions"]
+
+    def test_get_skill_cwd_directory(self):
+        """_get_skill_cwd returns the directory itself for directory-based prompts."""
+        plugin = PromptLibraryPlugin()
+        info = PromptInfo(
+            name="test", description="test", source="project",
+            path=Path("/workspace/skills/my-skill"), is_directory=True,
+        )
+        assert plugin._get_skill_cwd(info) == "/workspace/skills/my-skill"
+
+    def test_get_skill_cwd_file(self):
+        """_get_skill_cwd returns the parent for single-file prompts."""
+        plugin = PromptLibraryPlugin()
+        info = PromptInfo(
+            name="test", description="test", source="project",
+            path=Path("/workspace/prompts/review.md"), is_directory=False,
+        )
+        assert plugin._get_skill_cwd(info) == "/workspace/prompts"

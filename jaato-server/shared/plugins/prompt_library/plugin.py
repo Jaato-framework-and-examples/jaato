@@ -21,6 +21,7 @@ Template syntax:
 - {{$1}}, {{$2}}, etc. - Positional parameters (for Claude compat)
 - {{$0}} - All arguments joined with spaces
 - $ARGUMENTS - Claude Code compatibility (becomes {{$0}})
+- {{!command}} - Command substitution (runs command, embeds output)
 """
 
 import base64
@@ -36,6 +37,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional, Set, TYPE_CHECKING
 
 import yaml
+
+from shared.subprocess_runner import run_command as _run_command, RunResult
 
 if TYPE_CHECKING:
     from ..permission.plugin import PermissionPlugin
@@ -64,6 +67,10 @@ NAMED_PARAM_PATTERN = re.compile(r'\{\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([^}]*))?\}\}
 POSITIONAL_PARAM_PATTERN = re.compile(r'\{\{\$(\d+)(?::([^}]*))?\}\}')
 # Claude Code $ARGUMENTS placeholder
 ARGUMENTS_PLACEHOLDER = re.compile(r'\$ARGUMENTS\b')
+# Command substitution: {{!command args...}}
+COMMAND_PATTERN = re.compile(r'\{\{!(.+?)\}\}')
+# Timeout for command substitution (seconds)
+COMMAND_TIMEOUT = 30
 
 
 @dataclass
@@ -500,6 +507,67 @@ class PromptLibraryPlugin:
         self._prompt_cache = prompts
         return prompts
 
+    def _expand_commands(self, content: str, cwd: str) -> str:
+        """Expand ``{{!command}}`` placeholders by executing the command.
+
+        Each ``{{!...}}`` block is executed via the shared subprocess
+        runner (:func:`shared.subprocess_runner.run_command`) with the
+        skill directory as the working directory.  stdout replaces the
+        placeholder; on failure (non-zero exit or timeout) an inline
+        error message is embedded instead.
+
+        This runs **before** parameter substitution so that command
+        output is available as literal text to the model.
+
+        Args:
+            content: Prompt body potentially containing ``{{!...}}``
+                     placeholders.
+            cwd: Working directory for command execution (typically the
+                 skill's root directory).
+
+        Returns:
+            Content with all ``{{!...}}`` placeholders replaced by
+            their command output or error messages.
+        """
+        if '{{!' not in content:
+            return content
+
+        def _run(match: re.Match) -> str:
+            cmd = match.group(1).strip()
+            self._trace(f"_expand_commands: running '{cmd}' in {cwd}")
+            try:
+                r: RunResult = _run_command(
+                    cmd,
+                    cwd=cwd,
+                    timeout=COMMAND_TIMEOUT,
+                    max_output_chars=0,  # no truncation for embedded output
+                    check_cancel=False,  # expansion is pre-model, not cancellable
+                )
+                if r.timed_out:
+                    return f"[command timed out after {COMMAND_TIMEOUT}s: {cmd}]"
+                if r.returncode != 0:
+                    stderr = r.stderr.strip()
+                    return (
+                        f"[command failed: {cmd}]\n"
+                        f"[exit code {r.returncode}]\n"
+                        f"{stderr}"
+                    )
+                return r.stdout.rstrip('\n')
+            except Exception as e:
+                return f"[command error: {cmd}]\n[{e}]"
+
+        return COMMAND_PATTERN.sub(_run, content)
+
+    def _get_skill_cwd(self, info: 'PromptInfo') -> str:
+        """Return the working directory for a prompt's command execution.
+
+        For directory-based prompts this is the prompt directory itself;
+        for single-file prompts it is the parent directory.
+        """
+        if info.is_directory:
+            return str(info.path)
+        return str(info.path.parent)
+
     def _substitute_params(
         self,
         content: str,
@@ -627,6 +695,8 @@ class PromptLibraryPlugin:
 
         info = prompts[name]
         content = self._get_prompt_content(info)
+        # Expand {{!command}} placeholders before parameter substitution
+        content = self._expand_commands(content, self._get_skill_cwd(info))
         rendered, missing = self._substitute_params(content, params or {}, [])
 
         # Re-read frontmatter for metadata
@@ -1642,6 +1712,8 @@ class PromptLibraryPlugin:
 
         try:
             content = self._get_prompt_content(info)
+            # Expand {{!command}} placeholders before parameter substitution
+            content = self._expand_commands(content, self._get_skill_cwd(info))
             # Params from tool call are named params
             substituted, missing = self._substitute_params(content, params, [])
 
@@ -2070,6 +2142,8 @@ description: {description}
 
         try:
             content = self._get_prompt_content(info)
+            # Expand {{!command}} placeholders before parameter substitution
+            content = self._expand_commands(content, self._get_skill_cwd(info))
 
             # Map positional args to named placeholders using the order
             # declared in the prompt's frontmatter ``params`` block.  This
