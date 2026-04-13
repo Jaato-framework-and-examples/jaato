@@ -743,8 +743,8 @@ class JaatoWSServer:
                 if client_id in self._clients:
                     del self._clients[client_id]
             # Detach from session (prevents stale client_ids in attached_clients)
-            if self._session_manager:
-                self._session_manager.detach_client(client_id)
+            if self._command_router and self._command_router._session_manager:
+                self._command_router._session_manager.detach_client(client_id)
             # Clean up per-client state
             if self._workspace_manager:
                 self._workspace_manager.remove_client(client_id)
