@@ -1004,7 +1004,8 @@ class SessionManager:
 
     def create_headless_session(
         self,
-        profile_name: str,
+        profile_name: Optional[str] = None,
+        agent_name: Optional[str] = None,
         workspace_path: Optional[str] = None,
         initial_prompt: Optional[str] = None,
         session_name: Optional[str] = None,
@@ -1022,8 +1023,12 @@ class SessionManager:
         subscriptions (via the session hook) observe it normally.
 
         Args:
-            profile_name: Agent profile to use (resolved from
-                ``.jaato/profiles/``).
+            profile_name: Optional profile to use (resolved from
+                ``.jaato/profiles/``).  Controls model, plugins, GC.
+            agent_name: Optional agent to use (resolved from
+                ``.jaato/agents/``).  The agent's markdown becomes the
+                session's system instructions.  This is typically the
+                mandatory parameter — it defines *what* the session does.
             workspace_path: Workspace directory.  Defaults to the daemon's
                 cwd if not provided.
             initial_prompt: If set, a ``SendMessageRequest`` is dispatched
@@ -1038,6 +1043,7 @@ class SessionManager:
             session_name=session_name,
             workspace_path=workspace_path,
             profile_name=profile_name,
+            agent_name=agent_name,
         )
         if not session_id:
             return ""
