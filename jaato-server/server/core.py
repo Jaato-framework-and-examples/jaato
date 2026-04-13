@@ -458,15 +458,28 @@ class JaatoServer:
     def _with_session_env(self):
         """Context manager to apply session environment variables.
 
-        Temporarily applies session-specific environment variables to
-        os.environ for the duration of the context, then restores the
-        previous values on exit. This is necessary for components that
-        read from os.environ directly (provider SDKs, telemetry, etc.).
+        Two mechanisms are used in parallel:
 
-        On exit, each key that was set is either restored to its previous
-        value or removed from os.environ if it wasn't present before.
-        This prevents env vars from leaking between sessions.
+        1. **ContextVar** (``session_context.set_session_env``) — race-free,
+           per-context storage that propagates to ``ThreadPoolExecutor``
+           workers in Python 3.12+.  Jaato's own code (e.g. the
+           ``service_connector`` auth manager) reads this via
+           ``get_session_env()``.
+
+        2. **os.environ** — still mutated for third-party code that reads
+           the process environment directly (provider SDKs, proxy libs).
+           This remains subject to races between concurrent sessions, but
+           those affect only external libraries, not jaato's credential
+           handling.
+
+        On exit, the ContextVar is cleared and os.environ is restored.
         """
+        from shared.session_context import set_session_env, clear_session_env
+
+        # Set the race-free ContextVar first
+        set_session_env(self._session_env)
+
+        # Still set os.environ for third-party code
         saved: dict[str, str | None] = {}
         for key, value in self._session_env.items():
             if value is not None:
@@ -475,6 +488,7 @@ class JaatoServer:
         try:
             yield
         finally:
+            clear_session_env()
             for key, previous in saved.items():
                 if previous is None:
                     os.environ.pop(key, None)

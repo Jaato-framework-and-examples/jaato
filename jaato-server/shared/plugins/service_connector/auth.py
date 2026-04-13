@@ -2,6 +2,10 @@
 
 Manages authentication credentials from environment variables and
 handles OAuth2 token lifecycle.
+
+Credential reads use ``get_session_env()`` which checks the
+session-scoped ``ContextVar`` first, avoiding the race where
+concurrent sessions clobber each other's ``os.environ`` values.
 """
 
 import base64
@@ -11,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+from shared.session_context import get_session_env
 from ..subagent.config import expand_variables
 from .types import AuthConfig, AuthType, ParameterLocation
 
@@ -89,7 +94,7 @@ class AuthManager:
             if not auth_config.value_env:
                 raise AuthError("API key env var not configured")
 
-            api_key = os.environ.get(auth_config.value_env)
+            api_key = get_session_env(auth_config.value_env)
             if not api_key:
                 raise AuthError(
                     f"API key not found in environment variable: {auth_config.value_env}"
@@ -110,7 +115,7 @@ class AuthManager:
             if not auth_config.value_env:
                 raise AuthError("Bearer token env var not configured")
 
-            token = os.environ.get(auth_config.value_env)
+            token = get_session_env(auth_config.value_env)
             if not token:
                 raise AuthError(
                     f"Bearer token not found in environment variable: {auth_config.value_env}"
@@ -126,8 +131,8 @@ class AuthManager:
             if not auth_config.username_env or not auth_config.password_env:
                 raise AuthError("Basic auth env vars not configured")
 
-            username = os.environ.get(auth_config.username_env)
-            password = os.environ.get(auth_config.password_env)
+            username = get_session_env(auth_config.username_env)
+            password = get_session_env(auth_config.password_env)
 
             if not username:
                 raise AuthError(
@@ -199,8 +204,8 @@ class AuthManager:
         if not auth_config.client_id_env or not auth_config.client_secret_env:
             raise AuthError("OAuth2 client credentials env vars not configured")
 
-        client_id = os.environ.get(auth_config.client_id_env)
-        client_secret = os.environ.get(auth_config.client_secret_env)
+        client_id = get_session_env(auth_config.client_id_env)
+        client_secret = get_session_env(auth_config.client_secret_env)
 
         if not client_id:
             raise AuthError(
@@ -327,7 +332,7 @@ class AuthManager:
 
         # Check which are present
         for env_var in required:
-            if os.environ.get(env_var):
+            if get_session_env(env_var):
                 present.append(env_var)
             else:
                 missing.append(env_var)
