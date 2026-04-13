@@ -1319,6 +1319,20 @@ class JaatoSession:
                 if alias_name not in [s.name for s in self._event_bus_tools.get_tool_schemas()]:
                     self._executor.register(alias_name, executor)
 
+            # Register lifecycle tools (signal_completion) as core tools.
+            # These let the main agent declare "I'm done" and trigger
+            # downstream reactors — the same mechanism subagents get from
+            # the subagent plugin.
+            from .lifecycle_tools import LifecycleTools
+            self._lifecycle_tools = LifecycleTools(self)
+            lct_auto = self._lifecycle_tools.get_auto_approved_tools()
+            lct_executors = self._lifecycle_tools.get_executors()
+            for schema in self._lifecycle_tools.get_tool_schemas():
+                executor = lct_executors.get(schema.name)
+                if executor:
+                    is_auto = schema.name in lct_auto
+                    self._runtime.registry.register_core_tool(schema, executor, is_auto)
+
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
 

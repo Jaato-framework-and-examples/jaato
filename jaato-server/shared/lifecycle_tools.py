@@ -1,35 +1,42 @@
-"""Lifecycle plugin — implementation.
+"""Agent lifecycle tools — registered as core tools in JaatoSession.
 
-Single tool: ``signal_completion``.  When called, emits
-``AgentCompletedEvent`` for the calling agent via the session's UI
-hooks — the same mechanism subagents use when they finish.
+Provides ``signal_completion``, which lets the main agent declare its
+work is done.  This emits ``AgentCompletedEvent`` through the
+session's UI hooks — the same mechanism subagents use — enabling
+downstream reactors (e.g. memory-advisor) to trigger.
+
+Subagents get completion signaling for free from the subagent plugin
+which controls their lifecycle.  The main agent has no host, so it
+needs this tool to signal explicitly.
+
+Registered as a core tool (not a plugin) so it is available regardless
+of the profile's plugin list.
 """
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TYPE_CHECKING
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+if TYPE_CHECKING:
+    from shared.jaato_session import JaatoSession
 
 logger = logging.getLogger(__name__)
 
 
-class LifecyclePlugin:
-    """Provides agent lifecycle signaling tools.
+class LifecycleTools:
+    """Agent lifecycle signaling tools.
 
-    Auto-wired via ``set_session()`` during configure.  The tool
-    accesses the session's ``_ui_hooks`` to emit the completion event.
+    Instantiated per-session in ``JaatoSession.configure()`` and
+    registered via ``registry.register_core_tool()``.
+
+    Args:
+        session: The owning JaatoSession.
     """
 
-    @property
-    def name(self) -> str:
-        return "lifecycle"
-
-    def initialize(self, config: Any = None) -> None:
-        pass
-
-    def shutdown(self) -> None:
-        pass
+    def __init__(self, session: 'JaatoSession') -> None:
+        self._session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         return [
@@ -63,34 +70,24 @@ class LifecyclePlugin:
     def get_auto_approved_tools(self) -> List[str]:
         return ["signal_completion"]
 
-    def get_system_instructions(self) -> str:
-        return ""
-
-    def get_user_commands(self) -> List:
-        return []
-
     def _execute_signal_completion(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Emit AgentCompletedEvent for the calling agent.
 
-        Reads the session from the ContextVar and calls
-        on_agent_completed on its UI hooks — the same path subagents
-        use.
+        Calls on_agent_completed on the session's UI hooks — the same
+        path subagents use when they finish.
         """
         summary = args.get("summary", "")
 
-        from shared.session_context import get_current_session
-
-        try:
-            session = get_current_session()
-        except LookupError:
-            return {"error": "No active session context"}
-
-        hooks = getattr(session, '_ui_hooks', None)
+        hooks = getattr(self._session, '_ui_hooks', None)
         if not hooks or not hasattr(hooks, 'on_agent_completed'):
             return {"error": "No UI hooks available"}
 
-        agent_id = getattr(session, '_agent_id', 'main')
-        usage = session.get_context_usage() if hasattr(session, 'get_context_usage') else {}
+        agent_id = getattr(self._session, '_agent_id', 'main')
+        usage = (
+            self._session.get_context_usage()
+            if hasattr(self._session, 'get_context_usage')
+            else {}
+        )
 
         hooks.on_agent_completed(
             agent_id=agent_id,
@@ -110,7 +107,3 @@ class LifecyclePlugin:
             "agent_id": agent_id,
             "summary": summary,
         }
-
-
-def create_plugin() -> LifecyclePlugin:
-    return LifecyclePlugin()
