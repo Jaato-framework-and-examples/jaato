@@ -17,6 +17,7 @@ from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_syml
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
+from shared.subprocess_runner import run_command, requires_shell, RunResult
 from shared.trace import trace as _trace_write
 
 
@@ -699,16 +700,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     def _requires_shell(self, command: str) -> bool:
         """Check if a command requires shell interpretation.
 
-        Detects shell metacharacters like pipes, redirections, command chaining,
-        and command substitution that cannot be handled by subprocess without shell.
-
-        Args:
-            command: The command string to check.
-
-        Returns:
-            True if the command contains shell metacharacters requiring shell=True.
+        Delegates to :func:`shared.subprocess_runner.requires_shell`.
         """
-        return bool(SHELL_METACHAR_PATTERN.search(command))
+        return requires_shell(command)
 
     # --- Path sandboxing implementation ---
 
@@ -994,114 +988,52 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             if blocked_path:
                 return self._make_not_found_result(blocked_path, command)
 
-            # Prepare environment with extended PATH if extra_paths is provided
-            env = os.environ.copy()
+            # Merge separate arg_list into the command string so the
+            # shared runner receives a single command expression.
+            if arg_list and not self._requires_shell(command):
+                command = ' '.join(
+                    [shlex.quote(command)] + [shlex.quote(a) for a in arg_list]
+                )
+
+            # Build extra env for PATH extension
+            extra_env: Optional[Dict[str, str]] = None
             if extra_paths:
                 path_sep = os.pathsep
-                env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+                extra_env = {
+                    'PATH': os.environ.get('PATH', '')
+                    + path_sep + path_sep.join(extra_paths)
+                }
 
-            # Check if the command requires shell interpretation
-            use_shell = self._requires_shell(command)
-
-            # Prepare command/argv for execution
-            argv: Optional[List[str]] = None
-            if not use_shell:
-                # Non-shell mode: parse into argv list for safer execution
-                if arg_list:
-                    # Model passed command as executable name and args separately
-                    argv = [command] + arg_list
-                else:
-                    # Full command string
-                    argv = shlex.split(command)
-
-                # Normalize single-string with spaces passed mistakenly as executable
-                if len(argv) == 1 and ' ' in argv[0]:
-                    argv = shlex.split(argv[0])
-
-                # Resolve executable via PATH (including PATHEXT) for Windows
-                exe = argv[0]
-                resolved = shutil.which(exe, path=env.get('PATH'))
-                if resolved:
-                    argv[0] = resolved
-                else:
-                    return {
-                        'error': f"cli_based_tool: executable '{exe}' not found in PATH",
-                        'hint': 'Configure extra_paths or provide full path to the executable.'
-                    }
-
-            # Use streaming execution if callback is set
-            # Check thread-local first for parallel execution support
+            # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()
-            cancel_token = get_current_cancel_token()
             self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
 
-            # Both streaming and non-streaming use Popen so we can check the
-            # cancel token while the process runs.
-            # AppArmor confinement (if any) is inherited from the parent
-            # thread via fork+exec — see ToolExecutor.set_apparmor_context.
-            cmd = command if use_shell else argv
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                env=env,
-                shell=use_shell,
-                cwd=self._workspace_root
+            # Delegate to shared subprocess runner
+            r: RunResult = run_command(
+                command,
+                cwd=self._workspace_root,
+                max_output_chars=self._max_output_chars,
+                extra_env=extra_env,
+                on_stdout_line=effective_callback,
+                check_cancel=True,
             )
 
-            stdout_lines = []
-            stderr_lines = []
+            # Executable-not-found is surfaced as an error dict so the
+            # model sees a clear actionable message rather than a raw
+            # returncode=127 result.
+            if r.returncode == 127 and "not found in PATH" in r.stderr:
+                return {
+                    'error': f"cli_based_tool: {r.stderr}",
+                    'hint': 'Configure extra_paths or provide full path to the executable.'
+                }
 
-            if effective_callback:
-                # Streaming mode: read stdout line by line, check cancel between lines
-                if proc.stdout:
-                    for line in proc.stdout:
-                        if cancel_token is not None and cancel_token.is_cancelled:
-                            proc.kill()
-                            proc.wait()
-                            raise CancelledException("Tool cancelled during streaming output")
-                        stdout_lines.append(line)
-                        effective_callback(line.rstrip('\n\r'))
-            else:
-                # Non-streaming mode: read chunks, check cancel between reads
-                if proc.stdout:
-                    while True:
-                        if cancel_token is not None and cancel_token.is_cancelled:
-                            proc.kill()
-                            proc.wait()
-                            raise CancelledException("Tool cancelled during subprocess execution")
-                        chunk = proc.stdout.read(4096)
-                        if not chunk:
-                            break
-                        stdout_lines.append(chunk)
+            result: Dict[str, Any] = {
+                'stdout': r.stdout,
+                'stderr': r.stderr,
+                'returncode': r.returncode,
+            }
 
-            # Read remaining stderr after stdout is consumed
-            if proc.stderr:
-                stderr_lines = proc.stderr.readlines()
-
-            proc.wait()
-            stdout = ''.join(stdout_lines)
-            stderr = ''.join(stderr_lines)
-            returncode = proc.returncode
-
-            # Truncate large outputs to prevent context window overflow
-            truncated = False
-
-            if len(stdout) > self._max_output_chars:
-                stdout = stdout[:self._max_output_chars]
-                truncated = True
-
-            if len(stderr) > self._max_output_chars:
-                stderr = stderr[:self._max_output_chars]
-                truncated = True
-
-            result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
-
-            if truncated:
+            if r.truncated:
                 result['truncated'] = True
                 result['truncation_message'] = (
                     f"Output truncated to {self._max_output_chars} chars. "
@@ -1112,10 +1044,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # these as span attributes on the enclosing tool_span.
             result['_telemetry'] = {
                 'jaato.cli.command': command[:200],
-                'jaato.cli.returncode': returncode,
-                'jaato.cli.stdout_bytes': len(stdout),
-                'jaato.cli.stderr_bytes': len(stderr),
-                'jaato.cli.shell_mode': use_shell,
+                'jaato.cli.returncode': r.returncode,
+                'jaato.cli.stdout_bytes': len(r.stdout),
+                'jaato.cli.stderr_bytes': len(r.stderr),
+                'jaato.cli.shell_mode': requires_shell(command),
                 'jaato.cli.cwd': str(self._workspace_root or ''),
             }
 

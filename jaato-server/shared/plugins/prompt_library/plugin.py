@@ -38,6 +38,8 @@ from typing import Dict, List, Any, Callable, Optional, Set, TYPE_CHECKING
 
 import yaml
 
+from shared.subprocess_runner import run_command as _run_command, RunResult
+
 if TYPE_CHECKING:
     from ..permission.plugin import PermissionPlugin
 
@@ -508,11 +510,11 @@ class PromptLibraryPlugin:
     def _expand_commands(self, content: str, cwd: str) -> str:
         """Expand ``{{!command}}`` placeholders by executing the command.
 
-        Each ``{{!...}}`` block is run as a shell command via
-        ``subprocess.run(shell=True)`` with the skill directory as the
-        working directory.  stdout is captured and replaces the
-        placeholder; on failure (non-zero exit or timeout) the error
-        message is embedded instead.
+        Each ``{{!...}}`` block is executed via the shared subprocess
+        runner (:func:`shared.subprocess_runner.run_command`) with the
+        skill directory as the working directory.  stdout replaces the
+        placeholder; on failure (non-zero exit or timeout) an inline
+        error message is embedded instead.
 
         This runs **before** parameter substitution so that command
         output is available as literal text to the model.
@@ -534,24 +536,23 @@ class PromptLibraryPlugin:
             cmd = match.group(1).strip()
             self._trace(f"_expand_commands: running '{cmd}' in {cwd}")
             try:
-                result = subprocess.run(
+                r: RunResult = _run_command(
                     cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=COMMAND_TIMEOUT,
                     cwd=cwd,
+                    timeout=COMMAND_TIMEOUT,
+                    max_output_chars=0,  # no truncation for embedded output
+                    check_cancel=False,  # expansion is pre-model, not cancellable
                 )
-                if result.returncode != 0:
-                    stderr = result.stderr.strip()
+                if r.timed_out:
+                    return f"[command timed out after {COMMAND_TIMEOUT}s: {cmd}]"
+                if r.returncode != 0:
+                    stderr = r.stderr.strip()
                     return (
                         f"[command failed: {cmd}]\n"
-                        f"[exit code {result.returncode}]\n"
+                        f"[exit code {r.returncode}]\n"
                         f"{stderr}"
                     )
-                return result.stdout.rstrip('\n')
-            except subprocess.TimeoutExpired:
-                return f"[command timed out after {COMMAND_TIMEOUT}s: {cmd}]"
+                return r.stdout.rstrip('\n')
             except Exception as e:
                 return f"[command error: {cmd}]\n[{e}]"
 
