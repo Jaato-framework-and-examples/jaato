@@ -155,6 +155,7 @@ class TableFormatterPlugin:
     def __init__(self):
         self._priority = DEFAULT_PRIORITY
         self._console_width = 120
+        self._client_type: str = "terminal"  # "terminal" → box-drawing, "web"/"chat" → semantic
 
         # Buffer for accumulating table lines
         self._buffer: List[str] = []
@@ -312,7 +313,10 @@ class TableFormatterPlugin:
 
         # Check if this is actually a valid table
         if table_type == "markdown" and self._is_valid_markdown_table(table_text):
-            yield self._render_markdown_table(table_text)
+            if self._client_type == "terminal":
+                yield self._render_markdown_table(table_text)
+            else:
+                yield self._render_semantic_table(table_text)
         elif table_type == "ascii_grid":
             yield self._render_ascii_grid_table(table_text)
         else:
@@ -509,6 +513,37 @@ class TableFormatterPlugin:
 
         return vert + vert.join(formatted_cells) + vert
 
+    def _render_semantic_table(self, text: str) -> str:
+        """Render a markdown table as semantic <nb-table> markup.
+
+        Emits format-independent tags that clients render natively:
+        - Web clients → HTML <table>
+        - Chat clients → card/list layout
+        - API clients → structured JSON
+
+        The tag names use the ``nb-`` prefix (same namespace as notebook
+        cell markers) to keep the output pipeline's semantic vocabulary
+        consistent.
+        """
+        headers, rows, alignments = self._parse_markdown_table(text)
+        if not headers and not rows:
+            return text + "\n"
+
+        lines = ["<nb-table>"]
+
+        if headers:
+            lines.append("<nb-thead>")
+            cells = "".join(f"<nb-th>{cell}</nb-th>" for cell in headers)
+            lines.append(cells)
+            lines.append("</nb-thead>")
+
+        for row in rows:
+            cells = "".join(f"<nb-td>{cell}</nb-td>" for cell in row)
+            lines.append(f"<nb-tr>{cells}</nb-tr>")
+
+        lines.append("</nb-table>")
+        return "\n".join(lines) + "\n"
+
     def _render_ascii_grid_table(self, text: str) -> str:
         """Render ASCII grid table (already has borders, just pass through)."""
         # ASCII grid tables already have box characters, just ensure proper ending
@@ -537,6 +572,19 @@ class TableFormatterPlugin:
             width: Terminal width in columns.
         """
         self._console_width = width
+
+    def set_client_type(self, client_type: str) -> None:
+        """Set the client rendering surface.
+
+        When ``client_type`` is ``"terminal"``, tables are rendered with
+        Unicode box-drawing characters.  For ``"web"`` or ``"chat"``,
+        tables are emitted as semantic ``<nb-table>`` markup so the
+        client can render them natively (e.g. HTML ``<table>``).
+
+        Args:
+            client_type: ``"terminal"``, ``"web"``, ``"chat"``, or ``"api"``.
+        """
+        self._client_type = client_type
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""

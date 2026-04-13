@@ -105,6 +105,20 @@ class FormatterPipeline:
             if isinstance(formatter, ConfigurableFormatter):
                 formatter.set_console_width(width)
 
+    def set_client_type(self, client_type: str) -> None:
+        """Propagate client type to formatters that adapt their output.
+
+        Formatters like table_formatter use this to choose between
+        terminal rendering (box-drawing) and semantic markup (<nb-table>)
+        for clients that support richer rendering.
+
+        Args:
+            client_type: Client surface type (e.g. ``"terminal"``, ``"web"``).
+        """
+        for formatter in self._formatters:
+            if hasattr(formatter, "set_client_type"):
+                formatter.set_client_type(client_type)
+
     def set_disable_truncation(self, disabled: bool) -> None:
         """Disable width-based line truncation across formatters.
 

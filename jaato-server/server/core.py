@@ -393,6 +393,17 @@ class JaatoServer:
         if self._jaato:
             self._jaato.set_presentation_context(ctx)
 
+        # Propagate client type to formatter pipelines so formatters like
+        # table_formatter can choose between terminal rendering (box-drawing)
+        # and semantic markup (<nb-table>) for web/chat clients.
+        client_type = getattr(ctx, 'client_type', None)
+        if client_type and self._formatter_pipeline:
+            self._formatter_pipeline.set_client_type(str(client_type))
+            # Also propagate to per-agent pipelines
+            for agent in self._agents.values():
+                if agent.formatter_pipeline:
+                    agent.formatter_pipeline.set_client_type(str(client_type))
+
         # Note: server-side line truncation is disabled by default
         # (see __init__).  We no longer toggle it based on client_type
         # because the TUI and dashboard both handle line width on
