@@ -1319,20 +1319,6 @@ class JaatoSession:
                 if alias_name not in [s.name for s in self._event_bus_tools.get_tool_schemas()]:
                     self._executor.register(alias_name, executor)
 
-            # Register lifecycle tools (signal_completion) as core tools.
-            # These let the main agent declare "I'm done" and trigger
-            # downstream reactors — the same mechanism subagents get from
-            # the subagent plugin.
-            from .lifecycle_tools import LifecycleTools
-            self._lifecycle_tools = LifecycleTools(self)
-            lct_auto = self._lifecycle_tools.get_auto_approved_tools()
-            lct_executors = self._lifecycle_tools.get_executors()
-            for schema in self._lifecycle_tools.get_tool_schemas():
-                executor = lct_executors.get(schema.name)
-                if executor:
-                    is_auto = schema.name in lct_auto
-                    self._runtime.registry.register_core_tool(schema, executor, is_auto)
-
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
 
@@ -1341,6 +1327,24 @@ class JaatoSession:
             executors = self._runtime.get_executors(tools)
             for name, fn in executors.items():
                 self._executor.register(name, fn)
+
+            # Register lifecycle tools (signal_completion) directly on this
+            # session.  These are model-facing tools that must be visible in
+            # schemas regardless of profile plugin lists — unlike core tools
+            # (stream controls, event bus) which are internal infrastructure.
+            from .lifecycle_tools import LifecycleTools
+            self._lifecycle_tools = LifecycleTools(self)
+            existing_names = {s.name for s in self._tools}
+            for schema in self._lifecycle_tools.get_tool_schemas():
+                if schema.name not in existing_names:
+                    self._tools.append(schema)
+            for name, fn in self._lifecycle_tools.get_executors().items():
+                self._executor.register(name, fn)
+            # Auto-approve so no permission prompt
+            if self._runtime.permission_plugin:
+                self._runtime.permission_plugin.add_whitelist_tools(
+                    self._lifecycle_tools.get_auto_approved_tools()
+                )
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
