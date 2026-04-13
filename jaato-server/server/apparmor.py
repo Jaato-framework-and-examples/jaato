@@ -85,6 +85,11 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   {source_root}/         r,
   {source_root}/**       r,
 
+  # ---- premium package (read-only, optional) ----
+  # Profile discovery, instructions, and other premium content must be
+  # readable so discover_profiles() can scan all three tiers.
+  {premium_rules}
+
   # ---- user-global jaato config (read-only) ----
   # Allow agent/profile/prompt/theme definitions from ~/.jaato/.
   # NOT allowed: credentials, *_auth.json, sibling workspaces.
@@ -218,6 +223,19 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         # apparmor.py lives at jaato-server/server/apparmor.py, so the
         # repo root is two levels up from this file.
         self._source_root = Path(__file__).resolve().parents[2]
+
+        # Detect premium package root (if installed).  Premium content
+        # (profiles, instructions, etc.) must be readable by confined
+        # sessions for profile discovery and instruction assembly.
+        self._premium_root: Optional[Path] = None
+        try:
+            from shared.jaato_runtime import _get_premium_content_path
+            premium_profiles = _get_premium_content_path("profiles")
+            if premium_profiles:
+                # Content paths are like <pkg>/profiles — parent is the package root
+                self._premium_root = Path(premium_profiles).resolve().parent
+        except ImportError:
+            pass
 
         self._available: Optional[bool] = None  # Lazy-checked
 
@@ -418,11 +436,20 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         deny policy — only the session's own ``workspace_path`` is in
         the allow list.
         """
+        if self._premium_root:
+            premium_rules = (
+                f"{self._premium_root}/         r,\n"
+                f"  {self._premium_root}/**       r,"
+            )
+        else:
+            premium_rules = "# (no premium package installed)"
+
         return self.PROFILE_TEMPLATE.format(
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
             source_root=str(self._source_root),
+            premium_rules=premium_rules,
         )
 
 
