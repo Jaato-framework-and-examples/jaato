@@ -514,34 +514,33 @@ class TableFormatterPlugin:
         return vert + vert.join(formatted_cells) + vert
 
     def _render_semantic_table(self, text: str) -> str:
-        """Render a markdown table as semantic <nb-table> markup.
+        """Render a markdown table as semantic ``<j-table>`` markup.
 
         Emits format-independent tags that clients render natively:
-        - Web clients → HTML <table>
+
+        - Web clients → HTML ``<table>``
         - Chat clients → card/list layout
         - API clients → structured JSON
 
-        The tag names use the ``nb-`` prefix (same namespace as notebook
-        cell markers) to keep the output pipeline's semantic vocabulary
-        consistent.
+        The ``j-`` prefix identifies jaato pipeline semantic tags.
         """
         headers, rows, alignments = self._parse_markdown_table(text)
         if not headers and not rows:
             return text + "\n"
 
-        lines = ["<nb-table>"]
+        lines = ["<j-table>"]
 
         if headers:
-            lines.append("<nb-thead>")
-            cells = "".join(f"<nb-th>{cell}</nb-th>" for cell in headers)
+            lines.append("<j-thead>")
+            cells = "".join(f"<j-th>{cell}</j-th>" for cell in headers)
             lines.append(cells)
-            lines.append("</nb-thead>")
+            lines.append("</j-thead>")
 
         for row in rows:
-            cells = "".join(f"<nb-td>{cell}</nb-td>" for cell in row)
-            lines.append(f"<nb-tr>{cells}</nb-tr>")
+            cells = "".join(f"<j-td>{cell}</j-td>" for cell in row)
+            lines.append(f"<j-tr>{cells}</j-tr>")
 
-        lines.append("</nb-table>")
+        lines.append("</j-table>")
         return "\n".join(lines) + "\n"
 
     def _render_ascii_grid_table(self, text: str) -> str:
