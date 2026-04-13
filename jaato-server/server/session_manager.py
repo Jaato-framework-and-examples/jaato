@@ -726,6 +726,12 @@ class SessionManager:
                     session.is_dirty = True
                     logger.debug(f"Cleared turn tracking for session {session.session_id} (agent done)")
 
+                # Re-check deferred unload: if all clients disconnected
+                # while the model was running, the session was kept alive.
+                # Now that the model is done, unload if still orphaned.
+                if not session.attached_clients:
+                    self._maybe_unload_session(session.session_id)
+
         # Track tool calls as they start
         elif isinstance(event, ToolCallStartEvent):
             if session.interrupted_turn and event.agent_id == session.interrupted_turn.get("agent_id"):
@@ -1890,6 +1896,17 @@ class SessionManager:
 
         if session.attached_clients:
             return  # Still has clients
+
+        # Don't unload while the model thread is still running — the
+        # client may have disconnected (WS ping timeout, network blip)
+        # but the model is mid-turn processing tools.  The session will
+        # be unloaded when the model thread finishes and checks again.
+        if session.server and session.server._model_running:
+            logger.info(
+                "Deferring unload of session %s — model thread still active",
+                session_id,
+            )
+            return
 
         # Save before unloading
         if session.is_dirty:
