@@ -148,6 +148,36 @@ Prompts support parameter substitution:
 | `{{$1}}`, `{{$2}}` | Positional parameters | `{{$1}}` for first arg |
 | `{{$0}}` | All arguments joined | `{{$0}}` |
 | `$ARGUMENTS` | Claude Code compatibility | Becomes `{{$0}}` |
+| `{{!command}}` | Command substitution | Runs command, embeds stdout |
+
+### Command Substitution
+
+Prompts can embed shell command output that is evaluated **before** the prompt is sent to the model.
+Commands run in the skill's directory (the skill folder for directory-based prompts, or the parent
+directory for single-file prompts).
+
+```markdown
+---
+name: project-status
+description: Summarize current project state
+---
+Current branch: {{!git branch --show-current}}
+
+Recent changes:
+{{!git log --oneline -5}}
+
+Analyze these changes and suggest next steps.
+```
+
+Commands that fail (non-zero exit) or time out (30s limit) produce an inline error message
+instead of stdout, so the model can see what went wrong.
+
+Scripts bundled inside the skill's `scripts/` directory can be called with relative paths:
+
+```markdown
+{{!bash scripts/gather_context.sh}}
+{{!python scripts/fetch_data.py --project-id {{project_id}}}}
+```
 
 **Example prompt:**
 
