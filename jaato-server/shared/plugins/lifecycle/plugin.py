@@ -63,6 +63,12 @@ class LifecyclePlugin:
     def get_auto_approved_tools(self) -> List[str]:
         return ["signal_completion"]
 
+    def get_system_instructions(self) -> str:
+        return ""
+
+    def get_user_commands(self) -> List:
+        return []
+
     def _execute_signal_completion(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Emit AgentCompletedEvent for the calling agent.
 
