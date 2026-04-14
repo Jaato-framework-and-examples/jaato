@@ -634,13 +634,12 @@ class MemoryPlugin:
         if not self._indexer or not self._storage:
             return text, {"error": "Plugin not initialized"}
 
-        # Extract potential keywords
-        keywords = self._indexer.extract_keywords(text)
-
         # Find matching memories from BOTH workspace and global stores
-        matches = self._indexer.find_matches(keywords, limit=5)
+        # using paragraph-coherence matching (compound tags must have
+        # their components co-occur in some paragraph of `text`).
+        matches = self._indexer.find_matches_in_text(text, limit=5)
         if self._global_indexer:
-            global_matches = self._global_indexer.find_matches(keywords, limit=3)
+            global_matches = self._global_indexer.find_matches_in_text(text, limit=3)
             # Deduplicate by ID and merge (workspace takes priority)
             seen_ids = {m.id for m in matches}
             for gm in global_matches:

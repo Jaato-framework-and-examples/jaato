@@ -8,7 +8,7 @@ never surfaces memories that have graduated to references or been rejected.
 """
 
 import re
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from .models import ACTIVE_MATURITIES, Memory, MemoryMetadata
 
@@ -57,11 +57,10 @@ class MemoryIndexer:
         administrative tools (``list_memory_tags``, ``memory list``) see
         the complete picture.  Maturity filtering happens at query time.
 
-        Each tag is indexed under its **whole string** AND under each
-        of its sub-tokens (split on non-alphanumeric characters).  This
-        makes compound tags like ``workspace-baseline`` reachable from
-        a prompt that only mentions ``workspace`` while still preserving
-        the exact-match discipline in ``find_matches``.
+        Each tag is indexed under its **whole canonical string only**
+        (lowercased).  Sub-token expansion is applied at query time
+        through paragraph-coherence matching — see
+        ``find_matches_in_text``.
 
         Args:
             memory: Memory object to index
@@ -78,36 +77,89 @@ class MemoryIndexer:
         )
         self._memories[memory.id] = metadata
 
-        # Index by tags — both the full tag string and its sub-tokens.
+        # Index by canonical tag (whole, lowercased).
         for tag in memory.tags:
-            for key in self._tag_index_keys(tag):
-                bucket = self._tag_index.setdefault(key, [])
-                if memory.id not in bucket:
-                    bucket.append(memory.id)
+            key = tag.lower()
+            bucket = self._tag_index.setdefault(key, [])
+            if memory.id not in bucket:
+                bucket.append(memory.id)
 
     @staticmethod
-    def _tag_index_keys(tag: str) -> List[str]:
-        """Return all index keys for a tag: the whole string plus sub-tokens.
+    def _tag_components(tag: str) -> List[str]:
+        """Split a tag into its ≥3-char sub-tokens (lowercased).
 
-        Sub-tokens are extracted by splitting on non-alphanumeric
-        characters (hyphens, underscores, colons, dots), so
-        ``workspace-baseline`` produces ``["workspace-baseline",
-        "workspace", "baseline"]`` and ``agent:main`` produces
-        ``["agent:main", "agent", "main"]``.
+        ``workspace-baseline`` → ``["workspace", "baseline"]``
+        ``agent:main`` → ``["agent", "main"]``
+        ``api`` → ``["api"]``
+        ``plan-v2`` → ``["plan"]`` (``v2`` dropped as too short)
 
-        Short sub-tokens (< 3 chars) are excluded to avoid noise from
-        parts like ``"v2"`` or ``"ws"`` matching too broadly, unless
-        the whole tag itself is that short (then it's kept as-is so
-        intentionally-short tags like ``"gc"`` remain reachable via
-        exact-match).
+        Returns an empty list if the tag has no usable components, in
+        which case the caller should fall back to whole-string matching.
+        """
+        parts = re.split(r"[^a-z0-9]+", tag.lower())
+        return [p for p in parts if len(p) >= 3]
+
+    @staticmethod
+    def _paragraph_word_sets(text: str) -> List[Set[str]]:
+        """Split text into paragraphs, return a set of words per paragraph.
+
+        Paragraph separator is one or more blank lines (``\\n\\s*\\n+``).
+        Single newlines (e.g. inside a bullet list) keep lines in the
+        same paragraph — they're still one topical block.
+
+        Each paragraph's word set includes both whole tokens (with
+        internal hyphens/underscores/colons/dots) AND alphanumeric
+        sub-words, so a paragraph mentioning ``workspace-baseline``
+        contributes ``workspace-baseline``, ``workspace``, ``baseline``.
+        """
+        paragraphs = re.split(r"\n\s*\n+", text)
+        result: List[Set[str]] = []
+        for p in paragraphs:
+            p_lower = p.lower()
+            whole = set(re.findall(r"[a-z0-9][a-z0-9\-_:.]*[a-z0-9]", p_lower))
+            sub = set(re.findall(r"\b\w+\b", p_lower))
+            result.append(whole | sub)
+        return result
+
+    @classmethod
+    def _tag_coherent_in_paragraphs(
+        cls,
+        tag: str,
+        paragraphs: List[Set[str]],
+    ) -> bool:
+        """Check if a tag is topically present in any paragraph.
+
+        Matching rules:
+
+        - **Whole-tag match** — if the full tag string (lowercased)
+          appears verbatim in any paragraph, it matches.  Covers
+          short/atomic tags like ``api`` or ``gc`` and also catches
+          users who typed the whole compound tag.
+        - **Component coherence** — split the tag into ≥3-char
+          components.  For tags with 1–2 components, **all** must
+          appear in the same paragraph.  For 3+ components, a
+          **majority** (``ceil(n/2)``) suffices, since long compound
+          tags rarely have every part repeated together.
+
+        Word-distance is irrelevant — paragraph membership is the
+        cohesion signal.
         """
         tag_lower = tag.lower()
-        keys = [tag_lower]
-        parts = re.split(r"[^a-z0-9]+", tag_lower)
-        for p in parts:
-            if p and p != tag_lower and len(p) >= 3 and p not in keys:
-                keys.append(p)
-        return keys
+        if any(tag_lower in p for p in paragraphs):
+            return True
+
+        components = cls._tag_components(tag)
+        if not components:
+            return False
+
+        n = len(components)
+        threshold = n if n <= 2 else (n + 1) // 2  # all if ≤2, majority if ≥3
+
+        for paragraph in paragraphs:
+            present = sum(1 for c in components if c in paragraph)
+            if present >= threshold:
+                return True
+        return False
 
     def extract_keywords(self, prompt: str) -> List[str]:
         """Extract potential keywords from a prompt.
@@ -151,6 +203,65 @@ class MemoryIndexer:
             keywords.append(w)
         return keywords
 
+    def find_matches_in_text(
+        self,
+        text: str,
+        limit: int = 5,
+        *,
+        active_only: bool = True,
+    ) -> List[MemoryMetadata]:
+        """Find memories whose tags are coherent in any paragraph of text.
+
+        For every canonical tag in the index, runs
+        ``_tag_coherent_in_paragraphs``.  A memory surfaces if any of
+        its tags is coherent in at least one paragraph of the prompt
+        or tool result.
+
+        Results are ranked by **number of matching tags** (more matches
+        = more relevant), then by recency.
+
+        Cost is O(unique_tags × paragraphs × tag_components) per call,
+        which for hundreds of tags and short prompts is sub-millisecond.
+
+        Args:
+            text: Free-form text to analyse (user prompt, tool result, …).
+            limit: Maximum number of matches to return.
+            active_only: When True (default), restrict to memories with
+                ``raw`` or ``validated`` maturity.
+
+        Returns:
+            List of ``MemoryMetadata`` (lightweight, no full content),
+            ordered by relevance and recency.
+        """
+        paragraphs = self._paragraph_word_sets(text)
+        if not paragraphs or not any(paragraphs):
+            return []
+
+        # tag (canonical) → list of memory IDs that have this tag
+        # We need to know which tags matched per memory to score by tag count.
+        memory_tag_hits: Dict[str, int] = {}
+        for tag_key, memory_ids in self._tag_index.items():
+            if not self._tag_coherent_in_paragraphs(tag_key, paragraphs):
+                continue
+            for mid in memory_ids:
+                memory_tag_hits[mid] = memory_tag_hits.get(mid, 0) + 1
+
+        # Build (tag_count, MemoryMetadata) tuples, applying maturity filter.
+        scored = []
+        for mid, count in memory_tag_hits.items():
+            meta = self._memories.get(mid)
+            if meta is None:
+                continue
+            if active_only and meta.maturity not in ACTIVE_MATURITIES:
+                continue
+            scored.append((count, meta))
+
+        # Sort by recency first, then stable-sort by tag count (count wins).
+        scored.sort(key=lambda pair: pair[1].timestamp, reverse=True)
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        return [meta for _, meta in scored[:limit]]
+
     def find_matches(
         self,
         keywords: List[str],
@@ -159,33 +270,31 @@ class MemoryIndexer:
         active_only: bool = True,
         min_overlap: int = 1,
     ) -> List[MemoryMetadata]:
-        """Find memories with tags matching the provided keywords.
+        """Find memories whose tags exactly match any of the keywords.
 
-        Uses **exact tag-index matching** — a keyword must exactly equal
-        a key in the tag index (case-insensitive).  The index keys are
-        the whole tag strings plus their sub-tokens (see
-        ``_tag_index_keys``), so ``workspace`` in the prompt matches a
-        memory tagged ``workspace-baseline`` through the sub-token
-        expansion.  This keeps query-time logic O(1) per keyword while
-        making compound tags reachable from single-word prompts.
+        **Exact whole-tag matching only** — a keyword must equal a
+        canonical tag (case-insensitive).  This is the legacy path
+        useful when the caller has already extracted distinct keywords
+        and wants pure tag-set intersection (e.g. tests, programmatic
+        callers).
 
-        Results are ranked by overlap count (most matches first), then
-        by recency within the same overlap count.
+        For free-form text (prompts, tool results), use
+        :meth:`find_matches_in_text`, which applies paragraph-coherence
+        matching so compound tags like ``workspace-baseline`` surface
+        only when their components co-occur in a paragraph.
+
+        Results are ranked by overlap count, then by recency.
 
         Args:
-            keywords: List of keywords to match against tag-index keys.
+            keywords: List of keywords to compare against canonical tags.
             limit: Maximum number of matches to return.
-            active_only: When True (default), only return memories whose
-                maturity is in ``ACTIVE_MATURITIES`` (raw, validated).
-                Set to False to include all maturity states.
-            min_overlap: Minimum number of tag matches required for a
-                memory to be considered relevant (default: 1).  Single
-                matches are acceptable — the specificity of the tags
-                (and the length filter applied to extracted keywords)
-                prevents noise.
+            active_only: Restrict to ``raw`` / ``validated`` maturity
+                (default).
+            min_overlap: Minimum number of tag matches per memory
+                (default 1).
 
         Returns:
-            List of MemoryMetadata objects (lightweight, no full content)
+            List of ``MemoryMetadata`` ordered by relevance.
         """
         # Normalize keywords to a set for O(1) lookup
         keywords_set = {kw.lower() for kw in keywords}

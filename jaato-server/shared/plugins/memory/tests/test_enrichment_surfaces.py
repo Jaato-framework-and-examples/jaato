@@ -1,9 +1,9 @@
 """Tests for memory enrichment on both prompts and tool results.
 
 Covers:
-1. Sub-token tag indexing (`workspace-baseline` reachable from the
-   whole tag AND from `workspace` / `baseline` individually).
-2. `min_overlap=1` default (single-tag matches surface).
+1. Paragraph-coherence matching for compound tags: a tag's components
+   must co-occur in the same paragraph for the memory to surface.
+2. Whole-tag verbatim matching as the universal fallback.
 3. Tool-result enrichment subscription parity with references plugin.
 """
 
@@ -28,70 +28,109 @@ def _make_memory(tags):
     )
 
 
-class TestSubTokenIndexing:
+class TestParagraphCoherenceMatching:
 
-    def test_whole_tag_still_indexed(self):
+    def test_whole_tag_verbatim_in_text(self):
+        """If the full compound tag appears verbatim, it matches."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["workspace-baseline"]))
+        matches = idx.find_matches_in_text("Tell me about workspace-baseline.")
+        assert len(matches) == 1
+
+    def test_compound_tag_components_in_same_paragraph(self):
+        """All components co-occur in one paragraph → match."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["workspace-baseline"]))
+        text = "What is the current workspace? Specifically, the baseline state."
+        matches = idx.find_matches_in_text(text)
+        assert len(matches) == 1
+
+    def test_compound_tag_single_component_does_not_match(self):
+        """Single-component mention is too loose — requires both."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["workspace-baseline"]))
+        # Just mentions workspace, not baseline
+        matches = idx.find_matches_in_text("Tell me about my workspace today.")
+        assert len(matches) == 0
+
+    def test_components_split_across_paragraphs_does_not_match(self):
+        """Components must co-occur in the SAME paragraph."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["workspace-baseline"]))
+        text = "Tell me about my workspace.\n\nSeparately, what is a baseline?"
+        matches = idx.find_matches_in_text(text)
+        assert len(matches) == 0
+
+    def test_short_atomic_tag_matches_as_word(self):
+        """Atomic tags like `api` match by mere presence."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["api"]))
+        matches = idx.find_matches_in_text("Document the api endpoints")
+        assert len(matches) == 1
+
+    def test_long_compound_tag_uses_majority(self):
+        """For ≥3 components, majority (ceil(n/2)) suffices."""
+        idx = MemoryIndexer()
+        # 4 components → majority = 2
+        idx.index_memory(_make_memory(["skill-mod-code-circuit"]))
+        # Mention 2 of the 4: code and circuit
+        matches = idx.find_matches_in_text("Implement the circuit breaker code pattern.")
+        assert len(matches) == 1
+
+    def test_colon_separator_treated_as_split(self):
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["agent:main"]))
+        matches = idx.find_matches_in_text("The main agent is responsible.")
+        assert len(matches) == 1
+
+    def test_underscore_separator_treated_as_split(self):
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["list_memory_tags"]))
+        text = "We need to list the memory tags somehow."
+        matches = idx.find_matches_in_text(text)
+        # 3 components: list, memory, tags → majority = 2
+        # All three present → matches
+        assert len(matches) == 1
+
+
+class TestComponentExtraction:
+
+    def test_skip_short_components(self):
+        """Components shorter than 3 chars are dropped."""
+        components = MemoryIndexer._tag_components("plan-v2")
+        assert components == ["plan"]
+        # `v2` filtered
+
+    def test_atomic_short_tag_no_components(self):
+        """A tag that's entirely too-short returns no components.
+        It still matches via the whole-tag verbatim path."""
+        components = MemoryIndexer._tag_components("gc")
+        assert components == []
+
+    def test_atomic_short_tag_still_matchable_via_whole_tag(self):
+        """Atomic short tag matches by literal substring presence."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["gc"]))
+        matches = idx.find_matches_in_text("Investigate gc behaviour.")
+        assert len(matches) == 1
+
+
+class TestFindMatchesLegacy:
+    """The legacy keyword-based find_matches still works for callers
+    (e.g. tests, programmatic use) that already have distinct keywords."""
+
+    def test_exact_tag_match(self):
         idx = MemoryIndexer()
         idx.index_memory(_make_memory(["workspace-baseline"]))
         matches = idx.find_matches(["workspace-baseline"])
         assert len(matches) == 1
 
-    def test_compound_tag_matched_from_single_sub_token(self):
-        """The whole point: `workspace` alone should surface a memory
-        tagged `workspace-baseline`."""
+    def test_sub_token_does_not_match_via_legacy(self):
+        """Legacy path is exact-tag only — sub-tokens don't surface
+        compound tags any more (paragraph-coherence path covers that)."""
         idx = MemoryIndexer()
         idx.index_memory(_make_memory(["workspace-baseline"]))
-        matches = idx.find_matches(["workspace"])
-        assert len(matches) == 1
-
-    def test_colon_tag_split_into_parts(self):
-        idx = MemoryIndexer()
-        idx.index_memory(_make_memory(["agent:main"]))
-        assert len(idx.find_matches(["agent"])) == 1
-        assert len(idx.find_matches(["main"])) == 1
-        assert len(idx.find_matches(["agent:main"])) == 1
-
-    def test_underscore_tag_split(self):
-        idx = MemoryIndexer()
-        idx.index_memory(_make_memory(["list_memory_tags"]))
-        assert len(idx.find_matches(["memory"])) == 1
-        assert len(idx.find_matches(["tags"])) == 1
-
-    def test_short_sub_tokens_excluded_from_index(self):
-        """Parts shorter than 3 chars should not clutter the index — so
-        `v2` in `plan-v2` is not an index key by itself, but `plan` is."""
-        idx = MemoryIndexer()
-        idx.index_memory(_make_memory(["plan-v2"]))
-        # Whole tag still reachable
-        assert len(idx.find_matches(["plan-v2"])) == 1
-        # `plan` works as sub-token
-        assert len(idx.find_matches(["plan"])) == 1
-        # `v2` was filtered out of the index, so no match
-        assert len(idx.find_matches(["v2"])) == 0
-
-    def test_single_tag_surfaces_at_min_overlap_one(self):
-        """Default min_overlap is 1 — single-tag matches must surface."""
-        idx = MemoryIndexer()
-        idx.index_memory(_make_memory(["gpg-troubleshooting"]))
-        matches = idx.find_matches(["gpg-troubleshooting"])
-        assert len(matches) == 1
-
-
-class TestKeywordExtraction:
-
-    def test_compound_words_extracted_whole_and_split(self):
-        idx = MemoryIndexer()
-        keywords = idx.extract_keywords("How is the workspace-baseline today?")
-        assert "workspace-baseline" in keywords
-        assert "workspace" in keywords
-        assert "baseline" in keywords
-
-    def test_three_char_words_kept(self):
-        idx = MemoryIndexer()
-        keywords = idx.extract_keywords("API design for GPG")
-        assert "api" in keywords
-        assert "gpg" in keywords
-        assert "design" in keywords
+        assert idx.find_matches(["workspace"]) == []
 
 
 class TestToolResultEnrichment:
