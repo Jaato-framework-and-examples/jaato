@@ -660,20 +660,33 @@ class MemoryPlugin:
 
         enriched_text = text + "\n" + "\n".join(hint_lines)
 
-        # Collect unique tags from matched memories
-        matched_tags = []
+        # Collect ONLY the tags that actually triggered the match
+        # (i.e. were topically present in the text per the indexer's
+        # coherence rules).  Showing all tags from matched memories is
+        # misleading — administrative tags like "lesson" or
+        # "agent:foo" appear first but didn't drive the match.  The
+        # user/operator wants to see why each memory surfaced.
+        from .indexer import MemoryIndexer
+        segments = self._indexer._segments(text) if self._indexer else []
+        triggering_tags = []
         seen_tags = set()
         for m in matches:
             for tag in m.tags:
                 tag_lower = tag.lower()
-                if tag_lower not in seen_tags:
+                if tag_lower in seen_tags:
+                    continue
+                if MemoryIndexer._tag_coherent_in_paragraphs(tag, segments):
                     seen_tags.add(tag_lower)
-                    matched_tags.append(tag)
+                    triggering_tags.append(tag)
 
-        # Build notification message with matched tags
-        tag_summary = ", ".join(f'"{t}"' for t in matched_tags[:3])
-        if len(matched_tags) > 3:
-            tag_summary += f" +{len(matched_tags) - 3} more"
+        # Build notification message with the triggering tags
+        tag_summary = ", ".join(f'"{t}"' for t in triggering_tags[:3])
+        if len(triggering_tags) > 3:
+            tag_summary += f" +{len(triggering_tags) - 3} more"
+
+        # `trigger_keywords` in metadata kept for downstream telemetry
+        # consumers — narrowed to the same triggering set.
+        matched_tags = triggering_tags
 
         metadata = {
             "memory_matches": len(matches),
