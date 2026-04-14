@@ -242,22 +242,39 @@ class MemoryPlugin:
             ToolSchema(
                 name='retrieve_memories',
                 description=(
-                    'Retrieve previously stored memories by tags. '
-                    'Call this when you notice hints about available memories in the prompt, '
-                    'or when the user asks about a topic you may have explained before. '
-                    'By default searches both workspace-local and global (cross-session) memories.'
+                    'Retrieve previously stored memories. '
+                    'When the prompt shows "💡 Available Memories" hints, prefer '
+                    'a SINGLE call passing the listed memory IDs in `ids` — '
+                    'one call covers all suggested memories, no need to '
+                    'reconstruct tag queries per bullet. '
+                    'Use `tags` only when exploring or when no IDs are known. '
+                    'By default searches both workspace-local and global '
+                    '(cross-session) memories.'
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
+                        "ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Memory IDs to fetch directly (e.g. from "
+                                "the IDs shown in 'Available Memories' hints). "
+                                "Bypasses tag matching — fetches exactly these "
+                                "memories regardless of maturity or scope."
+                            )
+                        },
                         "tags": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Tags to search for (from the hints or user query)"
+                            "description": (
+                                "Tags to search for. Only used when `ids` is "
+                                "not provided. Either `ids` or `tags` is required."
+                            )
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max number of memories to retrieve (default: 3)"
+                            "description": "Max number of memories to retrieve (default: 3, ignored when `ids` is used)"
                         },
                         "scope": {
                             "type": "string",
@@ -265,7 +282,7 @@ class MemoryPlugin:
                             "description": (
                                 "Filter by scope: 'project' (workspace-local only), "
                                 "'universal' (global cross-session only). "
-                                "If omitted, searches both."
+                                "If omitted, searches both. Ignored when `ids` is used."
                             )
                         },
                         "maturity": {
@@ -273,11 +290,12 @@ class MemoryPlugin:
                             "enum": ["raw", "validated", "escalated", "dismissed"],
                             "description": (
                                 "Filter by maturity state. If omitted, returns "
-                                "active memories only (raw + validated)."
+                                "active memories only (raw + validated). "
+                                "Ignored when `ids` is used."
                             )
                         }
                     },
-                    "required": ["tags"]
+                    "required": []
                 },
                 category="memory",
                 discoverability="core",
@@ -414,8 +432,12 @@ class MemoryPlugin:
             "on an existing memory (used by the advisor agent for curation)\n"
             "- `delete_memory` — permanently delete a memory (for merge cleanup)\n\n"
             "When you see 💡 **Available Memories** hints — whether in "
-            "the user's prompt or appended to a tool result — use "
-            "`retrieve_memories` to access the full content.\n\n"
+            "the user's prompt or appended to a tool result — make a "
+            "**single** `retrieve_memories(ids=[...])` call passing the "
+            "listed memory IDs.  The hint already shows the exact "
+            "command to run.  Do not make one call per bullet with "
+            "reconstructed tag queries — that's wasteful and surfaces "
+            "the same memories multiple times.\n\n"
             "## Knowledge curation lifecycle\n\n"
             "Your memories are part of a learning pipeline:\n"
             "1. Created as **raw** — awaiting review by the advisor agent\n"
@@ -649,14 +671,23 @@ class MemoryPlugin:
         if not matches:
             return text, {"memory_matches": 0}
 
-        # Build hint section
+        # Build hint section.  Each bullet shows the memory ID and a
+        # short description; the closing line tells the agent how to
+        # fetch ALL listed memories in a single call (using the `ids`
+        # parameter).  This avoids the historical pattern of one
+        # retrieve_memories call per bullet with overlapping tag sets.
+        ids_list = [m.id for m in matches]
         hint_lines = [
             "",
-            "💡 **Available Memories** (use retrieve_memories to access):"
+            "💡 **Available Memories** — fetch them in ONE call:",
+            f"  retrieve_memories(ids={ids_list!r})",
+            "",
+            "  Listed below for reference:",
         ]
         for memory_meta in matches:
-            tags_str = ", ".join(memory_meta.tags)
-            hint_lines.append(f"  - [{tags_str}]: {memory_meta.description}")
+            hint_lines.append(
+                f"  - {memory_meta.id}: {memory_meta.description}"
+            )
 
         enriched_text = text + "\n" + "\n".join(hint_lines)
 
@@ -803,54 +834,91 @@ class MemoryPlugin:
     def _execute_retrieve(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute retrieve_memories tool.
 
-        Returns active memories (raw, validated) by default, from both
-        workspace and global stores.  Optional ``scope`` and ``maturity``
-        parameters narrow the search.
+        Two modes:
+
+        - ``ids`` provided → fetch those memory IDs directly from
+          either store, bypassing tag/scope/maturity filtering.  This
+          is the preferred path when the agent has IDs from an
+          enrichment hint — one call covers all surfaced memories.
+        - otherwise → search by ``tags`` (legacy keyword path).
+          Returns active memories (raw, validated) by default;
+          ``scope`` and ``maturity`` narrow the search.
 
         Args:
-            args: Tool arguments (tags, limit, scope, maturity)
+            args: Tool arguments. Either ``ids`` or ``tags`` should be
+                present.  Other supported keys: ``limit``, ``scope``,
+                ``maturity``.
 
         Returns:
-            Result dict with memories list including lifecycle metadata
+            Result dict with memories list including lifecycle metadata.
         """
-        tags = args.get("tags", [])
-        limit = args.get("limit", 3)
-        scope = args.get("scope")  # None = both, "project", "universal"
-        maturity = args.get("maturity")  # None = active only, or specific maturity
-        self._trace(f"retrieve_memories: tags={tags}, limit={limit}, scope={scope}, maturity={maturity}")
         if not self._storage:
             return {
                 "status": "error",
                 "message": "Memory plugin not initialized"
             }
 
-        # Determine active_only based on maturity filter
-        active_only = maturity is None  # default: only active (raw, validated)
+        ids = args.get("ids") or []
+        tags = args.get("tags", [])
+        limit = args.get("limit", 3)
+        scope = args.get("scope")  # None = both, "project", "universal"
+        maturity = args.get("maturity")  # None = active only, or specific maturity
 
-        # Search the appropriate store(s)
-        memories: List[Memory] = []
-        if scope != SCOPE_UNIVERSAL and self._storage:
-            memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
-        if scope != SCOPE_PROJECT and self._global_storage:
-            memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
+        # ── ID fetch path ────────────────────────────────────────────
+        if ids:
+            self._trace(f"retrieve_memories: ids={ids}")
+            id_set = set(ids)
+            memories: List[Memory] = []
+            seen: set = set()
+            for store in (self._storage, self._global_storage):
+                if not store:
+                    continue
+                for mem in store.load_all():
+                    if mem.id in id_set and mem.id not in seen:
+                        memories.append(mem)
+                        seen.add(mem.id)
+            if not memories:
+                return {
+                    "status": "no_results",
+                    "message": f"No memories found for ids: {ids}"
+                }
+            # Preserve requested order so the agent receives results in
+            # the order it asked for.
+            order = {mid: i for i, mid in enumerate(ids)}
+            memories.sort(key=lambda m: order.get(m.id, len(order)))
+            # Skip the tags/maturity/scope filtering and limit truncation
+            # — the agent asked for these specific memories explicitly.
 
-        # Filter by specific maturity if requested
-        if maturity is not None:
-            memories = [m for m in memories if m.maturity == maturity]
+        # ── Tag search path (legacy) ────────────────────────────────
+        else:
+            self._trace(f"retrieve_memories: tags={tags}, limit={limit}, scope={scope}, maturity={maturity}")
+            # Determine active_only based on maturity filter
+            active_only = maturity is None  # default: only active (raw, validated)
 
-        # Filter by specific scope if requested
-        if scope is not None:
-            memories = [m for m in memories if m.scope == scope]
+            # Search the appropriate store(s)
+            memories = []
+            if scope != SCOPE_UNIVERSAL and self._storage:
+                memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
+            if scope != SCOPE_PROJECT and self._global_storage:
+                memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
 
-        # Sort by recency (newest first) and truncate to limit
-        memories.sort(key=lambda m: m.timestamp, reverse=True)
-        memories = memories[:limit]
+            # Filter by specific maturity if requested
+            if maturity is not None:
+                memories = [m for m in memories if m.maturity == maturity]
 
-        if not memories:
-            return {
-                "status": "no_results",
-                "message": f"No memories found for tags: {tags}"
-            }
+            # Filter by specific scope if requested
+            if scope is not None:
+                memories = [m for m in memories if m.scope == scope]
+
+            # Sort by recency (newest first) and truncate to limit
+            memories.sort(key=lambda m: m.timestamp, reverse=True)
+            memories = memories[:limit]
+
+            if not memories:
+                return {
+                    "status": "no_results",
+                    "message": f"No memories found for tags: {tags}"
+                }
 
         # Update usage statistics
         for mem in memories:

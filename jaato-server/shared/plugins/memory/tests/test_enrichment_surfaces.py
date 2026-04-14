@@ -256,6 +256,60 @@ class TestToolResultEnrichment:
         assert result.result == tool_output
         assert result.metadata.get("memory_matches") == 0
 
+    def test_hint_includes_memory_ids_and_one_call_form(self, tmp_path):
+        """The enrichment hint must show memory IDs and the one-shot
+        retrieve_memories(ids=[...]) form so the agent doesn't fan out
+        into one call per bullet."""
+        plugin = MemoryPlugin()
+        plugin.initialize({
+            "storage_path": str(tmp_path / "workspace_memories.jsonl"),
+            "global_storage_path": str(tmp_path / "global_memories.jsonl"),
+        })
+        plugin._execute_store({
+            "content": "X",
+            "description": "Workspace baseline lesson",
+            "tags": ["workspace-baseline"],
+            "confidence": 0.9,
+        })
+        result = plugin.enrich_prompt(
+            "Tell me about the workspace baseline state."
+        )
+        # Must include the one-call form
+        assert "retrieve_memories(ids=" in result.prompt
+        # Must show memory IDs in the bullet list
+        for mid in result.metadata["matched_ids"]:
+            assert mid in result.prompt
+
+    def test_retrieve_by_ids_fetches_specific_memories(self, tmp_path):
+        plugin = MemoryPlugin()
+        plugin.initialize({
+            "storage_path": str(tmp_path / "workspace_memories.jsonl"),
+            "global_storage_path": str(tmp_path / "global_memories.jsonl"),
+        })
+        ids = []
+        for i in range(3):
+            r = plugin._execute_store({
+                "content": f"content {i}",
+                "description": f"memory {i}",
+                "tags": [f"tag-{i}", "common-tag"],
+                "confidence": 0.9,
+            })
+            ids.append(r["memory_id"])
+        # Fetch first and third only
+        result = plugin._execute_retrieve({"ids": [ids[0], ids[2]]})
+        assert result["status"] != "no_results"
+        returned_ids = [m["id"] for m in result["memories"]]
+        assert returned_ids == [ids[0], ids[2]]
+
+    def test_retrieve_by_ids_unknown_returns_no_results(self, tmp_path):
+        plugin = MemoryPlugin()
+        plugin.initialize({
+            "storage_path": str(tmp_path / "workspace_memories.jsonl"),
+            "global_storage_path": str(tmp_path / "global_memories.jsonl"),
+        })
+        result = plugin._execute_retrieve({"ids": ["mem_does_not_exist"]})
+        assert result["status"] == "no_results"
+
     def test_prompt_and_tool_result_use_same_core(self, tmp_path):
         """Both surfaces must produce the same hint format when matching
         the same memory."""
