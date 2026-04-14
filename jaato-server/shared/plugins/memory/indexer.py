@@ -99,65 +99,128 @@ class MemoryIndexer:
         parts = re.split(r"[^a-z0-9]+", tag.lower())
         return [p for p in parts if len(p) >= 3]
 
+    # Sentence/segment splitter.
+    #
+    # We split on:
+    #   - any newline (``\n+``), so each line is its own segment by default;
+    #   - sentence terminators (``.!?``) followed by whitespace.
+    #
+    # The ``\s+`` requirement after the terminator means decimals
+    # (``3.14``), version strings (``v0.5.0``) and tags with internal
+    # dots (``shared.utils``) are NOT split — there's no whitespace
+    # immediately after the dot.  Common abbreviations like ``e.g.``
+    # do split (the trailing space is there) but the false split is
+    # harmless: the resulting fragments are too short to contain the
+    # ≥3-char tag components anyway.
+    _SEGMENT_SPLIT_RE = re.compile(r"\n+|[.!?]+\s+")
+
     @staticmethod
-    def _paragraph_word_sets(text: str) -> List[Set[str]]:
-        """Split text into paragraphs, return a set of words per paragraph.
+    def _segment_word_sets(text: str) -> List[Set[str]]:
+        """Split text into sentence/line segments, returning words per segment.
 
-        Paragraph separator is one or more blank lines (``\\n\\s*\\n+``).
-        Single newlines (e.g. inside a bullet list) keep lines in the
-        same paragraph — they're still one topical block.
+        The unit of cohesion is a **sentence or line**, not a prose
+        paragraph.  This keeps the segments small enough that two
+        components co-occurring is a strong topical signal — long JSON
+        dumps or CLI output don't trivially satisfy multi-component
+        coherence by chance.
 
-        Each paragraph's word set includes both whole tokens (with
+        Each segment's word set includes both whole tokens (with
         internal hyphens/underscores/colons/dots) AND alphanumeric
-        sub-words, so a paragraph mentioning ``workspace-baseline``
+        sub-words, so a segment mentioning ``workspace-baseline``
         contributes ``workspace-baseline``, ``workspace``, ``baseline``.
         """
-        paragraphs = re.split(r"\n\s*\n+", text)
-        result: List[Set[str]] = []
-        for p in paragraphs:
-            p_lower = p.lower()
-            whole = set(re.findall(r"[a-z0-9][a-z0-9\-_:.]*[a-z0-9]", p_lower))
-            sub = set(re.findall(r"\b\w+\b", p_lower))
-            result.append(whole | sub)
+        return [words for _raw, words in MemoryIndexer._segments(text)]
+
+    @staticmethod
+    def _segments(text: str) -> List[tuple]:
+        """Internal: return (raw_segment, word_set) pairs for each segment.
+
+        Used by ``_tag_coherent_in_paragraphs`` so it can apply the
+        segment-size cap on the raw character length (a more reliable
+        proxy than unique-word count, since compact JSON has lots of
+        repeated keys like ``name``/``description`` that depress the
+        unique count below the cap).
+        """
+        segments = MemoryIndexer._SEGMENT_SPLIT_RE.split(text)
+        result: List[tuple] = []
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            seg_lower = seg.lower()
+            whole = set(re.findall(r"[a-z0-9][a-z0-9\-_:.]*[a-z0-9]", seg_lower))
+            sub = set(re.findall(r"\b\w+\b", seg_lower))
+            result.append((seg, whole | sub))
         return result
+
+    # Backward-compat alias — older internal callers and tests may still
+    # use ``_paragraph_word_sets``.  The semantics changed (sentence-
+    # scoped, not paragraph-scoped) but the contract — list of word sets
+    # — is the same.
+    @staticmethod
+    def _paragraph_word_sets(text: str) -> List[Set[str]]:
+        return MemoryIndexer._segment_word_sets(text)
+
+    # Maximum raw character length for a segment to be trusted for
+    # component coherence.  Anything larger is likely a structured
+    # dump (compact JSON, big CLI listing, hard-wrapped prose missed
+    # by sentence splitting) where unrelated words trivially co-occur
+    # — fall back to verbatim-only matching for those segments.  A
+    # typical sentence is ~150 chars; the cap is generous enough for
+    # long-form prose sentences but cuts off multi-record dumps.
+    _SEGMENT_MAX_CHARS = 250
 
     @classmethod
     def _tag_coherent_in_paragraphs(
         cls,
         tag: str,
-        paragraphs: List[Set[str]],
+        segments,
     ) -> bool:
-        """Check if a tag is topically present in any paragraph.
+        """Check if a tag is topically present in any segment.
+
+        Accepts either a list of word sets (legacy callers) or a list
+        of ``(raw_segment, word_set)`` pairs as produced by
+        ``_segments``.  The latter is preferred — it lets the size cap
+        check the raw segment's character length, which is more
+        reliable than the unique-word count for detecting structured
+        dumps (compact JSON has lots of repeated keys, depressing
+        unique counts).
 
         Matching rules:
 
         - **Whole-tag match** — if the full tag string (lowercased)
-          appears verbatim in any paragraph, it matches.  Covers
+          appears verbatim in any segment, it matches.  Covers
           short/atomic tags like ``api`` or ``gc`` and also catches
           users who typed the whole compound tag.
         - **Component coherence** — split the tag into ≥3-char
-          components.  For tags with 1–2 components, **all** must
-          appear in the same paragraph.  For 3+ components, a
-          **majority** (``ceil(n/2)``) suffices, since long compound
-          tags rarely have every part repeated together.
-
-        Word-distance is irrelevant — paragraph membership is the
-        cohesion signal.
+          components.  **All** components must appear in the same
+          segment.  Only segments at or below ``_SEGMENT_MAX_CHARS``
+          (raw length) are eligible for this path; oversized segments
+          require the verbatim whole-tag match instead.
         """
+        # Normalise input: if we got bare word sets (legacy), pair them
+        # with a synthetic raw length of 0 so the cap never fires.  If
+        # we got (raw, set) pairs, use them as-is.
+        normalised = []
+        for item in segments:
+            if isinstance(item, tuple) and len(item) == 2:
+                raw, words = item
+            else:
+                raw, words = "", item
+            normalised.append((raw, words))
+
         tag_lower = tag.lower()
-        if any(tag_lower in p for p in paragraphs):
+        if any(tag_lower in words for _raw, words in normalised):
             return True
 
         components = cls._tag_components(tag)
         if not components:
             return False
 
-        n = len(components)
-        threshold = n if n <= 2 else (n + 1) // 2  # all if ≤2, majority if ≥3
-
-        for paragraph in paragraphs:
-            present = sum(1 for c in components if c in paragraph)
-            if present >= threshold:
+        for raw, words in normalised:
+            if raw and len(raw) > cls._SEGMENT_MAX_CHARS:
+                continue  # Untrustworthy for component coherence.
+            if all(c in words for c in components):
                 return True
         return False
 
@@ -233,15 +296,17 @@ class MemoryIndexer:
             List of ``MemoryMetadata`` (lightweight, no full content),
             ordered by relevance and recency.
         """
-        paragraphs = self._paragraph_word_sets(text)
-        if not paragraphs or not any(paragraphs):
+        # Use _segments (not _paragraph_word_sets) so the size cap in
+        # _tag_coherent_in_paragraphs can inspect raw segment length.
+        segments = self._segments(text)
+        if not segments:
             return []
 
         # tag (canonical) → list of memory IDs that have this tag
         # We need to know which tags matched per memory to score by tag count.
         memory_tag_hits: Dict[str, int] = {}
         for tag_key, memory_ids in self._tag_index.items():
-            if not self._tag_coherent_in_paragraphs(tag_key, paragraphs):
+            if not self._tag_coherent_in_paragraphs(tag_key, segments):
                 continue
             for mid in memory_ids:
                 memory_tag_hits[mid] = memory_tag_hits.get(mid, 0) + 1

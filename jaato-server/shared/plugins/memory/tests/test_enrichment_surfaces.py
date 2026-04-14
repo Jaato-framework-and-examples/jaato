@@ -37,13 +37,23 @@ class TestParagraphCoherenceMatching:
         matches = idx.find_matches_in_text("Tell me about workspace-baseline.")
         assert len(matches) == 1
 
-    def test_compound_tag_components_in_same_paragraph(self):
-        """All components co-occur in one paragraph → match."""
+    def test_compound_tag_components_in_same_sentence(self):
+        """All components co-occur in one sentence → match."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["workspace-baseline"]))
+        text = "Show me the workspace baseline state."
+        matches = idx.find_matches_in_text(text)
+        assert len(matches) == 1
+
+    def test_components_split_across_sentences_does_not_match(self):
+        """Components must co-occur in the SAME sentence/segment.
+        With sentence-scoped segmentation, even adjacent sentences
+        about different concepts no longer pull in each other's tags."""
         idx = MemoryIndexer()
         idx.index_memory(_make_memory(["workspace-baseline"]))
         text = "What is the current workspace? Specifically, the baseline state."
         matches = idx.find_matches_in_text(text)
-        assert len(matches) == 1
+        assert len(matches) == 0
 
     def test_compound_tag_single_component_does_not_match(self):
         """Single-component mention is too loose — requires both."""
@@ -53,11 +63,11 @@ class TestParagraphCoherenceMatching:
         matches = idx.find_matches_in_text("Tell me about my workspace today.")
         assert len(matches) == 0
 
-    def test_components_split_across_paragraphs_does_not_match(self):
-        """Components must co-occur in the SAME paragraph."""
+    def test_components_split_across_lines_does_not_match(self):
+        """Components on different lines no longer co-occur in a segment."""
         idx = MemoryIndexer()
         idx.index_memory(_make_memory(["workspace-baseline"]))
-        text = "Tell me about my workspace.\n\nSeparately, what is a baseline?"
+        text = "Tell me about my workspace.\nSeparately, what is a baseline?"
         matches = idx.find_matches_in_text(text)
         assert len(matches) == 0
 
@@ -68,13 +78,20 @@ class TestParagraphCoherenceMatching:
         matches = idx.find_matches_in_text("Document the api endpoints")
         assert len(matches) == 1
 
-    def test_long_compound_tag_uses_majority(self):
-        """For ≥3 components, majority (ceil(n/2)) suffices."""
+    def test_long_compound_tag_requires_all_components(self):
+        """All components are required (no majority leniency).
+        With sentence-sized segments, requiring all components is the
+        right strictness — it prevents large structured dumps from
+        trivially matching long compound tags by chance."""
         idx = MemoryIndexer()
-        # 4 components → majority = 2
         idx.index_memory(_make_memory(["skill-mod-code-circuit"]))
-        # Mention 2 of the 4: code and circuit
+        # Only 2 of 4 components → does NOT match
         matches = idx.find_matches_in_text("Implement the circuit breaker code pattern.")
+        assert len(matches) == 0
+        # All 4 components in one sentence → matches
+        matches = idx.find_matches_in_text(
+            "The skill mod implements the code for circuit breaker."
+        )
         assert len(matches) == 1
 
     def test_colon_separator_treated_as_split(self):
@@ -90,6 +107,72 @@ class TestParagraphCoherenceMatching:
         matches = idx.find_matches_in_text(text)
         # 3 components: list, memory, tags → majority = 2
         # All three present → matches
+        assert len(matches) == 1
+
+
+class TestSegmentationAvoidsFalsePositives:
+    """Regression tests for the issue where long tool-result dumps
+    (JSON, CLI output, category lists) trivially satisfied compound-
+    tag matching because the whole dump was treated as one paragraph."""
+
+    def test_json_dump_does_not_trigger_false_positive(self):
+        """A list_tools()-style category dump must not surface
+        memory-system memories just because both `memory` and `system`
+        appear as category labels in different lines."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["memory-system"]))
+        json_dump = (
+            "{\n"
+            '  "categories": [\n'
+            '    {"name": "system", "description": "Shell commands, environment, system operations"},\n'
+            '    {"name": "memory", "description": "Persistent memory, notes, context storage across sessions"},\n'
+            '    {"name": "filesystem", "description": "Read, write, search, and navigate files"}\n'
+            '  ]\n'
+            "}"
+        )
+        matches = idx.find_matches_in_text(json_dump)
+        assert len(matches) == 0
+
+    def test_cli_output_does_not_trigger_unrelated_tags(self):
+        """A line-per-row listing must not surface tags whose
+        components happen to appear on different lines."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["plan-lifecycle"]))
+        cli_dump = (
+            "drwxr-xr-x  2 user user 4096 Apr 14 21:00 plan/\n"
+            "drwxr-xr-x  2 user user 4096 Apr 14 21:00 lifecycle/\n"
+        )
+        matches = idx.find_matches_in_text(cli_dump)
+        assert len(matches) == 0
+
+    def test_compact_json_dump_does_not_trigger_via_segment_cap(self):
+        """A compact one-line JSON dump has no newlines or sentence
+        terminators, so it would be one giant segment.  The segment-
+        size cap should kick in and reject it for component coherence."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["memory-system"]))
+        compact = (
+            '{"categories":[{"name":"system","description":"Shell commands, '
+            'environment, system operations"},{"name":"memory","description":'
+            '"Persistent memory, notes, context storage across sessions"},'
+            '{"name":"filesystem","description":"Read, write, search, '
+            'and navigate files and directories"}]}'
+        )
+        matches = idx.find_matches_in_text(compact)
+        assert len(matches) == 0
+
+    def test_prose_paragraph_with_period_splits_into_sentences(self):
+        """Two sentences in the same paragraph separated by a period
+        are treated as separate segments — components in different
+        sentences don't co-occur."""
+        idx = MemoryIndexer()
+        idx.index_memory(_make_memory(["api-design"]))
+        text = "The API is great. Design matters too."  # api in s1, design in s2
+        matches = idx.find_matches_in_text(text)
+        assert len(matches) == 0
+        # Same components in one sentence → match
+        text = "The api design is great."
+        matches = idx.find_matches_in_text(text)
         assert len(matches) == 1
 
 
