@@ -59,9 +59,24 @@ class AppArmorManager:
     degrade to no-ops.
     """
 
+    # Bump this whenever the PROFILE_TEMPLATE changes in a way that
+    # requires confined sessions to pick up new rules.  The value is
+    # embedded as a comment in every rendered profile, which changes the
+    # content hash and forces ``apparmor_parser`` to recompile against
+    # its cache at ``~/.jaato/apparmor-cache`` instead of reusing a stale
+    # entry.  Operators don't need to clear the cache manually; the next
+    # session will load the new rules automatically.
+    #
+    # History:
+    #   1 — initial template
+    #   2 — memories/ folder (raw queue + curated.jsonl), retain legacy
+    #       memories.jsonl for migration reads.
+    _TEMPLATE_VERSION = 2
+
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
     PROFILE_TEMPLATE = '''\
+# jaato-apparmor-template-version: {template_version}
 #include <tunables/global>
 
 profile jaato-ws-{session_id} flags=(attach_disconnected) {{
@@ -111,6 +126,19 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # All sessions can propose and read cross-session memories.
   # The maturity lifecycle (raw → validated) is the quality gate,
   # not filesystem permissions.
+  #
+  # Layout (current):
+  #   memories/raw/{{id}}.json    — pending queue, one file per memory
+  #   memories/curated.jsonl      — curator-managed knowledge base
+  # Layout (legacy, retained for migration):
+  #   memories.jsonl              — pre-split single-file store
+  #
+  # The first two rules cover folder creation (mkdir on the parent),
+  # directory enumeration, and atomic tempfile + rename writes inside
+  # the raw/ subdirectory and against curated.jsonl.  The third rule
+  # keeps pre-split data readable until it's migrated away.
+  @{{HOME}}/.jaato/memories/       rw,
+  @{{HOME}}/.jaato/memories/**     rw,
   @{{HOME}}/.jaato/memories.jsonl  rw,
 
   # ---- Claude Code interop (read-only) ----
@@ -445,6 +473,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             premium_rules = "# (no premium package installed)"
 
         return self.PROFILE_TEMPLATE.format(
+            template_version=self._TEMPLATE_VERSION,
             session_id=session_id,
             workspace_path=workspace_path,
             venv_path=str(self._venv_path),
