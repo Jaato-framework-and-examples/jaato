@@ -5,6 +5,10 @@ This document assesses jaato's memory mechanisms against the axes laid out in
 frames every memory system as a path through nine design axes; this document
 walks each axis and locates jaato's choices on it.
 
+> **Last updated:** 2026-04-14 — reflects the raw/curated split storage
+> layout, sentence-coherence tag matching, and the curator-only enrichment
+> path landed in commits `3f019999`, `d5ad97f3`, `b97dda14`, and `e0afcda0`.
+
 ---
 
 ## Inventory of jaato's memory-carrying mechanisms
@@ -13,12 +17,12 @@ walks each axis and locates jaato's choices on it.
 |---|---|---|
 | 1 | `SessionHistory` (`shared/session_history.py`) | Canonical in-session conversation (raw messages) |
 | 2 | `InstructionBudget` (`shared/instruction_budget.py`) | Token accounting + per-source GC policy (`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL`) |
-| 3 | `gc_truncate` / `gc_summarize` / `gc_hybrid` | Context-window GC strategies |
-| 4 | `memory` plugin — workspace `.jaato/memories.jsonl` + global `~/.jaato/memories.jsonl` | Agent-curated long-term knowledge |
-| 5 | Memory **curation lifecycle** ("The School": `raw → validated → escalated → dismissed`) | Background housekeeping by advisor agent |
-| 6 | `references` plugin | Static/curated documentation catalog with optional embeddings |
+| 3 | `gc_truncate` / `gc_summarize` / `gc_hybrid` / `gc_budget` | Context-window GC strategies |
+| 4 | `memory` plugin — workspace `<ws>/.jaato/memories/` + global `~/.jaato/memories/` (split: `raw/{id}.json` + `curated.jsonl`) | Agent-curated long-term knowledge |
+| 5 | Memory **curation lifecycle** ("The School": `raw → validated → escalated → dismissed`) — implemented as a queue (raw folder) drained by the `memory-advisor` reactor | Background housekeeping by advisor agent |
+| 6 | `references` plugin | Static/curated documentation catalog with optional embeddings (hybrid tag + semantic) |
 | 7 | Pinned preselected references (`SYSTEM.SELECTED_REFERENCES`) | GC-surviving reference content |
-| 8 | Prompt-enrichment pipeline (`EnrichmentPlugin`) | Hook-driven injection of hints into the prompt |
+| 8 | Prompt-enrichment pipeline (`EnrichmentPlugin`) — runs on **user prompts** AND **tool results** | Hook-driven injection of hints into the model's context |
 | 9 | Session persistence (`session` plugin) | Disk snapshot of session state across restarts |
 | 10 | `InstructionTokenCache` | Content-addressed token-count cache |
 
@@ -51,14 +55,13 @@ automatic **daily / weekly / monthly rollups**.
 Jaato uses all three timings the article lists.
 
 - **Synchronous (at conversation time):** `store_memory` tool calls during a
-  session write raw memories; GC fires synchronously when
+  session write to the **raw queue**; GC fires synchronously when
   `InstructionBudget.utilization_percent` crosses `threshold_percent`
   (default 80%) or continuously after each turn under `pressure_percent` mode.
 - **Asynchronous (background):** The **curation lifecycle** is the article's
-  "nightly auto-dreams" analogue — a separate advisor agent later runs
-  `get_pending_curation()` over `raw` memories and transitions them to
-  `validated`, `escalated`, or `dismissed`. This is decoupled from the working
-  session.
+  "nightly auto-dreams" analogue — the `memory-advisor` reactor agent fires on
+  `agent.completed` events, drains the raw queue, and transitions entries to
+  `validated`, `escalated`, or `dismissed`. Decoupled from the working session.
 - **On-demand (retrieval time):** The `references` plugin resolves and fetches
   content lazily when the model invokes `selectReferences` or when prompt
   enrichment detects `@reference` mentions.
@@ -78,25 +81,33 @@ Multi-curator, not a single policy.
 
 The LLM-as-curator path carries the article's critique: the working agent is
 bad at predicting what will matter later. Jaato mitigates this with the
-**maturity lifecycle** — raw writes are cheap and tentative, and the advisor
-later filters them.
+**raw-queue + advisor pattern** — raw writes are cheap and tentative, never
+surfaced as hints, and the advisor later promotes the worthwhile ones into the
+curated store.
 
 ---
 
 ## Axis 4 — Where it gets stored
 
 Jaato is **filesystem-first**, explicitly avoiding vector / graph DBs for the
-core path.
+core path. The memory store uses a **split layout** matched to the producer /
+consumer access pattern:
 
-- **Filesystem (JSONL):** `<workspace>/.jaato/memories.jsonl` (project scope)
-  and `~/.jaato/memories.jsonl` (universal scope). Append-for-create,
-  rewrite-whole-file for update / delete. The article names OpenClaw and
-  Claude Code as filesystem exemplars; jaato fits alongside them.
+- **Raw queue (folder-of-files):** `<base>/raw/{id}.json`. Write-many (any
+  agent storing a memory), read-by-curator. Each producer writes its own file
+  atomically via `tempfile + os.rename`, eliminating write contention. Raw
+  memories are never surfaced as enrichment hints.
+- **Curated store (single JSONL):** `<base>/curated.jsonl`. Read-many (every
+  enrichment pass), write-by-curator-only. The curator drains raw entries
+  into this file; rewrites use `tempfile + os.rename` so concurrent readers
+  see either the old or new file in full, never half-state.
+- **Two scopes:** workspace-local under `<workspace>/.jaato/memories/` and
+  cross-session global under `~/.jaato/memories/`. Same split layout each.
 - **Filesystem + sidecar vectors:** `references` uses a JSON catalog plus an
   optional `.npy` embedding matrix (pgvector-style inline, not a managed
   vector DB).
 - **In-memory:** `SessionHistory`, `InstructionBudget`, `MemoryIndexer`
-  (tag → ID map), `InstructionTokenCache`.
+  (canonical-tag → ID map, built from curated only), `InstructionTokenCache`.
 - **Disk snapshot:** `session` plugin serializes `SessionState` for restart.
 - **No SQL, no NoSQL, no managed vector DB, no graph DB.**
 
@@ -109,17 +120,32 @@ semantic search at conceptual queries.
 
 ## Axis 5 — How it gets retrieved
 
-Deliberately conservative.
+Conservative on the memory side, hybrid on references.
 
-- **Memory plugin:** **Exact tag matching** (case-insensitive) with
-  `min_overlap=2` required. No semantic similarity on the memory store
-  itself. The indexer explicitly documents the reason: "prevents false
-  positives from substring matches against large prompts where short tags
-  like 'test' would match thousands of unrelated words." Results ranked by
-  overlap count, then recency.
-- **References plugin:** Hybrid — tag matching + optional semantic similarity
-  via `EmbeddingProviderProtocol` / `SemanticMatcherProtocol`. This is the
-  only place in jaato where embeddings participate.
+- **Memory plugin — sentence-coherence tag matching** (shared
+  `shared/tag_coherence.py` engine):
+  - The retrieval text is segmented on sentence terminators (`.!?\s+`) and
+    line breaks, with a 250-char per-segment cap. This stops long structured
+    dumps from trivially satisfying multi-component coherence by chance.
+  - **Single-component tags** (`java`, `gpg`, `gc`, `spring.boot`) use strict
+    word-boundary regex — adjacent alphanumerics, hyphens, underscores, dots,
+    or slashes block the match. So `java` matches "the Java SDK" but NOT
+    "java.util.concurrent" or "Foo.java".
+  - **Multi-component tags** (`circuit-breaker`) match if the full string
+    appears verbatim in any segment OR if all of its ≥3-char components
+    co-occur in one segment. Hyphen / underscore / colon / space are
+    interchangeable separators — `circuit-breaker` matches `circuit_breaker`
+    or `circuit breaker`.
+  - **Dots are treated as qualifiers**, not separators — `spring.boot` stays
+    atomic so it doesn't match inside `org.spring.boot.autoconfigure`.
+  - **Curated-only:** the indexer is built solely from `curated.jsonl`. Raw
+    memories are queue-only and never surface as hints.
+  - Results ranked by overlap count, then recency. ID-based fetch
+    (`retrieve_memories(ids=[...])`) bypasses tag matching entirely.
+- **References plugin:** Hybrid — same sentence-coherence tag engine
+  (extracted from memory) plus optional semantic similarity via
+  `EmbeddingProviderProtocol` / `SemanticMatcherProtocol`. The semantic
+  veto in hybrid mode filters spurious component matches.
 - **Session history:** Direct list access; no retrieval layer — it's all in
   context until GC.
 - **Filesystem navigation:** General CLI tools (`grep`, `read`) give the model
@@ -128,8 +154,9 @@ Deliberately conservative.
 
 Compared to the article's table: jaato's *memory* retrieval is closer to
 Claude Code (pointer + explicit navigation) than to Rosebud V1 (Pinecone
-semantic similarity). Its *references* retrieval resembles QMD (BM25 +
-embedding hybrid).
+semantic similarity), but with sentence-coherence relaxation that catches
+compound concepts the user mentions naturally. Its *references* retrieval
+resembles QMD (BM25 + embedding hybrid).
 
 ---
 
@@ -141,9 +168,17 @@ Minimal but present.
   and `GCPlugin.collect()` enforces the budget.
 - **Deduplication:** `MemoryIndexer` deduplicates memory IDs within
   `_tag_index` buckets (an ID is never listed twice under the same tag).
-- **Filtering by metadata:** Maturity filter
-  (`ACTIVE_MATURITIES = {raw, validated}`) excludes `escalated` (represented
-  by references instead) and `dismissed` entries from enrichment hints.
+- **Filtering by maturity:** Raw memories are excluded at the storage layer
+  (they live in the raw queue, not the curated store the indexer reads from).
+  `escalated` and `dismissed` are also excluded by `ACTIVE_MATURITIES = {raw,
+  validated}` — though raw is moot now since it's not in the curated store.
+- **Triggering tags surfaced honestly in the hint:** the enrichment
+  notification shows only the tags that actually matched the input text, not
+  the full tag set of every surfaced memory (which historically misled the
+  agent into firing N retrieve calls).
+- **One-call retrieval form:** the hint includes the exact
+  `retrieve_memories(ids=[...])` invocation so the agent fetches all
+  surfaced memories in a single call.
 - **No re-ranking layer, no LLM-based narrowing of candidates, no explicit
   date-range filtering.**
 
@@ -161,13 +196,14 @@ Two-phase hybrid that maps cleanly to the article's three modes.
 | Article mode | Jaato realization |
 |---|---|
 | **Always injected** | `SYSTEM` instructions (base + client + framework + **pinned preselected references**). Pinned content survives GC via `SystemChildType.SELECTED_REFERENCES` (`LOCKED`). |
-| **Hook-driven** | The enrichment pipeline runs before the model sees the turn. `MemoryPlugin.enrich_prompt()` extracts keywords from the user message, finds matching active memories via the indexer, and injects **lightweight hints** (not full content) into the prompt. The reference plugin does the same for `@reference` mentions. |
-| **Tool-driven** | Hints tell the model what's available; it then calls `retrieve_memories` / `selectReferences` to pull full content. This is Phase 2 of jaato's documented "two-phase retrieval." |
+| **Hook-driven** | The enrichment pipeline runs on **both user prompts and tool results**. `MemoryPlugin.enrich_prompt()` and `enrich_tool_result()` share a single core that segments the text, matches against the curated tag index, and injects **lightweight hints** (memory IDs + descriptions + the one-call retrieve form). The references plugin does the same for `@reference` mentions and tool result contents. |
+| **Tool-driven** | Hints tell the model what's available and how to fetch them; it then calls `retrieve_memories(ids=[...])` / `selectReferences` to pull full content. This is Phase 2 of jaato's documented "two-phase retrieval." |
 
 This composition directly addresses the article's critique that tool-driven
 retrieval fails because "the model doesn't know what it doesn't know."
 Jaato's hook-driven hint injection is precisely the solution — surface
-existence cheaply, let the model decide to pay for content.
+existence cheaply, let the model decide to pay for content, and tell it the
+exact one-call invocation to use.
 
 ---
 
@@ -177,18 +213,19 @@ All five of the article's curator types are present.
 
 | Curator | Jaato role |
 |---|---|
-| **Harness** | `InstructionBudget` policy enforcement, GC trigger logic, indexer build, enrichment pipeline plumbing |
+| **Harness** | `InstructionBudget` policy enforcement, GC trigger logic, indexer build, enrichment pipeline plumbing, raw → curated routing on update_memory |
 | **Cheap model** | GC summarizer callable (can be wired to a smaller / cheaper provider for `gc_summarize` / `gc_hybrid`) |
-| **Main model** | Every `store_memory`, `retrieve_memories`, `selectReferences` call — the working agent is the primary write curator |
-| **Background process** | The **advisor agent** (the curation lifecycle) — a separate `JaatoSession` that reviews pending-curation memories and transitions maturity states |
-| **User** | `references select` / `memory` commands, `reset`, manual editing of `.jaato/memories.jsonl` |
+| **Main model** | Every `store_memory`, `retrieve_memories`, `selectReferences` call — the working agent is the primary write curator (writes go to the raw queue) |
+| **Background process** | The **`memory-advisor`** agent — a separate `JaatoSession` spawned by the reactor on `agent.completed`. Reads raw queue entries, transitions maturity states, consolidates into the curated store. Cross-process serialization is tracked as a backlog item (reactor singleton). |
+| **User** | `references select` / `memory` commands, `reset`, manual editing of `.jaato/memories/curated.jsonl` or removal of files in `.jaato/memories/raw/` |
 
 Jaato's **multi-curator composition** is its most distinctive design choice on
 this axis. The article notes that each curator type has different cost /
 quality / accountability profiles; jaato pays the "main model on every turn"
-cost only for writes, the "background LLM" cost only for curation, and the
-"harness" cost for the hot path. This layered assignment is closest to
-MemPalace in the article's comparison table.
+cost only for writes (cheap, into raw), the "background LLM" cost only for
+curation (advisor agent), and the "harness" cost for the hot path. The split
+storage layout is the physical realization of this separation — producers
+and consumers don't share a write path.
 
 ---
 
@@ -203,13 +240,14 @@ the article's hardest problems.
   `PARTIAL` / `EPHEMERAL`) attaches an importance signal to every byte in
   the context. `ConversationTurnType.WORKING` is `EPHEMERAL` (verbose tool
   output goes first); `ORIGINAL_REQUEST` is `LOCKED` (never GC'd).
-- **Overwrite-when-superseded:** `update_memory` mutates fields in place;
-  `maturity="dismissed"` is a soft forget (kept for audit, hidden from
-  enrichment).
+- **Overwrite-when-superseded:** `update_memory` mutates fields in place and
+  may move a memory across stores (raw → curated, or remove on dismissed).
 - **Bulk forgetting:** `reset` command clears the entire session history;
-  deleting the JSONL file forgets all memories in that scope.
-- **Append-only (effectively):** Dismissed memories are *hidden*, not
-  deleted — the article's "kept for audit trail" pattern.
+  removing files from `memories/raw/` or rewriting `curated.jsonl` forgets
+  them.
+- **Soft delete:** `maturity="dismissed"` removes the memory from both stores
+  in the new layout. (The previous "kept for audit" semantics is gone — when
+  the curator dismisses, the file is unlinked.)
 
 **How forgetting propagates:**
 
@@ -240,16 +278,16 @@ Mapping the article's failure-mode taxonomy onto jaato.
 
 | Failure mode | Jaato's exposure |
 |---|---|
-| Session amnesia | **Low** — memory plugin + global `~/.jaato/memories.jsonl` + session persistence cover this |
-| Entity confusion | **Medium** — no entity extraction layer, but tag-based retrieval avoids the "two Lunas" problem by requiring exact tag matches |
-| Over-inference | **Medium** — the `evidence` field and the `raw → validated` gate are explicit guardrails, but nothing prevents over-confident initial writes |
+| Session amnesia | **Low** — memory plugin + global `~/.jaato/memories/curated.jsonl` + session persistence cover this |
+| Entity confusion | **Medium** — no entity extraction layer, but tag-based retrieval avoids the "two Lunas" problem by requiring exact tag matches or tight component coherence |
+| Over-inference | **Low–medium** — the `evidence` field, the `raw → curated` gate (raw never reaches agents), and the curator's review explicitly mediate this |
 | Derivation drift | **Medium–high** — `gc_summarize` / `gc_hybrid` can summarize-over-summaries on long sessions; no provenance back to raw |
-| Retrieval misfire | **Low** — exact tag matching + `min_overlap=2` is intentionally strict, at the cost of recall |
+| Retrieval misfire | **Low** — sentence-coherence matching with strict-boundary single-component tags + segment cap is intentionally strict, at the cost of recall |
 | Stale context dominance | **Medium** — recency tiebreak in the indexer helps; no decay weighting on `usage_count` |
-| Selective retrieval bias | **High** — tag-based exact match only surfaces what the author of the write tagged correctly; cross-topic relevance is invisible |
+| Selective retrieval bias | **Medium** (was HIGH) — sentence-coherence + sub-token component matching catches compound concepts the user mentions naturally; still no cross-topic / semantic retrieval on memory |
 | Compaction information loss | **Medium–high** — GC removes `EPHEMERAL` tool outputs wholesale; no "compacted with pointer to raw" pattern like the article's *Lossless Claw* |
 | Confidence without provenance | **Low** — every `Memory` carries `source_session`, `source_agent`, `evidence`, `confidence` |
-| Memory-induced bias | **Inherent** — unavoidable for any hint-injection system; `min_overlap=2` limits the blast radius |
+| Memory-induced bias | **Inherent** — unavoidable for any hint-injection system; the curator gate (raw never surfaces) limits the blast radius significantly compared to the prior `min_overlap=2` design |
 
 ---
 
@@ -260,14 +298,14 @@ Adding a jaato column following the article's schema:
 | Axis | jaato |
 |---|---|
 | **What** | Raw (`SessionHistory`) + derived (agent-written `Memory` records, GC summaries) + externally curated (`references`) |
-| **When derived** | Synchronous (GC, `store_memory`) + async (advisor curation loop) + on-demand (reference resolution) |
-| **Write trigger** | LLM-as-curator (memory writes) + heuristic (GC thresholds) + user-triggered (references, reset) |
-| **Curator** | Main model (writes) + background model (curation / summaries) + harness (GC, enrichment plumbing) + user (commands) |
-| **Where** | Filesystem JSONL (workspace + `~/.jaato`) + sidecar `.npy` for reference embeddings + disk snapshot for session state |
-| **When retrieved** | Always-injected (`LOCKED` system blocks + pinned refs) + hook-driven (enrichment hints) + tool-driven (`retrieve_memories`, `selectReferences`) |
-| **How retrieved** | Exact tag matching + recency tiebreak (memories) / hybrid tag + embedding (references) / filesystem + grep (everything else) |
-| **Post-retrieval** | Maturity filter + `min_overlap` threshold + `InstructionBudget` token trimming. No re-ranker, no LLM narrowing |
-| **Forgetting** | Decay-by-policy (`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL`) + GC threshold + soft-delete via `dismissed` maturity + hard-delete on user command. No provenance cascade |
+| **When derived** | Synchronous (GC, `store_memory` → raw) + async (advisor curation loop, raw → curated) + on-demand (reference resolution) |
+| **Write trigger** | LLM-as-curator (memory writes, always raw initially) + heuristic (GC thresholds) + user-triggered (references, reset) |
+| **Curator** | Main model (writes to raw) + background agent (`memory-advisor`, raw → curated) + harness (GC, enrichment plumbing) + user (commands) |
+| **Where** | Filesystem split (raw folder + curated JSONL, workspace + `~/.jaato`) + sidecar `.npy` for reference embeddings + disk snapshot for session state |
+| **When retrieved** | Always-injected (`LOCKED` system blocks + pinned refs) + hook-driven (enrichment hints on prompts AND tool results) + tool-driven (`retrieve_memories(ids=...)`, `selectReferences`) |
+| **How retrieved** | Sentence-coherence tag matching + recency tiebreak (memories) / hybrid tag + embedding (references) / filesystem + grep (everything else) |
+| **Post-retrieval** | Maturity / store filter (curated only) + segment cap + `InstructionBudget` token trimming + triggering-tag-only hints. No re-ranker, no LLM narrowing |
+| **Forgetting** | Decay-by-policy (`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL`) + GC threshold + hard-delete on dismiss + hard-delete on user command. No provenance cascade |
 
 ---
 
@@ -275,27 +313,66 @@ Adding a jaato column following the article's schema:
 
 Against the article's map, jaato is a **conservative, filesystem-first,
 multi-curator** system whose distinctive feature is the
-**maturity-lifecycle curation layer** bridging the working agent and a
-background advisor. It buys low retrieval-misfire rates at the cost of higher
-selective-retrieval-bias, and it deliberately avoids managed vector / graph
+**split storage layout (raw queue + curated store)** that physically
+implements the producer / consumer separation between agents and the
+background advisor. It buys low retrieval-misfire rates with sentence-
+coherence matching and the curator gate, at the cost of some
+selective-retrieval-bias. It deliberately avoids managed vector / graph
 stores in favor of JSONL + tag matching + optional sidecar embeddings.
 
 **Weakest axes against the article's taxonomy:**
 
-1. No provenance cascade for forgetting.
-2. No post-retrieval re-ranking.
-3. No cross-topic / semantic retrieval on the core memory store.
+1. No provenance cascade for forgetting. If a session is deleted, its
+   memories stay behind orphaned.
+2. No post-retrieval re-ranking. Tag-coherence finds candidates by structure;
+   nothing scores their actual relevance to the prompt before injection.
+3. No cross-topic / semantic retrieval on the core memory store. Sentence
+   coherence catches more than verbatim tag matches but still misses queries
+   phrased entirely without the tag's vocabulary.
 4. Derivation drift is possible under `gc_summarize` because compacted
-   summaries don't carry pointers back to raw turns.
+   summaries don't carry pointers back to raw turns — the article's
+   *Lossless Claw* pattern is unrealized.
 
 **Strongest axes:**
 
 1. Explicit GC policy per byte in context (`InstructionBudget` + `GCPolicy`).
-2. Layered curators with appropriate cost profiles.
+2. Layered curators with appropriate cost profiles, made physical by the
+   raw-queue / curated-store split.
 3. Explicit `evidence` / `confidence` / `source_*` fields on every memory
    (provenance-first design).
 4. Two-phase hint-then-fetch retrieval that dodges the tool-driven-retrieval
-   failure mode identified in the article.
+   failure mode identified in the article. The hint surfaces memory IDs
+   and the exact one-call retrieval form, eliminating the "N calls per N
+   bullets" anti-pattern.
+5. Curator-only enrichment: agents only see vetted content as hints, raw
+   writes are tentative and cheap.
+6. Race-free concurrent producers via per-memory file writes in the raw
+   queue (atomic `tempfile + os.rename`).
+
+---
+
+## Open improvement opportunities
+
+Tracked in the project backlog:
+
+- **Semantic retrieval on the memory store** — port the references plugin's
+  `EmbeddingProviderProtocol` / `SemanticMatcherProtocol` hybrid into memory.
+  Tag-coherence finds candidates fast; embedding ranks them. Addresses the
+  Selective Retrieval Bias gap.
+- **Provenance cascade for forgetting** — when a session is deleted,
+  cascade-delete or orphan-flag its `source_session`-tagged memories.
+- **Compacted summary with pointer to raw** — when `gc_summarize` collapses
+  turns, persist a pointer to the verbatim raw range so the agent can reach
+  back if needed (the article's *Lossless Claw*).
+- **Post-retrieval re-ranking** — cheap-model or embedding pass that scores
+  candidate relevance before injection.
+- **Decay weighting on `usage_count`** — auto-flag never-retrieved memories
+  for advisor review.
+- **Reactor singleton coordination** — ensure only one `memory-advisor`
+  session runs at a time across the daemon.
+- **Memory storage cross-process locking** — the per-file atomic writes
+  cover concurrent producers; cross-process curator coordination still
+  depends on the reactor singleton work.
 
 ---
 
