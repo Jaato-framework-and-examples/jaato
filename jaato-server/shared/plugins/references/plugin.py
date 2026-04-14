@@ -2585,19 +2585,22 @@ class ReferencesPlugin:
                 # interchangeable separators so that "circuit-breaker"
                 # matches "circuit breaker", "circuit_breaker", and
                 # vice versa.
-                content_lower = content.lower()
+                # Sentence-coherence matching, shared with the memory
+                # plugin (see ``shared.tag_coherence``).  A tag matches
+                # if its full string appears verbatim in any sentence
+                # OR if all its ≥3-char sub-tokens co-occur in the same
+                # sentence — so ``circuit-breaker`` matches "circuit
+                # breaker" or "circuit_breaker" in addition to the
+                # literal hyphenated form.  In hybrid mode the
+                # semantic veto below filters spurious component matches.
+                from shared.tag_coherence import (
+                    tag_coherent_in_segments,
+                    text_segments,
+                )
+                segments = text_segments(content)
                 matched_sources: Dict[str, List[str]] = {}  # source_id → [matched_tags]
                 for tag, sources in tag_to_sources.items():
-                    # Match tag as a whole word (not inside dotted/path names).
-                    # After escaping, normalize escaped hyphens (\-),
-                    # escaped spaces (\ ), and literal underscores into
-                    # [ _-] so all separator variants match interchangeably.
-                    escaped = re.escape(tag.lower())
-                    escaped = re.sub(r'\\-|\\ |_', '[ _-]', escaped)
-                    tag_pattern = re.compile(
-                        r'(?<![a-zA-Z0-9_./-])' + escaped + r'(?![a-zA-Z0-9_./-])'
-                    )
-                    if tag_pattern.search(content_lower):
+                    if tag_coherent_in_segments(tag, segments):
                         for source in sources:
                             matched_sources.setdefault(source.id, []).append(tag)
 
