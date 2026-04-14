@@ -57,6 +57,12 @@ class MemoryIndexer:
         administrative tools (``list_memory_tags``, ``memory list``) see
         the complete picture.  Maturity filtering happens at query time.
 
+        Each tag is indexed under its **whole string** AND under each
+        of its sub-tokens (split on non-alphanumeric characters).  This
+        makes compound tags like ``workspace-baseline`` reachable from
+        a prompt that only mentions ``workspace`` while still preserving
+        the exact-match discipline in ``find_matches``.
+
         Args:
             memory: Memory object to index
         """
@@ -72,38 +78,77 @@ class MemoryIndexer:
         )
         self._memories[memory.id] = metadata
 
-        # Index by tags
+        # Index by tags — both the full tag string and its sub-tokens.
         for tag in memory.tags:
-            tag_lower = tag.lower()
-            if tag_lower not in self._tag_index:
-                self._tag_index[tag_lower] = []
-            if memory.id not in self._tag_index[tag_lower]:
-                self._tag_index[tag_lower].append(memory.id)
+            for key in self._tag_index_keys(tag):
+                bucket = self._tag_index.setdefault(key, [])
+                if memory.id not in bucket:
+                    bucket.append(memory.id)
+
+    @staticmethod
+    def _tag_index_keys(tag: str) -> List[str]:
+        """Return all index keys for a tag: the whole string plus sub-tokens.
+
+        Sub-tokens are extracted by splitting on non-alphanumeric
+        characters (hyphens, underscores, colons, dots), so
+        ``workspace-baseline`` produces ``["workspace-baseline",
+        "workspace", "baseline"]`` and ``agent:main`` produces
+        ``["agent:main", "agent", "main"]``.
+
+        Short sub-tokens (< 3 chars) are excluded to avoid noise from
+        parts like ``"v2"`` or ``"ws"`` matching too broadly, unless
+        the whole tag itself is that short (then it's kept as-is so
+        intentionally-short tags like ``"gc"`` remain reachable via
+        exact-match).
+        """
+        tag_lower = tag.lower()
+        keys = [tag_lower]
+        parts = re.split(r"[^a-z0-9]+", tag_lower)
+        for p in parts:
+            if p and p != tag_lower and len(p) >= 3 and p not in keys:
+                keys.append(p)
+        return keys
 
     def extract_keywords(self, prompt: str) -> List[str]:
         """Extract potential keywords from a prompt.
 
-        Simple approach:
-        1. Extract words (alphanumeric sequences)
-        2. Convert to lowercase
-        3. Filter out stopwords
-        4. Filter out very short words (< 4 chars)
+        Two extraction passes so compound tags are reachable both as
+        whole strings and as their parts:
+
+        1. **Whole tokens** including non-alphanumerics —
+           ``workspace-baseline`` or ``agent:main`` become a single
+           keyword.
+        2. **Sub-words** from the same token — ``workspace-baseline``
+           also contributes ``workspace`` and ``baseline``.
+
+        Both are lowercased, filtered against stopwords, and capped to
+        ``≥ 3 chars`` (matches the sub-token minimum in
+        ``_tag_index_keys`` so exact lookups line up).
 
         Args:
             prompt: User prompt text
 
         Returns:
-            List of extracted keywords
+            De-duplicated list of keywords (whole tokens first).
         """
-        # Extract words (including underscores for technical terms)
-        words = re.findall(r'\b\w+\b', prompt.lower())
+        prompt_lower = prompt.lower()
 
-        # Filter stopwords and short words
-        keywords = [
-            w for w in words
-            if w not in STOPWORDS and len(w) >= 4
-        ]
+        # Whole tokens: alphanumerics with internal hyphens/underscores/colons/dots
+        whole = re.findall(r"[a-z0-9][a-z0-9\-_:.]*[a-z0-9]", prompt_lower)
+        # Sub-words: just alphanumeric runs
+        sub = re.findall(r"\b\w+\b", prompt_lower)
 
+        seen = set()
+        keywords: List[str] = []
+        for w in whole + sub:
+            if w in seen:
+                continue
+            if w in STOPWORDS:
+                continue
+            if len(w) < 3:
+                continue
+            seen.add(w)
+            keywords.append(w)
         return keywords
 
     def find_matches(
@@ -112,28 +157,32 @@ class MemoryIndexer:
         limit: int = 5,
         *,
         active_only: bool = True,
-        min_overlap: int = 2,
+        min_overlap: int = 1,
     ) -> List[MemoryMetadata]:
         """Find memories with tags matching the provided keywords.
 
-        Uses **exact tag matching only** — a keyword must exactly equal
-        a tag (case-insensitive) to count as a match.  Memories must
-        have at least ``min_overlap`` matching tags to be returned.
-        This prevents false positives from substring matches against
-        large prompts where short tags like ``"test"`` would match
-        thousands of unrelated words.
+        Uses **exact tag-index matching** — a keyword must exactly equal
+        a key in the tag index (case-insensitive).  The index keys are
+        the whole tag strings plus their sub-tokens (see
+        ``_tag_index_keys``), so ``workspace`` in the prompt matches a
+        memory tagged ``workspace-baseline`` through the sub-token
+        expansion.  This keeps query-time logic O(1) per keyword while
+        making compound tags reachable from single-word prompts.
 
         Results are ranked by overlap count (most matches first), then
         by recency within the same overlap count.
 
         Args:
-            keywords: List of keywords to match against tags.
+            keywords: List of keywords to match against tag-index keys.
             limit: Maximum number of matches to return.
             active_only: When True (default), only return memories whose
                 maturity is in ``ACTIVE_MATURITIES`` (raw, validated).
                 Set to False to include all maturity states.
             min_overlap: Minimum number of tag matches required for a
-                memory to be considered relevant (default: 2).
+                memory to be considered relevant (default: 1).  Single
+                matches are acceptable — the specificity of the tags
+                (and the length filter applied to extracted keywords)
+                prevents noise.
 
         Returns:
             List of MemoryMetadata objects (lightweight, no full content)

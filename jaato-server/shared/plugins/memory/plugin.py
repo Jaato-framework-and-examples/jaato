@@ -18,6 +18,7 @@ from jaato_sdk.plugins.base import (
     CommandCompletion,
     HelpLines,
     PromptEnrichmentResult,
+    ToolResultEnrichmentResult,
     UserCommand,
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
@@ -412,7 +413,8 @@ class MemoryPlugin:
             "- `update_memory` — update maturity, confidence, tags, or content "
             "on an existing memory (used by the advisor agent for curation)\n"
             "- `delete_memory` — permanently delete a memory (for merge cleanup)\n\n"
-            "When you see 💡 **Available Memories** hints in prompts, use "
+            "When you see 💡 **Available Memories** hints — whether in "
+            "the user's prompt or appended to a tool result — use "
             "`retrieve_memories` to access the full content.\n\n"
             "## Knowledge curation lifecycle\n\n"
             "Your memories are part of a learning pipeline:\n"
@@ -565,14 +567,75 @@ class MemoryPlugin:
         Returns:
             PromptEnrichmentResult with enriched prompt and metadata
         """
+        enriched_text, metadata = self._enrich_text(prompt)
+        return PromptEnrichmentResult(prompt=enriched_text, metadata=metadata)
+
+    # ==================== Tool Result Enrichment ====================
+
+    def get_tool_result_enrichment_priority(self) -> int:
+        """Return tool result enrichment priority (lower = earlier)."""
+        return 80
+
+    def subscribes_to_tool_result_enrichment(self) -> bool:
+        """Subscribe so memory hints are injected into tool results too.
+
+        Without this, memories only surface at the start of a turn based
+        on the user's message.  Tool outputs that mention topics with
+        associated memories would miss them.  Mirrors the behaviour of
+        the references plugin which enriches both prompts and tool
+        results.
+        """
+        return True
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str,
+        tool_args: Optional[Dict[str, Any]] = None,
+    ) -> ToolResultEnrichmentResult:
+        """Inject memory hints into a tool result before the model sees it.
+
+        Uses the same keyword-extraction and tag-index path as
+        ``enrich_prompt``.  Called in the function-calling loop right
+        after a tool returns, so matching memories influence the
+        model's next reasoning step within the same turn.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string.
+            tool_args: Tool call arguments (unused here; kept for
+                protocol compatibility with other enrichers).
+
+        Returns:
+            ToolResultEnrichmentResult with hints appended.
+        """
+        enriched, metadata = self._enrich_text(result)
+        return ToolResultEnrichmentResult(result=enriched, metadata=metadata)
+
+    # ==================== Shared enrichment core ====================
+
+    def _enrich_text(self, text: str) -> tuple:
+        """Shared core for prompt and tool-result enrichment.
+
+        Runs the keyword → index → hint pipeline on arbitrary text and
+        returns ``(enriched_text, metadata)``.  Both ``enrich_prompt``
+        and ``enrich_tool_result`` wrap this with their respective
+        result types so the model sees the same "💡 Available Memories"
+        hint block regardless of which surface triggered the match.
+
+        Args:
+            text: The text to analyse (user prompt or tool output).
+
+        Returns:
+            Tuple of ``(enriched_text, metadata_dict)``.  When no
+            memories match, ``enriched_text`` equals ``text`` and
+            metadata carries ``memory_matches: 0``.
+        """
         if not self._indexer or not self._storage:
-            return PromptEnrichmentResult(
-                prompt=prompt,
-                metadata={"error": "Plugin not initialized"}
-            )
+            return text, {"error": "Plugin not initialized"}
 
         # Extract potential keywords
-        keywords = self._indexer.extract_keywords(prompt)
+        keywords = self._indexer.extract_keywords(text)
 
         # Find matching memories from BOTH workspace and global stores
         matches = self._indexer.find_matches(keywords, limit=5)
@@ -585,10 +648,7 @@ class MemoryPlugin:
                     matches.append(gm)
 
         if not matches:
-            return PromptEnrichmentResult(
-                prompt=prompt,
-                metadata={"memory_matches": 0}
-            )
+            return text, {"memory_matches": 0}
 
         # Build hint section
         hint_lines = [
@@ -599,7 +659,7 @@ class MemoryPlugin:
             tags_str = ", ".join(memory_meta.tags)
             hint_lines.append(f"  - [{tags_str}]: {memory_meta.description}")
 
-        enriched_prompt = prompt + "\n" + "\n".join(hint_lines)
+        enriched_text = text + "\n" + "\n".join(hint_lines)
 
         # Collect unique tags from matched memories
         matched_tags = []
@@ -616,21 +676,19 @@ class MemoryPlugin:
         if len(matched_tags) > 3:
             tag_summary += f" +{len(matched_tags) - 3} more"
 
-        return PromptEnrichmentResult(
-            prompt=enriched_prompt,
-            metadata={
-                "memory_matches": len(matches),
-                "matched_ids": [m.id for m in matches],
-                "trigger_keywords": matched_tags,
-                "notification": {
-                    "message": f"added context about {len(matches)} memories (tags: {tag_summary})"
-                },
-                "_telemetry": {
-                    "jaato.enrichment.memory.matches": len(matches),
-                    "jaato.enrichment.memory.trigger_keywords": len(matched_tags),
-                },
-            }
-        )
+        metadata = {
+            "memory_matches": len(matches),
+            "matched_ids": [m.id for m in matches],
+            "trigger_keywords": matched_tags,
+            "notification": {
+                "message": f"added context about {len(matches)} memories (tags: {tag_summary})"
+            },
+            "_telemetry": {
+                "jaato.enrichment.memory.matches": len(matches),
+                "jaato.enrichment.memory.trigger_keywords": len(matched_tags),
+            },
+        }
+        return enriched_text, metadata
 
     # ===== Tool Executors =====
 
