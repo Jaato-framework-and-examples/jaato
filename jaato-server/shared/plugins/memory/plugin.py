@@ -106,10 +106,11 @@ class MemoryPlugin:
         self._storage = MemoryStorage(self._storage_path_template)
         self._indexer = MemoryIndexer()
 
-        # Build index from existing memories
-        existing_memories = self._storage.load_all()
+        # Build index from CURATED memories only — raw memories are
+        # the curator's queue and aren't surfaced as enrichment hints.
+        existing_memories = self._storage.load_curated()
         self._indexer.build_index(existing_memories)
-        self._trace(f"initialize: storage_path={self._storage_path_template}, memories={len(existing_memories)}")
+        self._trace(f"initialize: storage_path={self._storage_path_template}, curated_memories={len(existing_memories)}")
 
         # Global storage at ~/.jaato/memories.jsonl — cross-session
         # knowledge shared by all agents.  Fixed path, no workspace
@@ -121,9 +122,9 @@ class MemoryPlugin:
         )
         self._global_storage = MemoryStorage(global_path)
         self._global_indexer = MemoryIndexer()
-        global_memories = self._global_storage.load_all()
+        global_memories = self._global_storage.load_curated()
         self._global_indexer.build_index(global_memories)
-        self._trace(f"initialize: global_path={global_path}, global_memories={len(global_memories)}")
+        self._trace(f"initialize: global_path={global_path}, global_curated_memories={len(global_memories)}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
@@ -157,7 +158,7 @@ class MemoryPlugin:
         self._trace(f"set_workspace_path: {path} -> {resolved}")
         self._storage = MemoryStorage(resolved)
         self._indexer = MemoryIndexer()
-        existing = self._storage.load_all()
+        existing = self._storage.load_curated()
         self._indexer.build_index(existing)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
@@ -802,13 +803,14 @@ class MemoryPlugin:
             source_session=self._get_session_id(),
         )
 
-        # Route to the appropriate store based on scope
-        if scope == SCOPE_UNIVERSAL and self._global_storage and self._global_indexer:
+        # Route to the appropriate store based on scope.  New memories
+        # always land in the raw queue — they are NOT added to the
+        # indexer because the indexer mirrors the curated store only.
+        # The curator promotes them to the indexer via update_memory.
+        if scope == SCOPE_UNIVERSAL and self._global_storage:
             self._global_storage.save(memory)
-            self._global_indexer.index_memory(memory)
         else:
             self._storage.save(memory)
-            self._indexer.index_memory(memory)
 
         return {
             "status": "success",
@@ -1056,8 +1058,15 @@ class MemoryPlugin:
             memory.content = args["content"]
 
         target_storage.update(memory)
+        # Rebuild the indexer from the curated store rather than
+        # patching incrementally — updates can promote a raw memory
+        # to curated, demote a curated memory to dismissed (which
+        # removes it), or just modify tags.  All cases stay correct
+        # if we rebuild from disk.  Updates are rare (curator only),
+        # so the cost is acceptable.
         if target_indexer:
-            target_indexer.index_memory(memory)
+            target_indexer.clear()
+            target_indexer.build_index(target_storage.load_curated())
 
         self._trace(f"update_memory: id={memory_id}, maturity={memory.maturity}")
         return {
@@ -1215,8 +1224,8 @@ class MemoryPlugin:
         deleted = self._storage.delete(memory_id)
 
         if deleted:
-            # Rebuild index after deletion
-            existing_memories = self._storage.load_all()
+            # Rebuild index from curated only — raw isn't indexed.
+            existing_memories = self._storage.load_curated()
             self._indexer.clear()
             self._indexer.build_index(existing_memories)
             return f"Removed memory: {memory_id}\n  Was: {memory.description}"
@@ -1354,11 +1363,12 @@ class MemoryPlugin:
             if "evidence" in parsed:
                 memory.evidence = parsed["evidence"]
 
-            # Save updated memory
+            # Save updated memory (routes to raw or curated based on
+            # current location and new maturity).
             self._storage.update(memory)
 
-            # Rebuild index
-            existing_memories = self._storage.load_all()
+            # Rebuild index from curated only — raw isn't indexed.
+            existing_memories = self._storage.load_curated()
             self._indexer.clear()
             self._indexer.build_index(existing_memories)
 

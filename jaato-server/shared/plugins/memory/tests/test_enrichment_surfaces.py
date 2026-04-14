@@ -229,13 +229,15 @@ class TestToolResultEnrichment:
             "storage_path": str(tmp_path / "workspace_memories.jsonl"),
             "global_storage_path": str(tmp_path / "global_memories.jsonl"),
         })
-        # Store a memory tagged around a specific topic
-        plugin._execute_store({
+        # Store a memory tagged around a specific topic + promote so
+        # it enters the curated index that enrichment reads.
+        store = plugin._execute_store({
             "content": "When debugging gpg-troubleshooting, re-warm the agent cache",
             "description": "GPG troubleshooting recipe",
             "tags": ["gpg-troubleshooting", "pass-store"],
             "confidence": 0.9,
         })
+        plugin._execute_update({"id": store["memory_id"], "maturity": "validated"})
         # A tool returns output that mentions the topic
         tool_output = (
             "pass show jaato-knowledge-manager/github-token\n"
@@ -265,12 +267,13 @@ class TestToolResultEnrichment:
             "storage_path": str(tmp_path / "workspace_memories.jsonl"),
             "global_storage_path": str(tmp_path / "global_memories.jsonl"),
         })
-        plugin._execute_store({
+        store = plugin._execute_store({
             "content": "X",
             "description": "Workspace baseline lesson",
             "tags": ["workspace-baseline"],
             "confidence": 0.9,
         })
+        plugin._execute_update({"id": store["memory_id"], "maturity": "validated"})
         result = plugin.enrich_prompt(
             "Tell me about the workspace baseline state."
         )
@@ -295,6 +298,7 @@ class TestToolResultEnrichment:
                 "confidence": 0.9,
             })
             ids.append(r["memory_id"])
+            plugin._execute_update({"id": r["memory_id"], "maturity": "validated"})
         # Fetch first and third only
         result = plugin._execute_retrieve({"ids": [ids[0], ids[2]]})
         assert result["status"] != "no_results"
@@ -318,12 +322,13 @@ class TestToolResultEnrichment:
             "storage_path": str(tmp_path / "workspace_memories.jsonl"),
             "global_storage_path": str(tmp_path / "global_memories.jsonl"),
         })
-        plugin._execute_store({
+        store = plugin._execute_store({
             "content": "X",
             "description": "About workspace-baseline",
             "tags": ["workspace-baseline"],
             "confidence": 0.9,
         })
+        plugin._execute_update({"id": store["memory_id"], "maturity": "validated"})
         probe = "tell me about the workspace-baseline"
         prompt_result = plugin.enrich_prompt(probe)
         tool_result = plugin.enrich_tool_result("some_tool", probe)
