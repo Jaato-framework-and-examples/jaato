@@ -251,13 +251,18 @@ the article's hardest problems.
 
 **How forgetting propagates:**
 
-This is where jaato does *not* fully solve the article's hardest question.
-Provenance tracking exists (`Memory.source_session`, `Memory.source_agent`,
-`Memory.evidence`) but there is **no cascade delete**: if the source session
-is purged, the memories it wrote stay behind. Similarly, GC-summarized turns
-produce a summary message that is now disconnected from the raw content it
-replaced — the article's "confidence without provenance" failure mode is
-possible here.
+The article's "provenance cascade" question (delete the source, cascade-
+forget what was derived from it) doesn't apply to jaato's session model.
+Sessions are transient by design and memories are written specifically so
+they outlive the session that produced them — cascading would defeat the
+purpose. Provenance fields (`Memory.source_session`, `Memory.source_agent`,
+`Memory.evidence`) exist as **audit metadata**, not as deletion triggers.
+
+Where the article's "confidence without provenance" failure mode IS exposed:
+GC-summarized turns produce a summary that is disconnected from the raw
+content it replaced. The summary lives on; the originals are gone. This is
+the *Lossless Claw* gap (no pointer from summary back to raw) and is
+tracked as an open improvement opportunity.
 
 **When forgetting happens:**
 
@@ -322,16 +327,23 @@ stores in favor of JSONL + tag matching + optional sidecar embeddings.
 
 **Weakest axes against the article's taxonomy:**
 
-1. No provenance cascade for forgetting. If a session is deleted, its
-   memories stay behind orphaned.
-2. No post-retrieval re-ranking. Tag-coherence finds candidates by structure;
+1. No post-retrieval re-ranking. Tag-coherence finds candidates by structure;
    nothing scores their actual relevance to the prompt before injection.
-3. No cross-topic / semantic retrieval on the core memory store. Sentence
+2. No cross-topic / semantic retrieval on the core memory store. Sentence
    coherence catches more than verbatim tag matches but still misses queries
    phrased entirely without the tag's vocabulary.
-4. Derivation drift is possible under `gc_summarize` because compacted
+3. Derivation drift is possible under `gc_summarize` because compacted
    summaries don't carry pointers back to raw turns — the article's
    *Lossless Claw* pattern is unrealized.
+
+**Note on the article's "provenance cascade" critique:** the article assumes
+a system where memories are tied to a long-lived user / conversation thread
+(deleting a chat should make the assistant forget what happened). Jaato's
+session model is the opposite — sessions are designed to be transient and
+memories are designed to outlive them. The whole point of writing a memory
+during session X is that it remains useful in session Y after X is gone.
+So jaato deliberately does not cascade-delete memories when their source
+session is purged.
 
 **Strongest axes:**
 
@@ -359,8 +371,6 @@ Tracked in the project backlog:
   `EmbeddingProviderProtocol` / `SemanticMatcherProtocol` hybrid into memory.
   Tag-coherence finds candidates fast; embedding ranks them. Addresses the
   Selective Retrieval Bias gap.
-- **Provenance cascade for forgetting** — when a session is deleted,
-  cascade-delete or orphan-flag its `source_session`-tagged memories.
 - **Compacted summary with pointer to raw** — when `gc_summarize` collapses
   turns, persist a pointer to the verbatim raw range so the agent can reach
   back if needed (the article's *Lossless Claw*).
