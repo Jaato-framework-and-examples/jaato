@@ -1,0 +1,46 @@
+"""LM Studio Model Provider Plugin — OpenAI-compatible chat + native load control.
+
+LM Studio exposes a local inference server with two relevant surfaces:
+
+- ``POST /v1/chat/completions`` — OpenAI-compatible chat (used for all completions)
+- ``POST /api/v1/models/load`` — native load endpoint where the model is
+  loaded into memory with a specific configuration (context length, GPU
+  offload, KV-cache offload, eval batch size, flash attention, number of
+  experts for MoE models, etc.).  This provider invokes the load endpoint
+  automatically when ``config.extra['load']`` is populated from the
+  session profile.
+
+Profile example (``plugin_configs`` keyed by provider name):
+
+    {
+      "provider": "lmstudio",
+      "model": "openai/gpt-oss-20b",
+      "plugin_configs": {
+        "lmstudio": {
+          "host": "http://localhost:1234",
+          "context_length": 16384,
+          "load": {
+            "context_length": 16384,
+            "eval_batch_size": 512,
+            "flash_attention": true,
+            "offload_kv_cache_to_gpu": true,
+            "num_experts": 8
+          }
+        }
+      }
+    }
+
+Profile knobs reach ``ProviderConfig.extra`` through the plugin_configs
+wiring in ``jaato_runtime.create_provider()`` — providers are plugins,
+so profile-level overrides live under ``plugin_configs[<provider_name>]``.
+
+Environment variables:
+    LMSTUDIO_HOST: Server URL (default: http://localhost:1234)
+    LMSTUDIO_MODEL: Default model name
+    LMSTUDIO_CONTEXT_LENGTH: Override context window size
+    LMSTUDIO_API_TOKEN: Optional bearer token (only when LM Studio requires it)
+"""
+
+from .provider import LMStudioProvider, create_provider
+
+__all__ = ["LMStudioProvider", "create_provider"]

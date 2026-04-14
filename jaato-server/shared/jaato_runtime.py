@@ -914,6 +914,7 @@ class JaatoRuntime:
         model: str,
         provider_name: Optional[str] = None,
         skip_model_test: bool = False,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
@@ -930,6 +931,11 @@ class JaatoRuntime:
                 model responds during ``provider.connect()``.  The model will
                 be validated on the first real message instead.  Used during
                 bootstrap to reduce startup latency.
+            plugin_configs: Optional per-plugin configuration dict from the
+                session profile.  Providers are plugins (``PLUGIN_KIND =
+                "model_provider"``), so their profile-level knobs live under
+                ``plugin_configs[provider_name]`` and are merged into
+                ``config.extra`` before provider initialization.
 
         Returns:
             Initialized and connected ModelProviderPlugin.
@@ -965,6 +971,17 @@ class JaatoRuntime:
                 from dataclasses import replace
                 extra_with_workspace = {**config.extra, 'workspace_path': workspace_path}
                 config = replace(config, extra=extra_with_workspace)
+
+        # Merge profile-level provider config.  Providers are plugins, so
+        # their profile knobs sit under ``plugin_configs[provider_name]``.
+        # Child keys override the stored ProviderConfig.extra so a profile
+        # can tune host, context length, load params, etc. per-session.
+        if plugin_configs:
+            provider_overrides = plugin_configs.get(effective_provider)
+            if provider_overrides:
+                from dataclasses import replace
+                merged_extra = {**config.extra, **provider_overrides}
+                config = replace(config, extra=merged_extra)
 
         t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)

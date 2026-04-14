@@ -189,6 +189,59 @@ class TestJaatoRuntimeCreateProvider:
         assert provider == mock_provider
         mock_provider.connect.assert_called_once_with("gemini-2.5-flash", skip_model_test=False)
 
+    @patch('shared.jaato_runtime.load_provider')
+    def test_create_provider_merges_plugin_configs_into_extra(self, mock_load_provider):
+        """Profile's plugin_configs[provider_name] must flow into config.extra.
+
+        This is the wiring that lets profiles tune provider-specific knobs
+        (e.g. LM Studio's host / load params) without changing provider
+        registration code.  The provider-agnostic default config is kept
+        intact and per-session overrides are applied on top.
+        """
+        runtime = JaatoRuntime()
+        runtime.connect("my-project", "us-central1")
+
+        mock_provider = MagicMock()
+        mock_load_provider.return_value = mock_provider
+
+        plugin_configs = {
+            "google_genai": {
+                "host": "http://localhost:1234",
+                "load": {"context_length": 16384, "flash_attention": True},
+            },
+            "other_plugin": {"irrelevant": "value"},
+        }
+        runtime.create_provider(
+            "gemini-2.5-flash",
+            plugin_configs=plugin_configs,
+        )
+
+        # Inspect the ProviderConfig handed to load_provider
+        _, supplied_config = mock_load_provider.call_args[0]
+        assert supplied_config.extra["host"] == "http://localhost:1234"
+        assert supplied_config.extra["load"] == {
+            "context_length": 16384,
+            "flash_attention": True,
+        }
+        # Non-matching plugin_configs entries must not leak into extra
+        assert "irrelevant" not in supplied_config.extra
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_create_provider_without_plugin_configs_leaves_extra_untouched(
+        self, mock_load_provider,
+    ):
+        """The wiring is opt-in — omitting plugin_configs must not perturb extra."""
+        runtime = JaatoRuntime()
+        runtime.connect("my-project", "us-central1")
+        mock_load_provider.return_value = MagicMock()
+
+        runtime.create_provider("gemini-2.5-flash")
+        _, supplied_config = mock_load_provider.call_args[0]
+        # Only framework-injected keys (like workspace_path) may appear; no
+        # user/profile knobs should be present.
+        assert "load" not in supplied_config.extra
+        assert "host" not in supplied_config.extra
+
 
 class TestJaatoRuntimeGetToolSchemas:
     """Tests for JaatoRuntime.get_tool_schemas()."""

@@ -127,6 +127,7 @@ Four plugin types:
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
 - `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
+- `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
 
 ### Tool Execution Flow
@@ -492,6 +493,59 @@ Benefits:
 - Run models locally without API costs
 - Privacy - data never leaves your machine
 - Use any model Ollama supports (Qwen, Llama, Mistral, etc.)
+
+### LM Studio (Local Models)
+| Variable | Purpose |
+|----------|---------|
+| `LMSTUDIO_HOST` | LM Studio server URL (default: `http://localhost:1234`) |
+| `LMSTUDIO_MODEL` | Default model name |
+| `LMSTUDIO_CONTEXT_LENGTH` | Override context window size |
+| `LMSTUDIO_API_TOKEN` | Optional bearer token (only when LM Studio requires it) |
+
+Chat uses LM Studio's OpenAI-compatible `/v1/chat/completions`.  Model
+catalog comes from the native `/api/v0/models` endpoint (which reports
+each model's real `max_context_length`).
+
+**Load-control**: when the session profile supplies a `load` dict under
+`plugin_configs["lmstudio"]`, the provider POSTs it to
+`POST /api/v1/models/load` before the first chat, reconfiguring the
+in-memory model with context length, GPU offload, KV-cache placement,
+etc.  Without a `load` dict the provider is passive — it uses whatever
+model the user has already loaded in LM Studio's UI or via `lms load`.
+
+Configuration options via `ProviderConfig.extra` (typically set from the
+session profile — see "Profile schema" below for the plumbing):
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `host` | str | `http://localhost:1234` | LM Studio server URL |
+| `context_length` | int | discovered from catalog | Context window override |
+| `api_token` | str | None | Bearer token for auth-required servers |
+| `load` | dict | None | Passthrough body for `/api/v1/models/load` |
+
+`load` keys (passed through to LM Studio unchanged):
+- `context_length`, `eval_batch_size`, `flash_attention`,
+  `num_experts`, `offload_kv_cache_to_gpu`, `echo_load_config`
+- Any future LM Studio load param — the provider does not validate keys.
+
+**Profile example:**
+```json
+{
+  "name": "local-gpt-oss",
+  "model": "openai/gpt-oss-20b",
+  "provider": "lmstudio",
+  "plugin_configs": {
+    "lmstudio": {
+      "host": "http://localhost:1234",
+      "load": {
+        "context_length": 16384,
+        "flash_attention": true,
+        "offload_kv_cache_to_gpu": true,
+        "eval_batch_size": 512
+      }
+    }
+  }
+}
+```
 
 ### NVIDIA NIM
 | Variable | Purpose |

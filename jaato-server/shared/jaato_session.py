@@ -1261,6 +1261,7 @@ class JaatoSession:
                 self._model_name,
                 provider_name=self._provider_name_override,
                 skip_model_test=skip_model_test,
+                plugin_configs=plugin_configs,
             )
 
             # Propagate agent context to provider for trace identification
