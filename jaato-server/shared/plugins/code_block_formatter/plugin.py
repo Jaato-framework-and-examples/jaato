@@ -171,6 +171,13 @@ class CodeBlockFormatterPlugin:
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
 
+        # Rendering surface.  "terminal" → Rich/ANSI with theme colours;
+        # any other value ("web", "chat", …) → semantic <j-code> markup
+        # that the client can style however it wants.  See
+        # shared/plugins/table_formatter for the mirror implementation
+        # that introduced this pattern.
+        self._client_type: str = "terminal"
+
         # Whether to apply width-based line trimming with the ▸ indicator.
         # Defaults to True (no trimming) — clients (TUI, dashboard) handle
         # line width on their own, and the server-side ▸ marker ends up
@@ -305,6 +312,24 @@ class CodeBlockFormatterPlugin:
         """Update the console width for rendering."""
         self._console_width = max(20, width)
 
+    def set_client_type(self, client_type: str) -> None:
+        """Set the client rendering surface.
+
+        ``"terminal"`` keeps the Rich/ANSI output (unchanged from
+        pre-client-awareness behaviour).  Any other value switches to
+        semantic ``<j-code>`` markup — no ANSI, no colours, no indent —
+        so the client owns the rendering.
+
+        The ``t`` attribute on ``<j-tok>`` elements tracks
+        ``pygments.token.STANDARD_TYPES`` short names (e.g. ``k`` for
+        keyword, ``mi`` for integer literal).  If Pygments renames any
+        of these in a future version, the client CSS must follow.
+
+        Args:
+            client_type: ``"terminal"``, ``"web"``, ``"chat"``, or ``"api"``.
+        """
+        self._client_type = client_type
+
     def set_disable_truncation(self, disabled: bool) -> None:
         """Enable or disable width-based line truncation.
 
@@ -342,16 +367,25 @@ class CodeBlockFormatterPlugin:
     # ==================== Internal Methods ====================
 
     def _render_code_block(self, code: str, language: str) -> str:
-        """Render a code block with syntax highlighting and block indent.
+        """Render a code block, routed by ``client_type``.
+
+        Terminal clients get Rich/ANSI with syntax highlighting and a
+        block indent — unchanged from the original implementation.  Any
+        other client gets semantic ``<j-code>`` markup (see
+        ``_render_semantic_code_block``).
 
         Args:
             code: The code content (without ``` markers).
-            language: The language identifier.
+            language: The language identifier from the fenced block.
 
         Returns:
-            ANSI-escaped string with syntax highlighting, indented as a block.
+            ANSI-escaped string for terminal, or semantic markup for web.
         """
-        # Map language aliases
+        if self._client_type != "terminal":
+            return self._render_semantic_code_block(code, language)
+
+        # Map language aliases (terminal path only — web keeps the raw
+        # string so the client can normalise it).
         lang = LANGUAGE_ALIASES.get(language.lower(), language.lower())
 
         # Block indent for visual distinction
@@ -437,6 +471,129 @@ class CodeBlockFormatterPlugin:
             # Fallback: return code as-is with indent if highlighting fails
             indented_lines = [indent + line for line in code.split('\n')]
             return '\n' + '\n'.join(indented_lines) + '\n'
+
+    def _render_semantic_code_block(self, code: str, language: str) -> str:
+        """Render a code block as semantic ``<j-code>`` markup.
+
+        Emits one ``<j-line>`` per source line and wraps Pygments-classified
+        token runs in ``<j-tok t="...">``.  The ``t`` attribute carries the
+        Pygments short token name from
+        :data:`pygments.token.STANDARD_TYPES` (walking up the token
+        hierarchy when the specific subtype has no entry).  Whitespace and
+        unclassified text are emitted as bare text inside ``<j-line>``.
+
+        The server emits no colours or inline styles; the client owns
+        presentation.  Trailing whitespace is stripped per line.
+
+        Args:
+            code: The code content (without ``` markers).
+            language: The raw language string from the fenced block.  Not
+                passed through ``LANGUAGE_ALIASES`` — the client decides
+                how to normalise.
+
+        Returns:
+            A newline-terminated ``<j-code>…</j-code>`` block.
+        """
+        from pygments import lex
+        from pygments.lexers import get_lexer_by_name
+        from pygments.lexers.special import TextLexer
+        from pygments.token import STANDARD_TYPES
+        from pygments.util import ClassNotFound
+
+        def escape(s: str) -> str:
+            return (
+                s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+            )
+
+        def short_name(token_type) -> str:
+            """Walk up the token hierarchy to find a STANDARD_TYPES entry.
+
+            Mirrors ``pygments.formatters.html.HtmlFormatter._get_css_classes``
+            — Pygments' own HTML formatter uses this same walk-up so
+            specific subtypes fall back to their parent's class.
+            """
+            t = token_type
+            while t is not None:
+                name = STANDARD_TYPES.get(t)
+                if name:
+                    return name
+                t = t.parent
+            return ""
+
+        # Strip a leading/trailing newline that fenced blocks commonly
+        # carry — they're part of the fence syntax, not the code.
+        stripped = code
+        if stripped.startswith("\n"):
+            stripped = stripped[1:]
+        if stripped.endswith("\n"):
+            stripped = stripped[:-1]
+
+        # Preserve the raw language string on the <j-code> element.
+        lang_attr = escape(language) if language else ""
+        open_tag = f'<j-code language="{lang_attr}">' if lang_attr else "<j-code>"
+
+        # Resolve lexer; fall back to plain text (no tokenisation) if
+        # Pygments doesn't recognise the language.
+        lexer = None
+        if language:
+            try:
+                lexer = get_lexer_by_name(language)
+            except ClassNotFound:
+                lexer = None
+        if lexer is None:
+            lexer = TextLexer()
+
+        # Group tokens into per-line runs.  Each entry in `lines` is a
+        # list of (short_class, text) pairs.  Empty short_class means
+        # plain text (no <j-tok> wrapper).
+        source_lines = stripped.split("\n")
+        lines: List[List[tuple]] = [[] for _ in source_lines]
+
+        current_line = 0
+        for token_type, value in lex(stripped, lexer):
+            if not value:
+                continue
+            cls = short_name(token_type)
+            parts = value.split("\n")
+            for i, part in enumerate(parts):
+                if part:
+                    lines[current_line].append((cls, part))
+                if i < len(parts) - 1:
+                    current_line += 1
+                    if current_line >= len(lines):
+                        # Safety: shouldn't exceed, but guard anyway.
+                        lines.append([])
+
+        # Pygments' lexers typically append a trailing newline, producing
+        # one extra empty line entry.  Drop trailing empty lines that
+        # exceed the original source line count.
+        expected = len(source_lines)
+        while len(lines) > expected and not lines[-1]:
+            lines.pop()
+
+        # Assemble the markup.  `n` attribute only when line_numbers enabled.
+        out_lines = [open_tag]
+        for idx, runs in enumerate(lines):
+            # Strip trailing whitespace-only runs to avoid trailing spaces
+            # in the rendered line.
+            while runs and not runs[-1][1].strip():
+                runs.pop()
+            children = []
+            for cls, text in runs:
+                esc = escape(text)
+                if cls:
+                    children.append(f'<j-tok t="{cls}">{esc}</j-tok>')
+                else:
+                    children.append(esc)
+            body = "".join(children)
+            if self._line_numbers:
+                out_lines.append(f'<j-line n="{idx + 1}">{body}</j-line>')
+            else:
+                out_lines.append(f'<j-line>{body}</j-line>')
+        out_lines.append("</j-code>")
+        return "\n".join(out_lines) + "\n"
 
 
 def create_plugin() -> CodeBlockFormatterPlugin:
