@@ -267,9 +267,16 @@ class JaatoRuntime:
         # Formatter pipeline (optional, for collecting formatter instructions)
         self._formatter_pipeline: Optional[Any] = None
 
-        # Base system instructions (loaded from .jaato/instructions/ or legacy single file)
+        # Base system instructions (loaded from .jaato/instructions/ or
+        # legacy single file).  Loaded **lazily** on first request via
+        # ``get_base_system_instructions`` so sessions that supply
+        # ``system_instruction_override`` (replacing the assembled prompt
+        # entirely) never pay the disk-I/O cost.  ``_base_loaded`` flips
+        # to True after the first load attempt — distinguishes "not yet
+        # loaded" from "loaded but no instruction files found" (where
+        # ``_base_system_instructions`` legitimately stays ``None``).
         self._base_system_instructions: Optional[str] = None
-        self._load_base_system_instructions()
+        self._base_loaded: bool = False
 
         # Content-addressed token count cache (shared across sessions)
         self._instruction_token_cache: InstructionTokenCache = (
@@ -290,6 +297,26 @@ class JaatoRuntime:
 
         # Subscribe telemetry to bus for plan/step context propagation
         self._telemetry.subscribe_to_bus(self._event_bus)
+
+    def get_base_system_instructions(self) -> Optional[str]:
+        """Return the base system instructions, loading on first call.
+
+        Lazy resolution: the actual disk read happens only when a session
+        first asks for the assembled prompt.  Sessions that supply a
+        ``system_instruction_override`` never call this, so they pay
+        nothing for the premium/workspace/user instruction files they
+        won't use.  Subsequent calls return the cached value (None when
+        no instruction files were found).
+
+        The runtime-wide cache is intentional: every session sharing the
+        same runtime sees the same base layer (it's framework config,
+        not per-session state), so loading once and sharing keeps memory
+        flat across N sessions.
+        """
+        if not self._base_loaded:
+            self._load_base_system_instructions()
+            self._base_loaded = True
+        return self._base_system_instructions
 
     def _load_base_system_instructions(self) -> None:
         """Load base system instructions from .jaato/instructions/ folder.
@@ -1275,9 +1302,11 @@ class JaatoRuntime:
         # Assemble final instructions: base -> additional -> plugin
         result_parts = []
 
-        # 1. Base system instructions from .jaato/instructions/ (or legacy single file)
-        if self._base_system_instructions:
-            result_parts.append(self._base_system_instructions)
+        # 1. Base system instructions from .jaato/instructions/ (or legacy
+        #    single file) — lazy-loaded on first request.
+        base = self.get_base_system_instructions()
+        if base:
+            result_parts.append(base)
 
         # 2. Additional instructions passed as parameter
         if additional:

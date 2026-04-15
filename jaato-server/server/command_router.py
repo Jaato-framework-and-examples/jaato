@@ -10,6 +10,7 @@ responses through the ``EventSink`` protocol.
 import json
 import logging
 import os
+import pathlib
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -223,15 +224,27 @@ class CommandRouter:
     ) -> None:
         """Handle ``session.new`` command.
 
-        Accepts ``--agent <name>`` and/or ``--profile <name>`` flags.
-        When ``--agent`` is provided, the agent's rendered markdown
-        becomes the session's system instructions.  When ``--profile``
-        is provided, it supplies runtime config (model, plugins, etc.).
-        Remaining key=value pairs are passed as agent parameters.
+        Accepted flags:
+            --profile <name>            Runtime config (model, plugins, GC, etc.)
+            --agent <name>              Agent whose rendered markdown becomes
+                                        the session's system instructions
+            --instructions <text|@path> Override the assembled system
+                                        instruction with the supplied text
+                                        (or the contents of @path).  Use this
+                                        to fit a session into a tiny context
+                                        window — pass an empty string or use
+                                        ``--no-instructions`` to suppress
+                                        plugin enrichment entirely.
+            --no-instructions           Sugar for ``--instructions ""``.
+            key=value                   Agent parameters (substituted into the
+                                        agent's ``{{param}}`` placeholders)
+
+        Remaining bare arguments are treated as the session name.
         """
         name = None
         profile_name = None
         agent_name = None
+        system_instruction_override: Optional[str] = None
         agent_params: Dict[str, str] = {}
         args_iter = iter(args)
         for arg in args_iter:
@@ -239,6 +252,23 @@ class CommandRouter:
                 profile_name = next(args_iter, None)
             elif arg == "--agent":
                 agent_name = next(args_iter, None)
+            elif arg == "--instructions":
+                from jaato_sdk.events import ErrorEvent
+                raw = next(args_iter, None)
+                if raw is None:
+                    self._event_sink.send_event(client_id, ErrorEvent(
+                        error="--instructions requires a value (text or @filepath)",
+                        error_type="UsageError",
+                        recoverable=True,
+                    ))
+                    return
+                system_instruction_override = self._resolve_instructions_value(
+                    raw, workspace_path, client_id,
+                )
+                if system_instruction_override is None:
+                    return  # error already emitted
+            elif arg == "--no-instructions":
+                system_instruction_override = ""
             elif "=" in arg:
                 key, _, value = arg.partition("=")
                 agent_params[key] = value
@@ -252,6 +282,7 @@ class CommandRouter:
             agent_name=agent_name,
             agent_params=agent_params if agent_params else None,
             created_by=created_by,
+            system_instruction_override=system_instruction_override,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
@@ -771,6 +802,54 @@ class CommandRouter:
         finally:
             if hasattr(plugin, 'set_output_callback'):
                 plugin.set_output_callback(None)
+
+    def _resolve_instructions_value(
+        self,
+        raw: str,
+        workspace_path: Optional[str],
+        client_id: str,
+    ) -> Optional[str]:
+        """Resolve a ``--instructions`` value into the literal text the session sees.
+
+        Two forms accepted:
+
+        - **Literal text** — e.g. ``--instructions "You are terse."``.
+          The value is returned verbatim.
+        - **File reference** — e.g. ``--instructions @prompts/min.md``.
+          A leading ``@`` is stripped and the rest is read from disk.
+          Relative paths resolve against ``workspace_path``; absolute
+          paths are honoured as-is.  ``~`` expands.
+
+        Returns the resolved text, or ``None`` if the file reference
+        could not be read (an ``ErrorEvent`` has been emitted to the
+        client in that case).
+        """
+        from jaato_sdk.events import ErrorEvent
+
+        if not raw.startswith("@"):
+            return raw
+
+        path_str = raw[1:]
+        if not path_str:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="--instructions @ requires a path after the @",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return None
+
+        path = pathlib.Path(path_str).expanduser()
+        if not path.is_absolute() and workspace_path:
+            path = pathlib.Path(workspace_path) / path
+        try:
+            return path.read_text(encoding="utf-8").rstrip("\n")
+        except (OSError, UnicodeDecodeError) as exc:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"--instructions @{path_str}: {exc}",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return None
 
     def _hint_available_auth_providers(self, client_id: str) -> None:
         """Send a hint listing available auth providers after session creation fails.

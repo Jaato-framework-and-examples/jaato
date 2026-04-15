@@ -57,6 +57,7 @@ class SystemChildType(Enum):
     CLIENT = "client"       # Programmatic system_instructions param - LOCKED
     FRAMEWORK = "framework" # Task completion, parallel tool guidance - LOCKED
     SELECTED_REFERENCES = "selected_references"  # Pinned preselected reference content - LOCKED
+    OVERRIDE = "override"   # system_instruction_override active — replaces all other SYSTEM children on the wire - LOCKED
 
 
 # Default GC policies per system child type
@@ -65,6 +66,7 @@ DEFAULT_SYSTEM_POLICIES: Dict[SystemChildType, GCPolicy] = {
     SystemChildType.CLIENT: GCPolicy.LOCKED,
     SystemChildType.FRAMEWORK: GCPolicy.LOCKED,
     SystemChildType.SELECTED_REFERENCES: GCPolicy.LOCKED,
+    SystemChildType.OVERRIDE: GCPolicy.LOCKED,
 }
 
 

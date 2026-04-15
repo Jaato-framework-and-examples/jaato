@@ -33,6 +33,9 @@ def _make_session(
     runtime.provider_name = provider_name
     runtime.instruction_token_cache = cache
     runtime._base_system_instructions = base_instructions
+    # Reflect the new lazy-getter contract: _collect_instruction_texts
+    # calls runtime.get_base_system_instructions(), not the attribute.
+    runtime.get_base_system_instructions.return_value = base_instructions
     runtime._formatter_pipeline = None
     runtime.telemetry = MagicMock()
     runtime.telemetry.enabled = False
@@ -83,6 +86,9 @@ def _make_session(
     session._gc_plugin = None
     session._gc_config = None
     session._preloaded_plugins = set()
+    # _system_instruction_override is normally set in configure(); tests
+    # bypass __init__ with __new__ so we set it explicitly to the default.
+    session._system_instruction_override = None
 
     # SessionHistory wrapper
     from ..session_history import SessionHistory

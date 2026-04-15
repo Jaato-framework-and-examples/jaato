@@ -215,6 +215,7 @@ class JaatoServer:
         env_overrides: Optional[Dict[str, str]] = None,
         instruction_token_cache: Optional[InstructionTokenCache] = None,
         profile: Optional[Any] = None,
+        system_instruction_override: Optional[str] = None,
     ):
         """Initialize the server.
 
@@ -235,11 +236,21 @@ class JaatoServer:
                 initialization. When set, the profile's model, provider,
                 plugins, system_instructions, plugin_configs, and GC
                 settings override the session defaults.
+            system_instruction_override: If provided, replaces the
+                fully-assembled system instruction for this session.  Plugin
+                enrichment and the agent prompt are still computed (for
+                budget accounting side effects) but their output is
+                discarded in favour of this string.  Pass ``""`` to send
+                the model no system message at all — the only viable option
+                when the model's context window is too small for the
+                assembled prompt (e.g. an 8K model with a 30K+ enriched
+                instruction).  Forwarded to ``JaatoSession.configure``.
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
         self._provider = provider
         self._profile = profile
+        self._system_instruction_override = system_instruction_override
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
         self._workspace_path = workspace_path
@@ -1494,34 +1505,43 @@ class JaatoServer:
     def _build_profile_session_kwargs(self) -> Optional[Dict[str, Any]]:
         """Build ``create_session()`` kwargs from the agent profile.
 
+        Always returns a dict when ``system_instruction_override`` is set
+        (even without a profile), so the override reaches the session
+        regardless of whether the caller used ``--profile``.
+
         Returns:
             Dict of kwargs for ``JaatoRuntime.create_session()``, or None
-            if no profile is set.
+            if neither a profile nor an override is set.
         """
-        if not self._profile:
-            return None
-
-        from shared.plugins.subagent.config import expand_plugin_configs
-
         kwargs: Dict[str, Any] = {}
 
-        if self._profile.plugins:
-            kwargs["tools"] = self._profile.plugins
-            if self._profile.preloaded_plugins:
-                kwargs["preloaded_plugins"] = self._profile.preloaded_plugins
+        if self._profile:
+            from shared.plugins.subagent.config import expand_plugin_configs
 
-        if self._profile.system_instructions:
-            kwargs["system_instructions"] = self._profile.system_instructions
+            if self._profile.plugins:
+                kwargs["tools"] = self._profile.plugins
+                if self._profile.preloaded_plugins:
+                    kwargs["preloaded_plugins"] = self._profile.preloaded_plugins
 
-        if self._profile.plugin_configs:
-            expanded = expand_plugin_configs(
-                self._profile.plugin_configs,
-                workspace_root_override=self._workspace_path,
-            )
-            kwargs["plugin_configs"] = expanded
+            if self._profile.system_instructions:
+                kwargs["system_instructions"] = self._profile.system_instructions
 
-        if self._profile.provider:
-            kwargs["provider_name"] = self._profile.provider
+            if self._profile.plugin_configs:
+                expanded = expand_plugin_configs(
+                    self._profile.plugin_configs,
+                    workspace_root_override=self._workspace_path,
+                )
+                kwargs["plugin_configs"] = expanded
+
+            if self._profile.provider:
+                kwargs["provider_name"] = self._profile.provider
+
+        # Apply the per-session system-instruction override last so it
+        # wins over any profile-supplied system_instructions.  Distinct
+        # from None (which means "no override") — the empty string is a
+        # legitimate value meaning "send no system message at all".
+        if self._system_instruction_override is not None:
+            kwargs["system_instruction_override"] = self._system_instruction_override
 
         return kwargs or None
 

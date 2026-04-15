@@ -63,6 +63,7 @@ def _make_session(
     runtime.provider_name = "test_provider"
     runtime.instruction_token_cache = cache
     runtime._base_system_instructions = base_instructions
+    runtime.get_base_system_instructions.return_value = base_instructions
     runtime._formatter_pipeline = None
     runtime.telemetry = MagicMock()
     runtime.telemetry.enabled = False
@@ -141,6 +142,8 @@ def _make_session(
     session._tool_plugins = None  # No profile restriction by default
     session._deferred_plugin_instructions = set()
     session._preloaded_plugins = set()
+    # Normally set in configure(); bypassed by __new__.
+    session._system_instruction_override = None
 
     # Phase 1: SessionHistory wrapper (canonical history owned by session)
     from ..session_history import SessionHistory

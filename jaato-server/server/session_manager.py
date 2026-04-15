@@ -788,6 +788,7 @@ class SessionManager:
         created_by: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        system_instruction_override: Optional[str] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -809,6 +810,12 @@ class SessionManager:
                 from ``.jaato/agents/`` and ``.jaato/prompts/``.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
+            system_instruction_override: If provided, replaces the assembled
+                system instruction passed to the model.  Use the empty string
+                to suppress plugin enrichment entirely — required for fitting
+                a session into a small model's context window (e.g. an 8K
+                Gemma where the default 30K+ assembled instruction wouldn't
+                leave room for tool schemas or the user's first prompt).
 
         Returns:
             The session ID (empty string on failure).
@@ -901,6 +908,7 @@ class SessionManager:
             env_overrides=env_overrides,
             instruction_token_cache=self._instruction_token_cache,
             profile=profile,
+            system_instruction_override=system_instruction_override,
         )
 
         # Initialize the server (events go directly to requesting client).

@@ -229,6 +229,13 @@ class JaatoSession:
         self._executor: Optional[ToolExecutor] = None
         self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
+        # The active override (passed via configure()) — None means the
+        # assembled pipeline output is sent on the wire; "" means no
+        # system message at all; non-empty replaces the assembly entirely.
+        # Stored so _populate_instruction_budget can compute an honest
+        # budget without having to be re-passed the value through every
+        # call site.
+        self._system_instruction_override: Optional[str] = None
         self._tool_plugins: Optional[List[str]] = None  # Plugin names for this session
 
         # Per-turn token accounting
@@ -1404,14 +1411,29 @@ class JaatoSession:
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
 
-        # Build system instructions
-        self._system_instruction = self._runtime.get_system_instructions(
-            plugin_names=tools,
-            additional=system_instructions,
-            presentation_context=self._presentation_context,
-        )
+        # Remember the override so _populate_instruction_budget (called
+        # below) can produce an honest budget reflecting the wire prompt.
+        self._system_instruction_override = system_instruction_override
+
+        # Build system instructions.  When an override is set, skip the
+        # assembly call entirely: it would do disk I/O (base instruction
+        # files), run plugin enrichment, and rebuild secondary indexes,
+        # all of whose textual output we'd then discard.  The session's
+        # plugin-level state was already initialised via plugin
+        # ``initialize()`` calls earlier in ``configure_tools``, so the
+        # agent retains tool functionality; it just doesn't get the
+        # would-be-discarded enrichment text.  Net effect: an
+        # override-using session pays *zero* disk I/O for base
+        # instructions, which was the headline reason behind the lazy
+        # getter on the runtime.
         if system_instruction_override is not None:
             self._system_instruction = system_instruction_override
+        else:
+            self._system_instruction = self._runtime.get_system_instructions(
+                plugin_names=tools,
+                additional=system_instructions,
+                presentation_context=self._presentation_context,
+            )
 
         # Store user commands
         if self._runtime.registry:
@@ -1655,7 +1677,13 @@ class JaatoSession:
         )
 
         # --- Collect phase: gather all texts that need counting ---
-        requests = self._collect_instruction_texts(session_instructions)
+        # Pass the override so the budget reflects what's actually on
+        # the wire (a single OVERRIDE entry, or nothing) rather than
+        # the assembly pipeline's would-be output.
+        requests = self._collect_instruction_texts(
+            session_instructions,
+            system_instruction_override=self._system_instruction_override,
+        )
 
         # --- Resolve phase: use cache or estimate for each request ---
         cache = self._runtime.instruction_token_cache
@@ -1694,15 +1722,30 @@ class JaatoSession:
     def _collect_instruction_texts(
         self,
         session_instructions: Optional[str],
+        system_instruction_override: Optional[str] = None,
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
-        Gathers texts from SYSTEM children (base, client, framework) and
-        PLUGIN children (per-plugin, per-formatter) into a flat list of
+        When ``system_instruction_override`` is set the wire-level system
+        message is exactly that string (or empty), regardless of what
+        the assembly pipeline produced.  In that case the budget must
+        reflect what *actually* reaches the model — we emit a single
+        ``OVERRIDE`` entry (or nothing for an empty override) instead of
+        walking BASE/CLIENT/FRAMEWORK/plugin texts that never make it to
+        the wire.  This avoids the silent lie where the budget showed
+        thousands of tokens of premium instructions while the model was
+        receiving an empty system message.
+
+        When ``system_instruction_override`` is ``None`` the assembly
+        pipeline is the authoritative source and we walk SYSTEM children
+        (base, client, framework, pinned references) plus PLUGIN
+        children (per-plugin, per-formatter) into a flat list of
         ``_TokenCountRequest`` objects.
 
         Args:
             session_instructions: The user-provided system_instructions from configure().
+            system_instruction_override: When not ``None``, supplants the
+                whole assembly — see above.
 
         Returns:
             List of ``_TokenCountRequest`` — one per instruction text.
@@ -1714,12 +1757,28 @@ class JaatoSession:
             _is_parallel_tools_enabled,
         )
 
+        # Override-aware short-circuit: the wire system message is the
+        # override, period.  No need to walk the assembly pipeline (and
+        # — paired with the lazy base loader — no disk I/O fires for
+        # ``runtime.get_base_system_instructions()`` on this session).
+        if system_instruction_override is not None:
+            if system_instruction_override == "":
+                return []
+            return [_TokenCountRequest(
+                text=system_instruction_override,
+                source=InstructionSource.SYSTEM,
+                child_key=SystemChildType.OVERRIDE.value,
+                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.OVERRIDE],
+                label="Override (system_instruction_override)",
+            )]
+
         requests: List[_TokenCountRequest] = []
 
         # --- SYSTEM children ---
 
-        # 1. Base instructions from .jaato/instructions/ (or legacy single file)
-        base_instructions = getattr(self._runtime, '_base_system_instructions', None)
+        # 1. Base instructions from .jaato/instructions/ (or legacy single
+        #    file) — lazy-loaded the first time any session asks.
+        base_instructions = self._runtime.get_base_system_instructions() if self._runtime else None
         if base_instructions:
             requests.append(_TokenCountRequest(
                 text=base_instructions,
