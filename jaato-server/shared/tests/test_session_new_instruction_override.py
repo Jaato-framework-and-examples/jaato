@@ -50,17 +50,39 @@ def router():
 
 class TestSessionNewParsing:
 
-    def test_no_instruction_flag_means_no_override(self, router):
+    def test_no_instruction_flag_means_no_override_and_no_suppression(self, router):
         r, sm = router
         r._handle_session_new("client1", ["my-session"], workspace_path="/tmp/ws")
-        # No --instructions / --no-instructions → override is None
+        # No --instructions / --no-instructions → both knobs stay at defaults
         assert sm.create_session.call_args.kwargs["system_instruction_override"] is None
+        assert sm.create_session.call_args.kwargs["suppress_base_instructions"] is False
 
-    def test_no_instructions_flag_resolves_to_empty_string(self, router):
+    def test_no_instructions_flag_triggers_base_suppression(self, router):
+        """``--no-instructions`` is partial suppression — drops the BASE
+        layer (``.jaato/instructions/*`` + premium baseline) while keeping
+        the agent prompt, plugin instructions, and framework constants.
+        It does NOT set system_instruction_override; that would drop
+        agent and plugin content too, which is rarely what you want."""
         r, sm = router
         r._handle_session_new("client1", ["--no-instructions"], workspace_path="/tmp/ws")
-        # Empty string is the trigger that "send no system message at all"
-        assert sm.create_session.call_args.kwargs["system_instruction_override"] == ""
+        assert sm.create_session.call_args.kwargs["suppress_base_instructions"] is True
+        # Full override is NOT implied by --no-instructions.
+        assert sm.create_session.call_args.kwargs["system_instruction_override"] is None
+
+    def test_instructions_is_full_override_not_base_suppression(self, router):
+        """``--instructions <text>`` is the full-override mechanism — it
+        replaces the wire system message entirely.  It must not also
+        flip the base-suppression knob (the override already discards
+        the base layer by virtue of replacing everything)."""
+        r, sm = router
+        r._handle_session_new(
+            "client1",
+            ["--instructions", "You are terse."],
+            workspace_path="/tmp/ws",
+        )
+        kwargs = sm.create_session.call_args.kwargs
+        assert kwargs["system_instruction_override"] == "You are terse."
+        assert kwargs["suppress_base_instructions"] is False
 
     def test_instructions_with_literal_text(self, router):
         r, sm = router

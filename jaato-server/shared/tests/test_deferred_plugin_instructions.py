@@ -144,6 +144,7 @@ def _make_session(
     session._preloaded_plugins = set()
     # Normally set in configure(); bypassed by __new__.
     session._system_instruction_override = None
+    session._suppress_base_instructions = False
 
     # Phase 1: SessionHistory wrapper (canonical history owned by session)
     from ..session_history import SessionHistory

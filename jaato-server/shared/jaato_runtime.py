@@ -841,6 +841,7 @@ class JaatoRuntime:
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
@@ -871,6 +872,14 @@ class JaatoRuntime:
                 accounting) but its output is discarded.  Used by
                 session-manipulation tools that replay a session with an
                 edited version of the materialised prompt.
+            suppress_base_instructions: If True, drop the BASE layer (the
+                .jaato/instructions/ files plus any premium-provided baseline)
+                from the assembled system instruction while keeping the agent
+                .md content, plugin instructions, and framework constants.
+                Useful for fitting a session into a small model's context window
+                — the framework-level baseline is usually the largest single
+                contributor.  Ignored when ``system_instruction_override`` is
+                set (full override supersedes partial suppression).
             workspace_path: If provided, overrides the runtime's workspace
                 path for this session.  Used by fork-replay to point a temp
                 session at a worktree snapshot without affecting other sessions
@@ -904,6 +913,7 @@ class JaatoRuntime:
             preloaded_plugins=preloaded_plugins,
             skip_model_test=skip_model_test,
             system_instruction_override=system_instruction_override,
+            suppress_base_instructions=suppress_base_instructions,
             workspace_path=workspace_path,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
@@ -1220,12 +1230,16 @@ class JaatoRuntime:
         additional: Optional[str] = None,
         presentation_context: Optional['PresentationContext'] = None,
         preloaded_plugins: Optional[set] = None,
+        include_base: bool = True,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
         The final instructions are assembled in this order:
         1. Base system instructions from .jaato/instructions/ folder (if exists,
-           falls back to legacy .jaato/system_instructions.md)
+           falls back to legacy .jaato/system_instructions.md) — skipped when
+           ``include_base`` is False so a session can keep its own agent/plugin/
+           framework content without carrying the framework-level baseline
+           (useful for small-context models)
         2. Additional instructions passed as parameter
         3. Plugin-specific system instructions
         4. Formatter pipeline instructions (output rendering capabilities)
@@ -1303,10 +1317,13 @@ class JaatoRuntime:
         result_parts = []
 
         # 1. Base system instructions from .jaato/instructions/ (or legacy
-        #    single file) — lazy-loaded on first request.
-        base = self.get_base_system_instructions()
-        if base:
-            result_parts.append(base)
+        #    single file) — lazy-loaded on first request.  Skipped when
+        #    include_base=False so sessions with suppress_base_instructions
+        #    don't pay the disk I/O (and don't get the baseline content).
+        if include_base:
+            base = self.get_base_system_instructions()
+            if base:
+                result_parts.append(base)
 
         # 2. Additional instructions passed as parameter
         if additional:

@@ -228,14 +228,20 @@ class CommandRouter:
             --profile <name>            Runtime config (model, plugins, GC, etc.)
             --agent <name>              Agent whose rendered markdown becomes
                                         the session's system instructions
-            --instructions <text|@path> Override the assembled system
-                                        instruction with the supplied text
-                                        (or the contents of @path).  Use this
-                                        to fit a session into a tiny context
-                                        window — pass an empty string or use
-                                        ``--no-instructions`` to suppress
-                                        plugin enrichment entirely.
-            --no-instructions           Sugar for ``--instructions ""``.
+            --instructions <text|@path> FULL OVERRIDE — replace the assembled
+                                        system instruction with the supplied
+                                        text (or the contents of @path).
+                                        Drops the agent's own prompt and
+                                        plugin tool hints too.  Use when you
+                                        need a specific, minimal system
+                                        prompt and nothing else.
+            --no-instructions           PARTIAL SUPPRESSION — drop only the
+                                        BASE layer (``.jaato/instructions/*``
+                                        + premium baseline).  Agent prompt,
+                                        plugin instructions, and framework
+                                        constants still reach the model.
+                                        The usual choice for fitting a
+                                        session into a small context window.
             key=value                   Agent parameters (substituted into the
                                         agent's ``{{param}}`` placeholders)
 
@@ -245,6 +251,7 @@ class CommandRouter:
         profile_name = None
         agent_name = None
         system_instruction_override: Optional[str] = None
+        suppress_base_instructions: bool = False
         agent_params: Dict[str, str] = {}
         args_iter = iter(args)
         for arg in args_iter:
@@ -268,7 +275,7 @@ class CommandRouter:
                 if system_instruction_override is None:
                     return  # error already emitted
             elif arg == "--no-instructions":
-                system_instruction_override = ""
+                suppress_base_instructions = True
             elif "=" in arg:
                 key, _, value = arg.partition("=")
                 agent_params[key] = value
@@ -283,6 +290,7 @@ class CommandRouter:
             agent_params=agent_params if agent_params else None,
             created_by=created_by,
             system_instruction_override=system_instruction_override,
+            suppress_base_instructions=suppress_base_instructions,
         )
         if new_session_id:
             # Update logging context now that session_id is known.

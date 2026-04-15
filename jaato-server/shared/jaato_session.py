@@ -236,6 +236,10 @@ class JaatoSession:
         # budget without having to be re-passed the value through every
         # call site.
         self._system_instruction_override: Optional[str] = None
+        # Partial-suppression flag — drop the BASE layer only.  Keeps
+        # agent / plugin / framework layers in play.  Ignored when
+        # _system_instruction_override is set (override wins).
+        self._suppress_base_instructions: bool = False
         self._tool_plugins: Optional[List[str]] = None  # Plugin names for this session
 
         # Per-turn token accounting
@@ -1207,6 +1211,7 @@ class JaatoSession:
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
     ) -> None:
         """Configure the session with tools and instructions.
@@ -1231,6 +1236,14 @@ class JaatoSession:
                 but its result is discarded in favour of this string.  Used by
                 session-manipulation tools that want to replay a session with
                 an edited version of the materialised prompt.
+            suppress_base_instructions: Partial suppression — drop only the
+                BASE layer (``.jaato/instructions/*.md`` + premium baseline)
+                from the assembled prompt while keeping the agent/session
+                instructions, plugin instructions, pinned references, and
+                framework constants.  Intended for small-context models where
+                the framework baseline is the single biggest token consumer.
+                Ignored when ``system_instruction_override`` is set (the full
+                override supersedes any partial suppression).
             workspace_path: If provided, overrides the runtime's workspace
                 path for this session.  Used by fork-replay to point a
                 temp session at a worktree snapshot without affecting other
@@ -1411,21 +1424,24 @@ class JaatoSession:
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
 
-        # Remember the override so _populate_instruction_budget (called
+        # Remember both knobs so _populate_instruction_budget (called
         # below) can produce an honest budget reflecting the wire prompt.
         self._system_instruction_override = system_instruction_override
+        self._suppress_base_instructions = suppress_base_instructions
 
-        # Build system instructions.  When an override is set, skip the
-        # assembly call entirely: it would do disk I/O (base instruction
-        # files), run plugin enrichment, and rebuild secondary indexes,
-        # all of whose textual output we'd then discard.  The session's
-        # plugin-level state was already initialised via plugin
-        # ``initialize()`` calls earlier in ``configure_tools``, so the
-        # agent retains tool functionality; it just doesn't get the
-        # would-be-discarded enrichment text.  Net effect: an
-        # override-using session pays *zero* disk I/O for base
-        # instructions, which was the headline reason behind the lazy
-        # getter on the runtime.
+        # Build system instructions.
+        #
+        # Full-override path: skip assembly entirely — no disk I/O, no
+        # enrichment churn.  Plugin state was already initialised earlier
+        # in configure_tools(), so tool functionality is intact; only the
+        # would-be-discarded enrichment text is skipped.
+        #
+        # Otherwise: assemble normally.  ``include_base=False`` drops just
+        # the BASE layer (framework baseline) while keeping the agent
+        # prompt, plugin instructions, and framework constants — the
+        # partial-suppression path for small-context models.  Base is
+        # also lazy-loaded on first use, so sessions that always suppress
+        # it never touch the disk.
         if system_instruction_override is not None:
             self._system_instruction = system_instruction_override
         else:
@@ -1433,6 +1449,7 @@ class JaatoSession:
                 plugin_names=tools,
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
+                include_base=not suppress_base_instructions,
             )
 
         # Store user commands
@@ -1677,12 +1694,15 @@ class JaatoSession:
         )
 
         # --- Collect phase: gather all texts that need counting ---
-        # Pass the override so the budget reflects what's actually on
-        # the wire (a single OVERRIDE entry, or nothing) rather than
-        # the assembly pipeline's would-be output.
+        # Pass the override and suppress-base flag so the budget
+        # reflects what's actually on the wire — a single OVERRIDE entry
+        # (or nothing) on full override, or the assembly minus BASE on
+        # partial suppression — rather than the assembly pipeline's
+        # would-be-full output.
         requests = self._collect_instruction_texts(
             session_instructions,
             system_instruction_override=self._system_instruction_override,
+            suppress_base=self._suppress_base_instructions,
         )
 
         # --- Resolve phase: use cache or estimate for each request ---
@@ -1723,6 +1743,7 @@ class JaatoSession:
         self,
         session_instructions: Optional[str],
         system_instruction_override: Optional[str] = None,
+        suppress_base: bool = False,
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
@@ -1777,8 +1798,15 @@ class JaatoSession:
         # --- SYSTEM children ---
 
         # 1. Base instructions from .jaato/instructions/ (or legacy single
-        #    file) — lazy-loaded the first time any session asks.
-        base_instructions = self._runtime.get_base_system_instructions() if self._runtime else None
+        #    file) — lazy-loaded the first time any session asks.  Skipped
+        #    entirely when suppress_base is set; other SYSTEM children
+        #    (CLIENT / FRAMEWORK / pinned refs) and PLUGIN children below
+        #    still contribute, so the agent keeps its agent-.md content
+        #    and tool instructions.
+        if not suppress_base and self._runtime:
+            base_instructions = self._runtime.get_base_system_instructions()
+        else:
+            base_instructions = None
         if base_instructions:
             requests.append(_TokenCountRequest(
                 text=base_instructions,

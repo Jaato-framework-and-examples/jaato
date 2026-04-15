@@ -86,9 +86,11 @@ def _make_session(
     session._gc_plugin = None
     session._gc_config = None
     session._preloaded_plugins = set()
-    # _system_instruction_override is normally set in configure(); tests
-    # bypass __init__ with __new__ so we set it explicitly to the default.
+    # _system_instruction_override and _suppress_base_instructions are
+    # normally set in configure(); tests bypass __init__ with __new__ so we
+    # set them explicitly to their defaults.
     session._system_instruction_override = None
+    session._suppress_base_instructions = False
 
     # SessionHistory wrapper
     from ..session_history import SessionHistory

@@ -173,6 +173,86 @@ class TestOverrideAwareCollect:
 # ──────────────────────────────────────────────────────────────────
 
 
+class TestSuppressBase:
+    """``suppress_base_instructions`` is the partial-suppression knob:
+    drops the framework baseline layer (``.jaato/instructions/*.md`` +
+    premium) while keeping the agent prompt, plugin instructions, and
+    framework constants that the session actually needs.
+    """
+
+    def test_suppress_skips_base_entry_only(self):
+        """BASE entry drops out of the budget; CLIENT and FRAMEWORK stay."""
+        session = _session_for_collect(base_instructions="FRAMEWORK BASELINE")
+        reqs = session._collect_instruction_texts(
+            session_instructions="agent prompt",
+            suppress_base=True,
+        )
+        child_keys = {r.child_key for r in reqs}
+        assert SystemChildType.BASE.value not in child_keys
+        # CLIENT (agent prompt) and FRAMEWORK (task completion, parallel
+        # tool guidance, turn summary) must still reach the model.
+        assert SystemChildType.CLIENT.value in child_keys
+        assert SystemChildType.FRAMEWORK.value in child_keys
+
+    def test_suppress_does_not_trigger_base_load(self):
+        """No disk I/O when the base layer is suppressed — the whole
+        point of the lazy getter + suppression combo is that sessions
+        which drop base never pay for it."""
+        session = _session_for_collect(base_instructions="FRAMEWORK BASELINE")
+        session._collect_instruction_texts(
+            session_instructions="agent prompt",
+            suppress_base=True,
+        )
+        session._runtime.get_base_system_instructions.assert_not_called()
+
+    def test_default_includes_base(self):
+        """Without the flag, BASE is fetched + included — default
+        behaviour unchanged so sessions not using the flag see the full
+        assembled prompt."""
+        session = _session_for_collect(base_instructions="FRAMEWORK BASELINE")
+        reqs = session._collect_instruction_texts(
+            session_instructions="agent prompt",
+        )
+        child_keys = {r.child_key for r in reqs}
+        assert SystemChildType.BASE.value in child_keys
+        session._runtime.get_base_system_instructions.assert_called_once()
+
+    def test_override_wins_over_suppress(self):
+        """If both knobs are set, override takes precedence — the wire
+        message is just the override string (or empty), ignoring the
+        partial-suppression request entirely."""
+        session = _session_for_collect()
+        reqs = session._collect_instruction_texts(
+            session_instructions="agent prompt",
+            system_instruction_override="custom",
+            suppress_base=True,
+        )
+        assert len(reqs) == 1
+        assert reqs[0].child_key == SystemChildType.OVERRIDE.value
+        assert reqs[0].text == "custom"
+
+    def test_suppress_preserves_plugin_instructions(self):
+        """The headline claim: plugin tool instructions survive the
+        partial suppression.  The agent still knows how to use cli,
+        file_edit, etc. — only the framework baseline is dropped."""
+        session = _session_for_collect()
+        registry = MagicMock()
+        plugin = MagicMock()
+        plugin.get_system_instructions.return_value = "PLUGIN TOOL HINTS"
+        registry._exposed = ["cli"]
+        registry.get_plugin = lambda name: plugin if name == "cli" else None
+        registry.plugin_has_core_tools = lambda name: True
+        session._runtime.registry = registry
+
+        reqs = session._collect_instruction_texts(
+            session_instructions="agent prompt",
+            suppress_base=True,
+        )
+        plugin_entries = [r for r in reqs if r.source == InstructionSource.PLUGIN]
+        assert len(plugin_entries) >= 1
+        assert any(r.text == "PLUGIN TOOL HINTS" for r in plugin_entries)
+
+
 class TestOverrideSuppressesPluginEntries:
     """Plugins contribute text that gets concatenated into the assembled
     system message — so if that whole assembly is replaced by an

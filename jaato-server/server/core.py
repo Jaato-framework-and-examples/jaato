@@ -216,6 +216,7 @@ class JaatoServer:
         instruction_token_cache: Optional[InstructionTokenCache] = None,
         profile: Optional[Any] = None,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: bool = False,
     ):
         """Initialize the server.
 
@@ -245,12 +246,21 @@ class JaatoServer:
                 when the model's context window is too small for the
                 assembled prompt (e.g. an 8K model with a 30K+ enriched
                 instruction).  Forwarded to ``JaatoSession.configure``.
+            suppress_base_instructions: Partial-suppression flag — drop
+                only the BASE layer (``.jaato/instructions/*.md`` + premium
+                baseline) while keeping the agent content, plugin
+                instructions, and framework constants.  The intended
+                default for small-context model sessions that still want
+                the agent's own prompt and the tool-specific hints.
+                Forwarded to ``JaatoSession.configure``.  Ignored when
+                ``system_instruction_override`` is also set.
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
         self._provider = provider
         self._profile = profile
         self._system_instruction_override = system_instruction_override
+        self._suppress_base_instructions = suppress_base_instructions
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
         self._workspace_path = workspace_path
@@ -1536,12 +1546,14 @@ class JaatoServer:
             if self._profile.provider:
                 kwargs["provider_name"] = self._profile.provider
 
-        # Apply the per-session system-instruction override last so it
-        # wins over any profile-supplied system_instructions.  Distinct
+        # Apply the per-session system-instruction knobs last so they
+        # win over any profile-supplied system_instructions.  Distinct
         # from None (which means "no override") — the empty string is a
         # legitimate value meaning "send no system message at all".
         if self._system_instruction_override is not None:
             kwargs["system_instruction_override"] = self._system_instruction_override
+        if self._suppress_base_instructions:
+            kwargs["suppress_base_instructions"] = True
 
         return kwargs or None
 

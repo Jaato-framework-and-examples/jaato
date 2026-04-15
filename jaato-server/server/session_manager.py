@@ -789,6 +789,7 @@ class SessionManager:
         agent_name: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: bool = False,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -812,10 +813,16 @@ class SessionManager:
                 placeholders.
             system_instruction_override: If provided, replaces the assembled
                 system instruction passed to the model.  Use the empty string
-                to suppress plugin enrichment entirely — required for fitting
-                a session into a small model's context window (e.g. an 8K
-                Gemma where the default 30K+ assembled instruction wouldn't
-                leave room for tool schemas or the user's first prompt).
+                to send no system message at all.  Full replacement — the
+                agent prompt and plugin instructions are also discarded.
+            suppress_base_instructions: Partial suppression — drop only
+                the BASE layer (``.jaato/instructions/*.md`` + any
+                premium-provided baseline) while keeping the agent prompt,
+                plugin instructions, and framework constants.  The usual
+                choice for fitting a session into a small model's context
+                window (the BASE layer is typically the single biggest
+                token consumer).  Ignored when ``system_instruction_override``
+                is also set.
 
         Returns:
             The session ID (empty string on failure).
@@ -909,6 +916,7 @@ class SessionManager:
             instruction_token_cache=self._instruction_token_cache,
             profile=profile,
             system_instruction_override=system_instruction_override,
+            suppress_base_instructions=suppress_base_instructions,
         )
 
         # Initialize the server (events go directly to requesting client).

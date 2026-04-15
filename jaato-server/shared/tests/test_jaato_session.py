@@ -110,6 +110,7 @@ class TestJaatoSessionConfigure:
             plugin_names=None,
             additional="Be a researcher.",
             presentation_context=None,
+            include_base=True,
         )
 
 
