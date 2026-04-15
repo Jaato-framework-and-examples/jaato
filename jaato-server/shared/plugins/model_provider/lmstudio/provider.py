@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import httpx
 
@@ -362,18 +362,20 @@ class LMStudioProvider:
                 raise LMStudioModelNotFoundError(
                     model, available=[entry["id"] for entry in catalog],
                 )
-            # Remember the native max_context_length for get_context_limit().
-            for entry in catalog or []:
-                if entry["id"] == model:
-                    max_ctx = entry.get("max_context_length")
-                    if isinstance(max_ctx, int) and max_ctx > 0:
-                        self._discovered_context_length = max_ctx
-                    break
 
         self._model_name = model
 
         if self._load_config is not None:
             self._load_model(model, self._load_config)
+
+        # Discover the actual live context window from a loaded instance.
+        # max_context_length on the model entry is the model's hard upper
+        # bound; the live instance config carries what the user (or our
+        # /load call) actually configured — these can differ by 100s of K
+        # for long-context models.  Falls back to max_context_length when
+        # no instance is loaded (passive-mode pre-warm) and ultimately to
+        # DEFAULT_CONTEXT_LENGTH.
+        self._refresh_discovered_context(model)
 
         logger.info(
             "Connected to LM Studio model: %s (context=%d, load_applied=%s)",
@@ -381,14 +383,43 @@ class LMStudioProvider:
         )
 
     def _load_model(self, model: str, load_params: Dict[str, Any]) -> None:
-        """POST the profile's load config to ``/api/v1/models/load``.
+        """Ensure an instance of ``model`` is loaded with the supplied params.
+
+        LM Studio's ``POST /api/v1/models/load`` endpoint is **not
+        idempotent** — every call creates a fresh in-memory instance
+        (with a sequential ``:N`` suffix on the instance_id), even when a
+        compatible instance already exists.  Without a pre-check, every
+        new jaato session would spin up a new copy of the model and pin
+        extra VRAM until the operator manually unloaded it.
+
+        Strategy: query ``GET /api/v1/models``, find any loaded instance
+        of the target model whose config matches every key in
+        ``load_params`` we explicitly set, and reuse it (skip the POST
+        entirely).  Only when no compatible instance is found do we
+        actually call ``/load``.
 
         The body is the load_params dict with ``model`` injected; any
         user-supplied ``model`` key is ignored to avoid inconsistency
         with ``connect()``'s argument.
         """
+        # Strip 'model' from desired_config so we compare only per-instance
+        # config knobs against existing instances of the same model.
+        desired_config = {k: v for k, v in load_params.items() if k != "model"}
+
+        existing = self._find_matching_loaded_instance(model, desired_config)
+        if existing is not None:
+            instance_id, _ = existing
+            self._trace(
+                f"[LOAD] reusing existing instance '{instance_id}' for {model} "
+                f"(matches {len(desired_config)} requested config keys)"
+            )
+            return
+
         body = {**load_params, "model": model}
-        self._trace(f"[LOAD] POST {self._host}/api/v1/models/load body_keys={sorted(body.keys())}")
+        self._trace(
+            f"[LOAD] POST {self._host}/api/v1/models/load "
+            f"body_keys={sorted(body.keys())} (no matching instance)"
+        )
         try:
             response = httpx.post(
                 f"{self._host}/api/v1/models/load",
@@ -414,7 +445,9 @@ class LMStudioProvider:
         """Query ``GET /api/v0/models`` and return the raw ``data`` array.
 
         Each entry carries ``id``, ``type``, ``state``, and
-        ``max_context_length`` among other fields.
+        ``max_context_length`` among other fields.  This is the lightweight
+        v0 listing — for live loaded-instance config (live context length,
+        reuse decisions) use ``_fetch_v1_models``.
         """
         try:
             response = httpx.get(
@@ -428,6 +461,83 @@ class LMStudioProvider:
         except httpx.HTTPError as exc:
             logger.warning("Failed to list LM Studio models: %s", exc)
             return []
+
+    def _fetch_v1_models(self) -> List[Dict[str, Any]]:
+        """Query ``GET /api/v1/models`` and return the raw ``models`` array.
+
+        v1 is richer than v0: each entry carries ``key`` (= v0's ``id``),
+        ``max_context_length``, plus a ``loaded_instances`` array describing
+        every running instance and its live config (``context_length``,
+        ``flash_attention``, ``offload_kv_cache_to_gpu``, …).  We use
+        v1 specifically for the load-reuse decision and for discovering
+        the actual configured context window of a running instance.
+        """
+        try:
+            response = httpx.get(
+                f"{self._host}/api/v1/models",
+                headers=self._auth_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+            return response.json().get("models", [])
+        except httpx.HTTPError as exc:
+            logger.warning("Failed to list LM Studio models (v1): %s", exc)
+            return []
+
+    def _find_matching_loaded_instance(
+        self, model: str, desired_config: Dict[str, Any],
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Find a loaded instance of ``model`` whose config matches.
+
+        Match rule: every key in ``desired_config`` must equal the
+        instance's value for that key.  Keys not in ``desired_config``
+        are ignored (LM Studio applies its own defaults like ``parallel``
+        which the caller never asked about — those mustn't trigger
+        spurious reloads).
+
+        Returns:
+            ``(instance_id, instance_config)`` of the first match, or
+            ``None`` when no instance qualifies.  ``None`` is also
+            returned when ``GET /api/v1/models`` fails — the caller
+            falls through to a fresh ``/load``.
+        """
+        for entry in self._fetch_v1_models():
+            if entry.get("key") != model:
+                continue
+            for inst in entry.get("loaded_instances", []) or []:
+                inst_config = inst.get("config", {}) or {}
+                if all(inst_config.get(k) == v for k, v in desired_config.items()):
+                    return inst.get("id", ""), inst_config
+            # Found the model entry but no matching instance — no point
+            # scanning the rest of the catalog.
+            return None
+        return None
+
+    def _refresh_discovered_context(self, model: str) -> None:
+        """Set ``self._discovered_context_length`` from the live LM Studio state.
+
+        Priority (within this helper — explicit overrides are applied
+        later in :meth:`get_context_limit`):
+
+        1. Live ``loaded_instances[0].config.context_length`` of the
+           target model — the *actual* configured context.
+        2. The model entry's ``max_context_length`` — the model's hard
+           upper bound, used when no instance is loaded yet.
+        3. Leave ``_discovered_context_length`` unset; ``get_context_limit``
+           falls back to ``DEFAULT_CONTEXT_LENGTH``.
+        """
+        for entry in self._fetch_v1_models():
+            if entry.get("key") != model:
+                continue
+            for inst in entry.get("loaded_instances", []) or []:
+                ctx = (inst.get("config") or {}).get("context_length")
+                if isinstance(ctx, int) and ctx > 0:
+                    self._discovered_context_length = ctx
+                    return
+            max_ctx = entry.get("max_context_length")
+            if isinstance(max_ctx, int) and max_ctx > 0:
+                self._discovered_context_length = max_ctx
+            return
 
     @property
     def is_connected(self) -> bool:

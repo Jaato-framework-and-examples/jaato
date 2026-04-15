@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -58,6 +59,47 @@ def _catalog_response(model_id: str = "gpt-oss-20b", max_ctx: int = 16384):
         ],
     }
     return resp
+
+
+def _v1_models_response(
+    model_id: str = "gpt-oss-20b",
+    max_ctx: int = 16384,
+    loaded_instances: Optional[list] = None,
+):
+    """Build a fake /api/v1/models response.  ``loaded_instances`` lets a
+    test assert on reuse logic without spinning up a real server."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {
+        "models": [
+            {
+                "type": "llm",
+                "key": model_id,
+                "max_context_length": max_ctx,
+                "loaded_instances": loaded_instances or [],
+            }
+        ],
+    }
+    return resp
+
+
+def _route_get(
+    *,
+    catalog_resp=None,
+    v1_resp=None,
+):
+    """Build a side_effect for httpx.get that routes by URL.
+
+    Both ``connect()`` and the new reuse/context-discovery helpers issue
+    GET requests against different endpoints (``/api/v0/models`` vs
+    ``/api/v1/models``); tests need to return the right shape for each.
+    """
+    def _route(url, *args, **kwargs):
+        if "/api/v1/models" in url:
+            return v1_resp if v1_resp is not None else _v1_models_response()
+        return catalog_resp if catalog_resp is not None else _catalog_response()
+    return _route
 
 
 def _load_response(status: int = 200, body: str = '{"status": "loaded"}'):
@@ -246,11 +288,44 @@ class TestConnectPassive:
 
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_records_discovered_context_length(self, mock_get):
-        mock_get.return_value = _catalog_response(max_ctx=131072)
+        # No loaded instance → falls back to the model's max_context_length.
+        mock_get.side_effect = _route_get(
+            catalog_resp=_catalog_response(max_ctx=131072),
+            v1_resp=_v1_models_response(max_ctx=131072, loaded_instances=[]),
+        )
         provider = LMStudioProvider()
         provider.initialize(ProviderConfig())
         provider.connect("gpt-oss-20b")
         assert provider._discovered_context_length == 131072
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_connect_uses_live_loaded_instance_context(self, mock_get):
+        """When an instance is loaded, its live config.context_length wins
+        over the model's max_context_length — the bug we hit was that an
+        8K-loaded model on a 128K-capable architecture was being reported
+        as 8K (default) because we were never reading the live config."""
+        mock_get.side_effect = _route_get(
+            catalog_resp=_catalog_response(max_ctx=131072),
+            v1_resp=_v1_models_response(
+                max_ctx=131072,
+                loaded_instances=[{
+                    "id": "gpt-oss-20b:1",
+                    "config": {
+                        "context_length": 32768,
+                        "flash_attention": True,
+                        "offload_kv_cache_to_gpu": True,
+                        "eval_batch_size": 512,
+                        "parallel": 4,
+                    },
+                }],
+            ),
+        )
+        provider = LMStudioProvider()
+        provider.initialize(ProviderConfig())
+        provider.connect("gpt-oss-20b")
+        # Live loaded config (32K) wins over the model's hard max (128K).
+        assert provider._discovered_context_length == 32768
+        assert provider.get_context_limit() == 32768
 
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_unknown_model_raises(self, mock_get):
@@ -271,7 +346,10 @@ class TestConnectActive:
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_with_load_posts_expected_body(self, mock_get, mock_post):
-        mock_get.return_value = _catalog_response()
+        # No matching loaded instance → /load is hit.
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[]),
+        )
         mock_post.return_value = _load_response(status=200)
 
         provider = LMStudioProvider()
@@ -302,7 +380,10 @@ class TestConnectActive:
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_active_overrides_any_model_in_load_dict(self, mock_get, mock_post):
         """A stray ``model`` key in load config must be overridden by connect()'s arg."""
-        mock_get.return_value = _catalog_response()
+        # No matching loaded instance → /load is hit.
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[]),
+        )
         mock_post.return_value = _load_response(status=200)
 
         provider = LMStudioProvider()
@@ -317,7 +398,9 @@ class TestConnectActive:
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_with_load_failure_raises(self, mock_get, mock_post):
-        mock_get.return_value = _catalog_response()
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[]),
+        )
         mock_post.return_value = _load_response(
             status=400, body='{"error": "context too large"}'
         )
@@ -332,7 +415,10 @@ class TestConnectActive:
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_connect_active_sends_bearer_when_token_configured(self, mock_get, mock_post):
-        mock_get.return_value = _catalog_response()
+        # No matching loaded instance → /load is hit.
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[]),
+        )
         mock_post.return_value = _load_response(status=200)
 
         provider = LMStudioProvider()
@@ -348,6 +434,154 @@ class TestConnectActive:
 
         post_headers = mock_post.call_args[1]["headers"]
         assert post_headers["Authorization"] == "Bearer tok-abc"
+
+
+# ============================================================
+# Reuse-or-load: avoid spawning a new instance per session
+# ============================================================
+
+
+class TestReuseOrLoad:
+    """LM Studio's POST /api/v1/models/load is non-idempotent — every call
+    creates a fresh instance.  We must query GET /api/v1/models first and
+    reuse an existing instance whose config matches the request, otherwise
+    every new jaato session pins extra VRAM until manual unload.
+    """
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_skips_load_when_matching_instance_exists(self, mock_get, mock_post):
+        """Existing instance with the requested config → POST /load is skipped."""
+        instance = {
+            "id": "gpt-oss-20b:1",
+            "config": {
+                "context_length": 16384,
+                "flash_attention": True,
+                "eval_batch_size": 512,
+                "offload_kv_cache_to_gpu": True,
+                "parallel": 4,  # server default — must not block reuse
+            },
+        }
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[instance]),
+        )
+
+        provider = LMStudioProvider()
+        provider.initialize(
+            ProviderConfig(extra={"load": {
+                "context_length": 16384,
+                "flash_attention": True,
+                "eval_batch_size": 512,
+                "offload_kv_cache_to_gpu": True,
+            }})
+        )
+        provider.connect("gpt-oss-20b")
+
+        # POST never happened — instance was reused.
+        mock_post.assert_not_called()
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_loads_when_no_matching_instance(self, mock_get, mock_post):
+        """Loaded instance has different config → POST /load happens."""
+        instance = {
+            "id": "gpt-oss-20b:1",
+            "config": {"context_length": 8192, "flash_attention": False},
+        }
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[instance]),
+        )
+        mock_post.return_value = _load_response(status=200)
+
+        provider = LMStudioProvider()
+        provider.initialize(
+            ProviderConfig(extra={"load": {
+                "context_length": 16384,  # different from loaded
+                "flash_attention": True,
+            }})
+        )
+        provider.connect("gpt-oss-20b")
+
+        mock_post.assert_called_once()
+        body = mock_post.call_args[1]["json"]
+        assert body["context_length"] == 16384
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_loads_when_no_instances_at_all(self, mock_get, mock_post):
+        """Empty loaded_instances → POST /load happens."""
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[]),
+        )
+        mock_post.return_value = _load_response(status=200)
+
+        provider = LMStudioProvider()
+        provider.initialize(
+            ProviderConfig(extra={"load": {"context_length": 16384}})
+        )
+        provider.connect("gpt-oss-20b")
+
+        mock_post.assert_called_once()
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_partial_config_match_reuses(self, mock_get, mock_post):
+        """When load_params specifies only context_length, an instance with
+        that context_length matches regardless of other config keys.  Server
+        defaults (parallel, num_experts) must not block reuse."""
+        instance = {
+            "id": "gpt-oss-20b:1",
+            "config": {
+                "context_length": 16384,
+                "flash_attention": False,    # we didn't ask
+                "eval_batch_size": 256,      # we didn't ask
+                "parallel": 4,
+            },
+        }
+        mock_get.side_effect = _route_get(
+            v1_resp=_v1_models_response(loaded_instances=[instance]),
+        )
+
+        provider = LMStudioProvider()
+        provider.initialize(
+            ProviderConfig(extra={"load": {"context_length": 16384}}),
+        )
+        provider.connect("gpt-oss-20b")
+        mock_post.assert_not_called()
+
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.post")
+    @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
+    def test_two_consecutive_connects_load_only_once(self, mock_get, mock_post):
+        """Regression for the per-session load bug: two providers in the
+        same process calling connect() back-to-back must produce exactly
+        one /load (the second sees the instance from the first)."""
+        # First connect: no instance loaded → POST /load happens.
+        # Second connect: server now has the instance → POST /load skipped.
+        no_inst = _v1_models_response(loaded_instances=[])
+        with_inst = _v1_models_response(loaded_instances=[{
+            "id": "gpt-oss-20b:1",
+            "config": {"context_length": 16384},
+        }])
+        get_responses = iter([no_inst, no_inst, with_inst, with_inst])
+        # 4 GETs total: 2 per connect (find_matching + refresh_discovered).
+
+        def _routed(url, *args, **kwargs):
+            if "/api/v1/models" in url:
+                return next(get_responses)
+            return _catalog_response()
+        mock_get.side_effect = _routed
+        mock_post.return_value = _load_response(status=200)
+
+        for _ in range(2):
+            p = LMStudioProvider()
+            p.initialize(
+                ProviderConfig(extra={"load": {"context_length": 16384}}),
+            )
+            p.connect("gpt-oss-20b")
+
+        assert mock_post.call_count == 1, (
+            "second connect() must reuse the instance loaded by the first"
+        )
 
 
 # ============================================================
@@ -367,7 +601,10 @@ class TestContextLimit:
 
     @patch("shared.plugins.model_provider.lmstudio.provider.httpx.get")
     def test_discovered_used_when_no_override(self, mock_get):
-        mock_get.return_value = _catalog_response(max_ctx=32768)
+        mock_get.side_effect = _route_get(
+            catalog_resp=_catalog_response(max_ctx=32768),
+            v1_resp=_v1_models_response(max_ctx=32768, loaded_instances=[]),
+        )
         provider = LMStudioProvider()
         provider.initialize(ProviderConfig())
         provider.connect("gpt-oss-20b")
