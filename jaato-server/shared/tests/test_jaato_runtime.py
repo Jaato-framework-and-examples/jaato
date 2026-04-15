@@ -243,6 +243,82 @@ class TestJaatoRuntimeCreateProvider:
         assert "host" not in supplied_config.extra
 
 
+class TestJaatoRuntimeVerifyAuth:
+    """Tests for JaatoRuntime.verify_auth() — provider-config plumbing.
+
+    Regression: previously verify_auth ignored profile knobs entirely
+    (passed config=None), so providers that resolve credentials from
+    plugin_configs (e.g. LM Studio's optional bearer token, NIM custom
+    base_url) saw an environment-only view that didn't match what
+    initialize() would later see.
+    """
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_verify_auth_passes_plugin_config_into_provider_config(
+        self, mock_load_provider,
+    ):
+        """plugin_configs[provider_name] must reach provider.verify_auth(config=...)."""
+        runtime = JaatoRuntime()
+        runtime.connect("p", "loc")
+
+        provider = MagicMock()
+        provider.verify_auth.return_value = True
+        mock_load_provider.return_value = provider
+
+        plugin_configs = {
+            "google_genai": {
+                "host": "http://gpu-box.lan:1234",
+                "api_token": "secret-abc",
+            },
+            "irrelevant_plugin": {"key": "value"},
+        }
+        runtime.verify_auth(plugin_configs=plugin_configs)
+
+        # Provider was called with a ProviderConfig whose extra carries
+        # the matching provider's overrides — and only those.
+        kwargs = provider.verify_auth.call_args.kwargs
+        config = kwargs["config"]
+        assert config is not None
+        assert config.extra["host"] == "http://gpu-box.lan:1234"
+        assert config.extra["api_token"] == "secret-abc"
+        assert "key" not in config.extra  # other plugin's keys don't leak
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_verify_auth_without_plugin_configs_passes_none_config(
+        self, mock_load_provider,
+    ):
+        """Backwards-compat: callers who don't supply plugin_configs must still work,
+        and providers receive config=None (the documented contract)."""
+        runtime = JaatoRuntime()
+        runtime.connect("p", "loc")
+        provider = MagicMock()
+        provider.verify_auth.return_value = True
+        mock_load_provider.return_value = provider
+
+        runtime.verify_auth()
+
+        kwargs = provider.verify_auth.call_args.kwargs
+        assert kwargs["config"] is None
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_verify_auth_no_match_in_plugin_configs(self, mock_load_provider):
+        """plugin_configs without an entry for the active provider → config=None.
+
+        This is the protective path: random plugin_configs entries can't
+        accidentally inject knobs into a provider they don't apply to.
+        """
+        runtime = JaatoRuntime()
+        runtime.connect("p", "loc")
+        provider = MagicMock()
+        provider.verify_auth.return_value = True
+        mock_load_provider.return_value = provider
+
+        runtime.verify_auth(plugin_configs={"some_other_provider": {"x": 1}})
+
+        kwargs = provider.verify_auth.call_args.kwargs
+        assert kwargs["config"] is None
+
+
 class TestJaatoRuntimeGetToolSchemas:
     """Tests for JaatoRuntime.get_tool_schemas()."""
 

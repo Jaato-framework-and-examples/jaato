@@ -218,8 +218,12 @@ class AntigravityProvider:
         self,
         allow_interactive: bool = False,
         on_message: Optional[Callable[[str], None]] = None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify authentication and optionally trigger interactive login.
+
+        ``config`` is accepted for protocol compatibility but unused — Antigravity
+        credentials live in OAuth storage, not in the profile.
 
         Args:
             allow_interactive: If True, allow interactive OAuth flow.

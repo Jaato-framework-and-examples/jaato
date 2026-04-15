@@ -509,9 +509,14 @@ class GoogleGenAIProvider:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured.
+
+        ``config`` is accepted for protocol compatibility but unused — Google
+        GenAI uses ADC / service-account / API-key resolution from the
+        environment, not the profile.
 
         For Google GenAI, this checks for API key (AI Studio) or GCP credentials
         (Vertex AI). Interactive login is not supported.

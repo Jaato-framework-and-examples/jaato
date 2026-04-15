@@ -198,7 +198,8 @@ class OllamaProvider(AnthropicProvider):
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify Ollama server is accessible.
 

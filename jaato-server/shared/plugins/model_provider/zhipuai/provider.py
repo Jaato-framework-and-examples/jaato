@@ -327,9 +327,13 @@ class ZhipuAIProvider(AnthropicProvider):
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify Zhipu AI API key is available.
+
+        ``config`` is accepted for protocol compatibility but unused — Z.AI
+        reads its credentials from the environment / stored auth file.
 
         This can be called BEFORE initialize() to check that credentials
         exist. Checks environment variable and stored credentials.

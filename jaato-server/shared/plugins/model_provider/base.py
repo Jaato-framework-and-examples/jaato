@@ -156,7 +156,8 @@ class ModelProviderPlugin(Protocol):
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message: Optional[Callable[[str], None]] = None
+        on_message: Optional[Callable[[str], None]] = None,
+        config: Optional[ProviderConfig] = None,
     ) -> bool:
         """Verify that authentication is configured and optionally trigger interactive login.
 
@@ -170,6 +171,15 @@ class ModelProviderPlugin(Protocol):
                 only check if credentials exist without prompting.
             on_message: Optional callback for status messages during interactive
                 login (e.g., "Opening browser...", "Waiting for auth...").
+            config: Optional ``ProviderConfig`` with profile-level knobs
+                already merged into ``extra`` by the runtime.  Providers
+                that resolve credentials from non-environment sources
+                (e.g. an API token in ``plugin_configs[provider]``) can
+                read those values here.  Implementations that don't need
+                the profile config simply ignore this kwarg.  Unlike
+                ``initialize()`` — which also receives config — this
+                call must remain cheap: read values, do not create
+                clients or make network requests.
 
         Returns:
             True if authentication is configured and valid.

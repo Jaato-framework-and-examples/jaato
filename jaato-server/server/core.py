@@ -1220,10 +1220,25 @@ class JaatoServer:
 
         try:
             # Use session env context and workspace directory so auth can access
-            # session-specific credentials and save tokens to the right location
+            # session-specific credentials and save tokens to the right location.
+            #
+            # Profile plugin_configs are forwarded so providers that resolve
+            # credentials from profile-level knobs (e.g. LM Studio's optional
+            # bearer token under plugin_configs['lmstudio']['api_token'], a
+            # custom NIM base_url) see the same view they will see during
+            # initialize().  Without this, verify_auth fell back to
+            # environment-only resolution and profile-supplied credentials
+            # were invisible at verify time.
             with _timer.stage("verify_auth") as _s4:
                 with self._with_session_env(), self._in_workspace():
-                    auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
+                    profile_plugin_configs = (
+                        self._profile.plugin_configs if self._profile else None
+                    )
+                    auth_ok = self._jaato.verify_auth(
+                        allow_interactive=True,
+                        on_message=auth_message,
+                        plugin_configs=profile_plugin_configs,
+                    )
 
             if not auth_ok:
                 # Credentials not found - try to use provider-specific auth plugin

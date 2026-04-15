@@ -385,11 +385,16 @@ class AnthropicProvider:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured and optionally trigger interactive login.
 
         This can be called BEFORE initialize() to ensure credentials are available.
+
+        ``config`` is accepted for protocol compatibility but unused: Anthropic
+        resolves credentials from environment, OAuth, and PKCE storage rather
+        than from the profile's ``plugin_configs``.
         For Anthropic, this checks for PKCE OAuth tokens, OAuth env tokens, or API keys.
 
         Args:

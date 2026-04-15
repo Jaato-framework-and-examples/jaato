@@ -225,9 +225,13 @@ class NIMProvider:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured.
+
+        ``config`` is accepted for protocol compatibility but unused — NIM
+        reads its API key from the environment / stored credentials.
 
         Must work before ``initialize()`` — checks for the API key
         in environment variables and stored credentials. Does not

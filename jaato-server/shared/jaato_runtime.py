@@ -517,7 +517,8 @@ class JaatoRuntime:
         self,
         allow_interactive: bool = False,
         on_message: Optional[Callable[[str], None]] = None,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Verify authentication before loading tools.
 
@@ -531,6 +532,16 @@ class JaatoRuntime:
             on_message: Optional callback for status messages during login.
             provider_name: Optional provider name to verify. If None, uses
                 the runtime's default provider.
+            plugin_configs: Optional per-plugin profile config dict, identical
+                in shape to ``SubagentProfile.plugin_configs``.  When the
+                profile carries provider-specific knobs under
+                ``plugin_configs[provider_name]`` (e.g. an LM Studio bearer
+                token, a custom NIM ``base_url``), they're merged into the
+                ``ProviderConfig.extra`` handed to ``provider.verify_auth``
+                so credential resolution at verify time matches what
+                ``initialize()`` will see later.  Without this, providers
+                fall back to environment-only credential discovery and
+                profile-supplied secrets are invisible at verify time.
 
         Returns:
             True if authentication is configured and valid.
@@ -553,15 +564,24 @@ class JaatoRuntime:
         """
         effective_provider = provider_name or self._provider_name
 
-        # Create a temporary provider instance just for auth verification
-        # We don't call initialize() yet - verify_auth is designed to work
-        # before full initialization
+        # Create a temporary provider instance just for auth verification.
+        # We don't call initialize() yet — verify_auth is designed to work
+        # before full initialization (no clients, no network).
         provider = load_provider(effective_provider, config=None)
 
-        # Call verify_auth on the provider
+        # Build a lightweight ProviderConfig that surfaces any profile
+        # knobs the provider may need to resolve credentials (host,
+        # api_token, base_url, etc.).  Providers that don't read config
+        # ignore the kwarg.
+        verify_config: Optional[ProviderConfig] = None
+        provider_overrides = (plugin_configs or {}).get(effective_provider)
+        if provider_overrides:
+            verify_config = ProviderConfig(extra=dict(provider_overrides))
+
         return provider.verify_auth(
             allow_interactive=allow_interactive,
-            on_message=on_message
+            on_message=on_message,
+            config=verify_config,
         )
 
     def register_provider(

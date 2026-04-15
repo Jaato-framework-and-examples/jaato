@@ -405,9 +405,14 @@ class GitHubModelsProvider:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured.
+
+        ``config`` is accepted for protocol compatibility but unused — GitHub
+        Models reads its credentials from environment, OAuth storage, and the
+        ``GITHUB_TOKEN`` env var rather than from the profile.
 
         For GitHub Models, this checks for:
         1. Device Code OAuth tokens (stored via github-auth login)

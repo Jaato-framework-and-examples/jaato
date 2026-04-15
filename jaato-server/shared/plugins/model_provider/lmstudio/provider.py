@@ -271,29 +271,57 @@ class LMStudioProvider:
         self,
         allow_interactive: bool = False,
         on_message=None,
+        config: Optional[ProviderConfig] = None,
     ) -> bool:
-        """Check that LM Studio is reachable (and authorised if token is set).
+        """Credentials-only check — LM Studio doesn't require auth by default.
 
-        Must work before ``initialize()``: it does not touch
-        ``self._client``.
+        Per the provider-plugin contract (``shared/plugins/CLAUDE.md``),
+        ``verify_auth`` runs on a *fresh, uninitialized* instance and must
+        only check whether credentials are **available** — not whether
+        they are valid, and not whether the remote service is reachable.
+        Reachability and model validity are the job of ``initialize()``
+        and ``connect()``, where ``self._host`` is already resolved from
+        the profile's ``plugin_configs['lmstudio']['host']`` and errors
+        can carry the right host in their message.
+
+        For LM Studio that means: there is nothing to authenticate in
+        the default local-server setup, so we always return ``True``.
+        When the server is configured with *Require API Token*, the
+        bearer is read either from the profile's
+        ``plugin_configs['lmstudio']['api_token']`` (via ``config.extra``
+        when supplied by the runtime) or from ``LMSTUDIO_API_TOKEN``.
+        Its presence is reported for operator visibility but is never a
+        hard requirement — an unconfigured server will simply accept any
+        token and the real validation happens on the first ``/v1``
+        request during ``initialize()``.
+
+        Args:
+            allow_interactive: Ignored (no interactive auth flow for LM Studio).
+            on_message: Optional status-message callback.
+            config: Optional ``ProviderConfig``.  When the runtime threads
+                the profile's ``plugin_configs['lmstudio']`` into the extra
+                dict and passes it here, we read ``api_token`` from it so
+                the status line reflects the profile-configured credential
+                rather than an environment-only view.
         """
-        host = resolve_host()
-        try:
-            response = httpx.get(
-                f"{host}/api/v0/models",
-                headers={
-                    "Authorization": f"Bearer {resolve_api_token()}",
-                } if resolve_api_token() else {},
-                timeout=5,
-            )
-            response.raise_for_status()
-            if on_message:
-                on_message(f"Connected to LM Studio at {host}")
-            return True
-        except httpx.HTTPError as exc:
-            if on_message:
-                on_message(f"Cannot connect to LM Studio at {host}: {exc}")
-            return False
+        token: Optional[str] = None
+        if config is not None and config.extra:
+            token = config.extra.get("api_token")
+        if not token:
+            token = resolve_api_token()
+
+        if on_message:
+            if token:
+                masked = (
+                    f"{token[:4]}…{token[-4:]}" if len(token) > 8 else "***"
+                )
+                on_message(f"LM Studio bearer token configured ({masked})")
+            else:
+                on_message(
+                    "LM Studio: no authentication required "
+                    "(local server, reachability validated at session start)"
+                )
+        return True
 
     def shutdown(self) -> None:
         """Close the OpenAI client."""

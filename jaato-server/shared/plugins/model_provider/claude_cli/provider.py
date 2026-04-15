@@ -208,10 +208,14 @@ class ClaudeCLIProvider:
         self,
         allow_interactive: bool = False,
         on_message: Optional[Callable[[str], None]] = None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that the CLI is authenticated.
 
         This checks if the claude CLI is installed and can be executed.
+
+        ``config`` is accepted for protocol compatibility but unused — the CLI
+        keeps its own auth state on disk; nothing in the profile influences it.
         The CLI handles its own authentication state.
 
         Note: This method can be called before initialize() to check if

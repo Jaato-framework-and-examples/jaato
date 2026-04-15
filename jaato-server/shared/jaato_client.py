@@ -388,7 +388,8 @@ class JaatoClient:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message: Optional[Callable[[str], None]] = None
+        on_message: Optional[Callable[[str], None]] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Verify authentication before loading tools.
 
@@ -400,6 +401,11 @@ class JaatoClient:
             allow_interactive: If True and auth is not configured, attempt
                 interactive login (e.g., browser-based OAuth).
             on_message: Optional callback for status messages during login.
+            plugin_configs: Optional profile plugin_configs dict.  Forwarded
+                to ``JaatoRuntime.verify_auth`` so providers that read
+                credentials from ``plugin_configs[provider_name]`` (e.g. an
+                LM Studio bearer token) see the same config they will see
+                during ``initialize()``.
 
         Returns:
             True if authentication is configured and valid.
@@ -426,7 +432,8 @@ class JaatoClient:
 
         return self._runtime.verify_auth(
             allow_interactive=allow_interactive,
-            on_message=on_message
+            on_message=on_message,
+            plugin_configs=plugin_configs,
         )
 
     def configure_tools(

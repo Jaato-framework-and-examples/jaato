@@ -308,6 +308,7 @@ class ZhipuAIOpenAIProvider:
         self,
         allow_interactive: bool = False,
         on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured.
 

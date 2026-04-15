@@ -164,6 +164,68 @@ class TestInitialize:
 
 
 # ============================================================
+# verify_auth — must NOT touch the network
+# ============================================================
+
+
+class TestVerifyAuth:
+    """Regression: prior implementation did a reachability probe that hit
+    DEFAULT_HOST when the runtime called verify_auth on a fresh, uninitialized
+    provider.  That violated the CLAUDE.md ``verify_auth`` contract (no network
+    access pre-initialize) and surfaced misleading 'cannot connect to localhost'
+    errors when the profile pointed at a remote LM Studio server."""
+
+    def test_returns_true_with_no_credentials_required(self, monkeypatch):
+        monkeypatch.delenv("LMSTUDIO_API_TOKEN", raising=False)
+        provider = LMStudioProvider()
+        msgs = []
+        ok = provider.verify_auth(on_message=msgs.append)
+        assert ok is True
+        assert any("no authentication required" in m for m in msgs)
+
+    def test_does_not_make_any_http_request(self, monkeypatch):
+        """Pre-initialize verify_auth must never hit the network — neither
+        the default host nor any configured one.  Patches both httpx surfaces
+        the provider could plausibly use to assert nothing escapes."""
+        monkeypatch.delenv("LMSTUDIO_API_TOKEN", raising=False)
+        provider = LMStudioProvider()
+        with patch(
+            "shared.plugins.model_provider.lmstudio.provider.httpx.get"
+        ) as gget, patch(
+            "shared.plugins.model_provider.lmstudio.provider.httpx.post"
+        ) as gpost:
+            provider.verify_auth()
+            assert gget.call_count == 0
+            assert gpost.call_count == 0
+
+    def test_reports_token_when_supplied_via_config(self):
+        """When the runtime threads plugin_configs[lmstudio] into a
+        ProviderConfig.extra, verify_auth must surface the token's presence
+        (with masking) without touching the network."""
+        provider = LMStudioProvider()
+        msgs = []
+        ok = provider.verify_auth(
+            on_message=msgs.append,
+            config=ProviderConfig(extra={"api_token": "secret-token-abc-1234"}),
+        )
+        assert ok is True
+        assert any("bearer token configured" in m for m in msgs)
+        # Token is masked, never echoed in full
+        assert all("secret-token-abc-1234" not in m for m in msgs)
+
+    def test_config_token_takes_precedence_over_env(self, monkeypatch):
+        monkeypatch.setenv("LMSTUDIO_API_TOKEN", "env-token-xxxx")
+        provider = LMStudioProvider()
+        msgs = []
+        provider.verify_auth(
+            on_message=msgs.append,
+            config=ProviderConfig(extra={"api_token": "profile-token-yyyy"}),
+        )
+        # Mask shows profile token's prefix/suffix, not env's
+        assert any("prof…yyyy" in m for m in msgs)
+
+
+# ============================================================
 # connect() — passive mode
 # ============================================================
 
