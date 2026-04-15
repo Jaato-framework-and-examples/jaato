@@ -520,16 +520,22 @@ class TestEnrichmentWithStandalone:
         # Run enrichment with some basic instructions (no embedded templates)
         result = plugin.enrich_system_instructions("# System Instructions\nNo templates here.")
 
-        # Should have annotations for standalone templates
-        assert "TEMPLATE AVAILABLE" in result.instructions
-        assert "Entity.java.tpl" in result.instructions
-        assert "Repository.java.tpl" in result.instructions
-        assert "application.yml.tpl" in result.instructions
+        # Eager per-template MANDATORY-USAGE blocks were replaced by a
+        # single compact pointer; per-template enumeration moved to
+        # contextual surfacing in enrich_prompt / enrich_tool_result so
+        # the catalog no longer pollutes the cacheable system-instruction
+        # prefix.  The pointer must mention the template count and the
+        # discovery tool the model can call to enumerate the catalog.
+        assert "templates available" in result.instructions
+        assert "listAvailableTemplates" in result.instructions
+        assert "writeFileFromTemplate" in result.instructions
 
-        # Index should be populated
+        # Index should be populated regardless of the new presentation.
         assert len(plugin._template_index) == 3
 
-        # Metadata should report standalone count
+        # Metadata should report counts (template_count is the new
+        # cumulative figure; standalone_count remains for parity).
+        assert result.metadata.get("template_count") == 3
         assert result.metadata.get("standalone_count") == 3
 
     def test_enrichment_persists_index(self, plugin, template_dir):

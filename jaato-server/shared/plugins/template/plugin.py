@@ -42,7 +42,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jaato_sdk.plugins.base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
+from jaato_sdk.plugins.base import (
+    PermissionDisplayInfo,
+    PromptEnrichmentResult,
+    SystemInstructionEnrichmentResult,
+    ToolResultEnrichmentResult,
+    UserCommand,
+)
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
 from shared.trace import trace as _trace_write
 
@@ -66,12 +72,21 @@ class TemplateIndexEntry:
         syntax: Detected template syntax ("jinja2" or "mustache").
         variables: Sorted list of variable names required by the template.
         origin: How the template was discovered ("embedded" or "standalone").
+        tags: Topical tags driving prompt/tool-result enrichment matching.
+            Produced upstream by the gen-references agent and persisted in
+            ``index.json``; runtime-discovered entries have an empty list
+            and remain accessible via ``listAvailableTemplates``/``writeFileFromTemplate``
+            tools but do not surface contextually.
+        description: Optional human-readable description (used in enrichment
+            hints when present).
     """
     name: str
     source_path: str  # String for JSON serialization; resolved to Path at lookup
     syntax: str
     variables: List[str] = field(default_factory=list)
     origin: str = "embedded"  # "embedded" or "standalone"
+    tags: List[str] = field(default_factory=list)
+    description: str = ""
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -184,6 +199,12 @@ class TemplatePlugin:
         # templates (left in original location). The model refers to templates
         # by name; the system resolves actual paths via this index.
         self._template_index: Dict[str, TemplateIndexEntry] = {}
+        # Tag-based indexer over the template catalog.  Drives prompt and
+        # tool-result enrichment via shared.tag_coherence (same matcher
+        # used by memory and references plugins).  Re-built whenever the
+        # catalog mutates; see ``_rebuild_indexer``.
+        from .indexer import TemplateIndexer
+        self._indexer = TemplateIndexer()
         # Plugin registry for cross-plugin communication (e.g., querying
         # the references plugin for selected directory sources).
         self._plugin_registry = None
@@ -212,6 +233,7 @@ class TemplatePlugin:
 
         self._initialized = True
         self._load_persisted_index()
+        self._indexer.build_index(list(self._template_index.values()))
         self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
 
     def set_plugin_registry(self, registry) -> None:
@@ -239,6 +261,7 @@ class TemplatePlugin:
         self._base_path = Path(path)
         self._templates_dir = self._base_path / ".jaato" / "templates"
         self._load_persisted_index()
+        self._indexer.build_index(list(self._template_index.values()))
         self._trace(f"set_workspace_path: base_path={self._base_path}, templates_dir={self._templates_dir}")
 
     def _load_persisted_index(self) -> None:
@@ -257,18 +280,31 @@ class TemplatePlugin:
             return
         try:
             data = json.loads(index_path.read_text(encoding="utf-8"))
-            templates = data.get("templates", {})
+            # Two on-disk schemas exist:
+            # 1. Runtime persist: ``{"templates": {name: entry, ...}}``
+            # 2. gen-references:  ``{"entries": [entry, ...], "schema": ...}``
+            # Normalise both into an iterable of (name, entry_dict) pairs.
+            if "entries" in data:
+                pairs = ((e.get("name", ""), e) for e in data.get("entries", []))
+            else:
+                pairs = data.get("templates", {}).items()
+
             loaded = 0
-            for name, entry_data in templates.items():
-                if name not in self._template_index:
-                    self._template_index[name] = TemplateIndexEntry(
-                        name=entry_data.get("name", name),
-                        source_path=entry_data.get("source_path", ""),
-                        syntax=entry_data.get("syntax", "jinja2"),
-                        variables=entry_data.get("variables", []),
-                        origin=entry_data.get("origin", "standalone"),
-                    )
-                    loaded += 1
+            for name, entry_data in pairs:
+                if not name or name in self._template_index:
+                    continue
+                self._template_index[name] = TemplateIndexEntry(
+                    name=entry_data.get("name", name),
+                    # gen-references writes "source"; runtime persist writes
+                    # "source_path".  Accept either so both schemas load.
+                    source_path=entry_data.get("source_path") or entry_data.get("source", ""),
+                    syntax=entry_data.get("syntax", "jinja2"),
+                    variables=entry_data.get("variables", []),
+                    origin=entry_data.get("origin", "standalone"),
+                    tags=entry_data.get("tags", []),
+                    description=entry_data.get("description") or entry_data.get("display_name", ""),
+                )
+                loaded += 1
             if loaded:
                 self._trace(f"_load_persisted_index: loaded {loaded} templates from {index_path}")
         except (json.JSONDecodeError, OSError, KeyError) as exc:
@@ -755,53 +791,44 @@ Template rendering writes files to the workspace."""
         instructions_preview = instructions[:100].replace('\n', '\\n') + ('...' if len(instructions) > 100 else '')
         self._trace(f"enrich_system_instructions called: {len(instructions)} chars, preview: {instructions_preview}")
 
-        annotations: List[str] = []
-
-        # Discover standalone templates from referenced directories
+        # Discover standalone templates from referenced directories and
+        # merge them into the unified index.
         standalone_entries = self._discover_from_references()
         for entry in standalone_entries:
             self._template_index[entry.name] = entry
 
-            # Build annotation for each standalone template
-            if entry.variables:
-                var_list = ", ".join(entry.variables)
-                var_dict_example = ", ".join(f'"{v}": <value>' for v in entry.variables[:3])
-                if len(entry.variables) > 3:
-                    var_dict_example += ", ..."
-            else:
-                var_list = "(none detected)"
-                var_dict_example = ""
-
-            annotations.append(
-                f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {entry.name}\n"
-                f"  Syntax: {entry.syntax}\n"
-                f"  Required variables: [{var_list}]\n"
-                f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                f"  Call: writeFileFromTemplate(\n"
-                f"      template_name=\"{entry.name}\",\n"
-                f"      variables={{{var_dict_example}}},\n"
-                f"      output_path=\"<your-output-file>\"\n"
-                f"  )"
-            )
-
-        # Persist the unified index to disk
+        # Persist the unified index to disk and rebuild the tag indexer
+        # so contextual surfacing reflects the latest catalog.
         self._persist_index()
+        self._indexer.build_index(list(self._template_index.values()))
 
-        if not annotations:
+        total = len(self._template_index)
+        if total == 0:
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
-        # Append annotations to instructions
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
-        enriched_instructions = instructions + annotation_block
+        # Compact pointer in lieu of per-template MANDATORY-USAGE blocks.
+        # Per-template enumeration scaled linearly with the catalog size,
+        # nagged the model about templates unrelated to the task, and
+        # invalidated the cacheable system-instruction prefix on every
+        # catalog change.  Relevant templates now surface contextually
+        # via enrich_prompt / enrich_tool_result using tag-coherence
+        # matching (see TemplateIndexer); the catalog stays discoverable
+        # via listAvailableTemplates.
+        pointer = (
+            f"\n\n---\n"
+            f"📦 {total} template{'s' if total != 1 else ''} available "
+            f"in the unified index.  Relevant ones surface in-context per "
+            f"prompt; call `listAvailableTemplates` for the full catalog "
+            f"or `writeFileFromTemplate(template_name=..., variables={{...}}, "
+            f"output_path=...)` to use one.\n---"
+        )
+        enriched_instructions = instructions + pointer
 
         return SystemInstructionEnrichmentResult(
             instructions=enriched_instructions,
             metadata={
+                "template_count": total,
                 "standalone_count": len(standalone_entries),
-                "standalone_templates": [
-                    {"name": e.name, "path": e.source_path, "variables": e.variables}
-                    for e in standalone_entries
-                ]
             }
         )
 
@@ -829,6 +856,91 @@ Template rendering writes files to the workspace."""
 
         return all_entries
 
+    # ==================== Prompt Enrichment ====================
+
+    def get_enrichment_priority(self) -> int:
+        """Return prompt enrichment priority (lower = earlier).
+
+        Templates run after memory/references contributions so the
+        relevance hints sit close to the bottom of the assembled prompt.
+        """
+        return 60
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Subscribe so user prompts are scanned for tag-coherent template matches."""
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Surface templates whose tags are coherent with the user prompt.
+
+        Mirrors the memory and references plugins' ``enrich_prompt``
+        contract: scans *prompt* with :class:`TemplateIndexer`, formats
+        a compact hint listing matched templates, and appends it to the
+        prompt the model receives.  Untagged templates never surface here
+        — they remain reachable via ``listAvailableTemplates``.
+        """
+        enriched, metadata = self._enrich_text_with_template_hints(prompt)
+        return PromptEnrichmentResult(prompt=enriched, metadata=metadata)
+
+    # ==================== Shared enrichment core ====================
+
+    def _enrich_text_with_template_hints(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """Compute template hints for arbitrary text (prompt or tool result).
+
+        Returns ``(enriched_text, metadata)``.  The same hint format is
+        used on both surfaces so the model sees a consistent block
+        whether the trigger was a user prompt or a tool's output.
+        """
+        if not self._indexer or self._indexer.get_template_count() == 0:
+            return text, {"template_matches": 0}
+
+        matches = self._indexer.find_matches_in_text(text, limit=5)
+        if not matches:
+            return text, {"template_matches": 0}
+
+        triggering_tags = self._indexer.triggering_tags(text, matches)
+
+        # Build the hint block.  Each bullet shows the template name,
+        # its description (when known), and the literal call form so the
+        # model can copy-paste rather than reconstruct argument shape.
+        hint_lines = ["", "📦 **Available Templates** — call by name:"]
+        for entry in matches:
+            desc = entry.description.strip() if entry.description else ""
+            tail = f" — {desc}" if desc else ""
+            hint_lines.append(f"  - `{entry.name}`{tail}")
+            if entry.variables:
+                var_preview = ", ".join(entry.variables[:5])
+                if len(entry.variables) > 5:
+                    var_preview += f", … (+{len(entry.variables) - 5} more)"
+                hint_lines.append(f"    variables: [{var_preview}]")
+        hint_lines.append(
+            "  Use: `writeFileFromTemplate(template_name=<name>, "
+            "variables={...}, output_path=...)`"
+        )
+
+        enriched_text = text + "\n" + "\n".join(hint_lines)
+
+        tag_summary = ", ".join(f'"{t}"' for t in triggering_tags[:3])
+        if len(triggering_tags) > 3:
+            tag_summary += f" +{len(triggering_tags) - 3} more"
+
+        metadata = {
+            "template_matches": len(matches),
+            "matched_names": [e.name for e in matches],
+            "trigger_tags": triggering_tags,
+            "notification": {
+                "message": (
+                    f"surfaced {len(matches)} relevant template"
+                    f"{'s' if len(matches) != 1 else ''}"
+                    + (f" (tags: {tag_summary})" if tag_summary else "")
+                ),
+            },
+            "_telemetry": {
+                "jaato.enrichment.template.contextual_matches": len(matches),
+            },
+        }
+        return enriched_text, metadata
+
     # ==================== Tool Result Enrichment ====================
 
     def get_tool_result_enrichment_priority(self) -> int:
@@ -836,7 +948,8 @@ Template rendering writes files to the workspace."""
         return 40
 
     def subscribes_to_tool_result_enrichment(self) -> bool:
-        """Subscribe to tool result enrichment for template extraction."""
+        """Subscribe to tool result enrichment for template extraction
+        and for contextual template surfacing on tool output."""
         return True
 
     def enrich_tool_result(
@@ -870,7 +983,7 @@ Template rendering writes files to the workspace."""
         # Suppress extraction when file belongs to a reference with standalone templates
         if tool_args and self._should_suppress_extraction(tool_args):
             self._trace("  suppressed: file belongs to reference with contents.templates")
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         # Find all code blocks in the result
         code_blocks = self._find_code_blocks(result)
@@ -885,7 +998,7 @@ Template rendering writes files to the workspace."""
                 code_blocks = [("", result, 0, len(result))]
             else:
                 self._trace("  no code blocks found in tool result")
-                return ToolResultEnrichmentResult(result=result)
+                return self._finalize_tool_result(result)
 
         # Filter to blocks that contain template syntax
         template_blocks = [
@@ -902,7 +1015,7 @@ Template rendering writes files to the workspace."""
                 has_section = bool(MUSTACHE_SECTION_PATTERN.search(content))
                 self._trace(f"  block {i+1}/{len(code_blocks)} lang={lang!r}: var={has_var} section={has_section} preview={preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         self._trace(f"enrich_tool_result: found {len(template_blocks)} template blocks")
 
@@ -979,14 +1092,19 @@ Template rendering writes files to the workspace."""
         self._persist_index()
 
         if not annotations:
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_result = result + annotation_block
 
-        return ToolResultEnrichmentResult(
-            result=enriched_result,
-            metadata={
+        # Embedded extraction added new entries to the catalog — refresh
+        # the tag indexer so subsequent prompts see them.
+        if extracted:
+            self._indexer.build_index(list(self._template_index.values()))
+
+        return self._finalize_tool_result(
+            enriched_result,
+            base_metadata={
                 "extracted_count": len(extracted),
                 "templates": [
                     {"hash": h, "path": str(p), "variables": v}
@@ -995,8 +1113,29 @@ Template rendering writes files to the workspace."""
                 "_telemetry": {
                     "jaato.enrichment.template.extracted_count": len(extracted),
                 },
-            }
+            },
         )
+
+    def _finalize_tool_result(
+        self,
+        result_text: str,
+        base_metadata: Optional[Dict[str, Any]] = None,
+    ) -> ToolResultEnrichmentResult:
+        """Layer contextual template hints on top of any extraction-stage output.
+
+        Every return path of :meth:`enrich_tool_result` routes through here
+        so contextual surfacing (driven by the tag indexer) is consistent
+        across the early-exit paths and the extraction success path.
+
+        ``base_metadata`` carries any extraction-stage telemetry the caller
+        wants to preserve; contextual hint metadata is merged on top
+        (contextual keys never overwrite extraction keys).
+        """
+        enriched, ctx_meta = self._enrich_text_with_template_hints(result_text)
+        metadata: Dict[str, Any] = dict(base_metadata or {})
+        for k, v in ctx_meta.items():
+            metadata.setdefault(k, v)
+        return ToolResultEnrichmentResult(result=enriched, metadata=metadata)
 
     # ==================== Standalone Template Discovery ====================
 
