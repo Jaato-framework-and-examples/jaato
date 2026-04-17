@@ -69,6 +69,67 @@ logger = logging.getLogger(__name__)
 _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 
 
+def _materialize_staged_files(
+    ws_path: Path,
+    staged_files: list,
+) -> int:
+    """Write inline ``staged_files`` entries into a freshly-provisioned workspace.
+
+    The <jaato-task> web component ships files inline on ``session.new``
+    (``[{"name": <relpath>, "data": <base64>}, ...]``) to avoid the
+    HTTP ``/api/task/artifacts`` upload roundtrip and its SSO cookie
+    dependency.  This helper applies the same path-traversal protections
+    as the HTTP route (``routes.py:upload_artifacts``) and the same
+    base64 decoding, then writes each payload under ``ws_path``.
+
+    Unsafe entries (absolute paths, ``..`` components, invalid base64,
+    non-dict entries, missing ``name``) are logged and skipped; the
+    caller never sees an exception.  Extracted as a module-level
+    function so unit tests can exercise the security-sensitive
+    validation without standing up a WebSocket server.
+
+    Args:
+        ws_path: Root of the newly-provisioned workspace.  All writes
+            are rooted here; the protections ensure they stay here.
+        staged_files: Iterable of ``{"name": str, "data": base64_str}``
+            dicts.  Non-dict entries in the list are skipped.
+
+    Returns:
+        The number of files successfully written.
+    """
+    import base64
+
+    written = 0
+    for entry in staged_files or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "")
+        data = entry.get("data", "")
+        if not name:
+            continue
+        # Path-traversal protection — matches routes.py upload validation.
+        clean = Path(name)
+        if clean.is_absolute() or ".." in clean.parts:
+            logger.warning("Rejecting staged_file with unsafe path: %s", name)
+            continue
+        try:
+            # ``validate=True`` — reject non-alphabet characters rather than
+            # silently ignoring them (default).  Without this, malformed
+            # input still produces "valid" output bytes, which is a
+            # security smell even if the name is workspace-bounded.
+            payload = base64.b64decode(data, validate=True)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "Rejecting staged_file %s: invalid base64 (%s)", name, exc,
+            )
+            continue
+        dest = ws_path / clean
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        written += 1
+    return written
+
+
 def load_tls_context(servers_json: Optional[Path] = None) -> Optional[ssl.SSLContext]:
     """Build an ``ssl.SSLContext`` from the ``tls`` section in servers.json.
 
@@ -807,7 +868,18 @@ class JaatoWSServer:
         # When running as part of JaatoDaemon, route session/command events
         # through the CommandRouter for unified dispatch across transports.
         if self._command_router:
-            await self._handle_message_daemon(client_id, event)
+            # Re-parse the raw JSON so side-channel fields (e.g. ``staged_files``
+            # on session.new) are accessible to the daemon handler.  These
+            # fields are NOT part of the typed ``CommandRequest`` dataclass —
+            # they piggyback on the WS JSON envelope so the web component can
+            # ship inline file payloads without a separate HTTP upload.
+            # Re-parsing is cheap (``deserialize_event`` already succeeded, so
+            # the JSON is valid).
+            try:
+                raw_data = json.loads(message)
+            except json.JSONDecodeError:
+                raw_data = None
+            await self._handle_message_daemon(client_id, event, raw_data=raw_data)
             return
 
         # --- Standalone mode ---
@@ -998,7 +1070,12 @@ class JaatoWSServer:
                 client_id, event.provider, event.model, event.api_key,
             )
 
-    async def _handle_message_daemon(self, client_id: str, event: Event) -> None:
+    async def _handle_message_daemon(
+        self,
+        client_id: str,
+        event: Event,
+        raw_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Handle a message when running in daemon mode.
 
         Delegates all events to the ``CommandRouter`` via
@@ -1014,6 +1091,11 @@ class JaatoWSServer:
         Args:
             client_id: The client's ID.
             event: The deserialized event.
+            raw_data: The raw parsed JSON envelope for the message, when
+                available.  Used to access side-channel fields on
+                ``session.new`` such as ``staged_files`` — inline file
+                payloads that aren't part of the typed ``CommandRequest``
+                dataclass but travel alongside it in the WS envelope.
         """
         from jaato_sdk.events import (
             ClientConfigRequest, CommandListRequest, CommandListEvent,
@@ -1068,6 +1150,27 @@ class JaatoWSServer:
                 client_id=client_id,
             )
             if provisioned:
+                # Materialise inline ``staged_files`` into the workspace.
+                # The <jaato-task> web component ships files in the WS
+                # envelope alongside session.new to avoid the HTTP
+                # ``/api/task/artifacts`` roundtrip (which depends on the
+                # dashboard's SSO cookie and breaks cross-origin embeds).
+                # Both ``staged_files`` and the ``--artifacts`` HTTP-upload
+                # path are supported; when both are present they apply in
+                # order (staged_files first, artifacts overlays).
+                staged_files = (
+                    getattr(event, 'staged_files', None)
+                    or (raw_data.get('staged_files') if raw_data else None)
+                )
+                if staged_files:
+                    written = _materialize_staged_files(
+                        Path(provisioned.path), staged_files,
+                    )
+                    logger.info(
+                        "Staged %d file(s) inline into workspace %s",
+                        written, provisioned.path,
+                    )
+
                 # Copy staged artifacts into the workspace if present.
                 # The dashboard passes --artifacts <staging_id> in the
                 # session.new args after uploading via /api/task/artifacts.
