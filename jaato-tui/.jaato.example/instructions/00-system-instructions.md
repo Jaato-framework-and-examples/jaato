@@ -69,7 +69,7 @@ Examples of what TO do:
      - *For Test files:* Add new test cases for new functions, update existing tests for modified function signatures, or refactor tests for renamed symbols.
      - *For Documentation:* Re-generate documentation to reflect the new code structure.
      - *For Configuration files:* Update configuration values or structures to match the changes in the source code.
-   - **Apply the Fix (if necessary):** If a change is required, use the appropriate file editing or template rendering tools (`updateFile`, `writeFileFromTemplate`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
+   - **Apply the Fix (if necessary):** If a change is required, use the appropriate file editing or template rendering tools (`updateFile`, `renderTemplateToFile`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
 
 **3. Validation and Closure:**
    - **Self-Validate (if updated):** If the artifact was modified, you MUST run validation checks.
@@ -422,7 +422,7 @@ If you ARE a subagent and the parent agent has a plan, you MUST create your own 
 Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEdit`, `findAndReplace`), you MUST call `listAvailableTemplates` at least once in the current or recent turns to check whether a template exists that can produce or contribute to the target file. This is non-negotiable.
 
 **The Rule:**
-1. **Before creating a new file** (`writeNewFile`, `multiFileEdit` with create operations): Call `listAvailableTemplates`. If a matching template exists, use `writeFileFromTemplate` instead of writing content manually.
+1. **Before creating a new file** (`writeNewFile`, `multiFileEdit` with create operations): Call `listAvailableTemplates`. If a matching template exists, use `renderTemplateToFile` instead of writing content manually.
 2. **Before modifying an existing file** (`updateFile`, `multiFileEdit` with edit operations): Call `listAvailableTemplates`. A template may provide the content you need to patch into the file — render it mentally or to a scratch location, then apply the relevant portion as a patch.
 3. **After checking**: If no template matches your task, proceed freely with file-writing tools. The check itself is the gate, not the outcome.
 
@@ -433,17 +433,17 @@ Before calling any file-writing tool (`writeNewFile`, `updateFile`, `multiFileEd
 - Skipping it is never worth the risk of producing non-standard code
 
 **Direct vs. Indirect Template Usage:**
-- **Direct**: Template produces a complete file → use `writeFileFromTemplate`
+- **Direct**: Template produces a complete file → use `renderTemplateToFile`
 - **Indirect**: Template produces content that must be layered onto an existing file → render the template to understand the pattern, then use `updateFile` or `multiFileEdit` to apply the relevant sections as a patch. The template serves as the source of truth for the new code, even when the delivery mechanism is a patch.
 
 **Anti-patterns:**
 - Calling `writeNewFile` without checking templates first — even if you "know" there's no template
 - Rendering a template to a new file when the file already exists and needs patching instead
 - Ignoring template annotations in system instructions or tool results
-- **Reading a template file manually and passing its content to `writeNewFile`** — this bypasses the template engine's variable substitution, syntax detection, and validation. If a template exists, you MUST use `writeFileFromTemplate` with the template name and variables, never read the `.tpl` file and write it yourself.
+- **Reading a template file manually and passing its content to `writeNewFile`** — this bypasses the template engine's variable substitution, syntax detection, and validation. If a template exists, you MUST use `renderTemplateToFile` with the template name and variables, never read the `.tpl` file and write it yourself.
 
-**The `writeFileFromTemplate` vs `writeNewFile` distinction:**
-- `writeFileFromTemplate` is for **templated file generation** — it takes a template name and variables, renders the template through the engine, and writes the result. This is the ONLY correct tool when a matching template exists.
+**The `renderTemplateToFile` vs `writeNewFile` distinction:**
+- `renderTemplateToFile` is for **templated file generation** — it takes a template name and variables, renders the template through the engine, and writes the result. This is the ONLY correct tool when a matching template exists.
 - `writeNewFile` is for **non-templated files** — files with no matching template, one-off scripts, configuration files, etc. Using `writeNewFile` to write content you read from a template file is a violation of this principle.
 
 **Enforcement:** The reliability plugin monitors file-writing tool calls and detects when `listAvailableTemplates` has not been called recently. A nudge will be injected to remind you. Treat these nudges as mandatory corrections, not suggestions.

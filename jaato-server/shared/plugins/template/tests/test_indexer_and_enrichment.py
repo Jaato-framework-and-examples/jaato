@@ -168,7 +168,7 @@ class TestEnrichPrompt:
         assert "📦 **Available Templates**" in result.prompt
         assert "RestController.java.tpl" in result.prompt
         assert "Spring REST controller scaffold" in result.prompt
-        assert "writeFileFromTemplate" in result.prompt
+        assert "renderTemplateToFile" in result.prompt
         assert result.metadata["template_matches"] == 1
         assert result.metadata["matched_names"] == ["RestController.java.tpl"]
         assert "rest" in result.metadata["trigger_tags"]

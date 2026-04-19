@@ -75,7 +75,7 @@ class TemplateIndexEntry:
         tags: Topical tags driving prompt/tool-result enrichment matching.
             Produced upstream by the gen-references agent and persisted in
             ``index.json``; runtime-discovered entries have an empty list
-            and remain accessible via ``listAvailableTemplates``/``writeFileFromTemplate``
+            and remain accessible via ``listAvailableTemplates``/``renderTemplateToFile``
             tools but do not surface contextually.
         description: Optional human-readable description (used in enrichment
             hints when present).
@@ -162,7 +162,7 @@ class TemplatePlugin:
     .jaato/templates/index.json for inspectability.
 
     Tools provided:
-    - writeFileFromTemplate: Render a template with variables and write to file
+    - renderTemplateToFile: Render a template with variables and write to file
     - listAvailableTemplates: List all templates in the unified index
     - listTemplateVariables: List all variables required by a template
 
@@ -268,7 +268,7 @@ class TemplatePlugin:
         """Load the template index from .jaato/templates/index.json if it exists.
 
         Seeds ``_template_index`` so that ``listAvailableTemplates`` and
-        ``writeFileFromTemplate`` work immediately, even before the
+        ``renderTemplateToFile`` work immediately, even before the
         references plugin discovers template directories.  Entries loaded
         here are overwritten if the references plugin later discovers the
         same template name (runtime discovery takes precedence).
@@ -354,7 +354,7 @@ class TemplatePlugin:
                         NudgeType.DIRECT_INSTRUCTION,
                         "NOTICE: You called {tool_name} without checking templates first. "
                         "Call listAvailableTemplates before writing files to check if a template "
-                        "can produce or contribute to the target file (directly via writeFileFromTemplate "
+                        "can produce or contribute to the target file (directly via renderTemplateToFile "
                         "or indirectly as a patch source)."
                     ),
                     PatternSeverity.MODERATE: (
@@ -382,7 +382,7 @@ class TemplatePlugin:
         """Return tool schemas for template tools."""
         return [
             ToolSchema(
-                name="writeFileFromTemplate",
+                name="renderTemplateToFile",
                 description=(
                     "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
                     "and write the result to a file. When a template exists for your task (check "
@@ -433,7 +433,7 @@ class TemplatePlugin:
                 name="listAvailableTemplates",
                 description=(
                     "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
-                    "session. If a template exists for your task, you MUST use writeFileFromTemplate "
+                    "session. If a template exists for your task, you MUST use renderTemplateToFile "
                     "instead of writing code manually. Shows both standalone templates (from "
                     "referenced directories) and embedded templates (extracted from documentation)."
                 ),
@@ -469,7 +469,7 @@ class TemplatePlugin:
             ToolSchema(
                 name="listTemplateVariables",
                 description=(
-                    "List all variables required by a template. Call this before writeFileFromTemplate "
+                    "List all variables required by a template. Call this before renderTemplateToFile "
                     "to know exactly what variables to provide. Analyzes the template and returns "
                     "all variable names that need to be substituted."
                 ),
@@ -491,7 +491,7 @@ class TemplatePlugin:
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return executor functions for each tool."""
         return {
-            "writeFileFromTemplate": self._execute_write_file_from_template,
+            "renderTemplateToFile": self._execute_render_template_to_file,
             "listAvailableTemplates": self._execute_list_available,
             "listTemplateVariables": self._execute_list_template_variables,
             "validateTemplateIndex": self._execute_validate_template_index,
@@ -517,12 +517,12 @@ showing the **exact variable names** required. Look for annotations like:
   ...
 ```
 
-**USE THESE EXACT VARIABLE NAMES** when calling writeFileFromTemplate. Do NOT guess or
+**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile. Do NOT guess or
 invent variable names - use the ones shown in the annotation.
 
 ### TEMPLATE TOOLS:
 
-**writeFileFromTemplate(output_path, template_name, variables)** - PREFERRED tool for file generation
+**renderTemplateToFile(output_path, template_name, variables)** - PREFERRED tool for file generation
   - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
   - The system resolves the name to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
@@ -551,13 +551,13 @@ create all necessary parent directories when writing files.
 ```
 # NEVER DO THIS - mkdir with template notation creates literal garbage directories
 cli_based_tool: mkdir -p src/main/java/{{package}}/domain/{model,service}
-writeFileFromTemplate: ...
+renderTemplateToFile: ...
 ```
 
 **CORRECT approach:**
 ```
-# Just call writeFileFromTemplate for each file - directories are created automatically
-writeFileFromTemplate(
+# Just call renderTemplateToFile for each file - directories are created automatically
+renderTemplateToFile(
     output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
     template_name="Entity.java.tpl",
     variables={"Entity": "Customer", "basePackage": "com.bank.customer"}
@@ -569,15 +569,15 @@ writeFileFromTemplate(
 1. **output_path must be a CONCRETE path** - all variables must be substituted BEFORE calling the tool
 2. **NEVER include `{` or `}` in output_path** - these are for template CONTENT only, not file paths
 3. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
-4. **Generate ONE file at a time** - call writeFileFromTemplate once per output file
+4. **Generate ONE file at a time** - call renderTemplateToFile once per output file
 
 **Example - Generating multiple files:**
 ```
-# For each entity, call writeFileFromTemplate with concrete paths:
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
+# For each entity, call renderTemplateToFile with concrete paths:
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
 ```
 
 ### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
@@ -591,14 +591,14 @@ call `listAvailableTemplates` at least once in the current or recent turns:
 
 **The workflow is always:**
 1. Call `listAvailableTemplates` to check what templates are available
-2. If a template matches your task **directly** → use `writeFileFromTemplate`
+2. If a template matches your task **directly** → use `renderTemplateToFile`
 3. If a template matches your task **indirectly** (the template provides content
    that should be layered onto an existing file) → render it mentally, then apply
    the relevant sections via `updateFile` or `multiFileEdit` as a patch
 4. If NO template matches → proceed freely with file-writing tools
 
 **Direct vs. Indirect Template Usage:**
-- **Direct**: Template produces a complete new file → `writeFileFromTemplate`
+- **Direct**: Template produces a complete new file → `renderTemplateToFile`
 - **Indirect**: Template provides a pattern or code fragment that must be merged
   into an existing file (e.g., adding resilience annotations to a Java class).
   The template is the **source of truth** for the new code — render it to
@@ -614,7 +614,7 @@ mandatory corrections — call `listAvailableTemplates` and re-evaluate before p
 Do NOT read `.tpl`/`.tmpl` template files with file-reading tools and then pass the content
 to `writeNewFile`. This bypasses the template engine's variable substitution, syntax
 detection, and validation. The ONLY correct way to use a template is:
-- `writeFileFromTemplate(template_name="...", variables={...}, output_path="...")`
+- `renderTemplateToFile(template_name="...", variables={...}, output_path="...")`
 
 The template engine resolves the file location, detects syntax (Jinja2/Mustache),
 substitutes variables, and writes the result. Manual reading and writing skips all of this.
@@ -681,7 +681,7 @@ Template rendering writes files to the workspace."""
     ) -> Optional[PermissionDisplayInfo]:
         """Format permission request for file writing tools.
 
-        Provides custom display formatting for writeFileFromTemplate to show
+        Provides custom display formatting for renderTemplateToFile to show
         the user what file will be created and with what content.
 
         Args:
@@ -692,7 +692,7 @@ Template rendering writes files to the workspace."""
         Returns:
             PermissionDisplayInfo with formatted content, or None to use default.
         """
-        if tool_name != "writeFileFromTemplate":
+        if tool_name != "renderTemplateToFile":
             return None
 
         output_path = arguments.get("output_path", "")
@@ -819,7 +819,7 @@ Template rendering writes files to the workspace."""
             f"📦 {total} template{'s' if total != 1 else ''} available "
             f"in the unified index.  Relevant ones surface in-context per "
             f"prompt; call `listAvailableTemplates` for the full catalog "
-            f"or `writeFileFromTemplate(template_name=..., variables={{...}}, "
+            f"or `renderTemplateToFile(template_name=..., variables={{...}}, "
             f"output_path=...)` to use one.\n---"
         )
         enriched_instructions = instructions + pointer
@@ -914,7 +914,7 @@ Template rendering writes files to the workspace."""
                     var_preview += f", … (+{len(entry.variables) - 5} more)"
                 hint_lines.append(f"    variables: [{var_preview}]")
         hint_lines.append(
-            "  Use: `writeFileFromTemplate(template_name=<name>, "
+            "  Use: `renderTemplateToFile(template_name=<name>, "
             "variables={...}, output_path=...)`"
         )
 
@@ -1066,7 +1066,7 @@ Template rendering writes files to the workspace."""
                     f"  Syntax: {syntax}\n"
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: writeFileFromTemplate(\n"
+                    f"  Call: renderTemplateToFile(\n"
                     f"      template_name=\"{rel_path}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
@@ -2037,7 +2037,7 @@ Template rendering writes files to the workspace."""
         standalone templates (discovered in referenced directories, left
         in their original location).
 
-        Each entry includes the template name (used for writeFileFromTemplate),
+        Each entry includes the template name (used for renderTemplateToFile),
         its origin, syntax, required variables, and source path.
         """
         if not self._template_index:
@@ -2078,8 +2078,8 @@ Template rendering writes files to the workspace."""
             },
         }
 
-    def _execute_write_file_from_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute writeFileFromTemplate tool.
+    def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute renderTemplateToFile tool.
 
         Renders a template and writes the result to a file.
         Supports both Jinja2 and Mustache template syntax (auto-detected).
@@ -2174,7 +2174,7 @@ Template rendering writes files to the workspace."""
                 "output_path": str(out_path)
             }
 
-        self._trace(f"writeFileFromTemplate: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
+        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
 
         return {
             "success": True,
