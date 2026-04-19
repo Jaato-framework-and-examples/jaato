@@ -188,6 +188,7 @@ class AgentUIHooks(Protocol):
         success: bool,
         token_usage: Optional[Dict[str, int]] = None,
         turns_used: Optional[int] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> None: ...
 
     def on_agent_turn_completed(

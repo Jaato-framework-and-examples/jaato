@@ -37,6 +37,7 @@ dependencies = [
     "psutil>=5.0.0",  # Cross-platform: server health metrics (CPU/memory monitoring)
     "watchdog>=4.0.0",  # server/workspace_monitor.py: real-time filesystem monitoring with debounce buffering
     "rich>=13.0.0",  # Shared plugins: terminal formatting (tables, panels, syntax highlighting)
+    "jsonschema>=4.0.0",  # signal_completion typed payload validation against profile-declared completion_payload_schema
 ]
 
 [project.urls]

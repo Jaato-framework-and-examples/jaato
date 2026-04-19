@@ -843,6 +843,7 @@ class JaatoRuntime:
         system_instruction_override: Optional[str] = None,
         suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
+        completion_payload_schema: Optional[Any] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -915,6 +916,7 @@ class JaatoRuntime:
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=suppress_base_instructions,
             workspace_path=workspace_path,
+            completion_payload_schema=completion_payload_schema,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

@@ -426,3 +426,107 @@ class TestNoInheritance:
         resolved, errors = resolve_profiles({})
         assert not errors
         assert resolved == {}
+
+
+class TestCompletionPayloadSchemaInheritance:
+    """Scalar-override semantics for completion_payload_schema."""
+
+    SAMPLE = {"type": "object", "properties": {"summary": {"type": "string"}}}
+    OTHER = {"type": "object", "properties": {"foo": {"type": "string"}}}
+
+    def test_child_inherits_parent_schema(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.SAMPLE
+
+    def test_child_overrides_parent_schema(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                completion_payload_schema=self.OTHER,
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.OTHER
+
+    def test_two_parents_disagree_is_conflict(self):
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                completion_payload_schema=self.OTHER,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert "child" in errors
+        assert "completion_payload_schema" in errors["child"]
+
+    def test_two_parents_disagree_child_overrides_resolves(self):
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                completion_payload_schema=self.OTHER,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                completion_payload_schema=self.SAMPLE,
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.SAMPLE
+
+    def test_path_string_inherited(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema="triage.json",
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == "triage.json"
+
+    def test_no_schema_anywhere_stays_none(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema is None

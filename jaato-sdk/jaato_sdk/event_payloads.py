@@ -168,6 +168,11 @@ class AgentCompletedPayload(TypedDict):
     """EventType.AGENT_COMPLETED — agent finished its task.
 
     Source: ``AgentCompletedEvent``
+
+    The ``payload`` field carries the validated typed payload from
+    ``signal_completion`` when the agent's profile declared a
+    ``completion_payload_schema``. Absent (or ``None``) when the
+    profile uses the legacy untyped ``summary`` parameter.
     """
     agent_id: str
     completed_at: str
@@ -175,6 +180,7 @@ class AgentCompletedPayload(TypedDict):
     token_usage: NotRequired[Optional[Dict[str, int]]]
     turns_used: NotRequired[Optional[int]]
     error: NotRequired[str]
+    payload: NotRequired[Optional[Dict[str, Any]]]
 
 
 class ToolCallStartedPayload(TypedDict):

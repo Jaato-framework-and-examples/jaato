@@ -1546,6 +1546,11 @@ class JaatoServer:
             if self._profile.provider:
                 kwargs["provider_name"] = self._profile.provider
 
+            if self._profile.completion_payload_schema is not None:
+                kwargs["completion_payload_schema"] = (
+                    self._profile.completion_payload_schema
+                )
+
         # Apply the per-session system-instruction knobs last so they
         # win over any profile-supplied system_instructions.  Distinct
         # from None (which means "no override") — the empty string is a
@@ -1832,7 +1837,8 @@ class JaatoServer:
                 ))
 
             def on_agent_completed(self, agent_id, completed_at, success,
-                                   token_usage=None, turns_used=None, error=""):
+                                   token_usage=None, turns_used=None, error="",
+                                   payload=None):
                 # Convert datetime to isoformat string if needed
                 completed_at_str = completed_at
                 if completed_at and hasattr(completed_at, 'isoformat'):
@@ -1850,6 +1856,7 @@ class JaatoServer:
                     token_usage=token_usage,
                     turns_used=turns_used,
                     error=error,
+                    payload=payload,
                 ))
 
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,

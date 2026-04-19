@@ -562,6 +562,16 @@ class SubagentProfile:
             profile inherits fields from its parents. Resolved during
             ``discover_profiles()`` — after resolution, ``inherits`` is
             cleared and the profile is fully flattened.
+        completion_payload_schema: Optional JSON Schema constraining the
+            ``payload`` argument of ``signal_completion``. Either an inline
+            dict or a string path resolved via the
+            ``.jaato/completion_schemas/`` tier (absolute → workspace →
+            home). When set, ``signal_completion``'s parameters carry the
+            schema so providers enforce it at sampling time and
+            ``LifecycleTools`` validates the payload server-side before
+            emitting ``AgentCompletedEvent``. When ``None``, the legacy
+            ``summary: str`` parameter is used. Inheritance follows the
+            scalar-override rule (parents must agree or child overrides).
     """
     name: str
     description: str
@@ -575,6 +585,7 @@ class SubagentProfile:
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
     inherits: Optional[List[str]] = None
+    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -813,6 +824,13 @@ def _merge_profiles(
     # gc: agreement-or-override (compare as dicts for equality)
     merged_gc = _resolve_scalar('gc', child.gc)
 
+    # completion_payload_schema: scalar-override (parents must agree or
+    # child overrides). Inline dicts and string paths both compared as-is
+    # via str() in _resolve_scalar.
+    merged_completion_schema = _resolve_scalar(
+        'completion_payload_schema', child.completion_payload_schema
+    )
+
     # --- Concatenation: system_instructions ---
     instruction_parts = []
     for parent in parents:
@@ -847,6 +865,7 @@ def _merge_profiles(
         gc=merged_gc,
         env=merged_env,
         inherits=None,  # Fully resolved
+        completion_payload_schema=merged_completion_schema,
     )
 
 
@@ -973,6 +992,7 @@ def _scan_profiles_dir(
             gc=gc_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
+            completion_payload_schema=data.get('completion_payload_schema'),
         )
         if data.get('system_instructions'):
             import warnings
@@ -1104,6 +1124,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             gc=gc_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
+            completion_payload_schema=data.get('completion_payload_schema'),
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -1328,6 +1349,7 @@ class SubagentConfig:
                 gc=gc_config,
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
+                completion_payload_schema=profile_data.get('completion_payload_schema'),
             )
 
         return cls(

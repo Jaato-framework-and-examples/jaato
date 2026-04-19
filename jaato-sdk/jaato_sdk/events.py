@@ -243,7 +243,16 @@ class AgentStatusChangedEvent(Event):
 
 @dataclass
 class AgentCompletedEvent(Event):
-    """Agent has completed its task."""
+    """Agent has completed its task.
+
+    The ``payload`` field carries the validated typed payload from
+    ``signal_completion`` when the agent's profile declared a
+    ``completion_payload_schema``. Reactor consumers should prefer
+    ``payload`` (structured fields) over ``summary`` (free text). When
+    the profile did not declare a schema, ``payload`` is ``None`` and
+    consumers fall back to reading the legacy ``summary`` field on the
+    associated tool result.
+    """
     type: EventType = field(default=EventType.AGENT_COMPLETED)
     agent_id: str = ""
     completed_at: str = ""
@@ -251,6 +260,7 @@ class AgentCompletedEvent(Event):
     token_usage: Optional[Dict[str, int]] = None
     turns_used: Optional[int] = None
     error: str = ""  # Cancellation reason or error message
+    payload: Optional[Dict[str, Any]] = None  # Validated typed payload from signal_completion
 
 
 @dataclass

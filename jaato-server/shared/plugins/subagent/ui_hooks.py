@@ -96,7 +96,8 @@ class AgentUIHooks(Protocol):
         completed_at: datetime,
         success: bool,
         token_usage: Optional[Dict[str, int]] = None,
-        turns_used: Optional[int] = None
+        turns_used: Optional[int] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Called when agent completes execution.
 
@@ -107,6 +108,12 @@ class AgentUIHooks(Protocol):
             token_usage: Dict with "prompt_tokens", "output_tokens", "total_tokens".
                         None if not available.
             turns_used: Number of conversation turns used. None if not available.
+            payload: Validated typed payload from ``signal_completion`` when
+                the agent's profile declared a ``completion_payload_schema``.
+                None when the profile uses the legacy untyped ``summary``
+                parameter or when this is a subagent completion (subagents
+                don't currently declare schemas — V1 scope is main-agent
+                completion via the lifecycle tool).
         """
         ...
 

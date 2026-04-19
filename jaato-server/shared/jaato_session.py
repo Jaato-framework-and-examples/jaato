@@ -212,6 +212,12 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # Profile-declared JSON Schema for signal_completion's payload parameter.
+        # Either an inline dict or a string path resolved via
+        # .jaato/completion_schemas/. ``LifecycleTools`` consults this field at
+        # construction time; when present the legacy ``summary: str`` parameter
+        # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
+        self._completion_payload_schema: Optional[Any] = None
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
@@ -1213,6 +1219,7 @@ class JaatoSession:
         system_instruction_override: Optional[str] = None,
         suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
+        completion_payload_schema: Optional[Any] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1255,6 +1262,11 @@ class JaatoSession:
         # Session-level workspace override
         if workspace_path is not None:
             self._workspace_path = workspace_path
+
+        # Profile-declared completion payload schema (raw — resolved by
+        # LifecycleTools at construction time using session.workspace_path)
+        if completion_payload_schema is not None:
+            self._completion_payload_schema = completion_payload_schema
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
