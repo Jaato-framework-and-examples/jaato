@@ -54,10 +54,36 @@ class TestApplyPresentationToPipeline:
         pipeline = MagicMock()
         server._apply_presentation_to_pipeline(pipeline)
         pipeline.set_client_type.assert_called_once()
-        # The value passed is whatever str() of the enum produces — just
-        # confirm it carries "web" information, exact format is not the contract.
+        # Formatters compare against literal "web" / "terminal" / etc., so
+        # the contract IS the exact enum value string — not the enum's repr.
         call_arg = pipeline.set_client_type.call_args[0][0]
-        assert "web" in call_arg.lower()
+        assert call_arg == "web", (
+            f"expected exact value 'web', got {call_arg!r} — "
+            f"likely str(enum) sneaking in instead of enum.value"
+        )
+
+    def test_terminal_client_routed_to_terminal_string(self):
+        """Regression test: TUI must receive 'terminal', not 'ClientType.TERMINAL'.
+
+        The code_block_formatter and table_formatter check
+        ``self._client_type != "terminal"`` to decide between Rich/ANSI
+        rendering and semantic ``<j-code>`` / ``<j-table>`` markup.  If the
+        propagation passes ``str(ClientType.TERMINAL)`` (which produces
+        ``"ClientType.TERMINAL"`` because ClientType is a (str, Enum)
+        mixin), the comparison falsely returns True and the TUI gets
+        unrendered semantic markup instead of syntax-highlighted code.
+        """
+        server = _make_server()
+        server._presentation_context = PresentationContext(
+            client_type=ClientType.TERMINAL
+        )
+        pipeline = MagicMock()
+        server._apply_presentation_to_pipeline(pipeline)
+        call_arg = pipeline.set_client_type.call_args[0][0]
+        assert call_arg == "terminal", (
+            f"TUI got {call_arg!r} — formatters will treat this as "
+            f"non-terminal and emit <j-code> markup instead of ANSI"
+        )
 
     def test_skips_pipeline_without_set_client_type(self):
         """Some pipeline implementations may not expose set_client_type."""
@@ -105,7 +131,8 @@ class TestLazyAgentPipelineInheritsClientType:
         result = server._get_agent_pipeline("subagent_1")
 
         assert result is created_pipeline
-        # The lazily-created pipeline must have received client_type.
+        # The lazily-created pipeline must have received client_type as
+        # the exact enum value string the formatters compare against.
         created_pipeline.set_client_type.assert_called_once()
         call_arg = created_pipeline.set_client_type.call_args[0][0]
-        assert "web" in call_arg.lower()
+        assert call_arg == "web"

@@ -449,7 +449,13 @@ class JaatoServer:
 
         client_type = getattr(ctx, 'client_type', None)
         if client_type and hasattr(pipeline, 'set_client_type'):
-            pipeline.set_client_type(str(client_type))
+            # ClientType is a (str, Enum) mixin — str(enum_member) returns
+            # "ClientType.TERMINAL", not "terminal".  Use .value (or pass
+            # the str-like enum through directly) so formatters comparing
+            # against literal "terminal" route the TUI to its ANSI path
+            # instead of falling through to the semantic <j-code> markup.
+            ct_str = client_type.value if hasattr(client_type, 'value') else str(client_type)
+            pipeline.set_client_type(ct_str)
 
     def set_apparmor_confinement(
         self,
