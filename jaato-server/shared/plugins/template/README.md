@@ -4,12 +4,12 @@ The template plugin provides Jinja2-based template rendering and automatic extra
 
 ## Features
 
-### 1. Template Rendering (`writeFileFromTemplate`)
+### 1. Template Rendering (`renderTemplateToFile`)
 
 Render Jinja2 templates with variable substitution and write results to files.
 
 ```python
-writeFileFromTemplate(
+renderTemplateToFile(
     template="Hello {{ name }}, welcome to {{ project }}!",
     variables={"name": "Alice", "project": "jaato"},
     output_path="greeting.txt"
@@ -19,7 +19,7 @@ writeFileFromTemplate(
 Or use a template file:
 
 ```python
-writeFileFromTemplate(
+renderTemplateToFile(
     template_path=".jaato/templates/service.java.tmpl",
     variables={"className": "OrderService", "package": "com.example"},
     output_path="src/main/java/com/example/OrderService.java"
@@ -59,17 +59,17 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │  **Extracted Templates:**                                       │
 │  [Template extracted: .jaato/templates/mod-code-001-basic...]   │
 │    Variables: circuitBreakerName, fallbackMethodName, ...       │
-│    Use: writeFileFromTemplate(template_path="...", variables={...})    │
+│    Use: renderTemplateToFile(template_path="...", variables={...})    │
 │  ---                                                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3. Simple Template Rendering (`writeFileFromTemplate`)
+### 3. Simple Template Rendering (`renderTemplateToFile`)
 
 A convenience tool for simple `{{variable}}` substitution that writes directly to a file:
 
 ```python
-writeFileFromTemplate(
+renderTemplateToFile(
     output_path="/src/main/java/com/bank/CustomerService.java",
     template_path="/templates/service.java.tmpl",
     variables={"class_name": "CustomerService", "package": "com.bank.customer"}
@@ -79,7 +79,7 @@ writeFileFromTemplate(
 Or with an inline template:
 
 ```python
-writeFileFromTemplate(
+renderTemplateToFile(
     output_path="/src/CustomerService.java",
     template="package {{package}};\n\npublic class {{class_name}} {}",
     variables={"class_name": "CustomerService", "package": "com.bank"}
@@ -130,7 +130,7 @@ the `gen-references` agent that catalogs a knowledge base or repository
 of templates).  Runtime-discovered templates (scanned ad-hoc from
 referenced directories without an index file) carry no tags and
 therefore never surface contextually — they remain reachable via
-`listAvailableTemplates` and `writeFileFromTemplate`.
+`listAvailableTemplates` and `renderTemplateToFile`.
 
 **Index entry schema** (per template):
 
@@ -160,7 +160,7 @@ The plugin accepts both on-disk schemas:
     variables: [entity, package]
   - `Entity.java.tpl` — JPA entity scaffold
     variables: [name, package]
-  Use: `writeFileFromTemplate(template_name=<name>, variables={...}, output_path=...)`
+  Use: `renderTemplateToFile(template_name=<name>, variables={...}, output_path=...)`
 ```
 
 **Surfacing rules** (mirrored across `enrich_prompt` and
@@ -183,7 +183,7 @@ The plugin accepts both on-disk schemas:
 Per-template `MANDATORY USAGE` blocks are no longer dumped into system
 instructions on every turn.  The plugin emits a single one-line pointer
 (`📦 N templates available; call listAvailableTemplates for the catalog
-or writeFileFromTemplate to use one`).  Catalog growth no longer
+or renderTemplateToFile to use one`).  Catalog growth no longer
 invalidates the cacheable system-instruction prefix, and the model is
 no longer nagged about templates unrelated to the current task.
 
@@ -205,7 +205,7 @@ listAvailableTemplates()
 
 ## Template Syntax
 
-### For `writeFileFromTemplate` (Full Jinja2)
+### For `renderTemplateToFile` (Full Jinja2)
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
@@ -214,7 +214,7 @@ listAvailableTemplates()
 | `{% for %}` | Loop | `{% for item in items %}...{% endfor %}` |
 | `{{ x \| filter }}` | Filters | `{{ name \| upper }}` |
 
-### For `writeFileFromTemplate` (Simple)
+### For `renderTemplateToFile` (Simple)
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
@@ -281,12 +281,12 @@ This directory can be gitignored as templates are extracted on-demand.
 
 ## Security
 
-**For `writeFileFromTemplate` (Jinja2):**
+**For `renderTemplateToFile` (Jinja2):**
 - Uses Jinja2's `SandboxedEnvironment` to prevent arbitrary code execution
 - `{% include %}` and `{% import %}` are disabled
 - `StrictUndefined` mode catches typos in variable names
 
-**For `writeFileFromTemplate` (simple):**
+**For `renderTemplateToFile` (simple):**
 - Uses regex-based substitution (no code execution risk)
 - Validates all template variables are provided
 - Prevents accidental file overwrite (requires explicit `overwrite=true`)
@@ -297,12 +297,12 @@ This directory can be gitignored as templates are extracted on-demand.
 
 ## Dependencies
 
-Jinja2 is required for `writeFileFromTemplate` (full Jinja2 mode) only:
+Jinja2 is required for `renderTemplateToFile` (full Jinja2 mode) only:
 
 ```bash
 pip install Jinja2
 ```
 
-The plugin gracefully reports if Jinja2 is not installed when `writeFileFromTemplate` is called.
+The plugin gracefully reports if Jinja2 is not installed when `renderTemplateToFile` is called.
 
-**Note:** `writeFileFromTemplate` (simple mode) does not require Jinja2—it uses built-in regex substitution.
+**Note:** `renderTemplateToFile` (simple mode) does not require Jinja2—it uses built-in regex substitution.

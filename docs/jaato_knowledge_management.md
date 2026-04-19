@@ -419,7 +419,7 @@ The template plugin runs after references, processing the content that reference
 │  │  Append annotations to system instructions:                   │    │
 │  │  "TEMPLATE AVAILABLE: Entity.java.tpl                         │    │
 │  │   Variables: Entity, basePackage, entityFields                │    │
-│  │   Use: writeFileFromTemplate(template_name="Entity.java.tpl", ...)" │    │
+│  │   Use: renderTemplateToFile(template_name="Entity.java.tpl", ...)" │    │
 │  │                                                               │    │
 │  │  Persist index to .jaato/templates/index.json                 │    │
 │  └─────────────────────────────────────────────────────────────┘    │
@@ -514,7 +514,7 @@ When the system makes implicit decisions (transitive selections, tag matches), i
 │     │  "TEMPLATE AVAILABLE: Entity.java.tpl                     │    │
 │     │   Syntax: mustache                                        │    │
 │     │   Variables: Entity, basePackage, entityFields             │    │
-│     │   Use: writeFileFromTemplate(template_name=...)"                 │    │
+│     │   Use: renderTemplateToFile(template_name=...)"                 │    │
 │     └──────────────────────────────────────────────────────────┘    │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -542,7 +542,7 @@ All templates -- whether extracted from documentation or discovered as standalon
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  Model refers to templates BY NAME only:                             │
-│  writeFileFromTemplate(template_name="Entity.java.tpl", ...)               │
+│  renderTemplateToFile(template_name="Entity.java.tpl", ...)               │
 │       │                                                              │
 │       ▼                                                              │
 │  ┌─────────────────────────────────────────────────────────────┐    │
@@ -626,7 +626,7 @@ The template plugin exposes three tools for code generation:
 
 | Tool | Purpose | Discoverability |
 |------|---------|----------------|
-| `writeFileFromTemplate` | Render template and write to file with overwrite control | Discoverable |
+| `renderTemplateToFile` | Render template and write to file with overwrite control | Discoverable |
 | `listAvailableTemplates` | List all templates in the unified index | Discoverable |
 | `listTemplateVariables` | List variables required by a specific template | Discoverable |
 
@@ -637,7 +637,7 @@ The template plugin exposes three tools for code generation:
 │                    TEMPLATE RENDERING FLOW                            │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  writeFileFromTemplate(                                               │
+│  renderTemplateToFile(                                               │
 │    template_name="Repository.java.tpl",                              │
 │    variables={"Entity": "Customer", "basePackage": "com.bank"},      │
 │    output_path="src/.../CustomerRepository.java"                     │
@@ -783,7 +783,7 @@ End-to-end flow from configuration to code generation:
 │           │                                                          │
 │           ▼                                                          │
 │  ┌─────────────────┐                                                │
-│  │  GENERATE        │  Model uses writeFileFromTemplate with indexed  │
+│  │  GENERATE        │  Model uses renderTemplateToFile with indexed  │
 │  │  (code)          │  templates and resolved variables               │
 │  │                  │  → Consistent, pattern-compliant output        │
 │  └─────────────────┘                                                │

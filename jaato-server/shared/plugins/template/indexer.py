@@ -8,7 +8,7 @@ Templates are tagged upstream by the ``gen-references`` agent and the tags
 arrive on each :class:`TemplateIndexEntry` via the persisted ``index.json``.
 Runtime-discovered templates (scanned from referenced directories without an
 index file) carry no tags and are not surfaced contextually — they remain
-accessible via ``listAvailableTemplates`` and ``writeFileFromTemplate``.
+accessible via ``listAvailableTemplates`` and ``renderTemplateToFile``.
 
 This module deliberately omits the lifecycle complexity that ``memory`` has
 (maturity states) and the dual-store split (workspace vs global): templates

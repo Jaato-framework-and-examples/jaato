@@ -450,13 +450,13 @@ class TestReferenceIntegration:
 
 class TestRenderWithIndex:
     def test_render_template_by_name(self, plugin, template_dir):
-        """writeFileFromTemplate should resolve template_name via index."""
+        """renderTemplateToFile should resolve template_name via index."""
         entries = plugin._discover_standalone_templates(template_dir)
         for entry in entries:
             plugin._template_index[entry.name] = entry
 
         output_file = plugin._base_path / "output" / "CustomerRepository.java"
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template_name": "Repository.java.tpl",
             "variables": {
                 "basePackage": "com.bank.customer",
@@ -474,7 +474,7 @@ class TestRenderWithIndex:
 
     def test_render_template_name_not_found(self, plugin):
         """Should return error when template name isn't in index."""
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template_name": "NonExistent.java.tpl",
             "variables": {},
             "output_path": "/tmp/out.java",
@@ -528,7 +528,7 @@ class TestEnrichmentWithStandalone:
         # discovery tool the model can call to enumerate the catalog.
         assert "templates available" in result.instructions
         assert "listAvailableTemplates" in result.instructions
-        assert "writeFileFromTemplate" in result.instructions
+        assert "renderTemplateToFile" in result.instructions
 
         # Index should be populated regardless of the new presentation.
         assert len(plugin._template_index) == 3
@@ -742,15 +742,15 @@ class TestMustacheDottedPaths:
         assert error is None
         assert rendered == "deep"
 
-    def test_writeFileFromTemplate_with_dotted_sections(self, plugin):
-        """writeFileFromTemplate should handle dotted section paths."""
+    def test_renderTemplateToFile_with_dotted_sections(self, plugin):
+        """renderTemplateToFile should handle dotted section paths."""
         template = (
             "{{#fields}}"
             "{{#validation.required}}required: {{fieldName}}\n{{/validation.required}}"
             "{{/fields}}"
         )
         output_file = plugin._base_path / "output" / "test.txt"
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template": template,
             "variables": {
                 "fields": [
@@ -876,10 +876,10 @@ class TestGeneratedAnnotationStripping:
         assert "@module mod-015" in result
         assert "@generated" not in result
 
-    def test_writeFileFromTemplate_with_generated_annotation(self, plugin):
-        """End-to-end: writeFileFromTemplate succeeds despite @generated."""
+    def test_renderTemplateToFile_with_generated_annotation(self, plugin):
+        """End-to-end: renderTemplateToFile succeeds despite @generated."""
         output_file = plugin._base_path / "output" / "CustomerId.java"
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template": self.JAVA_TEMPLATE_WITH_GENERATED,
             "variables": {
                 "basePackage": "com.bank.customer",
@@ -1090,8 +1090,8 @@ class TestListMetadataInjection:
         assert error is None
         assert rendered == "[a, b, c]"
 
-    def test_writeFileFromTemplate_entity_no_trailing_comma(self, plugin):
-        """End-to-end: writeFileFromTemplate renders Entity.java.tpl pattern correctly."""
+    def test_renderTemplateToFile_entity_no_trailing_comma(self, plugin):
+        """End-to-end: renderTemplateToFile renders Entity.java.tpl pattern correctly."""
         template = textwrap.dedent("""\
             public class Order {
                 public static Order create({{#entityFields}}{{fieldType}} {{fieldName}}{{^last}}, {{/last}}{{/entityFields}}) {
@@ -1100,7 +1100,7 @@ class TestListMetadataInjection:
             }
         """)
         output_file = plugin._base_path / "output" / "Order.java"
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template": template,
             "variables": {
                 "entityFields": [
@@ -1270,10 +1270,10 @@ class TestSpringBootPlaceholderCollision:
         for v in variables:
             assert not v.startswith("{"), f"Bogus variable with leading brace: {v}"
 
-    # -- writeFileFromTemplate end-to-end --
+    # -- renderTemplateToFile end-to-end --
 
-    def test_writeFileFromTemplate_spring_placeholder(self, plugin):
-        """End-to-end: writeFileFromTemplate with Spring Boot placeholder collision.
+    def test_renderTemplateToFile_spring_placeholder(self, plugin):
+        """End-to-end: renderTemplateToFile with Spring Boot placeholder collision.
 
         Includes a Mustache section (``{{#feign}}...{{/feign}}``) so that
         syntax auto-detection routes to the Mustache engine, matching how
@@ -1296,7 +1296,7 @@ class TestSpringBootPlaceholderCollision:
             {{/feign}}
         """)
         output_file = plugin._base_path / "output" / "application-integration.yml"
-        result = plugin._execute_write_file_from_template({
+        result = plugin._execute_render_template_to_file({
             "template": template,
             "variables": {
                 "apiName": "orders",

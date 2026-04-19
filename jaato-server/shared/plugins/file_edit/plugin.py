@@ -396,7 +396,7 @@ class FileEditPlugin:
                            "Fails if the file already exists. "
                            "NOTE: This tool is for NON-TEMPLATED files only. "
                            "If a matching template exists (check listAvailableTemplates), "
-                           "you MUST use writeFileFromTemplate instead — do NOT read "
+                           "you MUST use renderTemplateToFile instead — do NOT read "
                            "a .tpl file and pass its content here.",
                 parameters={
                     "type": "object",
