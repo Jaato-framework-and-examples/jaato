@@ -431,8 +431,17 @@ class TableFormatterPlugin:
 
     # ==================== Table Rendering ====================
 
+    # Minimum width a single column may be shrunk to before we stop
+    # reducing further. Keeps at least a few characters visible per cell.
+    _MIN_COL_WIDTH = 3
+
     def _render_markdown_table(self, text: str) -> str:
-        """Render a markdown table with box-drawing characters."""
+        """Render a markdown table with box-drawing characters.
+
+        If the natural table width exceeds ``self._console_width``, wider
+        columns are shrunk and their content is wrapped across multiple
+        visual lines so that the rendered table fits within the terminal.
+        """
         headers, rows, alignments = self._parse_markdown_table(text)
 
         if not headers and not rows:
@@ -454,7 +463,7 @@ class TableFormatterPlugin:
         while len(alignments) < num_cols:
             alignments.append("left")
 
-        # Calculate max width for each column
+        # Calculate max width for each column (natural width)
         col_widths = []
         for col_idx in range(num_cols):
             max_width = 0
@@ -462,6 +471,9 @@ class TableFormatterPlugin:
                 if col_idx < len(row):
                     max_width = max(max_width, _display_width(row[col_idx]))
             col_widths.append(max(max_width, 1))  # Minimum width of 1
+
+        # Shrink columns so the rendered table fits within console_width.
+        col_widths = self._shrink_widths(col_widths, self._console_width)
 
         # Build the table
         lines = []
@@ -471,17 +483,138 @@ class TableFormatterPlugin:
 
         # Header row (if present)
         if headers:
-            lines.append(self._make_row(headers, col_widths, alignments))
+            lines.extend(self._make_row_lines(headers, col_widths, alignments))
             lines.append(self._make_border("middle", col_widths))
 
-        # Data rows
+        # Data rows (each row may expand into multiple visual lines)
         for row in rows:
-            lines.append(self._make_row(row, col_widths, alignments))
+            lines.extend(self._make_row_lines(row, col_widths, alignments))
 
         # Bottom border
         lines.append(self._make_border("bottom", col_widths))
 
         return "\n".join(lines) + "\n"
+
+    def _shrink_widths(self, col_widths: List[int], max_total: int) -> List[int]:
+        """Reduce column widths so the whole table fits within ``max_total``.
+
+        Overhead per table line is ``3 * num_cols + 1`` characters
+        (left+right borders, one separator between each cell pair, and
+        two padding spaces per cell). Remaining budget is divided among
+        columns; columns wider than their budget are shrunk — widest
+        first — down to ``_MIN_COL_WIDTH``. If even the minimum layout
+        exceeds ``max_total`` (very narrow terminal, many columns), the
+        minimum layout is returned anyway rather than producing a
+        degenerate / zero-width column.
+
+        Args:
+            col_widths: Natural column widths (from content measurement).
+            max_total: Maximum total table width, in terminal columns.
+
+        Returns:
+            Adjusted column widths. Same length as ``col_widths``.
+        """
+        num_cols = len(col_widths)
+        if num_cols == 0:
+            return col_widths
+
+        overhead = 3 * num_cols + 1
+        available = max(max_total - overhead, num_cols * self._MIN_COL_WIDTH)
+
+        widths = list(col_widths)
+        total = sum(widths)
+        if total <= available:
+            return widths
+
+        # Shrink the widest column by 1 each iteration until the table
+        # fits or every column has reached the minimum width.
+        while total > available:
+            max_w = max(widths)
+            if max_w <= self._MIN_COL_WIDTH:
+                break
+            max_idx = widths.index(max_w)
+            widths[max_idx] -= 1
+            total -= 1
+        return widths
+
+    def _wrap_cell(self, text: str, width: int) -> List[str]:
+        """Wrap ``text`` to one or more lines of at most ``width`` columns.
+
+        Prefers breaking on whitespace; falls back to character-level
+        breaking for tokens that are themselves wider than ``width``
+        (long identifiers, URLs, unbroken runs of backticked tags).
+
+        Args:
+            text: Cell content. Markdown syntax is preserved verbatim —
+                the formatter runs before inline markdown styling, so
+                cells are plain strings without ANSI codes at this stage.
+            width: Target display width per wrapped line.
+
+        Returns:
+            List of lines, each with display width ``<= width``.
+            Always contains at least one entry (possibly empty).
+        """
+        if width <= 0:
+            return [text]
+        if _display_width(text) <= width:
+            return [text]
+
+        # Tokenize into runs of whitespace vs non-whitespace so we can
+        # try whitespace-based wrapping first.
+        tokens = re.findall(r"\S+|\s+", text)
+
+        lines: List[str] = []
+        current = ""
+        current_w = 0
+
+        def _flush_current() -> None:
+            nonlocal current, current_w
+            if current:
+                lines.append(current.rstrip())
+                current = ""
+                current_w = 0
+
+        for tok in tokens:
+            tok_w = _display_width(tok)
+            if current_w + tok_w <= width:
+                current += tok
+                current_w += tok_w
+                continue
+
+            # Token doesn't fit on the current line.
+            if tok.isspace():
+                # Drop whitespace at a wrap boundary.
+                _flush_current()
+                continue
+
+            _flush_current()
+
+            if tok_w <= width:
+                current = tok
+                current_w = tok_w
+                continue
+
+            # Token alone is wider than the column — break char by char.
+            chunk = ""
+            chunk_w = 0
+            for ch in tok:
+                cw = _display_width(ch)
+                if cw == 0:
+                    chunk += ch
+                    continue
+                if chunk_w + cw > width:
+                    if chunk:
+                        lines.append(chunk)
+                    chunk = ch
+                    chunk_w = cw
+                else:
+                    chunk += ch
+                    chunk_w += cw
+            current = chunk
+            current_w = chunk_w
+
+        _flush_current()
+        return lines or [""]
 
     def _make_border(self, position: str, col_widths: List[int]) -> str:
         """Create a horizontal border line."""
@@ -503,7 +636,11 @@ class TableFormatterPlugin:
         return left + mid.join(segments) + right
 
     def _make_row(self, cells: List[str], col_widths: List[int], alignments: List[str]) -> str:
-        """Create a data row with proper alignment."""
+        """Create a single-line data row with proper alignment.
+
+        Assumes every cell fits within its column width. For rendering
+        with wrap-aware, multi-line output, use :meth:`_make_row_lines`.
+        """
         vert = BOX_CHARS["vertical"]
         formatted_cells = []
 
@@ -512,6 +649,54 @@ class TableFormatterPlugin:
             formatted_cells.append(f" {formatted} ")
 
         return vert + vert.join(formatted_cells) + vert
+
+    def _make_row_lines(
+        self,
+        cells: List[str],
+        col_widths: List[int],
+        alignments: List[str],
+    ) -> List[str]:
+        """Create a data row, wrapping cells that exceed their column width.
+
+        A single logical row expands to as many visual lines as the
+        tallest (most wrapped) cell requires. Shorter cells are padded
+        with blank lines so all columns remain vertically aligned, and
+        every emitted line has box-drawing borders at the expected
+        positions.
+
+        Args:
+            cells: Cell contents for this row (length == ``len(col_widths)``).
+            col_widths: Width allotted to each column.
+            alignments: Per-column alignment (``"left"``/``"center"``/``"right"``).
+
+        Returns:
+            One or more rendered lines. At least one line is always
+            returned (possibly an all-blank row).
+        """
+        vert = BOX_CHARS["vertical"]
+
+        wrapped_cells = [
+            self._wrap_cell(cell, width)
+            for cell, width in zip(cells, col_widths)
+        ]
+
+        row_height = max((len(lines) for lines in wrapped_cells), default=1)
+
+        # Pad each cell's wrapped lines to the row height so all columns
+        # occupy the same number of visual rows.
+        for cell_lines in wrapped_cells:
+            while len(cell_lines) < row_height:
+                cell_lines.append("")
+
+        output_lines: List[str] = []
+        for line_idx in range(row_height):
+            parts: List[str] = []
+            for cell_lines, width, align in zip(wrapped_cells, col_widths, alignments):
+                line = cell_lines[line_idx]
+                formatted = _pad_to_width(line, width, align)
+                parts.append(f" {formatted} ")
+            output_lines.append(vert + vert.join(parts) + vert)
+        return output_lines
 
     def _render_semantic_table(self, text: str) -> str:
         """Render a markdown table as semantic ``<j-table>`` markup.

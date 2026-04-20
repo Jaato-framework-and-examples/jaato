@@ -288,3 +288,109 @@ class TestDisplayWidth:
         # All lines should have the same display width
         widths = [_display_width(line) for line in lines]
         assert len(set(widths)) == 1, f"Lines have different widths: {widths}"
+
+
+class TestWidthConstraint:
+    """Tests for width-constrained rendering (cell wrapping, shrinking)."""
+
+    def test_wide_table_fits_within_console_width(self):
+        """Tables wider than the console should be wrapped to fit."""
+        plugin = create_plugin()
+        plugin.set_console_width(60)
+
+        long_tags = ", ".join(f"`tag-{i}`" for i in range(20))
+        text = (
+            "| # | Name | Tags |\n"
+            "|---|------|------|\n"
+            f"| 1 | alpha | {long_tags} |\n"
+        )
+
+        result = plugin._render_markdown_table(text)
+        lines = result.strip().split("\n")
+
+        # Every rendered line must fit within the console width.
+        widths = [_display_width(line) for line in lines]
+        assert max(widths) <= 60, f"Line(s) exceed console width: {widths}"
+
+        # And all lines (borders + row lines) must share a common width
+        # so box-drawing characters stay aligned.
+        assert len(set(widths)) == 1, f"Lines have different widths: {widths}"
+
+    def test_wide_row_wraps_to_multiple_visual_lines(self):
+        """A cell wider than its column should wrap to multiple lines."""
+        plugin = create_plugin()
+        plugin.set_console_width(40)
+
+        text = (
+            "| Name | Description |\n"
+            "|------|-------------|\n"
+            "| foo | this is a fairly long description that should wrap onto several lines within its column |\n"
+        )
+
+        result = plugin._render_markdown_table(text)
+        lines = result.strip().split("\n")
+
+        # Header row: top border + header line + mid border = 3 lines minimum.
+        # Data row should expand beyond a single line because of wrapping.
+        # Expected structure: top, header, middle, >=2 data lines, bottom.
+        assert len(lines) >= 6, f"Expected multi-line data row, got: {lines}"
+
+    def test_narrow_console_keeps_minimum_column_width(self):
+        """Even in a very narrow terminal we should not collapse columns."""
+        plugin = create_plugin()
+        plugin.set_console_width(10)  # Smaller than any reasonable 3-col table
+
+        text = (
+            "| a | b | c |\n"
+            "|---|---|---|\n"
+            "| hello | world | !! |\n"
+        )
+
+        result = plugin._render_markdown_table(text)
+        # Should not raise and should produce some box-drawing output.
+        assert "┌" in result
+        assert "└" in result
+
+    def test_narrow_rendering_preserves_cell_content(self):
+        """Wrapped cells should still contain the full content (possibly across lines)."""
+        plugin = create_plugin()
+        plugin.set_console_width(50)
+
+        text = (
+            "| Name | Tags |\n"
+            "|------|------|\n"
+            "| x | alpha beta gamma delta epsilon zeta eta theta |\n"
+        )
+
+        result = plugin._render_markdown_table(text)
+        # Every word should still appear somewhere in the output,
+        # even if split across wrapped lines.
+        for word in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]:
+            assert word in result, f"Lost word '{word}' during wrapping"
+
+
+class TestWrapCell:
+    """Unit tests for the _wrap_cell helper."""
+
+    def test_short_text_not_wrapped(self):
+        plugin = create_plugin()
+        assert plugin._wrap_cell("hello", 10) == ["hello"]
+
+    def test_breaks_on_whitespace(self):
+        plugin = create_plugin()
+        lines = plugin._wrap_cell("alpha beta gamma", 6)
+        for line in lines:
+            assert _display_width(line) <= 6
+        assert "alpha" in lines[0]
+
+    def test_breaks_long_token_char_by_char(self):
+        plugin = create_plugin()
+        long_token = "x" * 25
+        lines = plugin._wrap_cell(long_token, 10)
+        for line in lines:
+            assert _display_width(line) <= 10
+        assert "".join(lines) == long_token
+
+    def test_zero_width_returns_original(self):
+        plugin = create_plugin()
+        assert plugin._wrap_cell("anything", 0) == ["anything"]
