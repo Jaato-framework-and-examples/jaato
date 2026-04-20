@@ -353,8 +353,42 @@ class ZhipuAIAuthPlugin:
                 self._emit("  - You have internet connectivity\n")
                 self._emit("  - api.z.ai is reachable from your network\n")
                 self._emit("  - No firewall or proxy is blocking the request\n")
+            elif detail.startswith("rate_limit"):
+                self._emit("\nZ.AI rejected the validation request with a rate limit.\n\n")
+                self._emit(f"Detail: {detail}\n\n")
+                self._emit(
+                    "This usually means your account's quota is exceeded or too\n"
+                    "many requests are hitting the API.  The key was NOT saved.\n"
+                    "Wait for the quota to reset and try again, or check your\n"
+                    "plan at https://z.ai/model-api.\n"
+                )
+            elif detail.startswith("payment_required"):
+                self._emit("\nZ.AI rejected the validation request: payment required.\n\n")
+                self._emit(f"Detail: {detail}\n\n")
+                self._emit(
+                    "Your billing / subscription appears to be inactive or\n"
+                    "exhausted.  The key was NOT saved.  Check your plan at\n"
+                    "https://z.ai/model-api or https://open.bigmodel.cn/.\n"
+                )
+            elif detail.startswith("server_error"):
+                self._emit("\nZ.AI returned a server error while validating the key.\n\n")
+                self._emit(f"Detail: {detail}\n\n")
+                self._emit(
+                    "The provider is likely temporarily unavailable.  The key\n"
+                    "was NOT saved.  Please retry in a few minutes.  If the\n"
+                    "problem persists, check https://status.z.ai/.\n"
+                )
+            elif detail.startswith("http_error"):
+                self._emit("\nZ.AI returned an unexpected response while validating the key.\n\n")
+                self._emit(f"Detail: {detail}\n\n")
+                self._emit(
+                    "The key was NOT saved.  Please report this response to\n"
+                    "support if it persists.\n"
+                )
             else:
                 self._emit("\nAPI key validation failed.\n\n")
+                if detail:
+                    self._emit(f"Detail: {detail}\n\n")
                 self._emit("Please check that:\n")
                 self._emit("  - The key is correct and complete\n")
                 self._emit("  - Your Z.AI account is active\n")
