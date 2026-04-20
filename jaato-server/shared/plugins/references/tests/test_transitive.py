@@ -2214,3 +2214,87 @@ class TestRuntimeTransitiveViaCmdSelect:
             assert result.get("transitive_count") == 2
         finally:
             plugin.shutdown()
+
+
+class TestEnrichmentDedup:
+    """Once a reference hint has been injected into the session's history,
+    subsequent enrichments that match the same source must not re-inject
+    the same block.  Covers all three enrichment passes:
+    @mention expansion, tag-match hints, and semantic-match hints.
+    """
+
+    def test_at_mention_expansion_only_once_per_session(self):
+        """The full **Referenced Sources** block expands on first @mention,
+        then dedups — otherwise every tool result re-inlines the same
+        multi-KB instruction block."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            first = plugin._enrich_content("See @ref-1 for details.", "prompt")
+            assert "**Referenced Sources:**" in first.prompt
+            assert first.metadata["mentioned_references"] == ["ref-1"]
+
+            # Second enrichment that mentions the same ref gets no block.
+            second = plugin._enrich_content(
+                "Check @ref-1 again in this tool output.", "tool:readFile"
+            )
+            assert "**Referenced Sources:**" not in second.prompt
+            assert "mentioned_references" not in (second.metadata or {})
+        finally:
+            plugin.shutdown()
+
+    def test_tag_hint_only_once_per_session(self):
+        """Tag-matched hint block injects once per source per session."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            first = plugin._enrich_content(
+                "We need to use java for this project", "prompt"
+            )
+            assert "Reference sources available" in first.prompt
+            assert "ref-1" in first.metadata["tag_matched_references"]
+
+            # Same tag match on a tool result — dedup kicks in.
+            second = plugin._enrich_content(
+                "java is also used in the test harness", "tool:readFile"
+            )
+            assert "Reference sources available" not in second.prompt
+            assert "tag_matched_references" not in (second.metadata or {})
+        finally:
+            plugin.shutdown()
+
+    def test_on_history_cleared_allows_resurface(self):
+        """After on_history_cleared(), references can be re-hinted."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-1", "name": "Java Guide", "tags": ["java"]},
+        ])
+        try:
+            plugin._enrich_content("Use java here", "prompt")
+            plugin.on_history_cleared()
+            after_reset = plugin._enrich_content("Use java here", "prompt")
+            assert "Reference sources available" in after_reset.prompt
+            assert "ref-1" in after_reset.metadata["tag_matched_references"]
+        finally:
+            plugin.shutdown()
+
+    def test_new_source_surfaces_even_when_another_already_surfaced(self):
+        """Dedup is per-source: a new tag-matched reference still hints
+        even after a different reference was already hinted."""
+        plugin = _make_plugin_with_selectable_tags([
+            {"id": "ref-java", "name": "Java Guide", "tags": ["java"]},
+            {"id": "ref-kafka", "name": "Kafka Guide", "tags": ["kafka"]},
+        ])
+        try:
+            plugin._enrich_content("We use java in the service", "prompt")
+            second = plugin._enrich_content(
+                "The kafka consumer batches events", "tool:readFile"
+            )
+            # Only the newly matched ref-kafka should appear in the bullets.
+            assert "Reference sources available" in second.prompt
+            matched = second.metadata.get("tag_matched_references", {})
+            assert "ref-kafka" in matched
+            assert "ref-java" not in matched
+        finally:
+            plugin.shutdown()

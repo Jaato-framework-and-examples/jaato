@@ -315,8 +315,45 @@ class TestToolResultEnrichment:
         assert result["status"] == "no_results"
 
     def test_prompt_and_tool_result_use_same_core(self, tmp_path):
-        """Both surfaces must produce the same hint format when matching
-        the same memory."""
+        """Both surfaces must produce the same hint format — verified by
+        running each on a *fresh* plugin instance (reading the same
+        storage) so the session-level dedup doesn't suppress the second
+        call."""
+        # Seed the storage once so both plugin instances see the same memory.
+        seeder = MemoryPlugin()
+        seeder.initialize({
+            "storage_path": str(tmp_path / "workspace_memories.jsonl"),
+            "global_storage_path": str(tmp_path / "global_memories.jsonl"),
+        })
+        store = seeder._execute_store({
+            "content": "X",
+            "description": "About workspace-baseline",
+            "tags": ["workspace-baseline"],
+            "confidence": 0.9,
+        })
+        seeder._execute_update({"id": store["memory_id"], "maturity": "validated"})
+
+        def _reader():
+            p = MemoryPlugin()
+            p.initialize({
+                "storage_path": str(tmp_path / "workspace_memories.jsonl"),
+                "global_storage_path": str(tmp_path / "global_memories.jsonl"),
+            })
+            return p
+
+        probe = "tell me about the workspace-baseline"
+        prompt_result = _reader().enrich_prompt(probe)
+        tool_result = _reader().enrich_tool_result("some_tool", probe)
+        # Both must have surfaced the memory and appended the same hint block
+        assert "💡 **Available Memories**" in prompt_result.prompt
+        assert "💡 **Available Memories**" in tool_result.result
+        assert prompt_result.metadata.get("memory_matches") == tool_result.metadata.get("memory_matches")
+
+    def test_same_memory_not_resurfaced_across_tool_calls(self, tmp_path):
+        """Once a memory's hint bullet has been injected into the session's
+        history, subsequent enrichments on the same text must NOT re-inject
+        the same block — otherwise every tool result inflates with
+        duplicate '💡 Available Memories' sections."""
         plugin = MemoryPlugin()
         plugin.initialize({
             "storage_path": str(tmp_path / "workspace_memories.jsonl"),
@@ -329,10 +366,28 @@ class TestToolResultEnrichment:
             "confidence": 0.9,
         })
         plugin._execute_update({"id": store["memory_id"], "maturity": "validated"})
+
         probe = "tell me about the workspace-baseline"
-        prompt_result = plugin.enrich_prompt(probe)
-        tool_result = plugin.enrich_tool_result("some_tool", probe)
-        # Both must have surfaced the memory and appended the same hint block
-        assert "💡 **Available Memories**" in prompt_result.prompt
-        assert "💡 **Available Memories**" in tool_result.result
-        assert prompt_result.metadata.get("memory_matches") == tool_result.metadata.get("memory_matches")
+        first = plugin.enrich_prompt(probe)
+        assert "💡 **Available Memories**" in first.prompt
+        assert first.metadata["memory_matches"] == 1
+
+        # Second call on the same text must NOT re-inject the hint block.
+        second = plugin.enrich_tool_result("some_tool", probe)
+        assert second.result == probe
+        assert second.metadata["memory_matches"] == 0
+        assert second.metadata.get("suppressed_duplicates") == [store["memory_id"]]
+
+        # A third enrichment on a DIFFERENT matching text still sees no
+        # new memories to surface — the dedup is keyed on memory ID, not
+        # on probe text.
+        third = plugin.enrich_tool_result(
+            "another_tool", "anything about the workspace-baseline here"
+        )
+        assert "💡 **Available Memories**" not in third.result
+
+        # After on_history_cleared(), the memory can surface again.
+        plugin.on_history_cleared()
+        fourth = plugin.enrich_prompt(probe)
+        assert "💡 **Available Memories**" in fourth.prompt
+        assert fourth.metadata["memory_matches"] == 1

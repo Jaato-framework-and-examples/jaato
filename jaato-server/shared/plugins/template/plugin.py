@@ -40,7 +40,7 @@ import tempfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.base import (
     PermissionDisplayInfo,
@@ -208,6 +208,15 @@ class TemplatePlugin:
         # Plugin registry for cross-plugin communication (e.g., querying
         # the references plugin for selected directory sources).
         self._plugin_registry = None
+        # Template names whose contextual "📦 Available Templates" hint
+        # bullet has already been injected into the model's context
+        # during this session.  Prevents the same block from being
+        # re-surfaced on every tool call.  Cleared by
+        # on_history_cleared() when the session history is wiped.
+        # Note: this only guards the *contextual surfacing* pass — the
+        # embedded-template extraction pass in enrich_tool_result() has
+        # its own content-hash dedup via ``_extracted_templates``.
+        self._surfaced_template_names: Set[str] = set()
 
     @property
     def name(self) -> str:
@@ -315,6 +324,21 @@ class TemplatePlugin:
         self._initialized = False
         self._extracted_templates.clear()
         self._template_index.clear()
+        self._surfaced_template_names.clear()
+
+    def on_history_cleared(self) -> None:
+        """Reset per-session enrichment tracking when history is wiped.
+
+        Called by ``JaatoSession.reset_session()`` on a true history clear.
+        Clears the ``_surfaced_template_names`` set so previously hinted
+        templates can surface again in the fresh conversation.
+
+        Does NOT clear ``_extracted_templates`` (content-hash → path) or
+        ``_template_index`` — those are durable on-disk artifacts whose
+        lifetime is orthogonal to the conversation.
+        """
+        self._surfaced_template_names.clear()
+        self._trace("on_history_cleared: cleared surfaced template tracking")
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -898,6 +922,19 @@ Template rendering writes files to the workspace."""
         if not matches:
             return text, {"template_matches": 0}
 
+        # Dedup: drop templates whose hint bullet was already injected in
+        # this session — otherwise every tool call re-appends the same
+        # "📦 Available Templates" block for the same matches.  When every
+        # match has already surfaced, return the text unchanged so no
+        # "surfaced N templates" notification fires either.
+        new_matches = [e for e in matches if e.name not in self._surfaced_template_names]
+        if not new_matches:
+            return text, {
+                "template_matches": 0,
+                "suppressed_duplicates": [e.name for e in matches],
+            }
+        matches = new_matches
+
         triggering_tags = self._indexer.triggering_tags(text, matches)
 
         # Build the hint block.  Each bullet shows the template name,
@@ -939,6 +976,9 @@ Template rendering writes files to the workspace."""
                 "jaato.enrichment.template.contextual_matches": len(matches),
             },
         }
+        # Remember what we injected so the same bullet doesn't reappear
+        # on the next tool call within this session.
+        self._surfaced_template_names.update(e.name for e in matches)
         return enriched_text, metadata
 
     # ==================== Tool Result Enrichment ====================

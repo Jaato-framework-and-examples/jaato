@@ -311,7 +311,41 @@ class TestPersistedIndexTagLoading:
 class TestSurfaceParity:
 
     def test_prompt_and_tool_result_produce_same_hint_block(self, tmp_path):
-        """Same input text → same hint, regardless of which surface called it."""
+        """Same input text → same hint, regardless of which surface called it.
+
+        The two surfaces are exercised on fresh plugin instances so the
+        session-level dedup (``_surfaced_template_names``) doesn't suppress
+        the second call — parity is about format, not per-session
+        frequency.
+        """
+        def _build():
+            p = _initialised_plugin(tmp_path)
+            p._template_index["circuit.tpl"] = _entry(
+                "circuit.tpl",
+                tags=["circuit-breaker"],
+                description="Resilience4j circuit breaker",
+            )
+            p._indexer.build_index(list(p._template_index.values()))
+            return p
+
+        text = "Add a circuit breaker around the payment call."
+        prompt_res = _build().enrich_prompt(text)
+        tool_res = _build().enrich_tool_result("anything", text)
+
+        # Both surfaces produced a hint, both reference the same template.
+        assert "📦 **Available Templates**" in prompt_res.prompt
+        assert "📦 **Available Templates**" in tool_res.result
+        assert prompt_res.metadata["matched_names"] == \
+            tool_res.metadata["matched_names"]
+
+
+class TestContextualDedup:
+    """Session-level dedup: once a template's contextual hint bullet has
+    been injected into history, subsequent enrichments on matching text
+    must NOT re-inject it — every tool call would otherwise re-append the
+    same '📦 Available Templates' block."""
+
+    def test_second_call_on_same_text_does_not_resurface(self, tmp_path):
         plugin = _initialised_plugin(tmp_path)
         plugin._template_index["circuit.tpl"] = _entry(
             "circuit.tpl",
@@ -319,13 +353,54 @@ class TestSurfaceParity:
             description="Resilience4j circuit breaker",
         )
         plugin._indexer.build_index(list(plugin._template_index.values()))
-
         text = "Add a circuit breaker around the payment call."
-        prompt_res = plugin.enrich_prompt(text)
-        tool_res = plugin.enrich_tool_result("anything", text)
 
-        # Both surfaces produced a hint, both reference the same template.
-        assert "📦 **Available Templates**" in prompt_res.prompt
-        assert "📦 **Available Templates**" in tool_res.result
-        assert prompt_res.metadata["matched_names"] == \
-            tool_res.metadata["matched_names"]
+        first = plugin.enrich_prompt(text)
+        assert "📦 **Available Templates**" in first.prompt
+        assert first.metadata["template_matches"] == 1
+
+        second = plugin.enrich_tool_result("anything", text)
+        assert "📦 **Available Templates**" not in second.result
+        assert second.metadata["template_matches"] == 0
+        assert second.metadata.get("suppressed_duplicates") == ["circuit.tpl"]
+
+    def test_new_template_still_surfaces_alongside_known(self, tmp_path):
+        """If a later enrichment would match multiple templates, only the
+        NEW ones appear in the hint; already-surfaced ones are filtered
+        out of the bullet list."""
+        plugin = _initialised_plugin(tmp_path)
+        plugin._template_index["rest.tpl"] = _entry(
+            "rest.tpl", tags=["rest"], description="REST scaffold"
+        )
+        plugin._template_index["controller.tpl"] = _entry(
+            "controller.tpl", tags=["controller"], description="Controller scaffold"
+        )
+        plugin._indexer.build_index(list(plugin._template_index.values()))
+
+        first = plugin.enrich_prompt("Build a rest endpoint.")
+        assert first.metadata["matched_names"] == ["rest.tpl"]
+
+        # Second prompt matches both tags — but rest.tpl is already
+        # surfaced, so only controller.tpl should appear.
+        second = plugin.enrich_prompt("Generate a controller for the rest api.")
+        assert "controller.tpl" in second.metadata["matched_names"]
+        assert "rest.tpl" not in second.metadata["matched_names"]
+        assert "controller.tpl" in second.prompt
+        # rest.tpl must not reappear in the bullet list
+        assert second.prompt.count("rest.tpl") == 0
+
+    def test_on_history_cleared_resets_dedup(self, tmp_path):
+        plugin = _initialised_plugin(tmp_path)
+        plugin._template_index["circuit.tpl"] = _entry(
+            "circuit.tpl",
+            tags=["circuit-breaker"],
+            description="Resilience4j circuit breaker",
+        )
+        plugin._indexer.build_index(list(plugin._template_index.values()))
+        text = "Add a circuit breaker around the payment call."
+
+        plugin.enrich_prompt(text)
+        plugin.on_history_cleared()
+        after_reset = plugin.enrich_prompt(text)
+        assert "📦 **Available Templates**" in after_reset.prompt
+        assert after_reset.metadata["template_matches"] == 1

@@ -6539,6 +6539,18 @@ NOTES
             if self._pinned_references:
                 self._remove_pinned_from_system_instruction()
                 self._pinned_references.clear()
+            # Notify enrichment plugins (memory, references, template, ...)
+            # so they can clear per-session dedup tracking.  Otherwise hints
+            # that were surfaced in the wiped conversation would never be
+            # re-emitted in the fresh one.
+            if self._runtime and self._runtime.registry:
+                try:
+                    self._runtime.registry.broadcast_history_cleared()
+                except Exception as exc:
+                    logger.debug(
+                        f"[session:{self._agent_id}] "
+                        f"broadcast_history_cleared failed: {exc}"
+                    )
 
     def get_turn_boundaries(self) -> List[int]:
         """Get indices where each turn starts in the history."""

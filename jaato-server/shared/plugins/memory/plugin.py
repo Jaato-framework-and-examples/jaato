@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from jaato_sdk.plugins.base import (
     CommandCompletion,
@@ -73,6 +73,12 @@ class MemoryPlugin:
         self._agent_name: Optional[str] = None
         self._session_id: Optional[str] = None
         self._storage_path_template: str = ".jaato/memories.jsonl"
+        # Memory IDs whose hint bullet has already been injected into the
+        # model's context during this session.  Prevents the same "💡
+        # Available Memories" block from being re-surfaced on every tool
+        # call when the same memory keeps matching.  Cleared by
+        # on_history_cleared() when the session history is wiped.
+        self._surfaced_memory_ids: Set[str] = set()
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -672,6 +678,20 @@ class MemoryPlugin:
         if not matches:
             return text, {"memory_matches": 0}
 
+        # Dedup: drop matches whose hint bullet was already injected into
+        # this session's history.  Keeps per-turn enrichment informative
+        # (new matches still surface) without re-spamming the same block
+        # on every tool call.  When every match has already been surfaced,
+        # return the text unchanged so no "added context" notification
+        # fires either.
+        new_matches = [m for m in matches if m.id not in self._surfaced_memory_ids]
+        if not new_matches:
+            return text, {
+                "memory_matches": 0,
+                "suppressed_duplicates": [m.id for m in matches],
+            }
+        matches = new_matches
+
         # Build hint section.  Each bullet shows the memory ID and a
         # short description; the closing line tells the agent how to
         # fetch ALL listed memories in a single call (using the `ids`
@@ -732,7 +752,22 @@ class MemoryPlugin:
                 "jaato.enrichment.memory.trigger_keywords": len(matched_tags),
             },
         }
+        # Remember what we injected so the same bullet doesn't reappear
+        # on the next tool call within this session.
+        self._surfaced_memory_ids.update(m.id for m in matches)
         return enriched_text, metadata
+
+    def on_history_cleared(self) -> None:
+        """Reset per-session enrichment tracking when history is wiped.
+
+        Called by ``JaatoSession.reset_session()`` on a true history clear
+        (not a GC-driven reset that restores history).  Clears the
+        ``_surfaced_memory_ids`` set so memories can surface again in the
+        fresh conversation — otherwise the model would never see the
+        hint bullet after a reset.
+        """
+        self._surfaced_memory_ids.clear()
+        self._trace("on_history_cleared: cleared surfaced memory tracking")
 
     # ===== Tool Executors =====
 
