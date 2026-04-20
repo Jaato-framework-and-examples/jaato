@@ -7,6 +7,7 @@ execution with support for:
 - Output callbacks for real-time feedback
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -55,6 +56,77 @@ def get_current_cancel_token():
         The current thread's CancelToken, or None.
     """
     return getattr(_thread_local, 'cancel_token', None)
+
+
+def in_trusted_bridge_context() -> bool:
+    """Whether the current thread is executing inside a trusted tool bridge.
+
+    A "trusted bridge" is a plugin-provided interpreter (today only the
+    notebook plugin's Python tool bindings) whose **outer** invocation was
+    already permission-approved by the user.  When the flag is set, tool
+    calls made through the bridge inherit that approval — permission
+    prompts for individual inner calls would be redundant because the user
+    already saw and approved the full code (including all ``tools.X(...)``
+    calls) when they approved the outer tool.
+
+    Plugins enter the trusted context via
+    :func:`push_trusted_bridge_context` before dispatching inner tool calls
+    and exit via :func:`pop_trusted_bridge_context` after the outer call
+    returns.  The context manager
+    :func:`trusted_bridge_context` wraps both in a ``with`` block.
+
+    Consumers (currently the permission plugin) call this from
+    ``check_permission`` to short-circuit the approval check with an
+    ALLOW decision when inside a trusted context.
+
+    Returns:
+        True if the current thread is inside a trusted bridge scope,
+        False otherwise.
+    """
+    return bool(getattr(_thread_local, 'trusted_bridge_depth', 0))
+
+
+def push_trusted_bridge_context() -> None:
+    """Enter a trusted bridge scope on the current thread.
+
+    Increments a per-thread depth counter so that nested entries (e.g. a
+    bridge cell that itself uses another bridge) are correctly balanced.
+    Callers MUST pair every ``push`` with a ``pop`` — prefer
+    :func:`trusted_bridge_context` to guarantee cleanup on exceptions.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = current + 1
+
+
+def pop_trusted_bridge_context() -> None:
+    """Exit a trusted bridge scope on the current thread.
+
+    Decrements the per-thread depth counter.  Underflow is silently
+    clamped to zero — callers that ``pop`` without a matching ``push``
+    indicate a bug but we prefer defensive clamping over exception noise
+    in exit paths.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = max(0, current - 1)
+
+
+@contextlib.contextmanager
+def trusted_bridge_context():
+    """Context manager form of push/pop for safe nested use.
+
+    Example::
+
+        with trusted_bridge_context():
+            # Tool calls dispatched here skip permission prompts.
+            result = backend.execute(cell_code)
+
+    The scope is thread-local; other threads are unaffected.
+    """
+    push_trusted_bridge_context()
+    try:
+        yield
+    finally:
+        pop_trusted_bridge_context()
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry

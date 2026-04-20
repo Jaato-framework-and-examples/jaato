@@ -731,8 +731,14 @@ class NotebookPlugin(StreamingCapable):
 
         self._trace(f"Executing in {notebook_id}: {code[:50]}...")
 
-        # Execute
-        result = backend.execute(notebook_id, code)
+        # Execute within a trusted bridge scope: the outer notebook_execute
+        # tool call was already permission-approved, and the user saw every
+        # ``tools.X(...)`` call in the approved code.  Bridge-dispatched
+        # inner tool calls inherit that approval via a thread-local flag
+        # the permission plugin checks (shared.ai_tool_runner.in_trusted_bridge_context).
+        from shared.ai_tool_runner import trusted_bridge_context
+        with trusted_bridge_context():
+            result = backend.execute(notebook_id, code)
 
         # Format response
         response: Dict[str, Any] = {
@@ -1095,9 +1101,16 @@ class NotebookPlugin(StreamingCapable):
         error_holder: List[Optional[Exception]] = [None]
 
         def run_execution():
-            """Run execution in a background thread."""
+            """Run execution in a background thread.
+
+            Enters the trusted bridge context on **this** thread because
+            the flag is thread-local — entering it outside would not
+            propagate to ``backend.execute``.
+            """
+            from shared.ai_tool_runner import trusted_bridge_context
             try:
-                result = backend.execute(notebook_id, code)
+                with trusted_bridge_context():
+                    result = backend.execute(notebook_id, code)
                 result_holder[0] = result
             except Exception as e:
                 error_holder[0] = e

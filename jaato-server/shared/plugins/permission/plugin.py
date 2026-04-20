@@ -1079,6 +1079,26 @@ class PermissionPlugin:
         """
         self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
 
+        # Trusted bridge fast-path: when a plugin-provided interpreter
+        # (today only the notebook plugin's Python tool bindings) wraps
+        # dispatch in trusted_bridge_context(), the outer tool call was
+        # already permission-approved by the user and the user saw every
+        # inner ``tools.X(...)`` call in the approved code.  Re-prompting
+        # for each inner call is redundant noise that trains users to
+        # rubber-stamp without reading.  Short-circuit with ALLOW; no
+        # evaluators, no PermissionRequestedEvent, no ledger entry beyond
+        # the trace line above.
+        from shared.ai_tool_runner import in_trusted_bridge_context
+        if in_trusted_bridge_context():
+            self._trace(
+                f"check_permission: trusted bridge context active, "
+                f"auto-allowing {tool_name}"
+            )
+            return True, {
+                'reason': 'Allowed via trusted bridge context (outer tool already approved)',
+                'method': 'trusted_bridge',
+            }
+
         # Build evaluator context early — evaluators run even for
         # pre-approved tools so they can override approvals.
         eval_context = EvalContext(

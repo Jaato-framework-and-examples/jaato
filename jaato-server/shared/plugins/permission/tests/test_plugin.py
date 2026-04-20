@@ -1154,3 +1154,128 @@ class TestPermissionPluginUserCommands:
         # Now should be denied
         allowed, _ = plugin.check_permission("some_tool", {})
         assert allowed is False
+
+
+class TestPermissionPluginTrustedBridgeContext:
+    """Tests for the trusted-bridge short-circuit in check_permission.
+
+    When a plugin-provided interpreter (notebook's Python tool bindings)
+    wraps inner dispatch in trusted_bridge_context(), permission checks
+    for bridge-dispatched tool calls must return ALLOW immediately —
+    the outer tool call was already user-approved and the user saw every
+    inner ``tools.X(...)`` call in the approved code.
+    """
+
+    def test_trusted_context_allows_tool_that_would_be_denied(self):
+        """Inside a trusted bridge scope, a tool denied by policy is allowed."""
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",  # normally deny everything
+            },
+        })
+
+        # Outside: deny
+        allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
+        assert allowed is False
+
+        # Inside: allow via trusted bridge
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission(
+                "writeNewFile", {"path": "x"}
+            )
+        assert allowed is True
+        assert info["method"] == "trusted_bridge"
+
+    def test_trusted_context_skips_blacklist(self):
+        """Even blacklisted tools are allowed inside a trusted bridge scope."""
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "allow",
+                "blacklist": {"tools": ["dangerous_tool"]},
+            },
+        })
+
+        # Outside: blacklisted tool denied
+        allowed, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed is False
+
+        # Inside: allowed via trusted bridge (outer approval dominates)
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("dangerous_tool", {})
+        assert allowed is True
+        assert info["method"] == "trusted_bridge"
+
+    def test_context_is_balanced(self):
+        """Nested contexts balance correctly; permission restored on full exit."""
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "deny"},
+        })
+
+        with trusted_bridge_context():
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+            with trusted_bridge_context():
+                allowed, _ = plugin.check_permission("x", {})
+                assert allowed is True
+            # Still inside outer → still allowed
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+
+        # Fully exited → back to deny policy
+        allowed, _ = plugin.check_permission("x", {})
+        assert allowed is False
+
+    def test_context_is_thread_local(self):
+        """Other threads are unaffected by one thread's trusted context."""
+        import threading
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "deny"},
+        })
+
+        results = {}
+
+        def worker():
+            # Worker thread has no trusted context; deny policy applies
+            allowed, _ = plugin.check_permission("x", {})
+            results["worker"] = allowed
+
+        with trusted_bridge_context():
+            # Main thread is inside the context; allow
+            allowed, _ = plugin.check_permission("x", {})
+            assert allowed is True
+
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+
+        assert results["worker"] is False, (
+            "worker thread must not inherit main thread's trusted context"
+        )
+
+    def test_trusted_bridge_method_label(self):
+        """The decision metadata identifies the short-circuit path."""
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "deny"},
+        })
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("x", {})
+
+        assert allowed is True
+        assert info["method"] == "trusted_bridge"
+        assert "trusted bridge" in info["reason"].lower()
