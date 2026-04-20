@@ -1076,6 +1076,30 @@ class PluginRegistry:
         """
         return self._workspace_path
 
+    def broadcast_history_cleared(self) -> None:
+        """Notify all plugins that the session history has been cleared.
+
+        Plugins implementing ``on_history_cleared()`` use this hook to
+        reset per-session enrichment tracking (e.g., which memory/
+        template/reference hints were already injected).  Without it,
+        enrichment plugins would never re-surface their hints after a
+        ``reset`` command, because their dedup state would still reflect
+        the wiped conversation.
+
+        Includes enrichment-only plugins since the main dedup consumers
+        (memory, references, template) live in either bucket depending on
+        how they were discovered.
+        """
+        _trace("broadcast_history_cleared")
+        for name in self._exposed | self._enrichment_only:
+            plugin = self._plugins.get(name)
+            if plugin and hasattr(plugin, 'on_history_cleared'):
+                try:
+                    plugin.on_history_cleared()
+                    _trace(f"  -> {name}.on_history_cleared()")
+                except Exception as exc:
+                    _trace(f"  -> {name}.on_history_cleared() failed: {exc}")
+
     def get_bootstrap_timings(self) -> Dict[str, dict]:
         """Get per-plugin bootstrap timing data.
 

@@ -113,6 +113,16 @@ class ReferencesPlugin:
         self._similarity_threshold: float = 0.75
         self._tag_similarity_threshold: float = 0.4
         self._max_matches_per_piece: int = 3
+        # Per-session tracking of which reference hints have already been
+        # injected into the model's context.  Split by pass so that a
+        # reference first surfaced as a tag hint can later be upgraded to
+        # an @mention expansion — but a repeated match of the same kind
+        # is suppressed.  Cleared by on_history_cleared() on a true
+        # session reset so references can be re-hinted in a fresh
+        # conversation.
+        self._surfaced_mention_ids: Set[str] = set()
+        self._surfaced_tag_matched_ids: Set[str] = set()
+        self._surfaced_semantic_ids: Set[str] = set()
 
     @property
     def name(self) -> str:
@@ -2545,19 +2555,36 @@ class ReferencesPlugin:
             self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
             mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
 
+            # Paths are authorized on every mention so new references gain
+            # access even when their instruction block is suppressed below.
             for source in mentioned_sources:
                 self._authorize_source_path(source)
 
-            instructions = [source.to_instruction() for source in mentioned_sources]
-            if instructions:
+            # Dedup: skip injecting instruction blocks for references whose
+            # full instructions were already expanded into this session's
+            # history.  Without this, every tool result re-inlines the
+            # same multi-KB Referenced Sources block.
+            new_mentioned_sources = [
+                s for s in mentioned_sources
+                if s.id not in self._surfaced_mention_ids
+            ]
+            if new_mentioned_sources:
+                instructions = [
+                    source.to_instruction() for source in new_mentioned_sources
+                ]
                 reference_block = (
                     "\n\n---\n**Referenced Sources:**\n\n" +
                     "\n\n".join(instructions) +
                     "\n---"
                 )
                 enriched_content = enriched_content + reference_block
-                all_metadata["mentioned_references"] = mentioned_ids
+                all_metadata["mentioned_references"] = [
+                    s.id for s in new_mentioned_sources
+                ]
                 all_metadata["source_type"] = source_type
+                self._surfaced_mention_ids.update(
+                    s.id for s in new_mentioned_sources
+                )
 
         # --- Pass 2: tag-based reference ID hints ---
         # Only consider unselected selectable sources (not AUTO, not already selected)
@@ -2637,6 +2664,15 @@ class ReferencesPlugin:
                                 f"{{{', '.join(f'{sid}: {score:.3f}' for sid, score in vetoed_sources.items())}}}"
                             )
 
+                # Dedup: drop sources whose tag-match hint was already
+                # injected in this session — otherwise every tool call
+                # re-appends the same "Reference sources available" block.
+                matched_sources = {
+                    sid: tags
+                    for sid, tags in matched_sources.items()
+                    if sid not in self._surfaced_tag_matched_ids
+                }
+
                 if matched_sources:
                     self._trace(
                         f"enrich [{source_type}]: tag matches: "
@@ -2662,6 +2698,7 @@ class ReferencesPlugin:
                     all_metadata["tag_matched_references"] = {
                         sid: tags for sid, tags in matched_sources.items()
                     }
+                    self._surfaced_tag_matched_ids.update(matched_sources.keys())
 
         # --- Pass 2b: semantic matching ---
         # When lookup_strategy includes semantic matching ("hybrid" or
@@ -2697,6 +2734,12 @@ class ReferencesPlugin:
                 m for m in semantic_matches if m.source_id in selectable_ids
             ]
 
+            # Dedup: drop semantic matches whose hint was already injected.
+            semantic_matches = [
+                m for m in semantic_matches
+                if m.source_id not in self._surfaced_semantic_ids
+            ]
+
             if semantic_matches:
                 self._trace(
                     f"enrich [{source_type}]: semantic matches: "
@@ -2727,6 +2770,9 @@ class ReferencesPlugin:
                         m.source_id: round(m.score, 4)
                         for m in semantic_matches
                     }
+                    self._surfaced_semantic_ids.update(
+                        m.source_id for m in semantic_matches
+                    )
 
         # --- Pass 3: one-time transitive selection hint ---
         # On the first prompt enrichment after initialization, notify the model
@@ -2793,6 +2839,19 @@ class ReferencesPlugin:
     def reset_selections(self) -> None:
         """Clear all session selections."""
         self._selected_source_ids.clear()
+
+    def on_history_cleared(self) -> None:
+        """Reset per-session enrichment tracking when history is wiped.
+
+        Called by ``JaatoSession.reset_session()`` on a true history clear.
+        Clears the surfaced-ID sets so previously hinted references can
+        surface again in the fresh conversation — without this, the model
+        would never see reference hints after a ``reset`` command.
+        """
+        self._surfaced_mention_ids.clear()
+        self._surfaced_tag_matched_ids.clear()
+        self._surfaced_semantic_ids.clear()
+        self._trace("on_history_cleared: cleared surfaced reference tracking")
 
     # Interactivity protocol methods
 
