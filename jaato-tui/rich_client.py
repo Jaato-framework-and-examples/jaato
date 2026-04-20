@@ -1742,12 +1742,23 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                 f"─── duration: {event.duration_seconds:.2f}s",
                                 "dim",
                             )
-                        if event.cache_read_tokens and event.prompt_tokens > 0:
-                            hit_pct = event.cache_read_tokens / event.prompt_tokens * 100
-                            buffer.add_system_message(
-                                f"─── cache hit: {hit_pct:.0f}%",
-                                "dim",
-                            )
+                        if event.cache_read_tokens:
+                            # prompt_tokens is the *new* (uncached) input only
+                            # (matches Anthropic's input_tokens semantics; jaato
+                            # normalizes other providers to this).  The hit rate
+                            # is therefore cache_read / (cache_read + new_input),
+                            # which naturally caps at 100%.  The earlier formula
+                            # (cache_read / prompt_tokens) produced absurd values
+                            # like 3697% whenever the cache served more tokens
+                            # than the new input — which is exactly when caching
+                            # is working.
+                            total_input = event.cache_read_tokens + event.prompt_tokens
+                            if total_input > 0:
+                                hit_pct = event.cache_read_tokens / total_input * 100
+                                buffer.add_system_message(
+                                    f"─── cache hit: {hit_pct:.0f}%",
+                                    "dim",
+                                )
                 model_running = False
                 display.refresh()
 
@@ -2116,9 +2127,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                 total = acc.get('total', prompt + output)
                                 turn_line = f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,})"
                                 cache_read = acc.get('cache_read')
-                                if cache_read and prompt > 0:
-                                    hit_pct = cache_read / prompt * 100
-                                    turn_line += f", cache hit: {hit_pct:.0f}%"
+                                if cache_read:
+                                    # See note in the live ─── cache hit ─── path:
+                                    # prompt is uncached input only; total input is
+                                    # cache_read + prompt.  The earlier formula
+                                    # produced absurd percentages on cache-warm turns.
+                                    total_input = cache_read + (prompt or 0)
+                                    if total_input > 0:
+                                        hit_pct = cache_read / total_input * 100
+                                        turn_line += f", cache hit: {hit_pct:.0f}%"
                                 turn_line += " ---"
                                 lines.append((turn_line, "dim"))
                                 turn_index += 1

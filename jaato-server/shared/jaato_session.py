@@ -3178,18 +3178,29 @@ NOTES
     ) -> str:
         """Classify a request's cache hit/miss outcome.
 
+        ``prompt_tokens`` is the *new* (uncached) input only — matches
+        Anthropic's ``input_tokens`` semantics, which jaato normalizes
+        other providers to (see ``model_provider/anthropic/converters.py``).
+        Total input therefore = ``cache_read_tokens + prompt_tokens``,
+        and the hit ratio is ``cache_read_tokens / total_input`` — which
+        naturally caps at 1.0.  Dividing by ``prompt_tokens`` alone
+        produces ratios above 1.0 on cache-warm turns (e.g. 36.97 from
+        26580 / 719) and misclassifies them as anomalies.
+
         Returns:
-            "hit"   — most prompt tokens served from cache (>= 80%)
-            "partial" — some prompt tokens served from cache (10-80%)
+            "hit"   — most input tokens served from cache (>= 80%)
+            "partial" — some input tokens served from cache (10-80%)
             "warm"  — cache was being written but not read (creation only)
             "miss"  — no cache reads, no creation
             "unknown" — usage data missing
         """
-        if not prompt_tokens or prompt_tokens <= 0:
-            return "unknown"
         read = cache_read_tokens or 0
         creation = cache_creation_tokens or 0
-        ratio = read / prompt_tokens if prompt_tokens else 0
+        new_input = prompt_tokens or 0
+        total_input = read + new_input
+        if total_input <= 0:
+            return "unknown"
+        ratio = read / total_input
         if ratio >= 0.8:
             return "hit"
         if ratio >= 0.1:
