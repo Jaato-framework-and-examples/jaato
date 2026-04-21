@@ -1,33 +1,21 @@
-"""Tests for semantic <j-code> markup emitted for non-terminal clients.
+"""Tests for the ``<j-code>`` semantic markup emitted by ``code_block_formatter``.
 
-Covers the `set_client_type("web")` path that emits structured markup
-instead of ANSI-escaped Rich output.  Terminal default behaviour is
-covered by the existing tests in this directory and must remain
-unchanged — see `test_default_stays_ansi`.
+The server *always* emits semantic markup now — there is no terminal
+branch and no ``set_client_type`` toggle.  Every attached client (TUI,
+web dashboard, chat bridge) renders the markup natively.
 """
 
 from shared.plugins.code_block_formatter.plugin import CodeBlockFormatterPlugin
 
 
-class TestDefaultClientType:
-
-    def test_default_stays_ansi(self):
-        """Without set_client_type, terminal ANSI path is used."""
-        plugin = CodeBlockFormatterPlugin()
-        out = plugin._render_code_block("def foo():\n    pass", "python")
-        # ANSI escape sequences present, semantic tags absent.
-        assert "\x1b[" in out
-        assert "<j-code" not in out
-
-
-class TestWebSemanticMarkup:
+class TestSemanticMarkup:
 
     def _render(self, code: str, lang: str) -> str:
         plugin = CodeBlockFormatterPlugin()
-        plugin.set_client_type("web")
         return plugin._render_code_block(code, lang)
 
-    def test_no_ansi_in_web_output(self):
+    def test_no_ansi_ever_emitted(self):
+        """The wire format carries no ANSI — clients render locally."""
         out = self._render("def foo():\n    pass", "python")
         assert "\x1b[" not in out
 
@@ -83,7 +71,6 @@ class TestWebSemanticMarkup:
         """Default (line_numbers=False): no n attribute.
         Enabled: each <j-line> carries n starting at 1."""
         plugin = CodeBlockFormatterPlugin()
-        plugin.set_client_type("web")
         plugin._line_numbers = True
         out = plugin._render_code_block("x = 1\ny = 2", "python")
         assert '<j-line n="1">' in out
@@ -97,10 +84,8 @@ class TestWebSemanticMarkup:
         assert "background" not in out
 
     def test_full_pipeline_streaming(self):
-        """Verify the complete streaming path: fenced block in, web
-        markup out, no ANSI leaks."""
+        """Complete streaming path: fenced block in, semantic markup out."""
         plugin = CodeBlockFormatterPlugin()
-        plugin.set_client_type("web")
         chunks = list(plugin.process_chunk("Before\n```python\ndef f(): pass\n```\nAfter\n"))
         chunks.extend(plugin.flush())
         output = "".join(chunks)
@@ -115,7 +100,6 @@ class TestTokenGrouping:
     def test_whitespace_not_emitted_as_trailing(self):
         """Trailing whitespace runs must be stripped per line."""
         plugin = CodeBlockFormatterPlugin()
-        plugin.set_client_type("web")
         out = plugin._render_code_block("x = 1   \ny = 2", "python")
         # The three trailing spaces after "1" should not appear as a
         # bare space run at end of line.  Check that the line ends with

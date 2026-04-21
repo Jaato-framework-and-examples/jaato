@@ -330,14 +330,6 @@ class JaatoServer:
         # The pipeline handles buffering internally for streaming
         self._formatter_pipeline = None
 
-        # Whether to disable width-based line truncation in formatters.
-        # Defaults to True — clients (TUI and dashboard) handle line
-        # width on their own; the server-side ▸ marker double-clips
-        # with misleading "more content" indicators.  Propagated to
-        # every agent's formatter pipeline at creation time so
-        # subagents created later inherit the setting.
-        self._disable_formatter_truncation: bool = True
-
     # =========================================================================
     # Workspace Management
     # =========================================================================
@@ -402,7 +394,13 @@ class JaatoServer:
     def set_presentation_context(self, ctx: 'PresentationContext') -> None:
         """Set the presentation context and propagate to session components.
 
-        Also keeps ``terminal_width`` in sync for backwards compatibility.
+        The context is stored on ``JaatoSession`` so that the model's
+        system prompt can adapt to the client's display capabilities
+        (e.g. avoid wide tables on narrow mobile screens).  It is *not*
+        propagated to the formatter pipeline: the pipeline always emits
+        client-agnostic semantic markup (``<j-code>``, ``<j-table>``),
+        which every attached client renders natively — so there is no
+        shared rendering state for heterogeneous clients to fight over.
 
         Args:
             ctx: Presentation context from the connected client.
@@ -413,49 +411,6 @@ class JaatoServer:
         # Propagate full context to JaatoClient → JaatoSession
         if self._jaato:
             self._jaato.set_presentation_context(ctx)
-
-        # Apply presentation-derived state to all existing pipelines.
-        # Lazily-created agent pipelines re-apply it in _get_agent_pipeline.
-        if self._formatter_pipeline:
-            self._apply_presentation_to_pipeline(self._formatter_pipeline)
-        for agent in self._agents.values():
-            if agent.formatter_pipeline:
-                self._apply_presentation_to_pipeline(agent.formatter_pipeline)
-
-        # Note: server-side line truncation is disabled by default
-        # (see __init__).  We no longer toggle it based on client_type
-        # because the TUI and dashboard both handle line width on
-        # their own — the server-side ▸ marker just gets in the way.
-
-    def _apply_presentation_to_pipeline(self, pipeline: Any) -> None:
-        """Apply presentation-derived state to a formatter pipeline.
-
-        Single source of truth for propagating ``PresentationContext``
-        attributes (client type, etc.) to any formatter pipeline — the
-        server-level one, pre-existing agent pipelines, or a freshly
-        lazily-created agent pipeline.
-
-        When extending ``PresentationContext`` with new fields that
-        formatters care about, add the propagation here once and both
-        ``set_presentation_context`` and ``_get_agent_pipeline`` will
-        pick it up automatically.
-
-        Args:
-            pipeline: The ``FormatterPipeline`` to configure.
-        """
-        ctx = self._presentation_context
-        if not ctx or not pipeline:
-            return
-
-        client_type = getattr(ctx, 'client_type', None)
-        if client_type and hasattr(pipeline, 'set_client_type'):
-            # ClientType is a (str, Enum) mixin — str(enum_member) returns
-            # "ClientType.TERMINAL", not "terminal".  Use .value (or pass
-            # the str-like enum through directly) so formatters comparing
-            # against literal "terminal" route the TUI to its ANSI path
-            # instead of falling through to the semantic <j-code> markup.
-            ct_str = client_type.value if hasattr(client_type, 'value') else str(client_type)
-            pipeline.set_client_type(ct_str)
 
     def set_apparmor_confinement(
         self,
@@ -1642,10 +1597,6 @@ class JaatoServer:
         if self._workspace_path:
             self._formatter_pipeline.set_workspace_path(self._workspace_path)
 
-        # Inherit truncation setting if presentation context was already set
-        if self._disable_formatter_truncation:
-            self._formatter_pipeline.set_disable_truncation(True)
-
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
     def _get_agent_pipeline(self, agent_id: str) -> Optional[Any]:
@@ -1687,17 +1638,6 @@ class JaatoServer:
             agent.formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
             if self._workspace_path:
                 agent.formatter_pipeline.set_workspace_path(self._workspace_path)
-            # Inherit truncation setting from the server (set by the
-            # presentation context when the client connected).  Subagents
-            # spawned after presentation_context was set need this here.
-            if self._disable_formatter_truncation:
-                agent.formatter_pipeline.set_disable_truncation(True)
-            # Inherit presentation-derived state (client_type, etc.) from
-            # the current presentation context.  This pipeline may be
-            # created lazily, after set_presentation_context() has already
-            # returned — without this, subagent pipelines miss the state
-            # that was applied to the server-level pipeline.
-            self._apply_presentation_to_pipeline(agent.formatter_pipeline)
             self._trace(f"Created formatter pipeline for agent {agent_id}")
         return agent.formatter_pipeline
 
