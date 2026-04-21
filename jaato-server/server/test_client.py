@@ -18,6 +18,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
@@ -231,6 +232,7 @@ async def run_client(
     port: int,
     message: Optional[str] = None,
     interactive: bool = True,
+    token: Optional[str] = None,
 ) -> None:
     """Run the test client.
 
@@ -239,12 +241,20 @@ async def run_client(
         port: Server port.
         message: Optional single message to send (non-interactive).
         interactive: Whether to run in interactive mode.
+        token: Bearer token for WS auth, sent as ``Authorization: Bearer
+            <token>``. Required when the server enforces auth.
     """
     uri = f"ws://{host}:{port}"
     print(colorize(f"Connecting to {uri}...", Colors.DIM))
 
+    connect_kwargs: dict = {}
+    if token:
+        connect_kwargs["additional_headers"] = {
+            "Authorization": f"Bearer {token}",
+        }
+
     try:
-        async with websockets.connect(uri) as websocket:
+        async with websockets.connect(uri, **connect_kwargs) as websocket:
             if message:
                 # Single message mode
                 request = {
@@ -323,6 +333,13 @@ def main():
         action="store_true",
         help="Monitor mode - only receive events, don't send"
     )
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=os.environ.get("JAATO_WS_TOKEN"),
+        help="Bearer token for WS auth (sent as 'Authorization: Bearer'). "
+             "Defaults to $JAATO_WS_TOKEN if set."
+    )
     args = parser.parse_args()
 
     try:
@@ -331,6 +348,7 @@ def main():
             port=args.port,
             message=args.message,
             interactive=not args.monitor and not args.message,
+            token=args.token,
         ))
     except KeyboardInterrupt:
         print(colorize("\nGoodbye!", Colors.DIM))

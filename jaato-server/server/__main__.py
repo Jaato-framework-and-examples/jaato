@@ -37,7 +37,9 @@ import json
 import logging
 import logging.handlers
 import os
+import secrets
 import signal
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -209,6 +211,9 @@ class JaatoDaemon:
         socket_mode: int = 0o666,
         dashboard_port: Optional[int] = None,
         server_name: Optional[str] = None,
+        ws_token: Optional[str] = None,
+        ws_token_file: Optional[str] = None,
+        ws_unsafe_no_auth: bool = False,
     ):
         """Initialize the daemon.
 
@@ -223,6 +228,10 @@ class JaatoDaemon:
                 (None to disable).
             server_name: Explicit server name for self-identification.
                 Passed to daemon extensions via ``_ExtensionContext``.
+            ws_token: Bearer token clients must present in the WS Upgrade
+                request. ``None`` means WS auth is disabled (open accept
+                — only acceptable on a trusted network or behind a
+                terminating reverse proxy that does its own auth).
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -232,6 +241,11 @@ class JaatoDaemon:
         self.log_file = log_file
         self._dashboard_port = dashboard_port
         self._server_name = server_name
+        self._ws_token = ws_token
+        # Stored only so they can round-trip through _write_config for
+        # --restart. The plaintext _ws_token is never serialised.
+        self._ws_token_file = ws_token_file
+        self._ws_unsafe_no_auth = ws_unsafe_no_auth
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -342,6 +356,7 @@ class JaatoDaemon:
                 port=port,
                 workspace_root=_default_ws_root,
                 ssl_context=ws_ssl_ctx,
+                required_token=self._ws_token,
             )
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())
@@ -439,7 +454,13 @@ class JaatoDaemon:
             logger.warning(f"Could not remove PID file: {e}")
 
     def _write_config(self) -> None:
-        """Write startup config for restart support."""
+        """Write startup config for restart support.
+
+        Only references that don't leak secrets are persisted:
+        ``ws_token_file`` (a path) yes, plaintext ``ws_token`` no, and
+        the auto-generated banner token is intentionally not saved so
+        each restart issues a fresh value.
+        """
         config = {
             "ipc_socket": self.ipc_socket,
             "web_socket": self.web_socket,
@@ -448,6 +469,8 @@ class JaatoDaemon:
             "socket_mode": self.socket_mode,
             "dashboard_port": self._dashboard_port,
             "server_name": self._server_name,
+            "ws_token_file": self._ws_token_file,
+            "ws_unsafe_no_auth": self._ws_unsafe_no_auth,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -855,6 +878,94 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
         return False
 
 
+def _resolve_ws_token(args) -> Optional[str]:
+    """Decide which bearer token (if any) the WS server should require.
+
+    Resolution order:
+
+    1. ``--web-socket`` not set → ``None`` (no WS server, no token).
+    2. ``--ws-unsafe-no-auth`` → ``None``, with a startup WARNING.
+    3. ``--ws-token-file`` → read first non-empty line. The file must
+       have mode 0600 or stricter (group/other readable is rejected) so
+       a leaked token can't be silently grabbed by another local user.
+    4. ``--ws-token`` → use as-is. Visible in process listings; the
+       help text discourages it for production.
+    5. Otherwise → auto-generate a 32-byte url-safe token and print it
+       to stderr (Jupyter-style). The generated value is not persisted;
+       restarting the daemon issues a fresh one.
+
+    Conflicting flags exit with a clear error rather than picking a
+    silent winner.
+    """
+    if not args.web_socket:
+        return None
+
+    if args.ws_unsafe_no_auth:
+        if args.ws_token or args.ws_token_file:
+            print(
+                "Error: --ws-unsafe-no-auth cannot be combined with "
+                "--ws-token / --ws-token-file",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        logger.warning(
+            "WS bearer auth disabled (--ws-unsafe-no-auth). The "
+            "WebSocket endpoint accepts ALL connections — only safe on "
+            "a trusted network or behind an auth-terminating proxy."
+        )
+        return None
+
+    if args.ws_token and args.ws_token_file:
+        print(
+            "Error: pass either --ws-token or --ws-token-file, not both",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if args.ws_token_file:
+        path = Path(args.ws_token_file).expanduser()
+        try:
+            mode = path.stat().st_mode
+        except OSError as exc:
+            print(f"Error: cannot read --ws-token-file {path}: {exc}", file=sys.stderr)
+            sys.exit(2)
+        # Reject world/group readable files. Same check ssh applies to
+        # private keys — leaked tokens are private keys for the daemon.
+        if sys.platform != "win32" and mode & (stat.S_IRWXG | stat.S_IRWXO):
+            print(
+                f"Error: --ws-token-file {path} is group/other accessible "
+                f"(mode {oct(mode & 0o777)}); restrict to 0600",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        token = path.read_text().splitlines()[0].strip() if path.read_text() else ""
+        if not token:
+            print(f"Error: --ws-token-file {path} is empty", file=sys.stderr)
+            sys.exit(2)
+        return token
+
+    if args.ws_token:
+        return args.ws_token
+
+    # Auto-generate. Print once to stderr in a banner so it's visible
+    # even when stdout is redirected. Not persisted to the restart
+    # config — each daemon start gets a fresh token.
+    token = secrets.token_urlsafe(32)
+    banner_line = "─" * 64
+    print(banner_line, file=sys.stderr)
+    print("WS bearer token (auto-generated, not persisted):", file=sys.stderr)
+    print(f"  {token}", file=sys.stderr)
+    print("Pass to clients via:", file=sys.stderr)
+    print("  Authorization: Bearer <token>   (Python / curl / proxies)", file=sys.stderr)
+    print("  ws://host:port/?token=<token>   (browsers)", file=sys.stderr)
+    print(
+        "Set --ws-token-file PATH to use a stable token across restarts.",
+        file=sys.stderr,
+    )
+    print(banner_line, file=sys.stderr)
+    return token
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Jaato Server - Multi-client AI assistant backend",
@@ -895,6 +1006,27 @@ Examples:
         "--web-socket",
         metavar="[HOST:]PORT",
         help="WebSocket address for remote clients (e.g., :8080 or 0.0.0.0:8080)",
+    )
+    parser.add_argument(
+        "--ws-token",
+        metavar="TOKEN",
+        default=None,
+        help="Bearer token clients must present in the WS Upgrade request. "
+             "Discouraged for production (visible in process list); prefer "
+             "--ws-token-file. Cannot be combined with --ws-unsafe-no-auth.",
+    )
+    parser.add_argument(
+        "--ws-token-file",
+        metavar="PATH",
+        default=None,
+        help="Path to a file containing the bearer token (one line). "
+             "File must be mode 0600 or stricter.",
+    )
+    parser.add_argument(
+        "--ws-unsafe-no-auth",
+        action="store_true",
+        help="Disable WS bearer auth entirely. Required to keep the legacy "
+             "open-accept behaviour. Logs a WARNING at startup.",
     )
     parser.add_argument(
         "--socket-mode",
@@ -1012,6 +1144,11 @@ Examples:
         args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "666"
         args.dashboard_port = config.get("dashboard_port")
         args.server_name = config.get("server_name")
+        # Only --ws-token-file is persisted (path, not secret). Inline
+        # tokens and auto-generated tokens are deliberately not saved.
+        args.ws_token_file = config.get("ws_token_file")
+        args.ws_token = None
+        args.ws_unsafe_no_auth = bool(config.get("ws_unsafe_no_auth", False))
 
         # Always restart as daemon
         args.daemon = True
@@ -1071,6 +1208,9 @@ Examples:
     if args.daemon or os.environ.get("JAATO_DAEMONIZED"):
         configure_logging(log_file=args.log_file, verbose=args.verbose)
 
+    # Resolve WS bearer token (only when --web-socket is configured).
+    ws_token = _resolve_ws_token(args)
+
     # Create and run daemon
     socket_mode = int(args.socket_mode, 8)
     daemon = JaatoDaemon(
@@ -1081,6 +1221,9 @@ Examples:
         socket_mode=socket_mode,
         dashboard_port=args.dashboard_port,
         server_name=args.server_name,
+        ws_token=ws_token,
+        ws_token_file=args.ws_token_file,
+        ws_unsafe_no_auth=args.ws_unsafe_no_auth,
     )
 
     try:

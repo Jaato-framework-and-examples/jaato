@@ -12,6 +12,8 @@ Usage:
 
 import asyncio
 import errno
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
+from urllib.parse import parse_qs, urlsplit
 import threading
 
 try:
@@ -297,6 +300,7 @@ class JaatoWSServer:
         default_template: str = "default",
         workspace_max_age: int = 86400,
         ssl_context: Optional[ssl.SSLContext] = None,
+        required_token: Optional[str] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -316,6 +320,15 @@ class JaatoWSServer:
             ssl_context: Optional ``ssl.SSLContext`` for TLS. When provided the
                 server listens on ``wss://`` instead of ``ws://``. Use
                 :func:`load_tls_context` to build one from ``servers.json``.
+            required_token: Bearer token clients must present in the WebSocket
+                Upgrade request to be accepted. ``None`` disables auth (open
+                accept). Clients present the token via either an
+                ``Authorization: Bearer <token>`` header (Python/curl/proxies)
+                or a ``?token=<token>`` query parameter (browsers, which
+                cannot set custom headers on ``new WebSocket(...)``). The
+                stored value is the SHA-256 digest only — the plaintext is
+                discarded after construction. Tokens are compared with
+                :func:`hmac.compare_digest`.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -326,6 +339,14 @@ class JaatoWSServer:
         self.port = port
         self._ssl_context = ssl_context
         self._workspace_root = workspace_root
+        # Stored as digest only — plaintext token never lives on the
+        # instance after construction. ``None`` means auth is disabled
+        # and every connection is accepted (legacy behaviour).
+        self._expected_token_digest: Optional[bytes] = (
+            hashlib.sha256(required_token.encode("utf-8")).digest()
+            if required_token
+            else None
+        )
 
         # Connection interceptors registered by daemon extensions.
         # See ``set_connection_interceptor()`` for the protocol.
@@ -780,12 +801,70 @@ class JaatoWSServer:
         """
         self._interceptors.append((check, handler))
 
+    def _extract_presented_token(self, websocket: ServerConnection) -> Optional[str]:
+        """Pull a bearer token out of the Upgrade request.
+
+        Two locations are accepted, in priority order:
+
+        1. ``Authorization: Bearer <token>`` header — the conventional
+           form. Used by Python clients, curl, and reverse proxies.
+        2. ``?token=<token>`` query parameter on the request URI — used
+           by browsers, since the standard ``WebSocket`` constructor does
+           not let JavaScript set custom request headers.
+
+        Returns the raw presented token (without prefix) or ``None`` if
+        no candidate is found.
+        """
+        request = getattr(websocket, "request", None)
+        if request is None:
+            return None
+
+        auth = ""
+        try:
+            auth = request.headers.get("Authorization", "") or ""
+        except Exception:
+            auth = ""
+        if auth.startswith("Bearer "):
+            token = auth[len("Bearer "):].strip()
+            if token:
+                return token
+
+        path = getattr(request, "path", "") or ""
+        if "?" in path:
+            try:
+                query = parse_qs(urlsplit(path).query)
+            except Exception:
+                query = {}
+            values = query.get("token") or []
+            if values and values[0]:
+                return values[0]
+
+        return None
+
+    def _check_ws_token(self, websocket: ServerConnection) -> bool:
+        """Validate the presented bearer token against the configured digest.
+
+        Returns ``True`` if auth is disabled or the presented token
+        matches; ``False`` otherwise. Comparison is timing-safe.
+        """
+        if self._expected_token_digest is None:
+            return True
+        presented = self._extract_presented_token(websocket)
+        if not presented:
+            return False
+        got = hashlib.sha256(presented.encode("utf-8")).digest()
+        return hmac.compare_digest(got, self._expected_token_digest)
+
     async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single client connection.
 
         Before normal client handling, registered interceptors are checked.
         If any interceptor's ``check`` returns ``True``, the connection is
         handed off to that interceptor's ``handler`` and this method returns.
+
+        After interceptors, bearer-token auth is enforced (if configured).
+        Failures get an immediate 1008 (Policy Violation) close so the
+        client sees a clean rejection rather than the connection hanging.
         """
         # Check registered interceptors (e.g., peer gossip connections)
         for check, handler in self._interceptors:
@@ -796,6 +875,18 @@ class JaatoWSServer:
             except Exception as exc:
                 logger.error("Connection interceptor failed: %s", exc)
                 return
+
+        # Bearer-token auth gate. Runs after interceptors so that
+        # extension-owned connection types (e.g., gossip peers) can
+        # implement their own auth.
+        if not self._check_ws_token(websocket):
+            remote = getattr(websocket, "remote_address", None)
+            logger.warning("Rejecting WS client from %s: bearer auth failed", remote)
+            try:
+                await websocket.close(code=1008, reason="auth failed")
+            except Exception:
+                pass
+            return
 
         # Assign client ID
         async with self._lock:

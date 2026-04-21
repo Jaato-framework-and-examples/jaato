@@ -60,8 +60,12 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
   - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `666`). Use `660` to restrict to owner and group only.
+  - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. With neither flag (and `--web-socket` set), a fresh 32-byte token is auto-generated and printed once to stderr.
+  - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
+
+  **WS auth contract:** clients send `Authorization: Bearer <token>` on the Upgrade request (Python/curl/proxies) or pass `?token=<token>` as a query parameter (browsers, which can't set custom headers from `new WebSocket()`). The server stores only the SHA-256 digest and compares with `hmac.compare_digest`. Auth runs after connection-interceptors but before any session work, so a bad token is closed with WS code 1008 immediately. The `set_client_user()` hook for jaato-premium SSO is unchanged — premium can still attach an identity after the bearer check passes.
 
 - **`server/core.py`**: `JaatoServer` - UI-agnostic core logic
   - Wraps `JaatoClient` with event emission instead of callbacks
