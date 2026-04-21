@@ -366,3 +366,53 @@ def discover_embedding_subsystem(
             )
 
     return (provider, matcher)
+
+
+def create_semantic_matcher() -> Optional[SemanticMatcherProtocol]:
+    """Create a fresh semantic matcher instance via entry point discovery.
+
+    Used by the references plugin to attach one matcher per bundle — each
+    bundle has its own sidecar index, so matcher instances cannot be
+    shared across bundles. This thin wrapper looks up the same
+    ``semantic_matcher`` entry point as :func:`discover_embedding_subsystem`
+    and invokes its factory with no arguments.
+
+    Returns:
+        A fresh :class:`SemanticMatcherProtocol` instance, or ``None`` when
+        no entry point is registered or the factory fails.
+    """
+    global _cached_ep_map
+
+    if _cached_ep_map is None:
+        # Populate the cache using the same mechanism as discover_*.
+        try:
+            if sys.version_info >= (3, 10):
+                eps = importlib.metadata.entry_points(group=_ENTRY_POINT_GROUP)
+            else:
+                all_eps = importlib.metadata.entry_points()
+                eps = all_eps.get(_ENTRY_POINT_GROUP, [])
+        except Exception:
+            _cached_ep_map = {}
+            return None
+        _cached_ep_map = {ep.name: ep for ep in eps}
+
+    ep = _cached_ep_map.get("semantic_matcher")
+    if ep is None:
+        return None
+    try:
+        factory = ep.load()
+        candidate = factory()
+    except Exception as exc:
+        logger.warning(
+            "Failed to instantiate semantic_matcher entry point '%s': %s",
+            ep.value, exc,
+        )
+        return None
+    if not isinstance(candidate, SemanticMatcherProtocol):
+        logger.warning(
+            "Entry point '%s' returned %s which does not implement "
+            "SemanticMatcherProtocol",
+            ep.value, type(candidate).__name__,
+        )
+        return None
+    return candidate

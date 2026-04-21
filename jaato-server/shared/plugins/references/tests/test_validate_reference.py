@@ -272,14 +272,13 @@ class TestValidateReferenceFile:
     # ==================== embedding validation ====================
 
     def test_valid_embedding(self):
-        """Valid embedding with index and source_hash."""
+        """Valid embedding with just a source_hash fingerprint."""
         data = {
             "id": "emb-ref",
             "name": "Embedded Ref",
             "type": "local",
             "path": "/tmp",
             "embedding": {
-                "index": 0,
                 "source_hash": "sha256:a1b2c3d4e5f6",
             },
         }
@@ -288,18 +287,19 @@ class TestValidateReferenceFile:
         assert errors == []
         assert warnings == []
 
-    def test_valid_embedding_higher_index(self):
-        """Embedding with a non-zero index is valid."""
+    def test_obsolete_index_key_warns(self):
+        """A legacy 'index' key on the embedding block is ignored with a warning."""
         data = {
-            "id": "emb-ref-2",
-            "name": "Embedded Ref 2",
+            "id": "legacy-ref",
+            "name": "Legacy Ref",
             "type": "local",
-            "path": "/tmp/docs",
+            "path": "/tmp",
             "embedding": {"index": 42, "source_hash": "sha256:deadbeef"},
         }
         is_valid, errors, warnings = validate_reference_file(data)
         assert is_valid is True
         assert errors == []
+        assert any("'embedding.index' is obsolete" in w for w in warnings)
 
     def test_no_embedding_is_valid(self):
         """Omitting embedding entirely is valid (not all refs are embedded)."""
@@ -326,57 +326,18 @@ class TestValidateReferenceFile:
         assert is_valid is False
         assert any("'embedding' must be an object" in e for e in errors)
 
-    def test_embedding_missing_index(self):
-        """embedding.index is required."""
-        data = {
-            "id": "no-idx",
-            "name": "No Index",
-            "type": "local",
-            "path": "/tmp",
-            "embedding": {"source_hash": "sha256:abc123"},
-        }
-        is_valid, errors, warnings = validate_reference_file(data)
-        assert is_valid is False
-        assert any("'embedding.index' is required" in e for e in errors)
-
     def test_embedding_missing_source_hash(self):
-        """embedding.source_hash is required."""
+        """embedding.source_hash is required when an embedding block is present."""
         data = {
             "id": "no-hash",
             "name": "No Hash",
             "type": "local",
             "path": "/tmp",
-            "embedding": {"index": 0},
+            "embedding": {},
         }
         is_valid, errors, warnings = validate_reference_file(data)
         assert is_valid is False
         assert any("'embedding.source_hash' is required" in e for e in errors)
-
-    def test_embedding_index_not_integer(self):
-        """embedding.index must be an integer."""
-        data = {
-            "id": "bad-idx",
-            "name": "Bad Index",
-            "type": "local",
-            "path": "/tmp",
-            "embedding": {"index": "zero", "source_hash": "sha256:abc"},
-        }
-        is_valid, errors, warnings = validate_reference_file(data)
-        assert is_valid is False
-        assert any("'embedding.index' must be an integer" in e for e in errors)
-
-    def test_embedding_index_negative(self):
-        """embedding.index must be non-negative."""
-        data = {
-            "id": "neg-idx",
-            "name": "Negative Index",
-            "type": "local",
-            "path": "/tmp",
-            "embedding": {"index": -1, "source_hash": "sha256:abc"},
-        }
-        is_valid, errors, warnings = validate_reference_file(data)
-        assert is_valid is False
-        assert any("'embedding.index' must be non-negative" in e for e in errors)
 
     def test_embedding_source_hash_not_string(self):
         """embedding.source_hash must be a string."""
@@ -385,7 +346,7 @@ class TestValidateReferenceFile:
             "name": "Bad Hash",
             "type": "local",
             "path": "/tmp",
-            "embedding": {"index": 0, "source_hash": 12345},
+            "embedding": {"source_hash": 12345},
         }
         is_valid, errors, warnings = validate_reference_file(data)
         assert is_valid is False
@@ -398,7 +359,7 @@ class TestValidateReferenceFile:
             "name": "No Prefix",
             "type": "local",
             "path": "/tmp",
-            "embedding": {"index": 0, "source_hash": "a1b2c3d4"},
+            "embedding": {"source_hash": "a1b2c3d4"},
         }
         is_valid, errors, warnings = validate_reference_file(data)
         assert is_valid is True  # Warning, not error
@@ -418,7 +379,6 @@ class TestValidateReferenceFile:
                 "scripts": None,
             },
             "embedding": {
-                "index": 5,
                 "source_hash": "sha256:deadbeefcafe",
             },
         }
