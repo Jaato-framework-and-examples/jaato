@@ -179,3 +179,65 @@ class TestBasicAuthWithSecretURI:
             manager = AuthManager()
             headers, _ = manager.get_auth_headers(auth, service_name="svc")
         assert headers["Authorization"].startswith("Basic ")
+
+
+class TestCheckCredentialsWithSecretURI:
+    """Regression: ``check_credentials`` (called by
+    ``configure_service_auth``) used to call ``get_session_env(URI)``
+    directly, which always returned ``None``, making URI-backed
+    credentials look "missing" even when the resolver was registered
+    and would succeed.  ``configure_service_auth`` then reported a
+    misleading auth status to the agent."""
+
+    def test_uri_resolved_credential_reported_present(self, pass_resolver):
+        auth = AuthConfig(
+            type=AuthType.BEARER,
+            value_env="pass://jaato-knowledge-manager/github-token",
+        )
+        manager = AuthManager()
+        result = manager.check_credentials(auth)
+        assert result["env_vars_required"] == [
+            "pass://jaato-knowledge-manager/github-token"
+        ]
+        assert result["env_vars_present"] == [
+            "pass://jaato-knowledge-manager/github-token"
+        ]
+        assert result["env_vars_missing"] == []
+
+    def test_uri_without_resolver_reported_missing(self):
+        """No resolver for the scheme → still reported as missing
+        (same as if the env var didn't exist).  The required list
+        preserves the URI string so the user sees what they asked for."""
+        auth = AuthConfig(
+            type=AuthType.BEARER,
+            value_env="vault://no-such-resolver/key",
+        )
+        manager = AuthManager()
+        result = manager.check_credentials(auth)
+        assert result["env_vars_present"] == []
+        assert result["env_vars_missing"] == [
+            "vault://no-such-resolver/key"
+        ]
+
+    def test_env_var_path_unchanged(self):
+        """Plain env var names still work — backwards compat."""
+        auth = AuthConfig(type=AuthType.BEARER, value_env="GH_TOKEN")
+        with patch.dict("os.environ", {"GH_TOKEN": "ghp_abc"}, clear=False):
+            manager = AuthManager()
+            result = manager.check_credentials(auth)
+        assert result["env_vars_present"] == ["GH_TOKEN"]
+        assert result["env_vars_missing"] == []
+
+    def test_basic_auth_mixed_sources(self, pass_resolver):
+        auth = AuthConfig(
+            type=AuthType.BASIC,
+            username_env="MY_USER",
+            password_env="pass://svc/password",
+        )
+        with patch.dict("os.environ", {"MY_USER": "alice"}, clear=False):
+            manager = AuthManager()
+            result = manager.check_credentials(auth)
+        assert set(result["env_vars_present"]) == {
+            "MY_USER", "pass://svc/password"
+        }
+        assert result["env_vars_missing"] == []

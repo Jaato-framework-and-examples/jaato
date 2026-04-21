@@ -360,13 +360,24 @@ class AuthManager:
         self,
         auth_config: AuthConfig
     ) -> Dict[str, Any]:
-        """Check which credentials are present in environment.
+        """Check which credentials are present.
+
+        For each ``*_env`` field, classifies it as present or missing
+        using the same :func:`_resolve_credential` helper that
+        :meth:`get_auth_headers` uses at request time — so a value
+        registered as a secret URI (``pass://``, ``vault://``, …)
+        is correctly reported as present when its resolver succeeds,
+        not falsely as missing because ``get_session_env(URI_string)``
+        returned ``None``.
 
         Args:
             auth_config: Authentication configuration.
 
         Returns:
-            Dict with env_vars_required, env_vars_present, env_vars_missing.
+            Dict with env_vars_required, env_vars_present,
+            env_vars_missing.  The list values preserve the original
+            ``*_env`` strings (env var names OR URIs) so the user can
+            tell at a glance what kind of source each credential uses.
         """
         required: list[str] = []
         present: list[str] = []
@@ -395,12 +406,13 @@ class AuthManager:
             if auth_config.client_secret_env:
                 required.append(auth_config.client_secret_env)
 
-        # Check which are present
-        for env_var in required:
-            if get_session_env(env_var):
-                present.append(env_var)
+        # Check which are present — same resolution path as request time.
+        for source in required:
+            value, _provenance = _resolve_credential(source)
+            if value:
+                present.append(source)
             else:
-                missing.append(env_var)
+                missing.append(source)
 
         return {
             "env_vars_required": required,
