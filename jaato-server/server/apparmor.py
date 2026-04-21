@@ -71,7 +71,14 @@ class AppArmorManager:
     #   1 — initial template
     #   2 — memories/ folder (raw queue + curated.jsonl), retain legacy
     #       memories.jsonl for migration reads.
-    _TEMPLATE_VERSION = 2
+    #   3 — narrow write rule for /proc/self/{{task/*/,}}attr/current so
+    #       apparmor_confine().__exit__ can actually restore unconfined.
+    #       Without this, the kernel denied the file-write that executes
+    #       the change_profile transition, leaving thread-pool workers
+    #       stuck in the session's enforce-mode profile across sessions —
+    #       subsequent operations (verify_auth reading ~/.jaato/*.json,
+    #       reads from external sandbox-added paths) all hit EACCES.
+    _TEMPLATE_VERSION = 3
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -201,17 +208,31 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
   # ---- profile transitions ----
   # Allow the framework to restore the unconfined state on tool exit.
-  # Without this, apparmor_confine().__exit__ silently fails to restore,
-  # and the thread stays trapped in this profile across tool calls —
-  # breaking framework-level tools (like spawn_subagent) that rely on
-  # opting out of confinement via TRAIT_FRAMEWORK_LEVEL.
+  # Two rules are both required:
   #
-  # Note: this does NOT let agent code escape confinement.  Writes to
-  # /proc/self/attr/current are gated by the change_profile capability,
-  # which only the framework's apparmor_confine context manager invokes.
-  # Agent tool code can't write to /proc/self/attr/current because file
-  # writes there are not in the workspace allow list.
+  #   1. ``change_profile -> unconfined`` — authorizes the semantic
+  #      transition (AppArmor capability check).
+  #   2. Write access to /proc/self/{{task/*/,}}attr/current — authorizes
+  #      the file-write that EXECUTES the transition (AppArmor file check).
+  #
+  # Without both, apparmor_confine().__exit__ silently fails to restore
+  # and the thread stays trapped in this profile.  That's worse than a
+  # single-tool failure: thread-pool workers are reused across sessions,
+  # so a trapped worker picked up for verify_auth in the next session
+  # will get EACCES on ~/.jaato/*_auth.json, and one picked up for an
+  # external-sandbox-added path will get EACCES reading that path —
+  # both failures were observed in session 20260421_202113 before this
+  # rule was added.
+  #
+  # Note: the write rule does NOT let agent code escape confinement on
+  # its own.  The ``change_profile`` capability is the actual gate —
+  # this profile permits transitions only to ``unconfined``, and only
+  # the framework's apparmor_confine context manager invokes the write.
+  # Agent tool code writing arbitrary text to attr/current wouldn't
+  # satisfy AppArmor's expected format and would be ignored.
   change_profile -> unconfined,
+  /proc/self/attr/current      w,
+  /proc/self/task/*/attr/current w,
 }}
 '''
 

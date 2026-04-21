@@ -14,6 +14,7 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -407,6 +408,46 @@ class JaatoWSServer:
             if not apparmor or not apparmor.is_available():
                 if apparmor is not None:
                     sess.sandbox_mode = "soft"
+                return
+
+            # AppArmor confinement is intended for WS-provisioned sessions
+            # only — multi-tenant deployments where untrusted or semi-
+            # trusted clients attach over WebSocket and need kernel-
+            # enforced filesystem isolation (see ``docs/apparmor-setup.md``).
+            #
+            # IPC sessions run on behalf of the local user, whose shell
+            # already has full filesystem access.  Confining them does not
+            # add security (the user can bypass by invoking python directly)
+            # but DOES create real correctness problems:
+            #
+            # - ``~/.jaato/*_auth.json`` and any path outside the session's
+            #   workspace become unreadable — breaks verify_auth, reference
+            #   selection, external ``sandbox add`` paths, etc.
+            # - Thread-pool workers leak profile state across sessions when
+            #   the restore-to-unconfined transition fails (it's gated on a
+            #   file-write rule that the profile doesn't grant).
+            #
+            # WS-provisioned sessions live under ``apparmor._workspace_root``
+            # (typically ``~/.jaato/workspaces/``).  Sessions whose workspace
+            # is elsewhere — IPC clients using the terminal's CWD, or any
+            # other non-provisioned workspace — are trusted-by-transport and
+            # skip confinement here.
+            try:
+                ws_workspace_root = os.path.realpath(
+                    str(apparmor._workspace_root)
+                )
+                sess_workspace = os.path.realpath(sess.workspace_path)
+            except OSError:
+                return
+            if not (
+                sess_workspace == ws_workspace_root
+                or sess_workspace.startswith(ws_workspace_root + os.sep)
+            ):
+                logger.debug(
+                    "AppArmor skipped for non-provisioned session %s "
+                    "(workspace %s not under %s — IPC or user-CWD session)",
+                    session_id, sess_workspace, ws_workspace_root,
+                )
                 return
 
             # Provision the AppArmor profile using the session manager's

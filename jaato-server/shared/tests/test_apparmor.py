@@ -106,6 +106,35 @@ class TestRenderProfile:
         profile = manager._render_profile("test_session", "/workspace")
         assert "jaato-ws-test_session" in profile
 
+    def test_allows_writing_attr_current_for_restore(self, manager):
+        """Regression: restore-to-unconfined on context-manager exit
+        writes to ``/proc/self/task/<tid>/attr/current``.  If the profile
+        doesn't grant write access to that file, the kernel denies the
+        file-write and the thread stays trapped in the enforce-mode
+        profile — even though ``change_profile -> unconfined`` authorizes
+        the semantic transition.  Trapped workers leak across sessions
+        and cause EACCES on subsequent reads of ``~/.jaato/*_auth.json``
+        and any external sandbox-added paths."""
+        profile = manager._render_profile("s1", "/workspace")
+        # Per-thread variant (used by apparmor_confine since it keys
+        # on threading.get_native_id())
+        assert "/proc/self/task/*/attr/current w" in profile
+        # Process-level variant — harmless to include and covers
+        # code paths that might write to the process-level attr file.
+        assert "/proc/self/attr/current" in profile
+        # The semantic capability rule must still be present (file-
+        # write alone doesn't authorize the profile transition).
+        assert "change_profile -> unconfined" in profile
+
+    def test_template_version_bumped_to_3(self, manager):
+        """Template changes affecting confinement correctness (like the
+        attr/current write rule) must bump _TEMPLATE_VERSION so
+        ``apparmor_parser`` recompiles from source instead of reusing a
+        stale cached binary."""
+        assert manager._TEMPLATE_VERSION == 3
+        profile = manager._render_profile("s1", "/workspace")
+        assert "jaato-apparmor-template-version: 3" in profile
+
 
 class TestMakeConfineContext:
     def test_returns_callable(self):
