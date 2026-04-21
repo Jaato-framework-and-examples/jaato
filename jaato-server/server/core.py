@@ -2189,8 +2189,16 @@ class JaatoServer:
         def on_permission_resolved(tool_name: str, request_id: str,
                                    granted: bool, method: str,
                                    comment: str = ""):
-            server._pending_permission_request_id = None
-            server._waiting_for_channel_input = False
+            # Only clear pending-prompt state when the resolution targets
+            # the currently-displayed prompt. Whitelist/blacklist auto-
+            # decisions fire this hook with an empty request_id and can
+            # race with a parallel tool's pending channel prompt — without
+            # this guard they would clobber the pending id and the user's
+            # response to the visible prompt would surface as a
+            # StateError ("Unknown permission request: ...").
+            if request_id and server._pending_permission_request_id == request_id:
+                server._pending_permission_request_id = None
+                server._waiting_for_channel_input = False
 
             # Resolution status is shown in the tool tree (e.g., "✓ [once]")
             # No need to emit separate output text
