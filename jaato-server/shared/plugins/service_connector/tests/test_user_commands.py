@@ -21,6 +21,21 @@ def _helplines_text(result: HelpLines) -> str:
     return "\n".join(line[0] for line in result.lines)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_tier(monkeypatch):
+    """Disable user-tier (``~/.jaato/services/``) lookup during tests.
+
+    The SchemaStore defaults to checking ``~/.jaato/services/`` as a
+    secondary tier behind the workspace tier.  Developers running these
+    tests locally may have real services installed there, which leak
+    into assertions written before tiering existed.  Patching the
+    helper to return ``None`` keeps tests deterministic regardless of
+    the developer's home directory.
+    """
+    from .. import schema_store
+    monkeypatch.setattr(schema_store, "_default_home_base_path", lambda: None)
+
+
 @pytest.fixture
 def plugin(tmp_path):
     """Create an initialized plugin with a temp workspace."""

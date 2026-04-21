@@ -3,7 +3,23 @@
 Manages the storage and retrieval of service configurations and endpoint
 schemas from the filesystem. Uses YAML format for human readability.
 
-Directory structure:
+Tiered lookup
+-------------
+
+Reads traverse two tiers in precedence order — the same pattern used by
+agents, profiles, prompts, skills, and themes elsewhere in jaato:
+
+1. **Workspace tier** — ``<workspace>/.jaato/services/``.  Per-project
+   services; the only writable tier.
+2. **User tier** — ``~/.jaato/services/``.  Shared across all workspaces
+   for the user.
+
+The first tier containing a given service wins (workspace shadows home).
+Writes always target the workspace tier — the user-tier is populated out
+of band (e.g. by the user manually copying a discovered service they
+want available everywhere).
+
+Directory structure (per tier):
     .jaato/services/
     ├── _discovered/              # Auto-cached OpenAPI specs
     │   └── {service}.yaml
@@ -14,7 +30,7 @@ Directory structure:
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .types import (
     AuthConfig,
@@ -23,10 +39,24 @@ from .types import (
 )
 
 
-# Default storage directory relative to workspace
+# Default storage directory relative to workspace OR user home
 DEFAULT_SERVICES_DIR = ".jaato/services"
 DISCOVERED_DIR = "_discovered"
 SERVICE_CONFIG_FILE = "_service.yaml"
+
+
+def _default_home_base_path() -> Optional[Path]:
+    """Return the user-tier services path, or None when HOME is unset.
+
+    ``~/.jaato/services/``.  The directory is not created on demand —
+    only read from.  When it doesn't exist the tiered lookup simply
+    skips it, so missing user-tier content is free of warnings.
+    """
+    try:
+        return Path.home() / DEFAULT_SERVICES_DIR
+    except (RuntimeError, OSError):
+        # Path.home() can raise on exotic configurations with no HOME.
+        return None
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -64,26 +94,51 @@ class SchemaStore:
         base_path: Root directory for schema storage (.jaato/services).
     """
 
-    def __init__(self, workspace_path: Optional[str] = None):
+    def __init__(
+        self,
+        workspace_path: Optional[str] = None,
+        home_base_path: Optional[Path] = None,
+    ):
         """Initialize the schema store.
 
         Args:
             workspace_path: Base directory for the workspace. If None,
                 workspace-relative paths will not resolve until
                 set_workspace_path() is called.
+            home_base_path: Override for the user-tier base path.  When
+                ``None`` (the default), uses ``~/.jaato/services/``.
+                Passing an explicit path is mainly for tests that need
+                to isolate the user tier; production callers rely on
+                the default.
         """
         self._workspace: Optional[Path] = Path(workspace_path) if workspace_path else None
         self._base_path: Optional[Path] = self._workspace / DEFAULT_SERVICES_DIR if self._workspace else None
+        # User-tier base path.  Unlike the workspace tier, this is
+        # independent of the workspace setting and populated eagerly at
+        # construction time (it comes from HOME, not from any caller-
+        # supplied state).  Read-only from this class's perspective;
+        # writes always go to self._base_path.
+        self._home_base_path: Optional[Path] = (
+            home_base_path if home_base_path is not None
+            else _default_home_base_path()
+        )
 
     @property
     def base_path(self) -> Optional[Path]:
-        """Get the base path for service storage, or None if no workspace set."""
+        """Get the workspace base path for service storage, or None if no workspace set."""
         return self._base_path
+
+    @property
+    def home_base_path(self) -> Optional[Path]:
+        """Get the user-tier base path (``~/.jaato/services/``), or None."""
+        return self._home_base_path
 
     def set_workspace_path(self, path: str) -> None:
         """Update the workspace path.
 
-        Called by plugin wiring when workspace is set.
+        Called by plugin wiring when workspace is set.  Does not touch
+        the user-tier base path, which stays pinned to ``~/.jaato/services/``
+        regardless of workspace changes.
 
         Args:
             path: New workspace path.
@@ -91,13 +146,72 @@ class SchemaStore:
         self._workspace = Path(path)
         self._base_path = self._workspace / DEFAULT_SERVICES_DIR
 
+    # ------------------------------------------------------------------
+    # Tier iteration
+    # ------------------------------------------------------------------
+
+    def _read_base_paths(self) -> Iterator[Path]:
+        """Yield base paths to READ from, in precedence order.
+
+        Workspace first (when configured), then user-tier (when it
+        exists on disk).  Caller is responsible for stopping at the
+        first hit when semantics demand "first tier wins" — this
+        helper just iterates.
+
+        Non-existent tiers are skipped — ``~/.jaato/services/`` is
+        optional and most users won't have it.
+        """
+        if self._base_path is not None and self._base_path.exists():
+            yield self._base_path
+        if self._home_base_path is not None and self._home_base_path.exists():
+            yield self._home_base_path
+
+    def _find_service_base(self, service_name: str) -> Optional[Path]:
+        """Return the first tier base containing ``service_name``.
+
+        Checks for either a manual service (``<base>/<service>/_service.yaml``)
+        or a discovered service (``<base>/_discovered/<service>.yaml``).
+        Workspace wins on conflict.
+        """
+        for base in self._read_base_paths():
+            if (base / service_name / SERVICE_CONFIG_FILE).exists():
+                return base
+            if (base / DISCOVERED_DIR / f"{service_name}.yaml").exists():
+                return base
+        return None
+
+    # ------------------------------------------------------------------
+    # Write-tier path helpers (workspace only)
+    # ------------------------------------------------------------------
+
     def _get_service_dir(self, service_name: str) -> Path:
-        """Get the directory for a service."""
+        """Get the WRITE directory for a service (always workspace-tier)."""
         return self._base_path / service_name
 
     def _get_discovered_dir(self) -> Path:
-        """Get the directory for discovered (cached) services."""
+        """Get the WRITE directory for discovered services (always workspace-tier)."""
         return self._base_path / DISCOVERED_DIR
+
+    # ------------------------------------------------------------------
+    # Read-tier path helpers (tiered)
+    # ------------------------------------------------------------------
+
+    def _get_service_dir_for_read(self, service_name: str) -> Optional[Path]:
+        """Get the READ directory for a service, respecting tier precedence.
+
+        Returns ``None`` when the service doesn't exist in any tier.
+        Callers that write should use :meth:`_get_service_dir` instead.
+        """
+        base = self._find_service_base(service_name)
+        return base / service_name if base else None
+
+    def _get_discovered_path_for_read(self, service_name: str) -> Optional[Path]:
+        """Get the READ path for a discovered service, respecting tier precedence."""
+        for base in self._read_base_paths():
+            path = base / DISCOVERED_DIR / f"{service_name}.yaml"
+            if path.exists():
+                return path
+        return None
 
     # === Service Operations ===
 
@@ -119,54 +233,60 @@ class SchemaStore:
     def load_service_config(self, service_name: str) -> Optional[ServiceConfig]:
         """Load a service configuration.
 
+        Tiered: checks workspace first, then user home.  First tier
+        wins — a workspace-tier service with the same name as a
+        user-tier one shadows the latter.
+
         Args:
             service_name: Name of the service.
 
         Returns:
             ServiceConfig if found, None otherwise.
         """
-        # Check regular services first
-        config_path = self._get_service_dir(service_name) / SERVICE_CONFIG_FILE
-        if config_path.exists():
-            data = _load_yaml(config_path)
-            if data:
-                data["name"] = service_name  # Ensure name is set
-                return ServiceConfig.from_dict(data)
+        for base in self._read_base_paths():
+            # Check regular service at this tier
+            config_path = base / service_name / SERVICE_CONFIG_FILE
+            if config_path.exists():
+                data = _load_yaml(config_path)
+                if data:
+                    data["name"] = service_name  # Ensure name is set
+                    return ServiceConfig.from_dict(data)
 
-        # Check discovered services
-        discovered_path = self._get_discovered_dir() / f"{service_name}.yaml"
-        if discovered_path.exists():
-            data = _load_yaml(discovered_path)
-            if data and data.get("config"):
-                config_data = data["config"]
-                config_data["name"] = service_name
-                return ServiceConfig.from_dict(config_data)
+            # Check discovered service at this tier
+            discovered_path = base / DISCOVERED_DIR / f"{service_name}.yaml"
+            if discovered_path.exists():
+                data = _load_yaml(discovered_path)
+                if data and data.get("config"):
+                    config_data = data["config"]
+                    config_data["name"] = service_name
+                    return ServiceConfig.from_dict(config_data)
 
         return None
 
     def list_services(self) -> List[str]:
-        """List all available service names.
+        """List all available service names across tiers.
 
         Returns:
-            List of service names (both manual and discovered).
+            List of service names (both manual and discovered) from all
+            readable tiers, deduplicated.  Workspace names shadow user-
+            tier names with the same string — but since this returns
+            names only (not configs), the deduplication is transparent.
         """
-        services = []
+        services = set()
 
-        if not self._base_path.exists():
-            return services
+        for base in self._read_base_paths():
+            for item in base.iterdir():
+                if item.is_dir() and not item.name.startswith('.'):
+                    if item.name == DISCOVERED_DIR:
+                        # List discovered services from YAML files
+                        for yaml_file in item.glob("*.yaml"):
+                            services.add(yaml_file.stem)
+                    else:
+                        # Regular service directory
+                        if (item / SERVICE_CONFIG_FILE).exists():
+                            services.add(item.name)
 
-        for item in self._base_path.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
-                if item.name == DISCOVERED_DIR:
-                    # List discovered services from YAML files
-                    for yaml_file in item.glob("*.yaml"):
-                        services.append(yaml_file.stem)
-                else:
-                    # Regular service directory
-                    if (item / SERVICE_CONFIG_FILE).exists():
-                        services.append(item.name)
-
-        return sorted(set(services))
+        return sorted(services)
 
     def delete_service(self, service_name: str) -> bool:
         """Delete a service and all its schemas.
@@ -222,7 +342,7 @@ class SchemaStore:
         service_name: str,
         endpoint_name: str
     ) -> Optional[EndpointSchema]:
-        """Load an endpoint schema.
+        """Load an endpoint schema (tiered: workspace first, then user home).
 
         Args:
             service_name: Service name/directory.
@@ -231,7 +351,10 @@ class SchemaStore:
         Returns:
             EndpointSchema if found, None otherwise.
         """
-        schema_path = self._get_service_dir(service_name) / f"{endpoint_name}.yaml"
+        service_dir = self._get_service_dir_for_read(service_name)
+        if service_dir is None:
+            return None
+        schema_path = service_dir / f"{endpoint_name}.yaml"
         if not schema_path.exists():
             return None
 
@@ -245,7 +368,13 @@ class SchemaStore:
         self,
         service_name: str
     ) -> List[Tuple[str, EndpointSchema]]:
-        """List all endpoint schemas for a service.
+        """List all endpoint schemas for a service (tiered).
+
+        Returns endpoints from whichever tier the service lives in —
+        workspace takes precedence; if the service is workspace-
+        defined, user-tier endpoints of the same service name are NOT
+        merged in.  This matches the "first tier wins" semantics of
+        ``load_service_config``.
 
         Args:
             service_name: Service name/directory.
@@ -253,8 +382,8 @@ class SchemaStore:
         Returns:
             List of (endpoint_name, schema) tuples.
         """
-        service_dir = self._get_service_dir(service_name)
-        if not service_dir.exists():
+        service_dir = self._get_service_dir_for_read(service_name)
+        if service_dir is None or not service_dir.exists():
             return []
 
         endpoints = []
@@ -330,7 +459,7 @@ class SchemaStore:
         self,
         service_name: str
     ) -> Optional[Tuple[ServiceConfig, List[EndpointSchema]]]:
-        """Load a discovered service.
+        """Load a discovered service (tiered: workspace first, then user home).
 
         Args:
             service_name: Service alias.
@@ -338,8 +467,8 @@ class SchemaStore:
         Returns:
             Tuple of (config, endpoints) if found, None otherwise.
         """
-        service_path = self._get_discovered_dir() / f"{service_name}.yaml"
-        if not service_path.exists():
+        service_path = self._get_discovered_path_for_read(service_name)
+        if service_path is None:
             return None
 
         data = _load_yaml(service_path)
@@ -357,7 +486,7 @@ class SchemaStore:
         return config, endpoints
 
     def get_discovered_source(self, service_name: str) -> Optional[str]:
-        """Get the original source URL/path for a discovered service.
+        """Get the original source URL/path for a discovered service (tiered).
 
         Args:
             service_name: Service alias.
@@ -365,8 +494,8 @@ class SchemaStore:
         Returns:
             Source URL/path if available, None otherwise.
         """
-        service_path = self._get_discovered_dir() / f"{service_name}.yaml"
-        if not service_path.exists():
+        service_path = self._get_discovered_path_for_read(service_name)
+        if service_path is None:
             return None
 
         data = _load_yaml(service_path)

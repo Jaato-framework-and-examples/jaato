@@ -78,7 +78,11 @@ class AppArmorManager:
     #       stuck in the session's enforce-mode profile across sessions —
     #       subsequent operations (verify_auth reading ~/.jaato/*.json,
     #       reads from external sandbox-added paths) all hit EACCES.
-    _TEMPLATE_VERSION = 3
+    #   4 — read access to ~/.jaato/services/ so user-tier services
+    #       (github, phoenix, etc.) are reachable from confined WS
+    #       sessions.  SchemaStore gained tiered lookup in the same
+    #       change; the profile needed to follow so the reads succeed.
+    _TEMPLATE_VERSION = 4
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -125,6 +129,8 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   @{{HOME}}/.jaato/skills/**       r,
   @{{HOME}}/.jaato/themes/         r,
   @{{HOME}}/.jaato/themes/**       r,
+  @{{HOME}}/.jaato/services/       r,
+  @{{HOME}}/.jaato/services/**     r,
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
   @{{HOME}}/.jaato/gc.json          r,

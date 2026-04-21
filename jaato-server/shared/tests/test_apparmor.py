@@ -126,14 +126,25 @@ class TestRenderProfile:
         # write alone doesn't authorize the profile transition).
         assert "change_profile -> unconfined" in profile
 
-    def test_template_version_bumped_to_3(self, manager):
+    def test_template_version_bumped(self, manager):
         """Template changes affecting confinement correctness (like the
-        attr/current write rule) must bump _TEMPLATE_VERSION so
+        attr/current write rule, or new allow rules such as
+        ~/.jaato/services/) must bump _TEMPLATE_VERSION so
         ``apparmor_parser`` recompiles from source instead of reusing a
         stale cached binary."""
-        assert manager._TEMPLATE_VERSION == 3
+        assert manager._TEMPLATE_VERSION >= 4
         profile = manager._render_profile("s1", "/workspace")
-        assert "jaato-apparmor-template-version: 3" in profile
+        assert f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}" in profile
+
+    def test_allows_reading_user_tier_services(self, manager):
+        """Regression: SchemaStore's tiered lookup reads
+        ``~/.jaato/services/`` as a user-tier fallback when the
+        workspace tier doesn't have the service.  Confined WS sessions
+        need AppArmor read access to that path, otherwise tiered lookup
+        is invisible to any model call coming from a confined tool."""
+        profile = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/services/" in profile
+        assert "@{HOME}/.jaato/services/**" in profile
 
 
 class TestMakeConfineContext:
