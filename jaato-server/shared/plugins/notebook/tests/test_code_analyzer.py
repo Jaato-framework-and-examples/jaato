@@ -190,6 +190,45 @@ open('/tmp/test')
         # Should not crash, may report parse error
         assert isinstance(result, AnalysisResult)
 
+    def test_apostrophe_in_single_quoted_string_gives_hint(self):
+        """The most common cell-authoring bug: apostrophes inside a
+        single-quoted string literal. The analyzer should surface the
+        offending line plus an actionable quoting hint so the permission
+        preview (and model retries) have something to act on instead of
+        just the bare ``unterminated string literal`` message."""
+        code = "x = 'it's bad'"
+        result = analyze_code(code)
+        parse_errors = [r for r in result.risks if r.category == "parse_error"]
+        assert len(parse_errors) == 1
+        risk = parse_errors[0]
+        assert risk.level == RiskLevel.LOW
+        assert risk.details is not None
+        assert "line 1:" in risk.details
+        assert "x = 'it's bad'" in risk.details
+        assert "Hint:" in risk.details
+        # Hint should actually name the fix
+        assert "double quotes" in risk.details or "triple-quoted" in risk.details
+
+    def test_unclosed_triple_quoted_string_gives_hint(self):
+        """Unterminated triple-quoted strings are a similar class of bug
+        and should also get the quoting hint."""
+        code = 'x = """not closed'
+        result = analyze_code(code)
+        parse_errors = [r for r in result.risks if r.category == "parse_error"]
+        assert len(parse_errors) == 1
+        assert parse_errors[0].details is not None
+        assert "Hint:" in parse_errors[0].details
+
+    def test_non_quote_syntax_error_omits_quote_hint(self):
+        """Unrelated SyntaxErrors should still get the offending line but
+        no misleading quote hint."""
+        code = "def foo(:"
+        result = analyze_code(code)
+        parse_errors = [r for r in result.risks if r.category == "parse_error"]
+        assert len(parse_errors) == 1
+        details = parse_errors[0].details or ""
+        assert "Hint:" not in details
+
     def test_network_imports_flagged(self):
         """Network-related imports should be flagged."""
         code = "import socket"

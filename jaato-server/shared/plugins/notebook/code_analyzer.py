@@ -34,6 +34,47 @@ except ImportError:
 _AST_STR_TYPE: tuple = (ast.Str,) if hasattr(ast, 'Str') else ()
 
 
+def _syntax_error_hint(err_msg: str) -> Optional[str]:
+    """Return an actionable hint for common SyntaxError patterns, or None.
+
+    The most frequent cell-authoring failure is an unescaped apostrophe
+    inside a single-quoted string literal (``'it's'``). Python's own
+    message for this varies across versions — surface a uniform hint.
+    """
+    msg = (err_msg or "").lower()
+    quote_markers = (
+        "unterminated string literal",
+        "eol while scanning string literal",
+        "unterminated triple-quoted string",
+    )
+    if any(m in msg for m in quote_markers):
+        return (
+            "If a string contains an apostrophe, wrap it in double quotes "
+            "(\"it's\"), escape the quote ('it\\'s'), or use a triple-quoted "
+            "string (\"\"\"...\"\"\")."
+        )
+    return None
+
+
+def _format_syntax_error_diagnostic(code: str, err: SyntaxError) -> str:
+    """Render a SyntaxError with offending line and caret, Python-traceback style.
+
+    Used by the permission preview so the user sees where the parse fails
+    instead of just the bare ``e.msg``.
+    """
+    lines = code.splitlines() if code else []
+    parts: List[str] = []
+    if err.lineno and 1 <= err.lineno <= len(lines):
+        prefix = f"line {err.lineno}: "
+        parts.append(prefix + lines[err.lineno - 1])
+        if err.offset and err.offset > 0:
+            parts.append(" " * (len(prefix) + err.offset - 1) + "^")
+    hint = _syntax_error_hint(err.msg or "")
+    if hint:
+        parts.append("Hint: " + hint)
+    return "\n".join(parts) if parts else ""
+
+
 class RiskLevel(Enum):
     """Risk level for detected patterns."""
     LOW = "low"          # Informational, probably safe
@@ -97,7 +138,11 @@ class AnalysisResult:
             for risk in level_risks[:max_items]:
                 lines.append(f"[{level_name}] {risk.description} (line {risk.line_number})")
                 if risk.details:
-                    lines.append(f"         {risk.details}")
+                    # details may span multiple lines (e.g., syntax error
+                    # with offending line + caret + hint). Indent every
+                    # line so the block visibly belongs to the risk above.
+                    for detail_line in risk.details.splitlines():
+                        lines.append(f"         {detail_line}")
 
         if len(self.risks) > max_items:
             lines.append(f"... and {len(self.risks) - max_items} more issues")
@@ -316,13 +361,16 @@ class CodeAnalyzer:
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
-            # Can't analyze invalid syntax
+            # Can't analyze invalid syntax. Surface a Python-traceback-style
+            # diagnostic (offending line + caret + optional hint) so the user
+            # sees exactly where the syntax fails in the permission preview.
             result.risks.append(DetectedRisk(
                 category="parse_error",
                 description=f"Syntax error: {e.msg}",
                 level=RiskLevel.LOW,
                 line_number=e.lineno or 1,
                 code_snippet=code[:80] if code else "",
+                details=_format_syntax_error_diagnostic(code, e),
             ))
             return result
 

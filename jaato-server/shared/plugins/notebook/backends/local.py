@@ -206,11 +206,22 @@ class LocalJupyterBackend(NotebookBackend):
             import traceback
             tb = traceback.format_exc()
 
+            error_message = str(e)
+            # Append an actionable hint for the most common cell-authoring
+            # failure: apostrophes inside single-quoted string literals.
+            # Python's own message ("unterminated string literal") doesn't
+            # suggest a fix — surface one so the model can retry targeted.
+            if isinstance(e, SyntaxError):
+                from ..code_analyzer import _syntax_error_hint
+                hint = _syntax_error_hint(e.msg or "")
+                if hint:
+                    error_message = f"{error_message}\n\nHint: {hint}"
+
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 outputs=outputs,
                 error_name=type(e).__name__,
-                error_message=str(e),
+                error_message=error_message,
                 traceback=tb,
                 duration_seconds=time.time() - start_time,
             )

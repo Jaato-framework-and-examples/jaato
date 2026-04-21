@@ -399,7 +399,13 @@ class NotebookPlugin(StreamingCapable):
                     "properties": {
                         "code": {
                             "type": "string",
-                            "description": "Python code to execute"
+                            "description": (
+                                "Python code to execute. For strings containing "
+                                "apostrophes, use double quotes (\"it's\") or "
+                                "triple-quoted strings (\"\"\"...\"\"\") — "
+                                "single quotes with inner apostrophes ('it's') "
+                                "are a SyntaxError."
+                            )
                         },
                         "notebook_id": {
                             "type": "string",
