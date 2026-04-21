@@ -162,6 +162,56 @@ class TestRewriteJTable:
         assert "&lt;" not in out
         assert "&amp;" not in out
 
+    def test_table_respects_max_width(self):
+        """Regression: Rich auto-detects width as 80 in capture contexts.
+        When the host terminal is narrower (tmux pane split, small
+        window), the rendered table overflows and the host wraps each
+        line mid-content — destroying the box visually.  Caller must be
+        able to constrain via ``max_table_width``."""
+        markup = (
+            "<j-table>\n"
+            "<j-thead><j-th>#</j-th><j-th>ID</j-th>"
+            "<j-th>Name</j-th><j-th>Topics</j-th></j-thead>\n"
+            "<j-tr><j-td>1</j-td>"
+            "<j-td>jaato-ipc-ws-transport-clients</j-td>"
+            "<j-td>JAATO IPC and WebSocket Transport Clients</j-td>"
+            "<j-td>IPC client, WebSocket server, event protocol, "
+            "recovery, message framing, Unix sockets, TLS, "
+            "auto-start, daemon mode</j-td></j-tr>\n"
+            "</j-table>\n"
+        )
+
+        narrow = rewrite_j_markup(markup, max_table_width=60)
+        # Every rendered line must fit within the requested width
+        # (excluding ANSI escapes that don't consume terminal columns).
+        for line in narrow.split("\n"):
+            visible = _strip_ansi(line)
+            assert len(visible) <= 60, (
+                f"line exceeds max_width=60: {len(visible)} cols: {visible!r}"
+            )
+
+    def test_table_max_width_too_small_clamped(self):
+        """``max_table_width`` below the floor (20) is clamped — the
+        renderer must never crash on absurd inputs."""
+        markup = (
+            "<j-table><j-thead><j-th>A</j-th></j-thead>"
+            "<j-tr><j-td>x</j-td></j-tr></j-table>"
+        )
+        # Should not raise
+        out = rewrite_j_markup(markup, max_table_width=5)
+        assert "x" in _strip_ansi(out)
+
+    def test_table_no_max_width_still_works(self):
+        """Backwards compat: callers that don't pass max_table_width
+        get the previous behavior (Rich default 80)."""
+        markup = (
+            "<j-table><j-thead><j-th>A</j-th></j-thead>"
+            "<j-tr><j-td>x</j-td></j-tr></j-table>"
+        )
+        out = rewrite_j_markup(markup)
+        assert "x" in _strip_ansi(out)
+        assert "<j-table>" not in out
+
 
 class TestUiThemeMapping:
 

@@ -690,7 +690,11 @@ class OutputBuffer:
         # the TUI owns presentation.
         from j_markup_renderer import contains_j_markup, rewrite_j_markup
         if contains_j_markup(text):
-            text = rewrite_j_markup(text, self._syntax_theme)
+            text = rewrite_j_markup(
+                text,
+                syntax_theme=self._syntax_theme,
+                max_table_width=self._console_width,
+            )
 
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
@@ -1233,7 +1237,11 @@ class OutputBuffer:
         # raw tags as plain text.  See j_markup_renderer for the why.
         from j_markup_renderer import contains_j_markup, rewrite_j_markup
         if contains_j_markup(chunk):
-            chunk = rewrite_j_markup(chunk, self._syntax_theme)
+            chunk = rewrite_j_markup(
+                chunk,
+                syntax_theme=self._syntax_theme,
+                max_table_width=self._console_width,
+            )
 
         # Get or create terminal emulator for this tool
         # Use continuation_id as key when tool belongs to a continuation group

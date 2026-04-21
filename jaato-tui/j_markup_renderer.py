@@ -183,8 +183,24 @@ def _render_code_to_ansi(code: str, language: str, syntax_theme: str) -> str:
         return "\n" + "\n".join(indent + line for line in code.split("\n")) + "\n"
 
 
-def _render_table_to_ansi(body: str) -> str:
-    """Render a ``<j-table>`` body as a box-drawing ASCII table."""
+def _render_table_to_ansi(body: str, max_width: Optional[int] = None) -> str:
+    """Render a ``<j-table>`` body as a box-drawing ASCII table.
+
+    Args:
+        body: The inner content of a ``<j-table>...</j-table>`` block.
+        max_width: Maximum total width in terminal columns the rendered
+            table is allowed to occupy.  When ``None``, Rich's default
+            (80 cols) is used — but in a ``capture()`` context Rich
+            cannot detect the actual terminal, so passing ``None``
+            makes the table render at 80 cols regardless of the host
+            terminal's real width.  When the host terminal is *narrower*
+            than 80 cols (tmux pane split, small window), the rendered
+            table overflows and the host terminal wraps each line
+            mid-content — destroying the box structure visually.  The
+            ``OutputBuffer`` caller threads its
+            ``_console_width`` through here so the table fits the
+            actual usable width.
+    """
     headers = []
     thead_match = _J_THEAD.search(body)
     if thead_match:
@@ -220,7 +236,14 @@ def _render_table_to_ansi(body: str) -> str:
         table.add_row(*padded[: len(table.columns)])
 
     try:
-        console = Console(force_terminal=True, no_color=False, highlight=False)
+        console_kwargs = {
+            "force_terminal": True,
+            "no_color": False,
+            "highlight": False,
+        }
+        if max_width is not None:
+            console_kwargs["width"] = max(20, max_width)
+        console = Console(**console_kwargs)
         with console.capture() as capture:
             console.print(table, end="")
         return "\n" + capture.get() + "\n"
@@ -243,7 +266,11 @@ def contains_j_markup(text: str) -> bool:
     return "<j-code" in text or "<j-table>" in text
 
 
-def rewrite_j_markup(text: str, syntax_theme: str = "monokai") -> str:
+def rewrite_j_markup(
+    text: str,
+    syntax_theme: str = "monokai",
+    max_table_width: Optional[int] = None,
+) -> str:
     """Replace every ``<j-code>`` / ``<j-table>`` block with ANSI output.
 
     Leaves all other text — including ``<nb-row>`` notebook markers,
@@ -256,6 +283,14 @@ def rewrite_j_markup(text: str, syntax_theme: str = "monokai") -> str:
         syntax_theme: Pygments theme name for code highlighting.
             Callers thread this through from the active UI theme
             (see :func:`ui_theme_to_syntax_theme`).
+        max_table_width: Maximum width in terminal columns the rendered
+            table is allowed to occupy.  Threaded through to
+            :func:`_render_table_to_ansi`.  When ``None``, Rich falls
+            back to its default 80 cols — which overflows in narrow
+            tmux panes and breaks the box visually.  Callers that know
+            the actual usable width (``OutputBuffer._console_width``)
+            should pass it explicitly.  Code blocks size themselves to
+            their content and ignore this.
 
     Returns:
         ``text`` with each matched block replaced by its ANSI rendering.
@@ -269,7 +304,7 @@ def rewrite_j_markup(text: str, syntax_theme: str = "monokai") -> str:
         return _render_code_to_ansi(code, language, syntax_theme)
 
     def replace_table(match: Match[str]) -> str:
-        return _render_table_to_ansi(match.group(1))
+        return _render_table_to_ansi(match.group(1), max_width=max_table_width)
 
     result = _J_CODE_BLOCK.sub(replace_code, text)
     result = _J_TABLE_BLOCK.sub(replace_table, result)
