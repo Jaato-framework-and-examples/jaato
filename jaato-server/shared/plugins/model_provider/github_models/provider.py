@@ -430,6 +430,7 @@ class GitHubModelsProvider:
             TokenNotFoundError: If allow_interactive=False and no token found.
         """
         from .env import resolve_token_source
+        from .oauth import try_load_tokens_with_reason
 
         token = resolve_token()
         if token:
@@ -440,6 +441,22 @@ class GitHubModelsProvider:
                 else:
                     on_message("Found GitHub token (environment variable)")
             return True
+
+        # No token resolved — differentiate "never logged in" from
+        # "OAuth token file exists but cannot be parsed".  The latter
+        # used to produce the same generic "no credentials found"
+        # message, hiding the actual fixable problem (corrupt JSON,
+        # missing field, permission error) from the user.
+        _, load_error = try_load_tokens_with_reason()
+        if load_error and on_message:
+            on_message(
+                f"GitHub OAuth token file found but could not be loaded: "
+                f"{load_error}"
+            )
+            on_message(
+                "Run 'github-auth login' to re-authenticate, or set "
+                "GITHUB_TOKEN."
+            )
 
         # No token found
         if not allow_interactive:

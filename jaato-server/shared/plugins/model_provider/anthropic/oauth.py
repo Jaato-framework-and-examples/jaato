@@ -9,6 +9,7 @@ import base64
 import hashlib
 import http.server
 import json
+import logging
 import os
 import secrets
 import threading
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -506,18 +509,63 @@ def save_tokens(tokens: OAuthTokens, workspace_path: Optional[str] = None) -> No
 
 
 def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
-    """Load tokens from persistent storage."""
+    """Load tokens from persistent storage.
+
+    Returns None if the file is absent **or** cannot be parsed.  A broken
+    token file (corrupt JSON, missing field, permission error) is logged
+    at WARNING so it surfaces in the trace log instead of being silently
+    swallowed.  Callers that need to surface the specific failure reason
+    should use :func:`try_load_tokens_with_reason` — this lets
+    ``verify_auth`` distinguish "never logged in" from "auth file is
+    broken".
+    """
+    tokens, _ = try_load_tokens_with_reason(workspace_path=workspace_path)
+    return tokens
+
+
+def try_load_tokens_with_reason(
+    workspace_path: Optional[str] = None,
+) -> Tuple[Optional["OAuthTokens"], Optional[str]]:
+    """Load OAuth tokens and return a reason string when the load fails.
+
+    Returns ``(tokens, reason)``:
+
+    - ``(OAuthTokens, None)`` — file loaded successfully.
+    - ``(None, None)`` — no token file exists.
+    - ``(None, "<reason>")`` — file exists but could not be loaded.
+
+    Lets ``verify_auth`` differentiate "not logged in" from "logged in
+    but auth file is broken", so users see the real failure (invalid
+    JSON, permission error, missing field) instead of a generic "no
+    credentials" message.
+    """
     path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return OAuthTokens.from_dict(data)
-    except Exception:
-        return None
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read Anthropic OAuth tokens: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse Anthropic OAuth tokens: %s", reason)
+        return None, reason
+
+    try:
+        return OAuthTokens.from_dict(data), None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed tokens at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed Anthropic OAuth tokens: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading Anthropic OAuth tokens: %s", reason)
+        return None, reason
 
 
 def clear_tokens(workspace_path: Optional[str] = None) -> None:
@@ -609,6 +657,11 @@ def save_pending_auth(code_verifier: str, state: str) -> None:
 def load_pending_auth() -> Tuple[Optional[str], Optional[str]]:
     """Load pending auth state.
 
+    Returns ``(code_verifier, state)``, or ``(None, None)`` when the file
+    is absent or cannot be parsed.  Parse errors are logged at WARNING
+    so a broken pending-auth file does not silently block the second
+    half of the OAuth flow.
+
     Returns:
         Tuple of (code_verifier, state), or (None, None) if not found.
     """
@@ -620,7 +673,11 @@ def load_pending_auth() -> Tuple[Optional[str], Optional[str]]:
         with open(path) as f:
             data = json.load(f)
         return data.get("code_verifier"), data.get("state")
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed to load Anthropic pending-auth state at %s: %s: %s",
+            path, exc.__class__.__name__, exc,
+        )
         return None, None
 
 

@@ -15,13 +15,16 @@ Storage follows jaato convention:
 """
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from .env import DEFAULT_BASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,18 +99,61 @@ def save_credentials(credentials: NIMCredentials, workspace_path: Optional[str] 
 
 
 def load_credentials(workspace_path: Optional[str] = None) -> Optional[NIMCredentials]:
-    """Load credentials from persistent storage."""
+    """Load credentials from persistent storage.
+
+    Returns None if the file is absent **or** fails to parse.  A broken
+    file (corrupt JSON, missing ``api_key``, permission error) is logged
+    at WARNING so it is visible in the provider trace log instead of
+    being silently swallowed.  Callers that need to surface the actual
+    reason should use :func:`try_load_credentials_with_reason`.
+    """
+    creds, _ = try_load_credentials_with_reason(workspace_path=workspace_path)
+    return creds
+
+
+def try_load_credentials_with_reason(
+    workspace_path: Optional[str] = None,
+) -> Tuple[Optional[NIMCredentials], Optional[str]]:
+    """Load credentials and return a reason string when the load fails.
+
+    Returns ``(credentials, reason)``:
+
+    - ``(NIMCredentials, None)`` — file loaded successfully.
+    - ``(None, None)`` — no credential file exists.
+    - ``(None, "<reason>")`` — file exists but could not be loaded.
+
+    Lets ``verify_auth`` distinguish "not configured" from "configured
+    but broken" and surface the specific failure (e.g. invalid JSON,
+    missing field, permission error) instead of reporting "No API key
+    found" for both.
+    """
     path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return NIMCredentials.from_dict(data)
-    except Exception:
-        return None
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read NIM credentials: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse NIM credentials: %s", reason)
+        return None, reason
+
+    try:
+        return NIMCredentials.from_dict(data), None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed credentials at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed NIM credentials: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive — don't mask unexpected failures
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading NIM credentials: %s", reason)
+        return None, reason
 
 
 def clear_credentials(workspace_path: Optional[str] = None) -> None:
@@ -178,6 +224,18 @@ def _create_validation_client():
     return get_httpx_client(**kwargs)
 
 
+def _extract_body_snippet(response, limit: int = 300) -> str:
+    """Return a short, safe snippet of a response body for error detail."""
+    try:
+        text = response.text or ""
+    except Exception:
+        return ""
+    text = text.strip().replace("\n", " ")
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
 def validate_api_key(
     api_key: str,
     base_url: Optional[str] = None,
@@ -193,9 +251,24 @@ def validate_api_key(
         base_url: Optional custom base URL (default: NVIDIA hosted API).
 
     Returns:
-        A ``(valid, error_detail)`` tuple. ``valid`` is True when the key
-        is accepted. ``error_detail`` is a human-readable hint when
-        ``valid`` is False (empty string on success).
+        A ``(valid, detail)`` tuple.  ``valid`` is True only when the
+        request authenticates and reaches the model (2xx or 400 "bad
+        request").  Other non-auth errors no longer masquerade as
+        success — this used to silently save a key on 429 / 402 / 5xx
+        responses.  ``detail`` carries a structured code:
+
+        - ``""`` — key is valid.
+        - ``"authentication_error: <status>: <body>"`` — key rejected
+          (401/403).
+        - ``"rate_limit: <status>: <body>"`` — quota / rate limit
+          exceeded (429).  Key was NOT saved.
+        - ``"payment_required: <status>: <body>"`` — billing inactive
+          (402).  Key was NOT saved.
+        - ``"server_error: <status>: <body>"`` — NIM endpoint is
+          temporarily unavailable (5xx).
+        - ``"http_error: <status>: <body>"`` — any other unexpected
+          status.
+        - ``"network_error: <details>"`` — request never reached NIM.
     """
     import httpx
 
@@ -217,16 +290,34 @@ def validate_api_key(
     try:
         client = _create_validation_client()
         response = client.post(test_url, headers=headers, json=body, timeout=30)
-        if response.status_code in (401, 403):
-            return (False, "authentication_error")
-        # Any other status (200, 400, etc.) means the key was accepted
-        return (True, "")
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (401, 403):
-            return (False, "authentication_error")
-        return (True, "")
+        status = getattr(e.response, "status_code", None)
+        snippet = _extract_body_snippet(e.response) if e.response is not None else ""
+        if status in (401, 403):
+            return (False, f"authentication_error: {status}: {snippet}")
+        if status == 429:
+            return (False, f"rate_limit: {status}: {snippet}")
+        if status == 402:
+            return (False, f"payment_required: {status}: {snippet}")
+        if status is not None and 500 <= status < 600:
+            return (False, f"server_error: {status}: {snippet}")
+        return (False, f"http_error: {status}: {snippet}")
     except Exception as e:
         return (False, f"network_error: {e}")
+
+    status = response.status_code
+    if 200 <= status < 300 or status == 400:
+        return (True, "")
+    snippet = _extract_body_snippet(response)
+    if status in (401, 403):
+        return (False, f"authentication_error: {status}: {snippet}")
+    if status == 429:
+        return (False, f"rate_limit: {status}: {snippet}")
+    if status == 402:
+        return (False, f"payment_required: {status}: {snippet}")
+    if 500 <= status < 600:
+        return (False, f"server_error: {status}: {snippet}")
+    return (False, f"http_error: {status}: {snippet}")
 
 
 def login_with_key(

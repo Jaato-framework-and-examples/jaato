@@ -444,6 +444,30 @@ class TestVerifyAuth:
         with patch.dict("os.environ", {}, clear=True):
             assert provider.verify_auth(allow_interactive=True) is False
 
+    def test_verify_auth_surfaces_broken_credentials(self):
+        """Broken credential file must surface the reason, not be
+        swallowed into a generic "no key" error.
+
+        Mirrors the Zhipu AI fix: a corrupt / unreadable credential
+        file used to be indistinguishable from a missing one, which
+        produced misleading "No API key found" messages while the real
+        problem (corrupt JSON, missing api_key, permission error) stayed
+        hidden.  The provider now emits the actual load reason.
+        """
+        provider = NIMProvider()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth.try_load_credentials_with_reason",
+                return_value=(None, "invalid JSON at /tmp/nim_auth.json: Expecting value"),
+            ):
+                messages = []
+                # Not self-hosted, no key -> should raise, but first emit the reason
+                with pytest.raises(APIKeyNotFoundError):
+                    provider.verify_auth(on_message=messages.append)
+                joined = "\n".join(messages)
+                assert "could not be loaded" in joined
+                assert "invalid JSON" in joined
+
 
 class TestConnection:
     """Tests for connect and session management."""
