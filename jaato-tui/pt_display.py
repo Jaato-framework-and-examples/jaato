@@ -473,7 +473,6 @@ class PTDisplay:
 
         # Formatter pipeline — server handles formatting, no client-side pipeline
         self._formatter_pipeline = None
-        self._code_block_formatter = None
         self._inline_md_formatter = None
 
         # Set keybinding config and theme on agent registry buffers too
@@ -3250,9 +3249,9 @@ class PTDisplay:
         if self._agent_registry:
             self._agent_registry.set_theme_all(theme)
 
-        # Update code block formatter syntax theme to match UI theme
-        if self._code_block_formatter:
-            self._code_block_formatter.set_syntax_theme(theme.name)
+        # Propagate theme name to the output buffer's <j-code> renderer
+        # so the Pygments Syntax theme tracks the active UI theme.
+        self._output_buffer.set_syntax_theme_from_ui_theme(theme.name)
 
         # Update inline markdown formatter colors to match UI theme
         if self._inline_md_formatter:
