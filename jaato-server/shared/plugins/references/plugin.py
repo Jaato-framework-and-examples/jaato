@@ -36,6 +36,15 @@ from .config_loader import (
     validate_reference_file,
 )
 from .bundle import Bundle, ROOT_BUNDLE_NAME, detect_drift, discover_bundles
+from .merge import (
+    MergeOptions,
+    MergeResult,
+    MergeStatus,
+    _read_bundle_manifest,
+    _load_sources_from_dir,
+    merge_bundle,
+    parse_merge_args,
+)
 from .reconcile import ReconcileResult, ReconcileStatus, reconcile_bundle
 from .embedding_types import (
     EmbeddingProviderProtocol,
@@ -1882,13 +1891,15 @@ class ReferencesPlugin:
             return self._cmd_references_bundles()
         elif subcommand == "reconcile":
             return self._cmd_references_reconcile(target)
+        elif subcommand == "merge":
+            return self._cmd_references_merge(target)
         elif subcommand == "help":
             return self._cmd_references_help()
         else:
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, select, "
-                    f"unselect, reload, bundles, reconcile, help"
+                    f"unselect, reload, bundles, reconcile, merge, help"
                 )
             }
 
@@ -2002,6 +2013,202 @@ class ReferencesPlugin:
             ],
             "help_lines": HelpLines(lines=lines),
         }
+
+    def _cmd_references_merge(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'references merge <source> [flags]'.
+
+        Parses the flag tail, resolves the source (loaded bundle name or
+        filesystem path), runs :func:`merge_bundle`, and — on success —
+        appends the merged sources into the in-memory catalog so the
+        model sees them without a reload.
+
+        Args:
+            raw_args: The ``target`` parameter from :class:`UserCommand`,
+                which captures the rest of the command line.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        source_arg, target_arg, options, parse_err = parse_merge_args(tokens)
+        if parse_err:
+            return {"error": parse_err}
+        if not source_arg:
+            return {
+                "error": (
+                    "Usage: references merge <source> [--into <bundle>] "
+                    "[--on-conflict reject|prefix|newer] [--re-embed] [--dry-run]"
+                )
+            }
+
+        # Resolve target bundle (default: root).
+        target_name = ROOT_BUNDLE_NAME
+        if target_arg:
+            target_name = (
+                ROOT_BUNDLE_NAME if target_arg in ("root", "(root)") else target_arg
+            )
+        target_bundle = next(
+            (b for b in self._bundles if b.name == target_name), None,
+        )
+        if target_bundle is None:
+            return {
+                "error": (
+                    f"Unknown target bundle '{target_arg or 'root'}'. "
+                    f"Loaded bundles: "
+                    f"{[b.display_name for b in self._bundles] or '(none)'}"
+                )
+            }
+
+        # Resolve source — first try a loaded bundle by name, then a path.
+        source_bundle: Optional[Bundle]
+        source_sources: List[ReferenceSource]
+        resolved_source_name: str
+
+        source_lookup = next(
+            (b for b in self._bundles if b.name == source_arg), None,
+        )
+        if source_lookup is not None:
+            if source_lookup.name == target_bundle.name:
+                return {
+                    "error": (
+                        f"Source and target are the same bundle "
+                        f"('{target_bundle.display_name}'); nothing to merge."
+                    )
+                }
+            source_bundle = source_lookup
+            source_sources = [
+                s for s in self._sources if s.bundle_name == source_lookup.name
+            ]
+            resolved_source_name = source_lookup.display_name
+        else:
+            source_path = Path(source_arg)
+            if not source_path.is_absolute():
+                if self._workspace_path:
+                    source_path = Path(self._workspace_path) / source_path
+                elif self._project_root:
+                    source_path = Path(self._project_root) / source_path
+            if not source_path.is_dir():
+                return {
+                    "error": (
+                        f"Source '{source_arg}' is neither a loaded bundle nor a "
+                        f"directory on disk. Loaded bundles: "
+                        f"{[b.display_name for b in self._bundles] or '(none)'}"
+                    )
+                }
+            source_bundle = _read_bundle_manifest(source_path)
+            if source_bundle is None:
+                return {
+                    "error": (
+                        f"Source directory '{source_path}' has no "
+                        f"embedding_config.json; cannot merge."
+                    )
+                }
+            source_sources = _load_sources_from_dir(source_path)
+            for s in source_sources:
+                s.bundle_name = source_bundle.name
+            resolved_source_name = str(source_path)
+
+        target_sources = [
+            s for s in self._sources if s.bundle_name == target_bundle.name
+        ]
+
+        result = merge_bundle(
+            target=target_bundle,
+            source_bundle=source_bundle,
+            source_sources=source_sources,
+            target_sources=target_sources,
+            provider=self._embedding_provider,
+            options=options,
+        )
+
+        self._trace(f"references merge: {result.summary()}")
+
+        # On a real (non-dry-run) success, update the in-memory catalog
+        # so the next prompt/tool call sees the merged sources without
+        # waiting for a reload. When the source was a loaded bundle, we
+        # remove its stale entries from the catalog first — those refs
+        # have been physically copied into the target, so the target's
+        # copy is authoritative from here on. (The source directory's
+        # JSON files remain in place; the operator can rm them.)
+        if result.status == MergeStatus.OK and result.added:
+            rename_lookup = dict(result.renamed)  # old_id → new_id
+            merged_source_ids = {s.id for s in source_sources}
+            source_bundle_name = source_bundle.name if source_lookup else None
+
+            if source_bundle_name is not None:
+                # Drop the source-bundle copies of merged ids from the
+                # live catalog. Ids left behind (e.g., skipped by --newer)
+                # stay attached to the source bundle until reload.
+                self._sources = [
+                    s for s in self._sources
+                    if not (
+                        s.bundle_name == source_bundle_name
+                        and s.id in merged_source_ids
+                        and rename_lookup.get(s.id, s.id) in result.added
+                    )
+                ]
+
+            existing_ids = {s.id for s in self._sources}
+            for s in source_sources:
+                new_id = rename_lookup.get(s.id, s.id)
+                if new_id not in result.added or new_id in existing_ids:
+                    continue
+                # Reload the fresh JSON the merge just wrote — it is the
+                # source of truth now (has the right id + source_hash).
+                fresh_path = target_bundle.directory / f"{new_id}.json"
+                if fresh_path.is_file():
+                    try:
+                        raw = json.loads(fresh_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    fresh = ReferenceSource.from_dict(raw)
+                    fresh.bundle_name = target_bundle.name
+                    self._resolve_source_for_context(fresh)
+                    self._sources.append(fresh)
+                    existing_ids.add(new_id)
+
+            # Re-attach target's matcher so the new rows become queryable.
+            if self._lookup_strategy in ("hybrid", "semantic_only") \
+                    and self._embedding_provider is not None:
+                target_bundle.matcher = self._attach_matcher(
+                    target_bundle, self._embedding_provider.model_name,
+                )
+                if target_bundle.name == ROOT_BUNDLE_NAME:
+                    self._semantic_matcher = target_bundle.matcher
+
+        # Build the HelpLines block for display.
+        lines: List[Tuple[str, str]] = [("MERGE", "bold"), ("", "")]
+        lines.append((f"  {result.summary()}", ""))
+        if result.renamed:
+            lines.append(("  renames:", "dim"))
+            for old, new in result.renamed:
+                lines.append((f"    {old} → {new}", "dim"))
+        if result.skipped:
+            lines.append(("  skipped:", "dim"))
+            for sid, reason in result.skipped:
+                lines.append((f"    {sid}: {reason}", "dim"))
+        if result.conflicts:
+            lines.append(("  conflicts:", "dim"))
+            for sid in result.conflicts:
+                lines.append((f"    {sid}", "dim"))
+
+        payload: Dict[str, Any] = {
+            "status": result.status.value,
+            "source": resolved_source_name,
+            "target": target_bundle.display_name,
+            "added": result.added,
+            "renamed": result.renamed,
+            "skipped": result.skipped,
+            "conflicts": result.conflicts,
+            "final_row_count": result.final_row_count,
+            "help_lines": HelpLines(lines=lines),
+        }
+        if result.error:
+            payload["error"] = result.error
+        return payload
 
     def _cmd_references_list(self, filter_arg: str) -> HelpLines:
         """Execute 'references list [all|selected|unselected]'."""
@@ -2252,6 +2459,15 @@ class ReferencesPlugin:
             ("        Without an argument, reconciles every bundle. Requires an", "dim"),
             ("        embedding provider (jaato.embedding entry point).", "dim"),
             ("", ""),
+            ("    merge <source> [--into <bundle>] [flags]", "dim"),
+            ("        Merge a knowledge bundle into another. <source> is either a", "dim"),
+            ("        loaded bundle name or a directory path containing an", "dim"),
+            ("        embedding_config.json. Default target is the root bundle.", "dim"),
+            ("        Flags:", "dim"),
+            ("          --on-conflict reject|prefix|newer  (default: reject)", "dim"),
+            ("          --re-embed                        (needed on model/dim mismatch)", "dim"),
+            ("          --dry-run                         (preview without writing)", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
@@ -2266,6 +2482,9 @@ class ReferencesPlugin:
             ("    references bundles                  Show loaded bundles", "dim"),
             ("    references reconcile                Reconcile every bundle", "dim"),
             ("    references reconcile teammate-kb    Reconcile one bundle", "dim"),
+            ("    references merge teammate-kb        Merge sub-bundle into root", "dim"),
+            ("    references merge ./incoming --on-conflict prefix", "dim"),
+            ("    references merge legacy --re-embed  Cross-model merge", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -2435,6 +2654,7 @@ class ReferencesPlugin:
             CommandCompletion("reload", "Reload catalog from disk"),
             CommandCompletion("bundles", "Show loaded knowledge bundles"),
             CommandCompletion("reconcile", "Reconcile bundle sidecars"),
+            CommandCompletion("merge", "Merge a bundle into another"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
@@ -2479,6 +2699,49 @@ class ReferencesPlugin:
                     CommandCompletion(
                         b.name if b.name else "root",
                         f"Reconcile {b.display_name}",
+                    )
+                    for b in self._bundles
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+
+            if subcommand == "merge":
+                # Suggest loaded bundle names other than the root as
+                # first-argument completions for `merge <source>`. The
+                # root is not offered because you can't merge the root
+                # into itself; path-based sources aren't enumerable so
+                # the user types them manually.
+                options = [
+                    CommandCompletion(b.name, f"Merge {b.display_name}")
+                    for b in self._bundles
+                    if b.name != ROOT_BUNDLE_NAME
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+
+        # Trailing-flag completions for 'references merge'.
+        if len(args) >= 2 and args[0].lower() == "merge":
+            partial = args[-1].lower()
+            # Flag names come first.
+            flags = [
+                CommandCompletion("--into", "Target bundle (default: root)"),
+                CommandCompletion("--on-conflict", "reject | prefix | newer"),
+                CommandCompletion("--re-embed", "Re-embed source against target model"),
+                CommandCompletion("--dry-run", "Preview without writing"),
+            ]
+            if partial.startswith("-") or not partial:
+                return [f for f in flags if f.value.startswith(partial or "-")]
+            # Value completions for the flag immediately before us.
+            if len(args) >= 3 and args[-2] == "--on-conflict":
+                vals = [
+                    CommandCompletion("reject", "Abort on id collision (default)"),
+                    CommandCompletion("prefix", "Rename incoming ids"),
+                    CommandCompletion("newer", "Keep the fresher side"),
+                ]
+                return [v for v in vals if v.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--into":
+                options = [
+                    CommandCompletion(
+                        b.name if b.name else "root",
+                        f"Into {b.display_name}",
                     )
                     for b in self._bundles
                 ]

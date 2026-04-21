@@ -278,9 +278,20 @@ scan logic.
 ### PR 3 — Merge subcommand
 
 - `references merge` with the flags listed above.
-- `--re-embed` path exercising `provider.embed_batch()` against
-  metadata-hashed source text.
-- Completion support for bundle names and conflict strategies.
+- `--re-embed` path exercising `provider.embed_text()` against
+  metadata-hashed source text; cross-model merges stamp a fresh
+  `source_hash` on the copied JSON so subsequent reconciles see no drift.
+- Three collision strategies: `reject` (default, aborts listing
+  conflicts), `prefix` (rename to `<source>_<id>`, JSON file + `id`
+  field both rewritten), `newer` (compare `source_hash` / JSON mtime).
+- Loaded-bundle sources: the merged ids are removed from the in-memory
+  catalog under the source's bundle_name and re-added under the
+  target's, so the next model turn sees the consolidation without a
+  reload.
+- Completion: bundle names for `<source>` and `--into`, literal
+  values for `--on-conflict`, and the flags themselves.
+- Atomic writes + advisory lock reuse the reconcile writer path —
+  one and only one piece of code rewrites a bundle's sidecar.
 
 ## Open questions
 
