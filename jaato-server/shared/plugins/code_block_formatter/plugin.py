@@ -1,18 +1,19 @@
 # shared/plugins/code_block_formatter/plugin.py
-"""Streaming code block formatter plugin for syntax highlighting.
+"""Streaming code block formatter plugin.
 
-This plugin transforms model output text containing markdown code blocks
-into ANSI-escaped text with syntax highlighting. It buffers content inside
-code blocks until they're complete, while passing through regular text
-immediately.
+This plugin detects markdown fenced code blocks in streaming text and
+converts them into semantic ``<j-code>`` markup that clients render
+natively.  The server never emits terminal ANSI or colours for code —
+that's the client's job.  This lets a TUI, a web dashboard, and a chat
+bridge co-attach to the same session without fighting over a single
+shared output format.
 
 Usage:
     from shared.plugins.code_block_formatter import create_plugin
 
     formatter = create_plugin()
-    formatter.initialize({"theme": "monokai", "line_numbers": True})
+    formatter.initialize({"line_numbers": True})
 
-    # Streaming mode
     for chunk in model_output:
         for output in formatter.process_chunk(chunk):
             print(output, end='')
@@ -20,16 +21,9 @@ Usage:
         print(output, end='')
 """
 
-import os
 import re
-from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
-from rich.console import Console
-from rich.syntax import Syntax
-from rich.text import Text
-
-from shared.plugins.table_formatter.plugin import _display_width
 from shared.trace import trace as _trace_write
 
 
@@ -38,122 +32,8 @@ def _trace(msg: str) -> None:
     _trace_write("CODE_BLOCK_FORMATTER", msg)
 
 
-# Common language aliases mapping
-LANGUAGE_ALIASES = {
-    'js': 'javascript',
-    'ts': 'typescript',
-    'py': 'python',
-    'rb': 'ruby',
-    'yml': 'yaml',
-    'sh': 'bash',
-    'shell': 'bash',
-    'zsh': 'bash',
-    'dockerfile': 'docker',
-    'md': 'markdown',
-    'cs': 'csharp',
-    'c++': 'cpp',
-    'objective-c': 'objectivec',
-    'ipython3': 'ipython',  # IPython with !shell, %magic support
-    'jupyter': 'ipython',  # Jupyter notebooks use IPython kernel
-    'cbl': 'cobol',  # COBOL source files
-    'cob': 'cobol',  # COBOL source files
-}
-
 # Priority for pipeline ordering (40-59 = syntax highlighting)
 DEFAULT_PRIORITY = 40
-
-
-def _get_content_width(line: str) -> int:
-    """Get the display width of actual content in a line (excluding trailing whitespace).
-
-    Args:
-        line: The line (may contain ANSI codes).
-
-    Returns:
-        Display width of content (excluding trailing spaces).
-    """
-    if not line:
-        return 0
-
-    # Parse ANSI codes to get plain text
-    if '\x1b[' in line:
-        text = Text.from_ansi(line)
-        plain = text.plain
-    else:
-        plain = line
-
-    # Strip trailing spaces and measure content width
-    content = plain.rstrip()
-    if not content:
-        return 0
-
-    return _display_width(content)
-
-
-def _trim_line_to_width(line: str, target_width: int, truncation_indicator: str = "") -> str:
-    """Trim a line to target_width, preserving ANSI codes and styling.
-
-    This removes trailing background padding while keeping the actual content
-    and its styling intact. If truncation_indicator is provided and the line's
-    content exceeds target_width, the indicator is appended after truncation.
-
-    Args:
-        line: The line to trim (may contain ANSI codes).
-        target_width: The width to trim to.
-        truncation_indicator: Character(s) to append when content is truncated
-            (e.g. "▸"). Empty string means no indicator.
-
-    Returns:
-        The line trimmed to target_width, as an ANSI string.
-    """
-    if not line:
-        return ""
-
-    # Parse ANSI codes to get styled text
-    if '\x1b[' in line:
-        text = Text.from_ansi(line)
-    else:
-        text = Text(line)
-
-    plain = text.plain
-
-    if target_width <= 0:
-        return ""
-
-    indicator_width = _display_width(truncation_indicator) if truncation_indicator else 0
-    trim_target = target_width - indicator_width if truncation_indicator else target_width
-
-    # Find the character index that corresponds to trim_target display columns
-    current_width = 0
-    char_count = 0
-    for char in plain:
-        char_width = _display_width(char)
-        if current_width + char_width > trim_target:
-            break
-        current_width += char_width
-        char_count += 1
-
-    # Slice the styled text to preserve styling
-    if char_count > 0:
-        result = text[:char_count]
-    else:
-        result = Text()
-
-    if truncation_indicator:
-        result.append(truncation_indicator, style="dim")
-
-    # Convert back to ANSI string
-    # Use a large width to prevent any wrapping during conversion
-    console = Console(width=10000, force_terminal=True, no_color=False, highlight=False)
-    with console.capture() as capture:
-        console.print(result, end="")
-    output = capture.get()
-
-    # Always append ANSI reset code to ensure styling doesn't bleed across lines
-    # when the text is later split by newlines and stored/rendered separately
-    if output and '\x1b[' in output and not output.endswith('\x1b[0m'):
-        output += '\x1b[0m'
-    return output
 
 
 class CodeBlockFormatterPlugin:
@@ -164,27 +44,8 @@ class CodeBlockFormatterPlugin:
     """
 
     def __init__(self):
-        self._theme = "monokai"
         self._line_numbers = False
-        self._word_wrap = True
-        self._background_color: Optional[str] = None
-        self._console_width = 80
         self._priority = DEFAULT_PRIORITY
-
-        # Rendering surface.  "terminal" → Rich/ANSI with theme colours;
-        # any other value ("web", "chat", …) → semantic <j-code> markup
-        # that the client can style however it wants.  See
-        # shared/plugins/table_formatter for the mirror implementation
-        # that introduced this pattern.
-        self._client_type: str = "terminal"
-
-        # Whether to apply width-based line trimming with the ▸ indicator.
-        # Defaults to True (no trimming) — clients (TUI, dashboard) handle
-        # line width on their own, and the server-side ▸ marker ends up
-        # double-clipping with misleading "more content" indicators.
-        # The presentation context's client_type can override this if a
-        # client explicitly opts in.
-        self._disable_truncation = True
 
         # Streaming state
         self._buffer = ""
@@ -293,72 +154,12 @@ class CodeBlockFormatterPlugin:
 
         Args:
             config: Dict with optional settings:
-                - theme: Syntax highlighting theme (default: "monokai")
-                - line_numbers: Show line numbers (default: False)
-                - word_wrap: Wrap long lines (default: True)
-                - background_color: Background color or None (default: None)
-                - console_width: Width for rendering (default: 80)
+                - line_numbers: Emit ``n="…"`` on ``<j-line>`` (default: False)
                 - priority: Pipeline priority (default: 40)
         """
         config = config or {}
-        self._theme = config.get("theme", "monokai")
         self._line_numbers = config.get("line_numbers", False)
-        self._word_wrap = config.get("word_wrap", True)
-        self._background_color = config.get("background_color", None)
-        self._console_width = config.get("console_width", 80)
         self._priority = config.get("priority", DEFAULT_PRIORITY)
-
-    def set_console_width(self, width: int) -> None:
-        """Update the console width for rendering."""
-        self._console_width = max(20, width)
-
-    def set_client_type(self, client_type: str) -> None:
-        """Set the client rendering surface.
-
-        ``"terminal"`` keeps the Rich/ANSI output (unchanged from
-        pre-client-awareness behaviour).  Any other value switches to
-        semantic ``<j-code>`` markup — no ANSI, no colours, no indent —
-        so the client owns the rendering.
-
-        The ``t`` attribute on ``<j-tok>`` elements tracks
-        ``pygments.token.STANDARD_TYPES`` short names (e.g. ``k`` for
-        keyword, ``mi`` for integer literal).  If Pygments renames any
-        of these in a future version, the client CSS must follow.
-
-        Args:
-            client_type: ``"terminal"``, ``"web"``, ``"chat"``, or ``"api"``.
-        """
-        self._client_type = client_type
-
-    def set_disable_truncation(self, disabled: bool) -> None:
-        """Enable or disable width-based line truncation.
-
-        When disabled, code blocks are rendered without per-line trimming
-        and without the ``▸`` indicator.  Used for non-terminal clients
-        (browser dashboards) that re-flow content and don't need fixed-
-        width line trimming.
-
-        Args:
-            disabled: True to skip truncation, False (default) to apply
-                ``console_width``-based trimming.
-        """
-        self._disable_truncation = disabled
-
-    def set_syntax_theme(self, theme_name: str) -> None:
-        """Set the syntax highlighting theme based on UI theme.
-
-        Maps UI theme names to appropriate Pygments syntax themes.
-
-        Args:
-            theme_name: UI theme name ("dark", "light", "high-contrast", etc.)
-        """
-        # Map UI themes to Pygments syntax themes
-        theme_mapping = {
-            "dark": "monokai",
-            "light": "solarized-light",  # Light background, good contrast
-            "high-contrast": "native",  # High contrast dark theme
-        }
-        self._theme = theme_mapping.get(theme_name, "monokai")
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
@@ -367,113 +168,7 @@ class CodeBlockFormatterPlugin:
     # ==================== Internal Methods ====================
 
     def _render_code_block(self, code: str, language: str) -> str:
-        """Render a code block, routed by ``client_type``.
-
-        Terminal clients get Rich/ANSI with syntax highlighting and a
-        block indent — unchanged from the original implementation.  Any
-        other client gets semantic ``<j-code>`` markup (see
-        ``_render_semantic_code_block``).
-
-        Args:
-            code: The code content (without ``` markers).
-            language: The language identifier from the fenced block.
-
-        Returns:
-            ANSI-escaped string for terminal, or semantic markup for web.
-        """
-        if self._client_type != "terminal":
-            return self._render_semantic_code_block(code, language)
-
-        # Map language aliases (terminal path only — web keeps the raw
-        # string so the client can normalise it).
-        lang = LANGUAGE_ALIASES.get(language.lower(), language.lower())
-
-        # Block indent for visual distinction
-        indent = "    "  # 4 spaces
-
-        try:
-            # Calculate natural width from raw code to prevent wrapping
-            code_lines = code.split('\n')
-            max_code_width = max((_display_width(line) for line in code_lines), default=0)
-
-            # Account for line numbers if enabled (Rich format: " NUM │ ")
-            if self._line_numbers and code_lines:
-                num_lines = len(code_lines)
-                line_number_width = len(str(num_lines)) + 4  # padding + separator
-                max_code_width += line_number_width
-
-            # Use content width as console width (prevents wrapping)
-            # Add buffer of 2 to account for any padding/formatting Rich may add
-            # (previous buffer of 1 was insufficient in some cases)
-            render_width = max(40, max_code_width + 2)
-
-            # Disable word_wrap during rendering since we've calculated render_width
-            # to be large enough for all content. This prevents any wrapping due to
-            # width calculation discrepancies between our calculation and Rich's.
-            # The self._word_wrap setting is preserved for potential future use.
-            syntax = Syntax(
-                code,
-                lang,
-                theme=self._theme,
-                line_numbers=self._line_numbers,
-                word_wrap=False,
-                background_color=self._background_color,
-            )
-
-            # Render to ANSI string using a temporary console
-            console = Console(
-                width=render_width,
-                force_terminal=True,
-                no_color=False,
-                highlight=False,
-            )
-            with console.capture() as capture:
-                console.print(syntax, end="")
-
-            rendered = capture.get()
-            lines = rendered.split('\n')
-
-            # Non-terminal clients (browser dashboards) re-flow content,
-            # so emit raw rendered lines with indent only — no width-based
-            # trimming, no ▸ indicator.
-            if self._disable_truncation:
-                indented_lines = [indent + line for line in lines]
-                return '\n' + '\n'.join(indented_lines) + '\x1b[0m\n'
-
-            # Find the natural width of content (max content width across all lines)
-            # This ensures background styling only extends to the widest content line
-            natural_width = max((_get_content_width(line) for line in lines), default=0)
-
-            # Calculate maximum allowed width based on terminal width minus indent
-            indent_width = _display_width(indent)
-            max_allowed_width = self._console_width - indent_width
-
-            # Cap natural width to terminal width so background padding
-            # never extends beyond the visible area
-            trim_width = min(natural_width, max_allowed_width) if max_allowed_width > 0 else natural_width
-
-            # Trim each line to the capped width, then add indent
-            trimmed_lines = []
-            for line in lines:
-                content_width = _get_content_width(line)
-                if max_allowed_width > 0 and content_width > max_allowed_width:
-                    # Line content exceeds terminal width: truncate with indicator
-                    trimmed = _trim_line_to_width(line, max_allowed_width, truncation_indicator="▸")
-                else:
-                    # Line fits: trim trailing background padding to capped width
-                    trimmed = _trim_line_to_width(line, trim_width)
-                trimmed_lines.append(indent + trimmed)
-
-            # Ensure ANSI reset at end to prevent styling from bleeding into subsequent text
-            return '\n' + '\n'.join(trimmed_lines) + '\x1b[0m\n'
-
-        except Exception:
-            # Fallback: return code as-is with indent if highlighting fails
-            indented_lines = [indent + line for line in code.split('\n')]
-            return '\n' + '\n'.join(indented_lines) + '\n'
-
-    def _render_semantic_code_block(self, code: str, language: str) -> str:
-        """Render a code block as semantic ``<j-code>`` markup.
+        """Render a fenced code block as semantic ``<j-code>`` markup.
 
         Emits one ``<j-line>`` per source line and wraps Pygments-classified
         token runs in ``<j-tok t="...">``.  The ``t`` attribute carries the
@@ -482,14 +177,15 @@ class CodeBlockFormatterPlugin:
         hierarchy when the specific subtype has no entry).  Whitespace and
         unclassified text are emitted as bare text inside ``<j-line>``.
 
-        The server emits no colours or inline styles; the client owns
-        presentation.  Trailing whitespace is stripped per line.
+        The server emits no colours or inline styles; every attached
+        client (TUI, web dashboard, chat bridge) renders this markup
+        natively into its own format.  This keeps the wire format
+        neutral when heterogeneous clients co-attach to a session.
 
         Args:
             code: The code content (without ``` markers).
-            language: The raw language string from the fenced block.  Not
-                passed through ``LANGUAGE_ALIASES`` — the client decides
-                how to normalise.
+            language: The raw language string from the fenced block.
+                The client decides how to normalise it.
 
         Returns:
             A newline-terminated ``<j-code>…</j-code>`` block.

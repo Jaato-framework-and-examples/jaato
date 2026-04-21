@@ -337,6 +337,10 @@ class OutputBuffer:
         self._formatter_pipeline: Optional[Any] = None
         # Theme configuration for styling (optional)
         self._theme: Optional["ThemeConfig"] = None
+        # Pygments theme for rendering server-emitted <j-code> blocks.
+        # Updated via set_syntax_theme_from_ui_theme() whenever the UI
+        # theme changes so syntax highlighting tracks the rest of the UI.
+        self._syntax_theme: str = "monokai"
         # Search state
         self._search_query: str = ""
         self._search_matches: List[Tuple[int, int, int]] = []  # (line_index, start_pos, end_pos)
@@ -435,6 +439,18 @@ class OutputBuffer:
         self._theme = theme
         # Invalidate render caches so content re-renders with new theme colors
         self._invalidate_line_caches()
+
+    def set_syntax_theme_from_ui_theme(self, ui_theme_name: str) -> None:
+        """Sync the ``<j-code>`` syntax-highlighting theme to the UI theme.
+
+        Called by pt_display whenever the user switches the active UI
+        theme (``dark``/``light``/``high-contrast``).  The mapping lives
+        in :mod:`j_markup_renderer` so CLI and any future clients can
+        share it.  Existing buffered content is not re-rendered — the
+        new theme only affects subsequently-arriving output.
+        """
+        from j_markup_renderer import ui_theme_to_syntax_theme
+        self._syntax_theme = ui_theme_to_syntax_theme(ui_theme_name)
 
     # Known Rich style primitives that should be passed through without semantic lookup
     _RICH_STYLE_PRIMITIVES = frozenset({
@@ -667,6 +683,14 @@ class OutputBuffer:
         text_preview = text[:80] + "..." if len(text) > 80 else text
         text_preview = text_preview.replace("\n", "\\n")
         _buffer_trace(f"append: source={source} mode={mode} text={text_preview!r}")
+
+        # Rewrite any <j-code>/<j-table> semantic markup the server
+        # emitted into ANSI before the text reaches the scroll buffer.
+        # See j_markup_renderer for why the wire format is neutral and
+        # the TUI owns presentation.
+        from j_markup_renderer import contains_j_markup, rewrite_j_markup
+        if contains_j_markup(text):
+            text = rewrite_j_markup(text, self._syntax_theme)
 
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
@@ -1203,6 +1227,13 @@ class OutputBuffer:
         tool = self._find_output_tool(call_id)
         if tool is None:
             return
+
+        # Rewrite any <j-code>/<j-table> semantic markup into ANSI
+        # *before* pyte sees it — otherwise pyte would just render the
+        # raw tags as plain text.  See j_markup_renderer for the why.
+        from j_markup_renderer import contains_j_markup, rewrite_j_markup
+        if contains_j_markup(chunk):
+            chunk = rewrite_j_markup(chunk, self._syntax_theme)
 
         # Get or create terminal emulator for this tool
         # Use continuation_id as key when tool belongs to a continuation group

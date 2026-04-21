@@ -51,6 +51,7 @@ from .auth import (
     login_interactive,
     logout,
     status as auth_status,
+    try_load_credentials_with_reason,
 )
 
 
@@ -338,6 +339,13 @@ class ZhipuAIProvider(AnthropicProvider):
         This can be called BEFORE initialize() to check that credentials
         exist. Checks environment variable and stored credentials.
 
+        When the stored credential file exists but cannot be loaded
+        (corrupt JSON, permission error, missing ``api_key`` field), the
+        failure reason is surfaced via ``on_message`` instead of being
+        swallowed as a generic "No credentials found".  Without this,
+        a broken auth file produces the same message as a missing one,
+        hiding the real problem from the user.
+
         Args:
             allow_interactive: Ignored (no interactive auth for Zhipu AI).
             on_message: Optional callback for status messages.
@@ -346,12 +354,35 @@ class ZhipuAIProvider(AnthropicProvider):
             True if an API key is available.
         """
         self._trace("[AUTH] Verifying credentials")
-        api_key = resolve_api_key() or get_stored_api_key()
-        if api_key:
-            self._trace("[AUTH] API key found")
+        env_key = resolve_api_key()
+        if env_key:
+            self._trace("[AUTH] API key found in environment")
             if on_message:
-                on_message("Found Zhipu AI API key")
+                on_message("Found Zhipu AI API key (env ZHIPUAI_API_KEY)")
             return True
+
+        creds, load_error = try_load_credentials_with_reason()
+        if creds and creds.api_key:
+            self._trace("[AUTH] API key loaded from stored credentials")
+            if on_message:
+                on_message("Found Zhipu AI API key (stored credentials)")
+            return True
+
+        if load_error:
+            # File exists but could not be parsed — surface the reason so
+            # users can distinguish "never logged in" from "auth file is
+            # broken / unreadable".
+            self._trace(f"[AUTH] Stored credentials unusable: {load_error}")
+            if on_message:
+                on_message(
+                    f"Zhipu AI credentials file found but could not be loaded: "
+                    f"{load_error}"
+                )
+                on_message(
+                    "Run 'zhipuai-auth key <your_api_key>' to re-authenticate, "
+                    "or set ZHIPUAI_API_KEY."
+                )
+            return False
 
         self._trace("[AUTH] No credentials found")
         if on_message:

@@ -73,6 +73,7 @@ from .errors import (
 from .oauth import (
     get_valid_access_token,
     load_tokens,
+    try_load_tokens_with_reason,
     login as oauth_login,
     refresh_tokens,
     save_tokens,
@@ -413,15 +414,41 @@ class AnthropicProvider:
 
         # Check existing credentials in priority order
         # 1. PKCE OAuth tokens (from interactive login)
-        try:
-            pkce_token = get_valid_access_token()
-            if pkce_token:
+        #
+        # Before trying a refresh, inspect the on-disk token file so we can
+        # tell "no tokens yet" from "file exists but cannot be parsed".
+        # A broken token file used to look identical to "never logged in",
+        # which is the exact "provider error not being surfaced" bug the
+        # branch name calls out.
+        tokens, load_error = try_load_tokens_with_reason()
+        if tokens:
+            try:
+                pkce_token = get_valid_access_token()
+                if pkce_token:
+                    if on_message:
+                        on_message("Found valid PKCE OAuth token")
+                    return True
+            except Exception as refresh_err:
+                # Token refresh failed — surface it so users see the
+                # actual refresh error rather than falling through to a
+                # misleading "no credentials" message.
                 if on_message:
-                    on_message("Found valid PKCE OAuth token")
-                return True
-        except Exception:
-            # Token refresh failed, will try other methods
-            pass
+                    on_message(
+                        f"Stored PKCE OAuth tokens could not be refreshed: "
+                        f"{refresh_err.__class__.__name__}: {refresh_err}"
+                    )
+        elif load_error:
+            # File exists but could not be loaded (corrupt JSON, missing
+            # field, permission error).  Surface the real reason.
+            if on_message:
+                on_message(
+                    f"Anthropic OAuth token file found but could not be loaded: "
+                    f"{load_error}"
+                )
+                on_message(
+                    "Run 'anthropic-auth login' to re-authenticate, or set "
+                    "ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY."
+                )
 
         # 2. OAuth token from env var
         oauth_token = resolve_oauth_token()
@@ -438,7 +465,10 @@ class AnthropicProvider:
             return True
 
         # No credentials found
-        if on_message:
+        if on_message and not load_error:
+            # Only emit the generic "No credentials found" when we didn't
+            # already surface a specific load error above; otherwise we'd
+            # contradict ourselves.
             on_message("No credentials found.")
 
         if not allow_interactive:

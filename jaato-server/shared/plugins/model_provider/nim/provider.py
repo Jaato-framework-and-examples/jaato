@@ -237,6 +237,13 @@ class NIMProvider:
         in environment variables and stored credentials. Does not
         access ``self._client`` (not yet initialized).
 
+        When the stored credential file exists but cannot be loaded
+        (corrupt JSON, permission error, missing ``api_key`` field),
+        the failure reason is surfaced via ``on_message`` instead of
+        being swallowed into "No credentials found".  Without this a
+        broken auth file produces the same message as a missing one,
+        hiding the real problem from the user.
+
         Args:
             allow_interactive: Ignored (NIM uses API keys only).
             on_message: Optional callback for status messages.
@@ -248,6 +255,7 @@ class NIMProvider:
             APIKeyNotFoundError: If no key found and not self-hosted.
         """
         import os
+        from .auth import try_load_credentials_with_reason
         from .env import ENV_NIM_API_KEY
 
         base_url = resolve_base_url()
@@ -259,12 +267,30 @@ class NIMProvider:
                 on_message("Found NIM API key (environment variable)")
             return True
 
-        # Check stored credentials
-        api_key = resolve_api_key()  # also checks stored credentials
-        if api_key:
+        # Check stored credentials, differentiating missing-file from
+        # broken-file so users can see parse/read errors instead of a
+        # generic "not configured" message.
+        creds, load_error = try_load_credentials_with_reason()
+        if creds and creds.api_key:
             if on_message:
                 on_message("Found NIM API key (stored credentials)")
             return True
+
+        if load_error:
+            if on_message:
+                on_message(
+                    f"NIM credentials file found but could not be loaded: "
+                    f"{load_error}"
+                )
+                on_message(
+                    "Run 'nim-auth key <your_api_key>' to re-authenticate, "
+                    f"or set {ENV_NIM_API_KEY}."
+                )
+            if not allow_interactive:
+                raise APIKeyNotFoundError(
+                    checked_locations=get_checked_credential_locations()
+                )
+            return False
 
         if is_self_hosted(base_url):
             if on_message:

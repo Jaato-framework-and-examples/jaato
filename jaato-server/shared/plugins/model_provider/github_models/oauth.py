@@ -14,12 +14,15 @@ Reference: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/author
 """
 
 import json
+import logging
 import os
 import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # OAuth configuration for GitHub Copilot
 # This is the public client ID used by GitHub Copilot extensions
@@ -492,28 +495,79 @@ def save_tokens(
 
 
 def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
-    """Load OAuth tokens from persistent storage."""
+    """Load OAuth tokens from persistent storage.
+
+    Returns None if the file is absent **or** cannot be parsed.  Broken
+    token files are logged at WARNING so they surface in the trace log
+    instead of being silently swallowed.  Callers that need to surface
+    the specific failure reason should use
+    :func:`try_load_tokens_with_reason`.
+    """
+    tokens, _ = try_load_tokens_with_reason(workspace_path=workspace_path)
+    return tokens
+
+
+def try_load_tokens_with_reason(
+    workspace_path: Optional[str] = None,
+) -> Tuple[Optional["OAuthTokens"], Optional[str]]:
+    """Load OAuth tokens and return a reason string when loading fails.
+
+    Returns ``(tokens, reason)``:
+
+    - ``(OAuthTokens, None)`` — file loaded successfully.
+    - ``(None, None)`` — no token file exists, **or** the file does not
+      contain an OAuth section (the same file may hold a Copilot token
+      without an ``oauth`` section, which is not an error).
+    - ``(None, "<reason>")`` — file exists but could not be parsed
+      (corrupt JSON, permission error, malformed data).
+
+    Lets ``verify_auth`` distinguish "never logged in" from "logged in
+    but auth file is broken" and emit a specific, actionable error
+    instead of a misleading "no credentials found".
+    """
     path = _get_token_storage_path(workspace_path=workspace_path)
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read GitHub OAuth tokens: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse GitHub OAuth tokens: %s", reason)
+        return None, reason
+
+    try:
         # Support both old format (direct) and new format (nested under "oauth")
         if "oauth" in data:
-            return OAuthTokens.from_dict(data["oauth"])
+            return OAuthTokens.from_dict(data["oauth"]), None
         elif "access_token" in data:
-            # Old format - direct OAuth token
-            return OAuthTokens.from_dict(data)
-        return None
-    except Exception:
-        return None
+            return OAuthTokens.from_dict(data), None
+        # File has no OAuth section (may hold a Copilot token only).
+        # That's not an error — just "no OAuth token configured".
+        return None, None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed OAuth tokens at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed GitHub OAuth tokens: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading GitHub OAuth tokens: %s", reason)
+        return None, reason
 
 
 def load_copilot_token() -> Optional[CopilotToken]:
-    """Load Copilot token from persistent storage."""
+    """Load Copilot token from persistent storage.
+
+    Returns None when the file is absent, has no ``copilot`` section, or
+    cannot be parsed.  Parse errors are logged at WARNING so a broken
+    auth file surfaces somewhere instead of being fully silent.
+    """
     path = _get_token_storage_path()
 
     if not path.exists():
@@ -522,10 +576,28 @@ def load_copilot_token() -> Optional[CopilotToken]:
     try:
         with open(path) as f:
             data = json.load(f)
-        if "copilot" in data:
-            return CopilotToken.from_dict(data["copilot"])
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Failed to load GitHub auth file at %s for Copilot token: %s: %s",
+            path, exc.__class__.__name__, exc,
+        )
         return None
-    except Exception:
+    except Exception as exc:  # defensive
+        logger.warning(
+            "Unexpected error loading GitHub auth file at %s: %s: %s",
+            path, exc.__class__.__name__, exc,
+        )
+        return None
+
+    if "copilot" not in data:
+        return None
+    try:
+        return CopilotToken.from_dict(data["copilot"])
+    except (KeyError, TypeError) as exc:
+        logger.warning(
+            "Malformed Copilot token at %s: %s: %s",
+            path, exc.__class__.__name__, exc,
+        )
         return None
 
 

@@ -265,9 +265,14 @@ class TestVerifyAuth:
         assert any("Found" in m for m in messages)
 
     @patch.dict('os.environ', {}, clear=True)
-    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value='stored-key')
-    def test_verify_auth_with_stored_key(self, mock_stored):
+    @patch('shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason')
+    def test_verify_auth_with_stored_key(self, mock_try_load):
         """Should return True when API key is stored."""
+        from ..auth import ZhipuAICredentials
+        mock_try_load.return_value = (
+            ZhipuAICredentials(api_key='stored-key', created_at=0.0),
+            None,
+        )
         provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
@@ -276,16 +281,46 @@ class TestVerifyAuth:
         assert result is True
 
     @patch.dict('os.environ', {}, clear=True)
-    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value=None)
-    def test_verify_auth_no_credentials(self, mock_stored):
-        """Should return False when no credentials are available."""
+    @patch(
+        'shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason',
+        return_value=(None, None),
+    )
+    def test_verify_auth_no_credentials(self, mock_try_load):
+        """Should return False with "No credentials" when nothing is configured."""
         provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is False
-        assert any("No" in m for m in messages)
+        assert any("No Zhipu AI credentials found" in m for m in messages)
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason')
+    def test_verify_auth_broken_credentials_surfaces_reason(self, mock_try_load):
+        """Broken credential file must surface the reason, not a generic
+        "No credentials found" message.
+
+        This is the bug the user flagged: a provider error (in this case a
+        credential file that couldn't be loaded) was being masked as a
+        missing token.  The fix exposes the real reason through
+        ``on_message`` so the user can fix the actual problem.
+        """
+        mock_try_load.return_value = (
+            None,
+            "invalid JSON at /tmp/zhipuai_auth.json: Expecting value (line 1, col 1)",
+        )
+        provider = ZhipuAIProvider()  # NOT initialized
+
+        messages = []
+        result = provider.verify_auth(on_message=messages.append)
+
+        assert result is False
+        joined = "\n".join(messages)
+        assert "could not be loaded" in joined
+        assert "invalid JSON" in joined
+        # Must NOT emit the old misleading "No credentials found" message.
+        assert "No Zhipu AI credentials found" not in joined
 
 
 class TestErrorHandling:
