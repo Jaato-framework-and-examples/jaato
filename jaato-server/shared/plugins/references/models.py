@@ -166,6 +166,13 @@ class ReferenceSource:
     # or source was added after the last indexing pass).
     embedding: Optional[EmbeddingMetadata] = None
 
+    # Runtime-only: which bundle this source was discovered from.
+    # Empty string denotes the root bundle (``.jaato/references/``); a
+    # non-empty value is the name of a sub-bundle subdirectory. Not
+    # serialized — membership is re-established every load from the
+    # directory the JSON file lives in. See ``bundle.Bundle``.
+    bundle_name: str = ""
+
     def to_instruction(self) -> str:
         """Generate instruction text for the model describing how to access this reference."""
         if self.type == SourceType.INLINE:

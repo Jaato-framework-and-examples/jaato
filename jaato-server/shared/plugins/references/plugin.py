@@ -28,10 +28,20 @@ from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
-from .config_loader import load_config, ReferencesConfig, resolve_source_paths, validate_reference_file
+from .config_loader import (
+    load_config,
+    ReferencesConfig,
+    discover_references,
+    resolve_source_paths,
+    validate_reference_file,
+)
+from .bundle import Bundle, ROOT_BUNDLE_NAME, detect_drift, discover_bundles
+from .reconcile import ReconcileResult, ReconcileStatus, reconcile_bundle
 from .embedding_types import (
     EmbeddingProviderProtocol,
     SemanticMatcherProtocol,
+    SemanticMatch,
+    create_semantic_matcher,
     discover_embedding_subsystem,
 )
 from jaato_sdk.plugins.base import (
@@ -102,10 +112,18 @@ class ReferencesPlugin:
         # preselected reference file. Paths are normalized using
         # normalize_for_comparison() for cross-platform matching.
         self._preselected_paths: Dict[str, Tuple[str, str]] = {}
-        # Semantic matching: embedding provider and matcher.
+        # Semantic matching: one embedding provider (shared) and one
+        # matcher per bundle. Each Bundle owns its own sidecar matrix and
+        # its own matcher instance; bundles whose embedding_model does not
+        # match the provider have ``bundle.matcher == None`` and are
+        # skipped at query time.
         # Initialized during initialize() when embedding config is present
         # and sentence-transformers is installed.
         self._embedding_provider: Optional[EmbeddingProviderProtocol] = None
+        self._bundles: List[Bundle] = []
+        # Retained for back-compat with tests that directly inspect the
+        # plugin state; points at the root bundle's matcher when present.
+        # New code should iterate self._bundles instead.
         self._semantic_matcher: Optional[SemanticMatcherProtocol] = None
         # Semantic matching configuration.
         # lookup_strategy: "hybrid" (tags + semantic), "tags_only", "semantic_only"
@@ -951,20 +969,28 @@ class ReferencesPlugin:
         # for the first time (no existing sidecar/config yet).
         self._init_embedding_provider(config)
 
-        # Initialize the full semantic matcher (provider + sidecar index)
-        # only when the catalog already has embedding metadata.
-        if (self._lookup_strategy in ("hybrid", "semantic_only")
-                and self._config
-                and self._config.embedding_model
-                and self._config.embedding_dimensions
-                and self._config.embedding_sidecar
-                and self._config.embedding_rows):
-            self._init_semantic_matching(config)
+        # Discover bundles (root + subdirectories with their own manifests)
+        # and load sub-bundle references into the flat catalog. Safe to
+        # call unconditionally — a workspace with no manifest anywhere
+        # yields an empty bundle list and becomes a no-op.
+        self._discover_and_load_bundles()
+
+        # Reconcile drift (new/edited/removed references) against each
+        # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
+        # deferred to the first semantic query; "off" disables the pass.
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._reconcile_eager_bundles()
+
+        # Attach one matcher per compatible bundle. Bundles whose
+        # embedding_model does not match the provider (or whose sidecar
+        # fails to load) are left without a matcher and skipped at query
+        # time; tag matching continues to work for their references.
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            self._init_bundle_matchers(config)
         else:
             self._trace(
                 f"initialize: semantic matching not configured "
-                f"(strategy={self._lookup_strategy}, "
-                f"embedding_model={getattr(self._config, 'embedding_model', None)})"
+                f"(strategy={self._lookup_strategy}, bundles={len(self._bundles)})"
             )
 
     def _init_embedding_provider(self, config: Dict[str, Any]) -> None:
@@ -999,121 +1025,273 @@ class ReferencesPlugin:
         if matcher is not None:
             self._semantic_matcher = matcher
 
-    def _init_semantic_matching(self, config: Dict[str, Any]) -> None:
-        """Initialize the semantic matcher with existing embedding index.
+    def _discover_and_load_bundles(self) -> None:
+        """Populate ``self._bundles`` and merge sub-bundle refs into the catalog.
 
-        Called from ``initialize()`` when the references catalog has embedding
-        metadata and the lookup strategy includes semantic matching.
+        The root bundle (if any) is discovered from
+        ``<workspace>/.jaato/references/embedding_config.json``. Sub-bundles
+        are immediate subdirectories of that path containing their own
+        manifests. Each sub-bundle's reference JSONs are loaded via
+        :func:`discover_references` and tagged with ``bundle_name`` so the
+        flat catalog can still reason about membership.
 
-        Sets up:
-        1. The embedding provider (discovered via ``jaato.embedding`` entry point).
-        2. The semantic matcher (discovered via the same entry point group).
-        3. Validates that the provider's model matches the index's model.
-
-        On any failure, logs a warning and leaves semantic matching disabled
-        (tag-based matching continues to work).
-
-        Args:
-            config: The plugin config dict from ``initialize()``.
+        Sources already loaded by :func:`load_config` (the root bundle)
+        have their ``bundle_name`` left as the default empty string. This
+        matches the new :data:`ROOT_BUNDLE_NAME` sentinel.
         """
-        embedding_model = self._config.embedding_model
-        embedding_dimensions = self._config.embedding_dimensions
-        sidecar_filename = self._config.embedding_sidecar
+        self._bundles = []
 
-        # Resolve sidecar path relative to config directory or workspace
-        sidecar_path = None
-        if self._config.config_base_path:
-            sidecar_path = os.path.join(self._config.config_base_path, sidecar_filename)
-        elif self._project_root:
-            sidecar_path = os.path.join(self._project_root, ".jaato", sidecar_filename)
-
-        if not sidecar_path:
-            self._trace("_init_semantic_matching: cannot resolve sidecar path")
+        if not self._config:
             return
 
-        # Build index → source_id mapping from the bundle's 'rows' list.
-        # rows[i] is the id of the reference whose vector is at matrix row i.
-        # Orphans (ids in rows[] but missing from the catalog) are omitted so
-        # the matcher never returns a hit we can't resolve to a ReferenceSource;
-        # reconcile will drop the orphan row the next time the bundle is rewritten.
-        rows = self._config.embedding_rows or []
-        known_ids = {s.id for s in self._sources}
-        index_to_source_id: Dict[int, str] = {
-            i: source_id
-            for i, source_id in enumerate(rows)
-            if source_id in known_ids
-        }
+        refs_dir = Path(self._config.references_dir)
+        if not refs_dir.is_absolute():
+            if self._workspace_path:
+                refs_dir = Path(self._workspace_path) / refs_dir
+            elif self._project_root:
+                refs_dir = Path(self._project_root) / refs_dir
+            else:
+                self._trace(
+                    "_discover_and_load_bundles: cannot resolve references_dir "
+                    "without workspace_path; bundle discovery skipped"
+                )
+                return
 
-        orphan_count = len(rows) - len(index_to_source_id)
-        if orphan_count:
-            self._trace(
-                f"_init_semantic_matching: {orphan_count} orphan row(s) in "
-                f"sidecar (ids present in rows[] but missing from catalog)"
-            )
+        self._bundles = discover_bundles(refs_dir)
 
-        if not index_to_source_id:
-            self._trace(
-                "_init_semantic_matching: no sidecar rows map to catalog sources"
-            )
+        if not self._bundles:
+            self._trace("_discover_and_load_bundles: no bundles found")
             return
 
-        # Provider and matcher were discovered in _init_embedding_provider().
-        # If either is missing, semantic matching cannot proceed.
+        # Load sub-bundle references. The root bundle's refs are already
+        # in self._sources from the initial load_config() call; we only
+        # need to pick up the sub-bundles here.
+        existing_ids = {s.id for s in self._sources}
+        project_root = self._project_root
+        for bundle in self._bundles:
+            if bundle.name == ROOT_BUNDLE_NAME:
+                continue
+            sub_sources = discover_references(
+                str(bundle.directory),
+                base_path=str(bundle.directory.parent),
+                project_root=project_root,
+            )
+            for source in sub_sources:
+                source.bundle_name = bundle.name
+                if source.id in existing_ids:
+                    self._trace(
+                        f"_discover_and_load_bundles: skipping duplicate id "
+                        f"'{source.id}' from bundle '{bundle.display_name}'"
+                    )
+                    continue
+                self._sources.append(source)
+                existing_ids.add(source.id)
+
+        self._trace(
+            f"_discover_and_load_bundles: bundles="
+            f"{[b.display_name for b in self._bundles]}, "
+            f"total_sources={len(self._sources)}"
+        )
+
+    def _reconcile_eager_bundles(self) -> None:
+        """Run :func:`reconcile_bundle` for every eager-mode bundle with drift.
+
+        Lazy and off bundles are skipped. Results are logged per bundle.
+        When the provider is missing, reconcile returns
+        :attr:`ReconcileStatus.UNAVAILABLE` and the bundle's sidecar is
+        left untouched — tag matching still works for its references.
+        """
+        if not self._bundles:
+            return
+        for bundle in self._bundles:
+            if bundle.reconcile_mode != "eager":
+                continue
+            result = reconcile_bundle(
+                bundle, self._sources, self._embedding_provider
+            )
+            if result.status == ReconcileStatus.CLEAN:
+                continue
+            self._trace(
+                f"reconcile[{bundle.display_name}]: {result.summary()}"
+            )
+
+    def _init_bundle_matchers(self, config: Dict[str, Any]) -> None:
+        """Attach a semantic matcher to each compatible bundle.
+
+        A bundle is "compatible" when the embedding provider is available
+        *and* ``bundle.embedding_model`` equals the provider's model name.
+        Mismatched bundles are left with ``bundle.matcher is None`` and
+        logged once so the operator knows why semantic matching is
+        skipping them.
+
+        The legacy single-matcher field :attr:`_semantic_matcher` is kept
+        in sync with the root bundle's matcher (if any) for the benefit of
+        tests that still assert on it directly.
+        """
+        if not self._bundles:
+            return
+
         if self._embedding_provider is None:
             self._trace(
-                "_init_semantic_matching: no embedding provider available"
+                "_init_bundle_matchers: no embedding provider — "
+                "all bundles left without a matcher"
             )
             return
 
-        if self._semantic_matcher is None:
-            self._trace(
-                "_init_semantic_matching: no semantic matcher available"
-            )
-            return
-
-        # Eagerly load the model now since we need it for matching
         if not self._embedding_provider.available:
             self._embedding_provider.load_model()
 
         if not self._embedding_provider.available:
             self._trace(
-                "_init_semantic_matching: embedding provider not available "
-                "(model failed to load)"
+                "_init_bundle_matchers: embedding provider failed to load"
             )
             self._embedding_provider = None
-            self._semantic_matcher = None
             return
 
-        provider_model = config.get("embedding_model", embedding_model)
-
-        # Validate model match
-        if not self._semantic_matcher.validate_model(provider_model):
-            self._trace(
-                f"_init_semantic_matching: model mismatch — provider "
-                f"'{provider_model}' vs index '{embedding_model}'"
-            )
-            self._semantic_matcher = None
-            self._embedding_provider = None
-            return
-
-        # Load sidecar
-        if not self._semantic_matcher.load_index(
-            sidecar_path=sidecar_path,
-            embedding_model=embedding_model,
-            embedding_dimensions=embedding_dimensions,
-            index_to_source_id=index_to_source_id,
-        ):
-            self._trace("_init_semantic_matching: failed to load sidecar")
-            self._semantic_matcher = None
-            self._embedding_provider = None
-            return
-
-        self._semantic_matcher.set_provider(self._embedding_provider)
-        self._trace(
-            f"_init_semantic_matching: ready — model='{provider_model}', "
-            f"dimensions={embedding_dimensions}, "
-            f"sources_with_embeddings={len(index_to_source_id)}"
+        provider_model = config.get(
+            "embedding_model", self._embedding_provider.model_name
         )
+
+        for bundle in self._bundles:
+            bundle.matcher = self._attach_matcher(bundle, provider_model)
+
+        root = next(
+            (b for b in self._bundles if b.name == ROOT_BUNDLE_NAME), None
+        )
+        self._semantic_matcher = root.matcher if root else None
+
+        attached = sum(1 for b in self._bundles if b.matcher is not None)
+        self._trace(
+            f"_init_bundle_matchers: attached={attached}/{len(self._bundles)} "
+            f"bundles (provider model='{provider_model}')"
+        )
+
+    def _attach_matcher(
+        self, bundle: Bundle, provider_model: str,
+    ) -> Optional[SemanticMatcherProtocol]:
+        """Build and wire a matcher for a single bundle.
+
+        Returns ``None`` when the bundle's embedding model does not match
+        the active provider, when ``rows`` maps to no known catalog source
+        (an empty or fully-orphan bundle), or when the matcher fails to
+        load the sidecar. In all cases the method logs and the rest of
+        the catalog is unaffected.
+        """
+        if bundle.embedding_model != provider_model:
+            self._trace(
+                f"_attach_matcher[{bundle.display_name}]: model mismatch — "
+                f"bundle '{bundle.embedding_model}' vs provider "
+                f"'{provider_model}'; skipping"
+            )
+            return None
+
+        known_ids = {
+            s.id for s in self._sources if s.bundle_name == bundle.name
+        }
+        index_to_source_id: Dict[int, str] = {
+            i: sid
+            for i, sid in enumerate(bundle.embedding_rows)
+            if sid in known_ids
+        }
+        if not index_to_source_id:
+            self._trace(
+                f"_attach_matcher[{bundle.display_name}]: no rows map to "
+                f"known catalog sources; skipping"
+            )
+            return None
+
+        matcher = create_semantic_matcher()
+        if matcher is None:
+            self._trace(
+                f"_attach_matcher[{bundle.display_name}]: no semantic_matcher "
+                f"entry point registered"
+            )
+            return None
+
+        if not matcher.validate_model(provider_model):
+            self._trace(
+                f"_attach_matcher[{bundle.display_name}]: matcher rejected "
+                f"provider model '{provider_model}'"
+            )
+            return None
+
+        loaded = matcher.load_index(
+            sidecar_path=str(bundle.sidecar_path),
+            embedding_model=bundle.embedding_model,
+            embedding_dimensions=bundle.embedding_dimensions,
+            index_to_source_id=index_to_source_id,
+        )
+        if not loaded:
+            self._trace(
+                f"_attach_matcher[{bundle.display_name}]: failed to load sidecar "
+                f"{bundle.sidecar_path}"
+            )
+            return None
+
+        matcher.set_provider(self._embedding_provider)
+        return matcher
+
+    # ----- Cross-bundle semantic matching helpers -----
+
+    def _semantic_available(self) -> bool:
+        """Whether at least one bundle has an attached matcher ready to query."""
+        return any(
+            b.matcher is not None and b.matcher.available
+            for b in self._bundles
+        )
+
+    def _semantic_score_sources(
+        self, query_vec: Any, source_ids: Set[str],
+    ) -> Dict[str, float]:
+        """Score ``source_ids`` across every bundle that owns them.
+
+        Each bundle only knows about its own sources, so we partition
+        ``source_ids`` by bundle before delegating. Missing entries in
+        the merged dict mean the source isn't in any attached bundle.
+        """
+        scores: Dict[str, float] = {}
+        for bundle in self._bundles:
+            if bundle.matcher is None or not bundle.matcher.available:
+                continue
+            bundle_ids = source_ids & bundle.owned_source_ids
+            if not bundle_ids:
+                continue
+            scores.update(bundle.matcher.score_sources(query_vec, bundle_ids))
+        return scores
+
+    def _semantic_embed_and_match(
+        self,
+        content: str,
+        threshold: float,
+        top_k: int,
+        exclude_ids: Optional[Set[str]] = None,
+    ) -> List[SemanticMatch]:
+        """Embed ``content`` once and query every attached bundle.
+
+        Runs the matrix-multiply per bundle, merges the per-bundle hits by
+        score, and returns the global top-K. The single embedding avoids
+        paying model cost per bundle.
+        """
+        if not self._embedding_provider or not self._embedding_provider.available:
+            return []
+        query_vec = self._embedding_provider.embed_text_as_array(content)
+        if query_vec is None:
+            return []
+
+        all_matches: List[SemanticMatch] = []
+        for bundle in self._bundles:
+            if bundle.matcher is None or not bundle.matcher.available:
+                continue
+            matches = bundle.matcher.find_matches(
+                query_vec,
+                threshold=threshold,
+                top_k=top_k,
+                exclude_ids=exclude_ids,
+            )
+            all_matches.extend(matches)
+
+        all_matches.sort(key=lambda m: m.score, reverse=True)
+        return all_matches[:top_k]
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
@@ -1125,6 +1303,9 @@ class ReferencesPlugin:
         self._selected_source_ids = []
         self._embedding_provider = None
         self._semantic_matcher = None
+        for bundle in self._bundles:
+            bundle.matcher = None
+        self._bundles = []
         self._preselected_paths = {}
         self._transitive_parent_map = {}
         self._transitive_notification_pending = False
@@ -1676,6 +1857,8 @@ class ReferencesPlugin:
             select <ref-id>                 - Select a reference source
             unselect <ref-id>               - Unselect a reference source
             reload                          - Reload catalog from disk
+            bundles                         - Show loaded knowledge bundles
+            reconcile [<bundle>]            - Reconcile bundle sidecars
             help                            - Show usage help
         """
         subcommand = args.get("subcommand", "list")
@@ -1695,10 +1878,130 @@ class ReferencesPlugin:
             return self._cmd_references_unselect(target)
         elif subcommand == "reload":
             return self._cmd_references_reload()
+        elif subcommand == "bundles":
+            return self._cmd_references_bundles()
+        elif subcommand == "reconcile":
+            return self._cmd_references_reconcile(target)
         elif subcommand == "help":
             return self._cmd_references_help()
         else:
-            return {"error": f"Unknown subcommand: {subcommand}. Use: list, select, unselect, reload, help"}
+            return {
+                "error": (
+                    f"Unknown subcommand: {subcommand}. Use: list, select, "
+                    f"unselect, reload, bundles, reconcile, help"
+                )
+            }
+
+    def _cmd_references_bundles(self) -> HelpLines:
+        """Execute 'references bundles' — show loaded knowledge bundles.
+
+        One row per bundle: name, source count, model, dimensions, and
+        current drift status. Bundles without an attached matcher are
+        flagged so the operator can see at a glance why semantic matching
+        skips them.
+        """
+        lines: List[Tuple[str, str]] = [("BUNDLES", "bold"), ("", "")]
+        if not self._bundles:
+            lines.append(("    (no bundles — no embedding_config.json discovered)", ""))
+            return HelpLines(lines=lines)
+
+        for bundle in self._bundles:
+            own_count = sum(
+                1 for s in self._sources if s.bundle_name == bundle.name
+            )
+            drift = detect_drift(bundle, self._sources)
+            if bundle.matcher is None:
+                status = "NO MATCHER"
+            elif not drift.is_clean():
+                status = drift.summary()
+            else:
+                status = "up-to-date"
+            lines.append((
+                f"  {bundle.display_name:<18} "
+                f"{own_count:>3} refs  "
+                f"model={bundle.embedding_model}  "
+                f"dim={bundle.embedding_dimensions}  "
+                f"{status}",
+                "",
+            ))
+        return HelpLines(lines=lines)
+
+    def _cmd_references_reconcile(self, target: str) -> Dict[str, Any]:
+        """Execute 'references reconcile [<bundle>]'.
+
+        Without an argument, reconciles every bundle. With a bundle name
+        (``root`` or a subdirectory name), reconciles only that bundle.
+        After a successful pass, re-attaches matchers so the next
+        semantic query sees the new sidecar.
+        """
+        target = (target or "").strip()
+
+        # Resolve target → list of bundles to reconcile.
+        if target:
+            name = ROOT_BUNDLE_NAME if target in ("root", "(root)") else target
+            candidates = [b for b in self._bundles if b.name == name]
+            if not candidates:
+                return {
+                    "error": (
+                        f"Unknown bundle '{target}'. Known bundles: "
+                        f"{[b.display_name for b in self._bundles] or '(none)'}"
+                    )
+                }
+        else:
+            candidates = list(self._bundles)
+
+        if not candidates:
+            return {
+                "status": "no_bundles",
+                "message": "No bundles to reconcile (no embedding_config.json discovered).",
+            }
+
+        results: List[ReconcileResult] = []
+        for bundle in candidates:
+            results.append(
+                reconcile_bundle(
+                    bundle, self._sources, self._embedding_provider,
+                )
+            )
+
+        # Re-attach matchers for any bundle whose sidecar changed.
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            provider_model = (
+                self._embedding_provider.model_name
+                if self._embedding_provider
+                else ""
+            )
+            for bundle, result in zip(candidates, results):
+                if result.status in (ReconcileStatus.UPDATED, ReconcileStatus.CLEAN):
+                    bundle.matcher = self._attach_matcher(bundle, provider_model)
+            root = next(
+                (b for b in self._bundles if b.name == ROOT_BUNDLE_NAME),
+                None,
+            )
+            self._semantic_matcher = root.matcher if root else None
+
+        lines: List[Tuple[str, str]] = [("RECONCILE", "bold"), ("", "")]
+        for result in results:
+            lines.append((f"  {result.summary()}", ""))
+            for sid, reason in result.skipped:
+                lines.append((f"    skipped {sid}: {reason}", ""))
+
+        return {
+            "status": "ok",
+            "results": [
+                {
+                    "bundle": r.bundle_name or "(root)",
+                    "status": r.status.value,
+                    "added": r.added,
+                    "refreshed": r.refreshed,
+                    "pruned": r.pruned,
+                    "skipped": r.skipped,
+                    "final_row_count": r.final_row_count,
+                }
+                for r in results
+            ],
+            "help_lines": HelpLines(lines=lines),
+        }
 
     def _cmd_references_list(self, filter_arg: str) -> HelpLines:
         """Execute 'references list [all|selected|unselected]'."""
@@ -1938,6 +2241,17 @@ class ReferencesPlugin:
             ("        Previously selected sources are preserved when they still", "dim"),
             ("        exist in the reloaded catalog.", "dim"),
             ("", ""),
+            ("    bundles", "dim"),
+            ("        Show loaded knowledge bundles. Each bundle is a directory", "dim"),
+            ("        (root or subdirectory) with its own embedding_config.json", "dim"),
+            ("        and sidecar matrix. Reports drift and matcher status.", "dim"),
+            ("", ""),
+            ("    reconcile [<bundle>]", "dim"),
+            ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
+            ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
+            ("        Without an argument, reconciles every bundle. Requires an", "dim"),
+            ("        embedding provider (jaato.embedding entry point).", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
@@ -1949,6 +2263,9 @@ class ReferencesPlugin:
             ("    references select my-ref-001        Select a reference by ID", "dim"),
             ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
             ("    references reload                   Reload catalog from disk", "dim"),
+            ("    references bundles                  Show loaded bundles", "dim"),
+            ("    references reconcile                Reconcile every bundle", "dim"),
+            ("    references reconcile teammate-kb    Reconcile one bundle", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -2116,6 +2433,8 @@ class ReferencesPlugin:
             CommandCompletion("select", "Select a reference source"),
             CommandCompletion("unselect", "Unselect a reference source"),
             CommandCompletion("reload", "Reload catalog from disk"),
+            CommandCompletion("bundles", "Show loaded knowledge bundles"),
+            CommandCompletion("reconcile", "Reconcile bundle sidecars"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
@@ -2152,6 +2471,16 @@ class ReferencesPlugin:
                     CommandCompletion(s.id, s.name)
                     for s in self._sources
                     if s.id in selected_set
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+
+            if subcommand == "reconcile":
+                options = [
+                    CommandCompletion(
+                        b.name if b.name else "root",
+                        f"Reconcile {b.display_name}",
+                    )
+                    for b in self._bundles
                 ]
                 return [o for o in options if o.value.startswith(partial)]
 
@@ -2660,13 +2989,12 @@ class ReferencesPlugin:
                 vetoed_sources: Dict[str, float] = {}
                 if (
                     matched_sources
-                    and self._semantic_matcher
-                    and self._semantic_matcher.available
+                    and self._semantic_available()
                     and self._lookup_strategy == "hybrid"
                 ):
                     query_vec = self._embedding_provider.embed_text_as_array(content)
                     if query_vec is not None:
-                        scores = self._semantic_matcher.score_sources(
+                        scores = self._semantic_score_sources(
                             query_vec, set(matched_sources.keys())
                         )
                         for sid, score in scores.items():
@@ -2723,8 +3051,7 @@ class ReferencesPlugin:
         # embeddings are similar.  Excludes sources already surfaced by
         # @reference-id expansion or tag matching to avoid duplicates.
         if (
-            self._semantic_matcher
-            and self._semantic_matcher.available
+            self._semantic_available()
             and self._lookup_strategy in ("hybrid", "semantic_only")
             and "selectReferences" not in self._exclude_tools
         ):
@@ -2734,7 +3061,7 @@ class ReferencesPlugin:
             if "tag_matched_references" in all_metadata:
                 already_surfaced.update(all_metadata["tag_matched_references"].keys())
 
-            semantic_matches = self._semantic_matcher.embed_and_match(
+            semantic_matches = self._semantic_embed_and_match(
                 content=content,
                 threshold=self._similarity_threshold,
                 top_k=self._max_matches_per_piece,
