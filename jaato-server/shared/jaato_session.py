@@ -74,6 +74,13 @@ from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
+# Rewind-with-hint budget.  How many consecutive rewinds we allow
+# per logical operation before giving up and surfacing the failure
+# normally.  The counter resets on any successful tool execution.
+# Keep small: the point is to unstick the model once, not to loop.
+# See ``docs/design/rewind-with-hint.md`` for rationale.
+REWIND_BUDGET_PER_OPERATION = 2
+
 
 class ActivityPhase(Enum):
     """Activity phases for tracking what a session is doing.
@@ -381,6 +388,14 @@ class JaatoSession:
         # Tracks whether the current turn is "complex" (multiple model responses with tool calls)
         self._turn_model_response_count: int = 0
         self._turn_had_tool_calls: bool = False
+
+        # Rewind-with-hint state.  Counter increments each time the
+        # rewind detector fires for a MAX_TOKENS-truncated tool call
+        # (see ``shared/rewind.py``); resets on any successful tool
+        # execution so a healthy session is never starved of future
+        # rewinds.  Capped at ``REWIND_BUDGET_PER_OPERATION`` to prevent
+        # a persistently-failing model from looping.
+        self._rewind_count: int = 0
 
         # Background thread for Phase 2 instruction token counting.
         # Set by _start_background_token_counting(), joined before GC.
@@ -3420,6 +3435,134 @@ NOTES
     # into a single TurnResult-based flow.  They are used exclusively
     # by ``_run_chat_loop`` and its sub-methods.
 
+    def _maybe_rewind(self, response: ProviderResponse) -> bool:
+        """Attempt a rewind-with-hint recovery for truncated tool calls.
+
+        Detects the ``MAX_TOKENS``-truncated tool call pathology (see
+        ``shared/rewind.py``), rewrites the last assistant message to
+        preserve its narration text while dropping the half-serialized
+        ``tool_use`` part, and appends a synthetic user-role hint
+        naming the specific tool and the truncation reason.  On a hit,
+        the caller should ``continue`` its request loop to re-request
+        the provider with the rewritten history.
+
+        Bounded by :data:`REWIND_BUDGET_PER_OPERATION` — after the cap
+        is reached the pathology is allowed to surface normally via
+        the existing abnormal-termination path in
+        :meth:`_classify_finish_reason`.  The counter resets on any
+        successful tool execution (see the tool-call completion path).
+
+        Telemetry: on fire, sets ``jaato.rewind.reason``,
+        ``jaato.rewind.tool``, and ``jaato.rewind.count`` on the active
+        turn span.
+
+        Args:
+            response: The just-received :class:`ProviderResponse` whose
+                function calls will be inspected.
+
+        Returns:
+            True when the detector fired AND the rewind budget
+            allowed it AND narration text was successfully preserved —
+            caller should re-request the provider.  False otherwise
+            (no detection, budget exhausted, or nothing to preserve).
+        """
+        from .rewind import (
+            detect_truncated_tool_call,
+            find_truncated_call_name,
+        )
+
+        tool_schemas = (
+            self._runtime.registry.get_exposed_tool_schemas()
+            if self._runtime and self._runtime.registry else []
+        )
+        reason = detect_truncated_tool_call(response, tool_schemas)
+        if reason is None:
+            return False
+
+        if self._rewind_count >= REWIND_BUDGET_PER_OPERATION:
+            self._trace(
+                f"REWIND_BUDGET_EXHAUSTED reason={reason} "
+                f"count={self._rewind_count}, letting failure surface"
+            )
+            return False
+
+        bad_call_name = (
+            find_truncated_call_name(response, tool_schemas) or "unknown"
+        )
+        preserved = self._history.rewrite_last_dropping_tool_use()
+        if preserved is None:
+            # No narration to anchor the hint on — fall through.
+            self._trace(
+                f"REWIND_SKIP reason={reason} tool={bad_call_name}: "
+                "no narration preserved"
+            )
+            return False
+
+        self._history.append(
+            Message.from_text(Role.USER, self._build_rewind_hint_text(
+                bad_call_name, reason, preserved,
+            )),
+        )
+        self._rewind_count += 1
+
+        span = getattr(self, '_current_turn_span', None)
+        if span is not None:
+            try:
+                span.set_attribute("jaato.rewind.reason", reason)
+                span.set_attribute("jaato.rewind.tool", bad_call_name)
+                span.set_attribute("jaato.rewind.count", self._rewind_count)
+            except Exception as exc:
+                logger.debug(f"Failed to set rewind telemetry: {exc}")
+
+        self._trace(
+            f"REWIND fired reason={reason} tool={bad_call_name} "
+            f"count={self._rewind_count} preserved_chars={len(preserved)}"
+        )
+        return True
+
+    def _build_rewind_hint_text(
+        self,
+        tool_name: str,
+        reason: str,
+        preserved_narration: str,
+    ) -> str:
+        """Compose the synthetic user-role hint injected after a rewind.
+
+        The hint references the model's own preserved narration, names
+        the specific tool, explains the detection reason, and offers a
+        concrete recipe for working around the truncation.  Keeping the
+        message conversational ("yes, and here's the right way…") is
+        deliberate — a bare "try again" would read as an unexplained
+        reset to the model.
+        """
+        # Trim narration to keep the hint compact; the model has its own
+        # narration in the preceding assistant turn anyway — we just
+        # need enough to anchor the correction.
+        if len(preserved_narration) > 200:
+            preserved_narration = preserved_narration[:197] + "…"
+
+        reason_explanation = {
+            "max_tokens_empty_args": (
+                "the completion budget truncated your arguments — the "
+                "tool call arrived with empty arguments."
+            ),
+            "max_tokens_missing_required": (
+                "the completion budget truncated your arguments — the "
+                "tool call is missing required fields."
+            ),
+        }.get(reason, "your tool call arguments were truncated.")
+
+        return (
+            f"Before that `{tool_name}` call lands: {reason_explanation} "
+            f"Your narration just before the call was: "
+            f"\"{preserved_narration}\". "
+            f"Please write this in smaller pieces instead — for a large "
+            f"file, start with a skeleton call (e.g. outline or placeholder "
+            f"content), then append each section with follow-up calls. "
+            f"For shell or CLI tools with long inputs, split the work "
+            f"across multiple invocations. Try again now."
+        )
+
     def _classify_finish_reason(
         self,
         response: ProviderResponse,
@@ -3871,13 +4014,23 @@ NOTES
             # Rolled back in the outer except block if all retries fail.
             self._history.append(Message.from_text(Role.USER, message))
 
-            # Send message (streaming or batched) with telemetry
-            with self._telemetry.llm_span(
+            # Send message (streaming or batched) with telemetry.
+            #
+            # Wrapped in a ``while True`` retry loop to support the
+            # rewind-with-hint recovery path for MAX_TOKENS-truncated
+            # tool calls.  Normal runs iterate once and ``break``.  A
+            # rewind detection rewrites history, injects a user-role
+            # hint, and ``continue``s to re-request the provider —
+            # bounded by ``REWIND_BUDGET_PER_OPERATION``.  See
+            # ``docs/design/rewind-with-hint.md`` and
+            # ``shared/rewind.py``.
+            while True:
+              with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=use_streaming,
                 attributes=self._build_llm_span_attributes(),
-            ) as llm_telemetry:
+              ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
                 if use_streaming:
                     # Track whether we've sent the first chunk (to use "write" vs "append")
@@ -3966,7 +4119,18 @@ NOTES
                 self._turn_model_response_count += 1
                 # Record token usage to telemetry span
                 self._record_token_telemetry(llm_telemetry, response)
-            self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+              self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+
+              # Rewind-with-hint hook: detect MAX_TOKENS-truncated tool
+              # calls, rewrite history to preserve narration, inject a
+              # corrective user-role hint, and re-request the provider.
+              # ``_maybe_rewind`` returns True when the rewind fired and
+              # the budget allowed it — in which case we loop to
+              # re-request.  Otherwise we break and fall through to the
+              # existing abnormal-termination classifier.
+              if self._maybe_rewind(response):
+                continue
+              break
 
             # Emit turn progress after initial response
             pending_calls = len([p for p in response.parts if p.function_call])
@@ -4438,6 +4602,18 @@ NOTES
 
                 # Emit tool end hook as each completes
                 result = results[fc.id or fc.name]
+                # Rewind-with-hint budget reset: a successful tool
+                # execution ends the "logical operation" that the
+                # rewind budget is gating.  Future MAX_TOKENS-truncated
+                # calls in this session start fresh instead of being
+                # starved by an exhausted counter.  See
+                # ``_maybe_rewind`` for the counter's consumer side.
+                if result.success and self._rewind_count > 0:
+                    self._trace(
+                        f"REWIND_BUDGET_RESET on successful {fc.name} "
+                        f"(was count={self._rewind_count})"
+                    )
+                    self._rewind_count = 0
                 fc_duration = (result.end_time - result.start_time).total_seconds()
                 # Check if tool was auto-backgrounded or has continuation
                 fc_auto_bg = False

@@ -23,8 +23,10 @@ whether to write.
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from jaato_sdk.plugins.model_provider.types import Message, Role
+
 if TYPE_CHECKING:
-    from jaato_sdk.plugins.model_provider.types import Message
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,57 @@ class SessionHistory:
            is maintained.
         """
         return self._messages
+
+    def rewrite_last_dropping_tool_use(self) -> Optional[str]:
+        """Rewrite the last message to keep text parts and drop ``function_call`` parts.
+
+        Used by the rewind-with-hint recovery path in
+        :mod:`shared.jaato_session` when the provider returned a
+        ``MAX_TOKENS``-truncated tool call: the model's narration
+        text is worth preserving as an anchor for the corrective hint,
+        but the half-serialized ``function_call`` part must go so the
+        chat loop doesn't try to execute it.
+
+        The last message is expected to be the just-appended assistant
+        response.  When its role is NOT ``MODEL``, or no text parts
+        survive the drop, we leave history untouched and return
+        ``None`` — the caller treats that as "nothing to preserve" and
+        falls through to the existing abnormal-termination handling.
+
+        Returns:
+            The concatenated text of the preserved parts when the
+            rewrite succeeded, or ``None`` when no rewrite happened
+            (empty history, wrong role, or no text to keep).
+        """
+        if not self._messages:
+            return None
+
+        last = self._messages[-1]
+        if last.role != Role.MODEL:
+            # Defensive: only assistant turns carry function_call parts
+            # from the model.  If the history doesn't end with one,
+            # something upstream is out of order — don't mutate.
+            return None
+
+        kept_parts = [p for p in last.parts if p.function_call is None]
+        if not any(p.text for p in kept_parts):
+            # No narration to preserve — signal caller to skip rewind.
+            return None
+
+        # Mutate in place via replacement.  We keep the same message_id
+        # and model/provider so downstream consumers (GC, token ledger,
+        # telemetry) continue to see a coherent assistant turn.
+        rewritten = Message(
+            role=last.role,
+            parts=kept_parts,
+            message_id=last.message_id,
+            model=last.model,
+            provider=last.provider,
+        )
+        self._messages[-1] = rewritten
+        self._dirty = True
+
+        return rewritten.text or ""
 
     def __len__(self) -> int:
         return len(self._messages)
