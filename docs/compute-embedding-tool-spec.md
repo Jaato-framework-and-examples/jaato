@@ -178,6 +178,7 @@ Both the `compute_embedding` tool handler and the references plugin's internal A
   "embedding_model": "all-MiniLM-L6-v2",
   "embedding_dimensions": 384,
   "embedding_sidecar": "references.embeddings.npy",
+  "rows": ["arch-overview"],
   "references": [
     {
       "id": "arch-overview",
@@ -185,7 +186,6 @@ Both the `compute_embedding` tool handler and the references plugin's internal A
       "tags": ["architecture", "overview", "design"],
       "description": "High-level architecture document",
       "embedding": {
-        "index": 0,
         "source_hash": "sha256:a1b2c3d4..."
       }
     }
@@ -195,7 +195,7 @@ Both the `compute_embedding` tool handler and the references plugin's internal A
 
 ### Sidecar file: `references.embeddings.npy`
 
-The vectors live in a separate NumPy binary file — a 2D `float32` array of shape `(N, D)` where N is the number of references with embeddings and D is the dimension count (384 for MiniLM). Each reference's `embedding.index` is its row in this matrix.
+The vectors live in a separate NumPy binary file — a 2D `float32` array of shape `(N, D)` where N is the number of references with embeddings and D is the dimension count (384 for MiniLM). Row position is defined by the bundle's `rows` list (index i in `rows` corresponds to row i in the matrix), so the references themselves don't need to agree on numbering.
 
 **Why a sidecar:**
 - The JSON index stays clean and human-readable — no 768-element float arrays cluttering the schema
@@ -205,15 +205,17 @@ The vectors live in a separate NumPy binary file — a 2D `float32` array of sha
 
 **Lifecycle:**
 - `gen-references` agent writes both `references.json` and `references.embeddings.npy` together
-- The agent calls `compute_embedding` per document, collects all vectors, writes the matrix in index order
-- On re-index: if `source_hash` matches the current file, reuse the existing row; only re-embed changed files, then rewrite the sidecar
+- The agent calls `compute_embedding` per document, collects all vectors, writes the matrix in the order declared by `rows`
+- On re-index: if `source_hash` matches the current metadata, reuse the existing row; only re-embed changed refs, append new rows, drop orphans, then rewrite the sidecar
 
 ### Design notes
 
 - **`tags` retained** — the hybrid lookup strategy (exact tag match → semantic fallback) means tags are still the fast path when the caller knows the exact tag
-- **`source_hash`** — SHA-256 of the content that was embedded. During index refresh, if the file hash hasn't changed, skip re-embedding. Also enables staleness detection at runtime
+- **`source_hash`** — SHA-256 of the metadata that was embedded (name + description + tags + fetchHint). During index refresh, if the hash hasn't changed, skip re-embedding. Also enables staleness detection at runtime
 - **`embedding_model` + `embedding_dimensions` at top level** — the references plugin validates at startup that the configured embedding model matches what's recorded in the index. Mismatch → warning + refuse semantic matching (fall back to tags only)
-- **`embedding.index`** — the row pointer into the sidecar matrix. References without embeddings simply omit the `embedding` property
+- **`rows`** — ordered list of reference ids, `rows[i]` is the id whose vector lives at matrix row `i`. Single source of truth for row↔id mapping, so inserting/removing a row only rewrites this list (not every reference JSON). References without embeddings simply omit the `embedding` property and don't appear in `rows`
+
+See [References as Knowledge Bundles](design/references-knowledge-bundles.md) for how this schema participates in the per-bundle reconcile and merge flow.
 
 ---
 

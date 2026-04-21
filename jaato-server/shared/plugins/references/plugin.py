@@ -957,7 +957,8 @@ class ReferencesPlugin:
                 and self._config
                 and self._config.embedding_model
                 and self._config.embedding_dimensions
-                and self._config.embedding_sidecar):
+                and self._config.embedding_sidecar
+                and self._config.embedding_rows):
             self._init_semantic_matching(config)
         else:
             self._trace(
@@ -1030,14 +1031,30 @@ class ReferencesPlugin:
             self._trace("_init_semantic_matching: cannot resolve sidecar path")
             return
 
-        # Build index → source_id mapping from sources with embeddings
-        index_to_source_id: Dict[int, str] = {}
-        for source in self._sources:
-            if source.embedding is not None:
-                index_to_source_id[source.embedding.index] = source.id
+        # Build index → source_id mapping from the bundle's 'rows' list.
+        # rows[i] is the id of the reference whose vector is at matrix row i.
+        # Orphans (ids in rows[] but missing from the catalog) are omitted so
+        # the matcher never returns a hit we can't resolve to a ReferenceSource;
+        # reconcile will drop the orphan row the next time the bundle is rewritten.
+        rows = self._config.embedding_rows or []
+        known_ids = {s.id for s in self._sources}
+        index_to_source_id: Dict[int, str] = {
+            i: source_id
+            for i, source_id in enumerate(rows)
+            if source_id in known_ids
+        }
+
+        orphan_count = len(rows) - len(index_to_source_id)
+        if orphan_count:
+            self._trace(
+                f"_init_semantic_matching: {orphan_count} orphan row(s) in "
+                f"sidecar (ids present in rows[] but missing from catalog)"
+            )
 
         if not index_to_source_id:
-            self._trace("_init_semantic_matching: no sources have embeddings")
+            self._trace(
+                "_init_semantic_matching: no sidecar rows map to catalog sources"
+            )
             return
 
         # Provider and matcher were discovered in _init_embedding_provider().

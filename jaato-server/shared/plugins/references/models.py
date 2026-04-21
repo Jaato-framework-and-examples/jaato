@@ -88,22 +88,27 @@ class InjectionMode(Enum):
 class EmbeddingMetadata:
     """Embedding metadata for a reference source.
 
-    Links a reference to its row in the sidecar ``.npy`` matrix.
+    Marks a reference as having an entry in its bundle's sidecar matrix.
     Produced by the ``gen-references`` agent when it calls the
     ``compute_embedding`` tool during indexing.
 
+    The reference's row position in the sidecar matrix is *not* stored here;
+    it is derived from the bundle's ``embedding_config.json`` ``rows`` list
+    (see ``ReferencesConfig.embedding_rows``). Only the metadata fingerprint
+    stays on the reference itself, so a drop-in reference never has to agree
+    with the other references on numbering.
+
     Attributes:
-        index: Row position in the sidecar embedding matrix.
-        source_hash: SHA-256 hash of the content that was embedded.
-            Used for staleness detection and incremental re-indexing.
+        source_hash: SHA-256 hash of the metadata that was embedded
+            (name + description + tags + fetchHint). Used by the reconcile
+            pass to detect "this reference's metadata drifted since its
+            vector was computed → re-embed it".
     """
-    index: int
     source_hash: str
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a dict."""
         return {
-            "index": self.index,
             "source_hash": self.source_hash,
         }
 
@@ -112,16 +117,14 @@ class EmbeddingMetadata:
         """Create from a dict, or return None if data is absent/invalid.
 
         Args:
-            data: Raw dict from JSON with ``index`` and ``source_hash`` keys,
-                or None.
+            data: Raw dict from JSON with a ``source_hash`` key, or None.
         """
         if not data or not isinstance(data, dict):
             return None
-        index = data.get("index")
         source_hash = data.get("source_hash")
-        if index is None or source_hash is None:
+        if source_hash is None:
             return None
-        return cls(index=int(index), source_hash=str(source_hash))
+        return cls(source_hash=str(source_hash))
 
 
 @dataclass
