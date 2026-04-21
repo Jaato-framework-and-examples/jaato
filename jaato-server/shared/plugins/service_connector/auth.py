@@ -16,7 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 from shared.session_context import get_session_env
-from ..subagent.config import expand_variables
+from ..subagent.config import (
+    _SECRET_URI_RE,
+    _resolve_secret_uri,
+    expand_variables,
+)
 from .types import AuthConfig, AuthType, ParameterLocation
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,67 @@ logger = logging.getLogger(__name__)
 class AuthError(Exception):
     """Authentication error."""
     pass
+
+
+def _resolve_credential(
+    name_or_uri: Optional[str],
+) -> Tuple[Optional[str], str]:
+    """Resolve a credential value from either an env var name or a secret URI.
+
+    The ``AuthConfig`` fields named ``*_env`` historically held literal
+    environment variable names.  They now also accept
+    ``scheme://path[#key]`` secret URIs resolved via the
+    :class:`SecretResolver` registry discovered from the
+    ``jaato.premium`` entry point (``pass://`` from jaato-premium's
+    ``pass(1)`` resolver, ``vault://`` from a HashiCorp Vault resolver,
+    etc.).  This helper centralises the two-mode lookup so every auth
+    type benefits uniformly.
+
+    The return tuple carries both the resolved value and a
+    safe-to-surface provenance string — on error the caller uses the
+    provenance in the ``AuthError`` message so users debugging stale
+    secrets see *where* the credential should have come from (not the
+    credential itself, which is never surfaced).
+
+    Args:
+        name_or_uri: The value of an ``AuthConfig.*_env`` field.  When
+            ``None`` or empty, both return values are appropriate
+            placeholders (``None``, empty string) so callers can still
+            reference the provenance in error messages.
+
+    Returns:
+        Tuple of ``(resolved_value, provenance)`` where:
+
+        - ``resolved_value`` is the credential string (or ``None`` when
+          the URI/env-var doesn't resolve).
+        - ``provenance`` is a human-readable description of the source
+          (e.g. ``"env var GITHUB_TOKEN"`` or ``"secret URI
+          pass://jaato-knowledge-manager/github-token"``) safe to log
+          and to include in error messages.
+
+    Raises:
+        SecretResolutionError: propagated when a URI matches a
+            registered resolver but resolution itself fails (auth error
+            against the secret backend, not-found, backend unreachable).
+    """
+    if not name_or_uri:
+        return None, "(unset)"
+
+    if _SECRET_URI_RE.match(name_or_uri):
+        # Secret URI path — resolve via registered SecretResolver.
+        # _resolve_secret_uri returns the URI unchanged when no resolver
+        # is registered (with a warning log); treat that as "not resolved".
+        resolved = _resolve_secret_uri(name_or_uri)
+        provenance = f"secret URI {name_or_uri}"
+        if resolved == name_or_uri:
+            # No resolver was registered for the scheme — the URI came
+            # back as-is.  That's never a valid credential; return None
+            # so the caller emits a clear error.
+            return None, provenance
+        return resolved, provenance
+
+    # Env var path (legacy behaviour).
+    return get_session_env(name_or_uri), f"env var {name_or_uri}"
 
 
 @dataclass
@@ -94,10 +159,10 @@ class AuthManager:
             if not auth_config.value_env:
                 raise AuthError("API key env var not configured")
 
-            api_key = get_session_env(auth_config.value_env)
+            api_key, provenance = _resolve_credential(auth_config.value_env)
             if not api_key:
                 raise AuthError(
-                    f"API key not found in environment variable: {auth_config.value_env}"
+                    f"API key could not be resolved from {provenance}"
                 )
 
             if auth_config.key_location == ParameterLocation.HEADER:
@@ -115,15 +180,15 @@ class AuthManager:
             if not auth_config.value_env:
                 raise AuthError("Bearer token env var not configured")
 
-            token = get_session_env(auth_config.value_env)
+            token, provenance = _resolve_credential(auth_config.value_env)
             if not token:
                 raise AuthError(
-                    f"Bearer token not found in environment variable: {auth_config.value_env}"
+                    f"Bearer token could not be resolved from {provenance}"
                 )
 
             logger.info(
-                "BEARER auth: env=%s len=%d prefix=%s",
-                auth_config.value_env, len(token), token[:4] + "...",
+                "BEARER auth: source=%s len=%d prefix=%s",
+                provenance, len(token), token[:4] + "...",
             )
             headers["Authorization"] = f"Bearer {token}"
 
@@ -131,16 +196,16 @@ class AuthManager:
             if not auth_config.username_env or not auth_config.password_env:
                 raise AuthError("Basic auth env vars not configured")
 
-            username = get_session_env(auth_config.username_env)
-            password = get_session_env(auth_config.password_env)
+            username, user_provenance = _resolve_credential(auth_config.username_env)
+            password, pass_provenance = _resolve_credential(auth_config.password_env)
 
             if not username:
                 raise AuthError(
-                    f"Username not found in environment variable: {auth_config.username_env}"
+                    f"Username could not be resolved from {user_provenance}"
                 )
             if not password:
                 raise AuthError(
-                    f"Password not found in environment variable: {auth_config.password_env}"
+                    f"Password could not be resolved from {pass_provenance}"
                 )
 
             credentials = base64.b64encode(
@@ -204,16 +269,16 @@ class AuthManager:
         if not auth_config.client_id_env or not auth_config.client_secret_env:
             raise AuthError("OAuth2 client credentials env vars not configured")
 
-        client_id = get_session_env(auth_config.client_id_env)
-        client_secret = get_session_env(auth_config.client_secret_env)
+        client_id, cid_provenance = _resolve_credential(auth_config.client_id_env)
+        client_secret, cs_provenance = _resolve_credential(auth_config.client_secret_env)
 
         if not client_id:
             raise AuthError(
-                f"Client ID not found in environment variable: {auth_config.client_id_env}"
+                f"Client ID could not be resolved from {cid_provenance}"
             )
         if not client_secret:
             raise AuthError(
-                f"Client secret not found in environment variable: {auth_config.client_secret_env}"
+                f"Client secret could not be resolved from {cs_provenance}"
             )
 
         # Build token request
