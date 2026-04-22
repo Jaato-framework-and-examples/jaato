@@ -63,6 +63,7 @@ from jaato_sdk.plugins.base import (
 )
 
 from shared.path_utils import normalize_for_comparison
+from shared.session_context import get_current_session
 from shared.trace import trace as _trace_write
 
 
@@ -173,6 +174,14 @@ class ReferencesPlugin:
         registry.register_category("knowledge", "Reference sources, documentation, context retrieval")
         self._trace(f"set_plugin_registry: registry set")
 
+    # NOTE: deliberately no ``set_session()`` here.  Plugin instances
+    # are shared across subagents within a session, so storing the
+    # session on ``self`` would leak the parent's session into a
+    # subagent's set_session() call (and trip
+    # tests/test_plugin_session_safety.py).  Auth paths instead read
+    # ``get_current_session()`` from ``shared.session_context`` — the
+    # session wiring sets the ContextVar around every tool execution.
+
     def set_workspace_path(self, path: str) -> None:
         """Update the workspace path for resolving reference source paths.
 
@@ -222,75 +231,164 @@ class ReferencesPlugin:
             f"from workspace={workspace_path}"
         )
 
-    def _authorize_source_path(self, source: ReferenceSource) -> None:
-        """Authorize a source's path for readonly access via the sandbox plugin.
+    def _authorize_source_path(self, source: ReferenceSource) -> bool:
+        """Authorize a source's path for readonly access at every layer.
 
-        For LOCAL sources, this registers them with the sandbox manager plugin
-        so that readFile can access them as readonly. The sandbox plugin persists
-        the path in the session config and syncs to the registry.
+        Two cooperating layers are involved:
 
-        Falls back to direct registry authorization if the sandbox plugin is
-        not available.
+        1. **Application layer** (``sandbox_manager.add_path_programmatic``
+           or registry fallback) — adds the path to the in-process
+           allowlist so ``readFile`` and friends accept it.
+        2. **Kernel layer** (per-session AppArmor reference fragment via
+           ``ReferenceAuthorizer.authorize``) — only present in confined
+           WS sessions.  Without this, the kernel ``open(2)`` would
+           still EACCES even when the application says yes.
 
-        Args:
-            source: The reference source whose path should be authorized.
+        Returns ``True`` when both layers succeeded (or when only the
+        application layer applies because no AppArmor authorizer is
+        installed), ``False`` when the kernel-layer fragment failed —
+        in that case the application allowlist update is left in place
+        but the caller should treat the reference as not selectable so
+        the model gets a clear error instead of a silent EACCES later.
+
+        Most call sites ignore the return value (catalog reload,
+        transitive selection, enrichment-time mention auth) — for
+        those, kernel-layer failure is logged via :meth:`_trace` and
+        the user-facing tool path will surface it on a subsequent
+        explicit selection.  ``selectReferences`` and the matching
+        slash command propagate the failure into their result.
         """
         if not self._plugin_registry:
-            return
+            return True
 
         if source.type != SourceType.LOCAL:
-            return
+            return True
 
         # Get the resolved path
         resolved_path = self._resolve_path_for_access(source)
         if not resolved_path:
-            return
+            return True
 
         path_str = str(resolved_path)
 
-        # Try to use the sandbox plugin's programmatic API
+        # Layer 1: application-layer allowlist
         sandbox_plugin = self._plugin_registry.get_plugin("sandbox_manager")
         if sandbox_plugin and hasattr(sandbox_plugin, 'add_path_programmatic'):
             if sandbox_plugin.add_path_programmatic(path_str, access="readonly"):
                 self._trace(f"authorized external path via sandbox: {path_str}")
-                return
+            else:
+                # Fall through to direct registry — sandbox plugin
+                # exists but declined (e.g. validation error).  Ensure
+                # something authorizes the path before we try the
+                # kernel layer.
+                self._plugin_registry.authorize_external_path(
+                    path_str, self._name, access="readonly",
+                )
+                self._trace(
+                    f"authorized external path via registry fallback "
+                    f"(sandbox declined): {path_str}",
+                )
+        else:
+            self._plugin_registry.authorize_external_path(
+                path_str, self._name, access="readonly",
+            )
+            self._trace(
+                f"authorized external path via registry fallback: {path_str}",
+            )
 
-        # Fallback: authorize directly via registry
-        self._plugin_registry.authorize_external_path(path_str, self._name, access="readonly")
-        self._trace(f"authorized external path via registry fallback: {path_str}")
+        # Layer 2: kernel-layer AppArmor fragment (only when running
+        # under a confined WS session).  Read the current session via
+        # the ContextVar — never store on ``self``, plugin instances
+        # are shared across subagents.  ``LookupError`` means we're
+        # outside any session context (catalog discovery, tests) — no
+        # kernel layer to mutate, treat as success at this layer.
+        authorizer = self._current_reference_authorizer()
+        if authorizer is not None:
+            if not authorizer.authorize(source.id, path_str):
+                self._trace(
+                    f"AppArmor fragment FAILED for {source.id} "
+                    f"({path_str}); kernel will deny reads",
+                )
+                return False
+            self._trace(
+                f"AppArmor fragment installed for {source.id} ({path_str})",
+            )
 
-    def _deauthorize_source_path(self, source: ReferenceSource) -> None:
-        """Remove a source's path from the sandbox / registry authorization.
+        return True
 
-        Reverses the effect of _authorize_source_path(). Tries the sandbox
-        plugin's programmatic API first, falls back to direct registry
-        deauthorization.
+    @staticmethod
+    def _current_reference_authorizer():
+        """Return the AppArmor reference authorizer for the current
+        session context, or ``None`` if none is set.
 
-        Args:
-            source: The reference source whose path should be deauthorized.
+        Centralises the ContextVar lookup so the auth/deauth paths
+        share the same handling for the "no session in context" case
+        (catalog discovery before configure(), unit tests that
+        construct a plugin in isolation, etc.).
+        """
+        try:
+            session = get_current_session()
+        except LookupError:
+            return None
+        if session is None:
+            return None
+        getter = getattr(session, "get_reference_authorizer", None)
+        if getter is None:
+            return None
+        return getter()
+
+    def _deauthorize_source_path(self, source: ReferenceSource) -> bool:
+        """Reverse :meth:`_authorize_source_path` at both layers.
+
+        Returns ``True`` on success at every applicable layer; ``False``
+        only when the kernel-layer fragment removal failed.  Most
+        callers ignore the return value — deauthorization failure is
+        not fatal (the rule will be cleared on session teardown), and
+        the application-layer change always succeeds.
         """
         if not self._plugin_registry:
-            return
+            return True
 
         if source.type != SourceType.LOCAL:
-            return
+            return True
 
         resolved_path = self._resolve_path_for_access(source)
         if not resolved_path:
-            return
+            return True
 
         path_str = str(resolved_path)
 
-        # Try to use the sandbox plugin's programmatic API
+        # Layer 1: application-layer allowlist
         sandbox_plugin = self._plugin_registry.get_plugin("sandbox_manager")
         if sandbox_plugin and hasattr(sandbox_plugin, 'remove_path_programmatic'):
             if sandbox_plugin.remove_path_programmatic(path_str):
                 self._trace(f"deauthorized external path via sandbox: {path_str}")
-                return
+            else:
+                self._plugin_registry.deauthorize_external_path(path_str, self._name)
+                self._trace(
+                    f"deauthorized external path via registry fallback "
+                    f"(sandbox declined): {path_str}",
+                )
+        else:
+            self._plugin_registry.deauthorize_external_path(path_str, self._name)
+            self._trace(
+                f"deauthorized external path via registry fallback: {path_str}",
+            )
 
-        # Fallback: deauthorize directly via registry
-        self._plugin_registry.deauthorize_external_path(path_str, self._name)
-        self._trace(f"deauthorized external path via registry fallback: {path_str}")
+        # Layer 2: kernel-layer AppArmor fragment removal — same
+        # ContextVar handling as _authorize_source_path.
+        authorizer = self._current_reference_authorizer()
+        if authorizer is not None:
+            if not authorizer.deauthorize(source.id):
+                self._trace(
+                    f"AppArmor fragment removal FAILED for {source.id}",
+                )
+                return False
+            self._trace(
+                f"AppArmor fragment removed for {source.id}",
+            )
+
+        return True
 
     def _resolve_source_for_context(self, source: ReferenceSource) -> None:
         """Resolve a catalog source's path for the current project context.
@@ -1604,15 +1702,37 @@ class ReferencesPlugin:
                 "message": " ".join(parts)
             }
 
-        # Track selections and authorize paths
+        # Track selections and authorize paths.  When a kernel-layer
+        # AppArmor fragment fails (confined WS only), roll back the
+        # selection for that source — granting it would mislead the
+        # model into believing it can read the file when the kernel
+        # will refuse.  Other matched sources still proceed.
         selected_sources = []
+        kernel_failed: List[Dict[str, str]] = []
         for source in matched:
             self._selected_source_ids.append(source.id)
-            self._authorize_source_path(source)
+            ok = self._authorize_source_path(source)
+            if not ok:
+                # Roll back the bookkeeping; sandbox_manager already
+                # had the path added but the kernel will deny opens,
+                # so leaving it selected would be a false promise.
+                self._selected_source_ids.pop()
+                resolved = self._resolve_path_for_access(source)
+                kernel_failed.append({
+                    "id": source.id,
+                    "name": source.name,
+                    "path": str(resolved) if resolved else source.path,
+                })
+                continue
             selected_sources.append(source)
 
         selected_ids = [s.id for s in selected_sources]
         self._trace(f"selectReferences: selected={selected_ids}")
+        if kernel_failed:
+            self._trace(
+                f"selectReferences: kernel-layer authorization failed for "
+                f"{[f['id'] for f in kernel_failed]}",
+            )
 
         # Resolve transitive references from the newly selected sources
         transitive_sources = self._apply_transitive_selection(selected_ids)
@@ -1660,17 +1780,38 @@ class ReferencesPlugin:
 
             source_results.append(entry)
 
+        # Status reflects whether everything actually worked.  A partial
+        # failure (some kernel fragments rejected) needs a distinct
+        # status so the model doesn't silently treat "selected but
+        # unreadable" sources as available.
+        if kernel_failed and not selected_sources:
+            status = "kernel_authorization_failed"
+        elif kernel_failed:
+            status = "partial_success"
+        else:
+            status = "success"
+
         result: Dict[str, Any] = {
-            "status": "success",
+            "status": status,
             "selected_count": len(selected_sources),
             "sources": source_results,
         }
         if transitive_sources:
             result["transitive_count"] = len(transitive_sources)
+        if kernel_failed:
+            result["kernel_authorization_failed"] = kernel_failed
+            result["kernel_authorization_failure_hint"] = (
+                "AppArmor refused to grant readonly access to the path(s) "
+                "above. Check the daemon log for 'AppArmor fragment "
+                "rejected' or 'apparmor_parser reload failed' entries; "
+                "common causes are unreadable parent directories or path "
+                "characters that AppArmor treats as glob metacharacters."
+            )
 
         result['_telemetry'] = {
             'jaato.references.operation': 'select',
             'jaato.references.selected_count': len(selected_sources),
+            'jaato.references.kernel_failed_count': len(kernel_failed),
         }
 
         return result
@@ -2240,7 +2381,20 @@ class ReferencesPlugin:
             return {"status": "already_selected", "message": f"Reference '{ref_id}' is already selected."}
 
         self._selected_source_ids.append(ref_id)
-        self._authorize_source_path(source)
+        if not self._authorize_source_path(source):
+            # Kernel-layer (AppArmor) refused; roll back the selection
+            # so the user doesn't see "selected" for a reference whose
+            # files won't actually be readable.
+            self._selected_source_ids.pop()
+            resolved = self._resolve_path_for_access(source)
+            return {
+                "error": (
+                    f"Reference '{ref_id}' could not be authorized at the "
+                    f"kernel layer (AppArmor refused {resolved}). Check "
+                    f"the daemon log for 'AppArmor fragment rejected' "
+                    f"or 'apparmor_parser reload failed' entries."
+                ),
+            }
         self._trace(f"references select: selected '{ref_id}'")
 
         # Resolve transitive references from the newly selected source

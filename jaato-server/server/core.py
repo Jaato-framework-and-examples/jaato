@@ -439,6 +439,32 @@ class JaatoServer:
         if session and session._executor:
             session._executor.set_apparmor_context(confine_context)
 
+    def set_reference_authorizer(self, authorizer) -> None:
+        """Install the per-session AppArmor reference-fragment authorizer.
+
+        Mirrors :meth:`set_apparmor_confinement` for the
+        ``selectReferences`` flow: when a confined WS session selects a
+        reference whose ``resolved_path`` lies outside the workspace,
+        the references plugin calls ``authorizer.authorize(ref_id, path)``
+        to write a per-reference AppArmor fragment so the kernel actually
+        permits the subsequent ``readFile`` syscall.  Without this,
+        application-layer ``sandbox_manager`` would whitelist the path
+        but the kernel would still EACCES at ``open()``.
+
+        Called by ``JaatoWSServer`` after AppArmor confinement is
+        enabled for the session.  ``None`` is treated as "no authorizer
+        available" — the references plugin then operates with the
+        in-process allowlist alone.
+        """
+        if not self._jaato:
+            logger.warning(
+                "set_reference_authorizer called before client initialized"
+            )
+            return
+        session = self._jaato.get_session()
+        if session is not None:
+            session.set_reference_authorizer(authorizer)
+
     @property
     def auth_pending(self) -> bool:
         """Check if authentication is pending."""

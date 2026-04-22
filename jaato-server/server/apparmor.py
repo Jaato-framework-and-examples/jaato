@@ -31,12 +31,13 @@ can confine tools without importing ``server.apparmor``.
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, ContextManager, Optional
+from typing import Callable, ContextManager, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,13 @@ class AppArmorManager:
     #       (github, phoenix, etc.) are reachable from confined WS
     #       sessions.  SchemaStore gained tiered lookup in the same
     #       change; the profile needed to follow so the reads succeed.
-    _TEMPLATE_VERSION = 4
+    #   5 — ``include if exists`` directive at the end of the profile
+    #       pointing at a per-session ``.refs.d/`` fragment directory.
+    #       Allows ``add_reference_fragment()`` to grant readonly access
+    #       to selected reference paths (selectReferences) without
+    #       editing the base profile.  Empty/missing dir is a no-op
+    #       thanks to ``if exists``, so existing sessions keep working.
+    _TEMPLATE_VERSION = 5
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -239,6 +246,15 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   change_profile -> unconfined,
   /proc/self/attr/current      w,
   /proc/self/task/*/attr/current w,
+
+  # ---- per-session reference fragments ----
+  # ``add_reference_fragment(session_id, ref_id, path)`` writes one
+  # bare-rule file per selected reference into the .refs.d/ dir below
+  # and reloads this profile.  ``if exists`` keeps things working when
+  # the dir is absent (no references selected yet) and absorbs the
+  # race between profile load and first selection.  Removed at session
+  # teardown via _remove_all_reference_fragments().
+  include if exists "{refs_include_glob}"
 }}
 '''
 
@@ -293,6 +309,12 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             pass
 
         self._available: Optional[bool] = None  # Lazy-checked
+
+        # Per-session locks for fragment-write + parser-reload races.
+        # Lazily allocated by _session_lock(); cleaned up on teardown.
+        # The guard lock protects the dict itself.
+        self._session_locks: Dict[str, threading.Lock] = {}
+        self._session_locks_guard = threading.Lock()
 
     # ------------------------------------------------------------------
     # Availability
@@ -472,8 +494,275 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             logger.exception("Failed to delete AppArmor profile file %s", profile_path)
             return False
 
+        # Drop any per-session reference fragments and the lock state.
+        # Both are session-scoped — keeping them around after the
+        # profile is gone would leak across session_id reuse.
+        self._remove_all_reference_fragments(session_id)
+        with self._session_locks_guard:
+            self._session_locks.pop(session_id, None)
+
         logger.info("Removed AppArmor profile %s", profile_name)
         return True
+
+    # ------------------------------------------------------------------
+    # Reference fragments (per-selectReferences readonly grants)
+    # ------------------------------------------------------------------
+    #
+    # Each ``selectReferences`` call writes one bare-rule file into
+    # ``{profile_dir}/jaato-ws-{session_id}.refs.d/`` and reloads the
+    # base profile via ``sudo apparmor_parser -r``.  The base profile's
+    # ``include if exists`` directive (added in template v5) splices the
+    # fragment in.  Unselect deletes the fragment and reloads.  Session
+    # teardown removes the directory.
+    #
+    # Layering note: AppArmor enforcement is the kernel side of the
+    # authorization story.  The application layer (sandbox_manager
+    # ``add_path_programmatic``) is *also* required so that in-process
+    # readers (``readFile``, glob, etc.) check the path against the
+    # session's allow list before even attempting an open.  Both layers
+    # are managed independently — the references plugin calls each in
+    # turn.
+
+    # AppArmor rule globs interpret these characters specially.  We
+    # reject any reference path containing them at fragment-write time
+    # so the fragment we emit means exactly what the path says.
+    _APPARMOR_GLOB_CHARS = frozenset("[]{}*?\\")
+
+    def _validate_path_for_fragment(self, path: str) -> Optional[str]:
+        """Return an error message if *path* cannot be encoded as an
+        AppArmor rule, otherwise ``None``.
+
+        Rejected: relative paths (AppArmor needs absolute), paths
+        containing AppArmor glob metacharacters, paths containing
+        newlines (would break the fragment file format).
+        """
+        if not path:
+            return "path is empty"
+        if not path.startswith("/"):
+            return f"path must be absolute: {path!r}"
+        if "\n" in path or "\r" in path:
+            return f"path contains newline/CR: {path!r}"
+        bad = sorted(set(path) & self._APPARMOR_GLOB_CHARS)
+        if bad:
+            return (
+                f"path contains AppArmor glob metacharacter(s) "
+                f"{bad!r}: {path!r}"
+            )
+        return None
+
+    @staticmethod
+    def _safe_fragment_filename(ref_id: str) -> str:
+        """Sanitize ``ref_id`` for use as a fragment filename.
+
+        AppArmor's ``include`` glob picks up everything in the dir
+        regardless of name, so the only constraint is filesystem
+        validity and avoiding collisions.  We collapse anything outside
+        ``[A-Za-z0-9._-]`` to ``_`` and refuse the empty string.
+        """
+        cleaned = re.sub(r'[^A-Za-z0-9._-]', '_', ref_id)
+        return cleaned or "ref"
+
+    def _fragment_content(self, path: str) -> str:
+        """Build the AppArmor rule body for granting readonly access to *path*.
+
+        Files get a single ``r,`` rule.  Directories get two — one for
+        the directory listing itself and one (``**``) for all
+        descendants — matching the workspace allow rule pattern at the
+        top of the base template.  The path is wrapped in double quotes
+        so spaces and other shell-special characters in the path don't
+        confuse the parser.
+        """
+        p = Path(path)
+        is_dir = False
+        try:
+            is_dir = p.is_dir()
+        except OSError:
+            # Path may not exist yet (selection happened first); treat
+            # as a file by default — single ``r,`` rule is harmless if
+            # later turned into a dir, but we'll re-fragment then.
+            is_dir = False
+
+        if is_dir:
+            return (
+                f"# auto-generated jaato reference fragment\n"
+                f'  "{path}/"   r,\n'
+                f'  "{path}/**" r,\n'
+            )
+        return (
+            f"# auto-generated jaato reference fragment\n"
+            f'  "{path}" r,\n'
+        )
+
+    def _session_lock(self, session_id: str) -> threading.Lock:
+        """Return (lazily allocating) the per-session fragment-write lock.
+
+        Reload races would otherwise collapse a parallel
+        select+unselect into "one of the two changes wins".
+        """
+        with self._session_locks_guard:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._session_locks[session_id] = lock
+            return lock
+
+    def _reload_profile(self, profile_path: Path) -> tuple[bool, str]:
+        """Run ``apparmor_parser -r`` on *profile_path*.
+
+        Returns ``(ok, stderr)`` so the caller can decide rollback
+        and surface a clear error.  Atomic from the kernel's view —
+        on failure the previously-loaded policy stays active.
+        """
+        try:
+            result = subprocess.run(
+                ["sudo", "apparmor_parser", "-r",
+                 "--cache-loc", str(self._cache_dir),
+                 str(profile_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "apparmor_parser timed out"
+        except OSError as exc:
+            return False, f"apparmor_parser failed to run: {exc}"
+
+        if result.returncode != 0:
+            return False, result.stderr.strip() or "apparmor_parser non-zero exit"
+        return True, ""
+
+    def add_reference_fragment(
+        self, session_id: str, ref_id: str, path: str,
+    ) -> bool:
+        """Grant readonly access to *path* for the session's profile.
+
+        Writes ``{refs_dir}/{safe_ref_id}`` and reloads the base
+        profile.  Failure (validation, file write, parser reload) is
+        logged and returned as ``False`` — the caller (references
+        plugin) propagates this so the model sees the selection didn't
+        actually grant access.
+
+        Returns ``True`` on success or when AppArmor is unavailable
+        (no kernel layer to mutate, so nothing to fail).
+        """
+        if not self.is_available():
+            return True  # No kernel layer; succeed at this layer.
+
+        err = self._validate_path_for_fragment(path)
+        if err:
+            logger.error(
+                "AppArmor fragment rejected (session=%s ref=%s): %s",
+                session_id, ref_id, err,
+            )
+            return False
+
+        refs_dir = self._refs_dir(session_id)
+        profile_path = self._profile_dir / self.get_profile_name(session_id)
+        if not profile_path.exists():
+            logger.error(
+                "AppArmor base profile missing for session %s; cannot "
+                "add reference fragment", session_id,
+            )
+            return False
+
+        safe_id = self._safe_fragment_filename(ref_id)
+        fragment_path = refs_dir / safe_id
+        fragment_body = self._fragment_content(path)
+
+        with self._session_lock(session_id):
+            try:
+                refs_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = fragment_path.with_suffix(".tmp")
+                tmp_path.write_text(fragment_body)
+                tmp_path.replace(fragment_path)  # atomic on same fs
+            except OSError:
+                logger.exception(
+                    "Failed to write AppArmor fragment %s", fragment_path,
+                )
+                return False
+
+            ok, err = self._reload_profile(profile_path)
+            if not ok:
+                logger.error(
+                    "apparmor_parser reload failed adding fragment %s: %s",
+                    fragment_path, err,
+                )
+                # Roll back the bad fragment so the next reload doesn't
+                # keep failing on the same bad rule.
+                fragment_path.unlink(missing_ok=True)
+                return False
+
+        logger.info(
+            "AppArmor fragment added (session=%s ref=%s path=%s)",
+            session_id, ref_id, path,
+        )
+        return True
+
+    def remove_reference_fragment(
+        self, session_id: str, ref_id: str,
+    ) -> bool:
+        """Revoke readonly access previously granted to *ref_id*.
+
+        Idempotent: missing fragment is treated as success.  Always
+        succeeds at the kernel layer — even if reload fails the
+        fragment is gone, so the next successful reload (e.g. from a
+        subsequent add) drops the rule.
+        """
+        if not self.is_available():
+            return True
+
+        safe_id = self._safe_fragment_filename(ref_id)
+        refs_dir = self._refs_dir(session_id)
+        profile_path = self._profile_dir / self.get_profile_name(session_id)
+        fragment_path = refs_dir / safe_id
+
+        with self._session_lock(session_id):
+            if not fragment_path.exists():
+                return True
+
+            try:
+                fragment_path.unlink()
+            except OSError:
+                logger.exception(
+                    "Failed to remove AppArmor fragment %s", fragment_path,
+                )
+                return False
+
+            if profile_path.exists():
+                ok, err = self._reload_profile(profile_path)
+                if not ok:
+                    logger.warning(
+                        "apparmor_parser reload failed removing fragment "
+                        "%s: %s (fragment file gone, rule still in kernel "
+                        "until next reload)", fragment_path, err,
+                    )
+                    # Still return True — the fragment file is gone, so
+                    # the next add (or session teardown) reload will
+                    # drop the rule.  Returning False would mislead the
+                    # caller into thinking the unselection failed.
+
+        logger.info(
+            "AppArmor fragment removed (session=%s ref=%s)",
+            session_id, ref_id,
+        )
+        return True
+
+    def _remove_all_reference_fragments(self, session_id: str) -> None:
+        """Delete the entire per-session refs dir.
+
+        Called from ``teardown_profile`` after the base profile has
+        been unloaded — at that point no further reload is needed
+        because the include directive points at a profile that no
+        longer exists in the kernel.
+        """
+        refs_dir = self._refs_dir(session_id)
+        if not refs_dir.exists():
+            return
+        try:
+            shutil.rmtree(refs_dir)
+            logger.debug("Removed AppArmor refs dir: %s", refs_dir)
+        except OSError:
+            logger.exception(
+                "Failed to remove AppArmor refs dir %s", refs_dir,
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -506,7 +795,17 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             venv_path=str(self._venv_path),
             source_root=str(self._source_root),
             premium_rules=premium_rules,
+            refs_include_glob=f"{self._refs_dir(session_id)}/*",
         )
+
+    def _refs_dir(self, session_id: str) -> Path:
+        """Per-session AppArmor reference-fragment directory.
+
+        Lives next to the base profile file so AppArmor's ``include``
+        glob picks up every fragment file written by
+        ``add_reference_fragment()``.
+        """
+        return self._profile_dir / f"{self.get_profile_name(session_id)}.refs.d"
 
 
 # ------------------------------------------------------------------
@@ -578,3 +877,41 @@ def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
     def _confine():
         return apparmor_confine(profile_name)
     return _confine
+
+
+# ------------------------------------------------------------------
+# Reference authorizer (selectReferences → fragment management)
+# ------------------------------------------------------------------
+
+class ReferenceAuthorizer:
+    """Per-session handle the references plugin uses to mutate the
+    session's AppArmor profile when a reference is selected/unselected.
+
+    Mirrors the ``make_confine_context()`` injection pattern: the
+    server (which owns the ``AppArmorManager``) constructs an instance
+    bound to one session and hands it across the ``server → shared``
+    boundary via ``JaatoServer.set_reference_authorizer()``.  The
+    references plugin queries it from the session and calls
+    ``authorize`` / ``deauthorize`` alongside the existing
+    ``sandbox_manager`` calls.
+
+    When AppArmor is unavailable, ``JaatoWSServer.get_reference_authorizer``
+    returns ``None`` and the plugin skips the fragment path entirely —
+    the in-process ``sandbox_manager`` allowlist is the only layer.
+    """
+
+    def __init__(self, apparmor: "AppArmorManager", session_id: str) -> None:
+        self._apparmor = apparmor
+        self._session_id = session_id
+
+    def authorize(self, ref_id: str, path: str) -> bool:
+        """Grant kernel-level readonly access to *path* for this session."""
+        return self._apparmor.add_reference_fragment(
+            self._session_id, ref_id, path,
+        )
+
+    def deauthorize(self, ref_id: str) -> bool:
+        """Revoke a previously-authorized reference."""
+        return self._apparmor.remove_reference_fragment(
+            self._session_id, ref_id,
+        )

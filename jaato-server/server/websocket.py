@@ -483,6 +483,12 @@ class JaatoWSServer:
             confine_context = ws_server.get_apparmor_confinement(session_id)
             if confine_context:
                 server.set_apparmor_confinement(confine_context)
+                # Hand over the per-session reference authorizer so the
+                # references plugin can mutate the kernel profile when
+                # selectReferences grants new readonly paths.
+                authorizer = ws_server.get_reference_authorizer(session_id)
+                if authorizer is not None:
+                    server.set_reference_authorizer(authorizer)
                 sess.sandbox_mode = "apparmor"
                 # Record mapping so the workspace reaper can teardown
                 # the profile by workspace ID.
@@ -1680,6 +1686,23 @@ class JaatoWSServer:
         from .apparmor import make_confine_context
         profile_name = self._apparmor.get_profile_name(session_id)
         return make_confine_context(profile_name)
+
+    def get_reference_authorizer(self, session_id: str):
+        """Get the AppArmor reference-fragment authorizer for a session.
+
+        Returns a ``ReferenceAuthorizer`` suitable for passing to
+        ``JaatoServer.set_reference_authorizer()`` so the references
+        plugin can grant kernel-level readonly access to selected
+        reference paths via per-session AppArmor fragments.
+
+        Returns ``None`` when AppArmor is unavailable for this server;
+        the references plugin then skips the fragment path entirely
+        and relies on the in-process sandbox_manager allowlist alone.
+        """
+        if not self._apparmor or not self._apparmor.is_available():
+            return None
+        from .apparmor import ReferenceAuthorizer
+        return ReferenceAuthorizer(self._apparmor, session_id)
 
     async def _handle_config_update(
         self,

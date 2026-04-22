@@ -242,6 +242,13 @@ class JaatoSession:
         self._executor: Optional[ToolExecutor] = None
         self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
+        # Per-session AppArmor reference-fragment authorizer.  Set by
+        # JaatoServer.set_reference_authorizer() after WS provisions an
+        # AppArmor profile.  ``None`` means no kernel layer to mutate
+        # — the references plugin operates at the application layer
+        # (sandbox_manager) only.  Plugins access this via
+        # get_reference_authorizer() rather than touching the slot.
+        self._reference_authorizer = None
         # The active override (passed via configure()) — None means the
         # assembled pipeline output is sent on the wire; "" means no
         # system message at all; non-empty replaces the assembly entirely.
@@ -1178,6 +1185,26 @@ class JaatoSession:
             enabled: True to use streaming, False for batched responses.
         """
         self._use_streaming = enabled
+
+    def set_reference_authorizer(self, authorizer) -> None:
+        """Install the AppArmor reference-fragment authorizer for this session.
+
+        Called by ``JaatoServer.set_reference_authorizer()`` after WS
+        provisions a confined profile.  Plugins read it via
+        :meth:`get_reference_authorizer`.  Passing ``None`` clears it.
+        """
+        self._reference_authorizer = authorizer
+
+    def get_reference_authorizer(self):
+        """Return the AppArmor reference-fragment authorizer, or ``None``.
+
+        Used by the references plugin to grant kernel-level readonly
+        access to selected reference paths.  ``None`` means the session
+        is not running under AppArmor confinement, so the application-
+        layer ``sandbox_manager`` allowlist is the only authorization
+        layer the plugin needs to touch.
+        """
+        return self._reference_authorizer
 
     def set_parent_cancel_token(self, token: CancelToken) -> None:
         """Set a parent cancel token for cancellation propagation.

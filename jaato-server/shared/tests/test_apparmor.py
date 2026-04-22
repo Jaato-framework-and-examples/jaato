@@ -219,3 +219,262 @@ class TestTeardownProfile:
     def test_returns_false_when_unavailable(self, manager):
         manager._available = False
         assert manager.teardown_profile("s1") is False
+
+
+class TestProfileTemplateIncludesRefsDir:
+    """The base profile must reference the per-session refs.d directory
+    via ``include if exists`` so add_reference_fragment() can splice
+    fragments without ever editing the base file again."""
+
+    def test_render_emits_include_directive(self, manager):
+        rendered = manager._render_profile("sess123", "/workspace")
+        # The directive should reference the per-session refs dir under
+        # the configured profile_dir.
+        refs_glob = f"{manager._refs_dir('sess123')}/*"
+        assert "include if exists" in rendered
+        assert refs_glob in rendered
+
+    def test_template_version_bumped_to_5(self, manager):
+        # Bumping the version is what invalidates apparmor_parser's
+        # cache for confined sessions; without the bump, sessions with
+        # cached v4 profiles would not pick up the include directive.
+        rendered = manager._render_profile("sess123", "/workspace")
+        assert "jaato-apparmor-template-version: 5" in rendered
+
+
+class TestPathValidation:
+    """Reference paths must be encodable as bare AppArmor rules; the
+    validator catches the cases that would otherwise silently mean
+    something different from what the path says."""
+
+    def test_relative_path_rejected(self, manager):
+        err = manager._validate_path_for_fragment("relative/path")
+        assert err and "must be absolute" in err
+
+    def test_empty_path_rejected(self, manager):
+        err = manager._validate_path_for_fragment("")
+        assert err is not None
+
+    def test_glob_metacharacters_rejected(self, manager):
+        for ch in "[]{}*?\\":
+            err = manager._validate_path_for_fragment(f"/some/{ch}/path")
+            assert err and "glob metacharacter" in err, (
+                f"failed to reject {ch!r}"
+            )
+
+    def test_newline_rejected(self, manager):
+        err = manager._validate_path_for_fragment("/some/path\nevil rule")
+        assert err and ("newline" in err or "CR" in err)
+
+    def test_normal_path_accepted(self, manager):
+        assert manager._validate_path_for_fragment("/home/user/docs") is None
+
+    def test_path_with_spaces_accepted(self, manager):
+        # Spaces are not glob metachars; the fragment writer wraps the
+        # path in double quotes so the parser handles them.
+        assert manager._validate_path_for_fragment("/Users/me/My Docs") is None
+
+
+class TestSafeFragmentFilename:
+    """Fragment files share a directory; arbitrary ref_id strings must
+    not produce filenames that escape the dir or collide cross-session."""
+
+    def test_alphanumeric_passes_through(self, manager):
+        assert manager._safe_fragment_filename("ref-001_v2.json") == "ref-001_v2.json"
+
+    def test_path_separator_collapsed(self, manager):
+        assert "/" not in manager._safe_fragment_filename("foo/bar")
+        assert manager._safe_fragment_filename("foo/bar") == "foo_bar"
+
+    def test_empty_id_falls_back(self, manager):
+        # Empty string would otherwise produce a fragment file named ""
+        # which is not a valid filename on most filesystems.
+        assert manager._safe_fragment_filename("") == "ref"
+
+    def test_unicode_collapsed(self, manager):
+        # Non-ASCII characters are sanitized to keep the filename
+        # portable across filesystems.
+        assert manager._safe_fragment_filename("café") == "caf_"
+
+
+class TestFragmentContent:
+    """The content the fragment writer emits must be syntactically
+    valid AppArmor and grant the right permissions."""
+
+    def test_file_emits_single_readonly_rule(self, manager, tmp_path):
+        target = tmp_path / "doc.md"
+        target.write_text("hello")
+        body = manager._fragment_content(str(target))
+        # File rule: just the path with `r,`.
+        assert f'"{target}" r,' in body
+        # Should NOT include a directory glob for a file.
+        assert "**" not in body
+
+    def test_directory_emits_recursive_rules(self, manager, tmp_path):
+        target = tmp_path / "docs"
+        target.mkdir()
+        body = manager._fragment_content(str(target))
+        # Directory rule: trailing-slash for the dir itself plus **
+        # for descendants — matches the workspace pattern at the top
+        # of the base template.
+        assert f'"{target}/"   r,' in body
+        assert f'"{target}/**" r,' in body
+
+
+class TestAddRemoveReferenceFragment:
+    """End-to-end fragment lifecycle, with the parser invocation
+    mocked.  Exercises the threading lock, atomic write, rollback on
+    parser failure, and the no-op-when-unavailable contract."""
+
+    def test_unavailable_returns_true_without_writing(self, manager, profile_dir):
+        manager._available = False
+        ok = manager.add_reference_fragment("s1", "ref1", "/some/path")
+        assert ok is True
+        # Nothing should have been written when AppArmor is off — the
+        # references plugin treats this as "no kernel layer to mutate".
+        refs_dir = manager._refs_dir("s1")
+        assert not refs_dir.exists()
+
+    def test_add_writes_fragment_and_reloads(self, manager, profile_dir, tmp_path):
+        manager._available = True
+        # Create a base profile so add_reference_fragment finds it.
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+
+        target = tmp_path / "doc.md"
+        target.write_text("hello")
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            ok = manager.add_reference_fragment("s1", "ref-A", str(target))
+
+        assert ok is True
+        fragment_path = manager._refs_dir("s1") / "ref-A"
+        assert fragment_path.exists()
+        # Content should encode the path as a single readonly rule.
+        assert f'"{target}" r,' in fragment_path.read_text()
+        # apparmor_parser was invoked exactly once with -r.
+        assert mock_run.call_count == 1
+        cmd = mock_run.call_args.args[0]
+        assert "apparmor_parser" in cmd[1] or cmd[1].endswith("apparmor_parser")
+        assert "-r" in cmd
+
+    def test_add_rejects_glob_in_path_without_writing(self, manager, profile_dir):
+        manager._available = True
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            ok = manager.add_reference_fragment("s1", "ref-glob", "/path/with/*/glob")
+
+        assert ok is False
+        # Nothing reaches the parser when validation rejects the path.
+        mock_run.assert_not_called()
+        assert not (manager._refs_dir("s1") / "ref-glob").exists()
+
+    def test_add_rolls_back_fragment_when_reload_fails(self, manager, profile_dir, tmp_path):
+        manager._available = True
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+        target = tmp_path / "doc.md"
+        target.write_text("hello")
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="parse error")
+            ok = manager.add_reference_fragment("s1", "ref-bad", str(target))
+
+        assert ok is False
+        # The bad fragment must be unlinked so the next reload doesn't
+        # keep failing on it.
+        assert not (manager._refs_dir("s1") / "ref-bad").exists()
+
+    def test_add_fails_when_base_profile_missing(self, manager, profile_dir, tmp_path):
+        # Without a base profile to reload, add can't work — returning
+        # True here would silently leave the kernel without the rule.
+        manager._available = True
+        target = tmp_path / "doc.md"
+        target.write_text("x")
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            ok = manager.add_reference_fragment("s1", "ref", str(target))
+
+        assert ok is False
+        mock_run.assert_not_called()
+
+    def test_remove_deletes_fragment_and_reloads(self, manager, profile_dir, tmp_path):
+        manager._available = True
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+        # Pre-create a fragment as if add_reference_fragment had run.
+        refs_dir = manager._refs_dir("s1")
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "ref-A").write_text('"/path" r,\n')
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            ok = manager.remove_reference_fragment("s1", "ref-A")
+
+        assert ok is True
+        assert not (refs_dir / "ref-A").exists()
+        assert mock_run.call_count == 1
+
+    def test_remove_is_idempotent(self, manager, profile_dir):
+        manager._available = True
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            ok = manager.remove_reference_fragment("s1", "never-existed")
+        assert ok is True
+        # No reload when there was nothing to remove.
+        mock_run.assert_not_called()
+
+    def test_teardown_profile_clears_refs_dir(self, manager, profile_dir):
+        manager._available = True
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+        refs_dir = manager._refs_dir("s1")
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "ref-A").write_text('"/p" r,\n')
+        (refs_dir / "ref-B").write_text('"/q" r,\n')
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            manager.teardown_profile("s1")
+
+        # Both the base profile file and the entire refs dir should be
+        # gone — leaking either across session_id reuse would resurrect
+        # stale rules in the next session.
+        assert not (profile_dir / "jaato-ws-s1").exists()
+        assert not refs_dir.exists()
+
+    def test_teardown_clears_session_lock(self, manager, profile_dir):
+        manager._available = True
+        (profile_dir / "jaato-ws-s1").write_text("# base profile")
+        # Touch the lock dict by acquiring once.
+        _ = manager._session_lock("s1")
+        assert "s1" in manager._session_locks
+
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            manager.teardown_profile("s1")
+
+        assert "s1" not in manager._session_locks
+
+
+class TestReferenceAuthorizer:
+    """The thin handle handed across the server→shared boundary so
+    plugins can mutate the kernel profile without importing
+    server.apparmor."""
+
+    def test_authorize_delegates_to_manager(self, manager):
+        from server.apparmor import ReferenceAuthorizer
+        authorizer = ReferenceAuthorizer(manager, "s1")
+
+        with patch.object(manager, "add_reference_fragment", return_value=True) as add:
+            ok = authorizer.authorize("ref-A", "/some/path")
+
+        assert ok is True
+        add.assert_called_once_with("s1", "ref-A", "/some/path")
+
+    def test_deauthorize_delegates_to_manager(self, manager):
+        from server.apparmor import ReferenceAuthorizer
+        authorizer = ReferenceAuthorizer(manager, "s1")
+
+        with patch.object(manager, "remove_reference_fragment", return_value=True) as rm:
+            ok = authorizer.deauthorize("ref-A")
+
+        assert ok is True
+        rm.assert_called_once_with("s1", "ref-A")
