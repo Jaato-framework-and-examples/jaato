@@ -336,11 +336,24 @@ def main():
     parser.add_argument(
         "--token",
         type=str,
-        default=os.environ.get("JAATO_WS_TOKEN"),
+        default=None,
         help="Bearer token for WS auth (sent as 'Authorization: Bearer'). "
-             "Defaults to $JAATO_WS_TOKEN if set."
+             "Falls back to $JAATO_WS_TOKEN, then to ~/.jaato/ws.token "
+             "(the daemon's default token file)."
     )
     args = parser.parse_args()
+
+    # Resolve token: explicit flag > env > well-known file.
+    if args.token is None:
+        args.token = os.environ.get("JAATO_WS_TOKEN")
+    if args.token is None:
+        from pathlib import Path
+        default_path = Path.home() / ".jaato" / "ws.token"
+        if default_path.exists():
+            try:
+                args.token = default_path.read_text().splitlines()[0].strip() or None
+            except OSError:
+                pass
 
     try:
         asyncio.run(run_client(

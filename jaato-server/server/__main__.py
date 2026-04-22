@@ -878,6 +878,65 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
         return False
 
 
+DEFAULT_WS_TOKEN_FILE = str(Path.home() / ".jaato" / "ws.token")
+
+
+def _load_token_file(path: Path) -> str:
+    """Read a bearer token from ``path``, enforcing 0600-or-stricter mode.
+
+    Used by both the explicit ``--ws-token-file`` path and the default
+    ``~/.jaato/ws.token`` path. Exits (code 2) on any failure rather
+    than falling back — a leaked token is a security defect, not a
+    recoverable error.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        print(f"Error: cannot read WS token file {path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    # Reject world/group readable files. Same check ssh applies to
+    # private keys — leaked tokens are private keys for the daemon.
+    if sys.platform != "win32" and mode & (stat.S_IRWXG | stat.S_IRWXO):
+        print(
+            f"Error: WS token file {path} is group/other accessible "
+            f"(mode {oct(mode & 0o777)}); restrict to 0600",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    content = path.read_text()
+    token = content.splitlines()[0].strip() if content else ""
+    if not token:
+        print(f"Error: WS token file {path} is empty", file=sys.stderr)
+        sys.exit(2)
+    return token
+
+
+def _create_default_token_file(path: Path) -> str:
+    """Generate a fresh token and persist it at ``path`` with mode 0600.
+
+    Used on first WS-bound daemon start when no explicit flag was given.
+    The parent directory is created if missing; the file is written
+    atomically via ``os.open`` with ``O_CREAT|O_EXCL`` so a concurrent
+    process racing to create the same file can't clobber our token.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+    except Exception:
+        # If writing failed after opening, remove the empty file so the
+        # next start can retry instead of erroring on a zero-byte token.
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return token
+
+
 def _resolve_ws_token(args) -> Optional[str]:
     """Decide which bearer token (if any) the WS server should require.
 
@@ -885,14 +944,13 @@ def _resolve_ws_token(args) -> Optional[str]:
 
     1. ``--web-socket`` not set → ``None`` (no WS server, no token).
     2. ``--ws-unsafe-no-auth`` → ``None``, with a startup WARNING.
-    3. ``--ws-token-file`` → read first non-empty line. The file must
-       have mode 0600 or stricter (group/other readable is rejected) so
-       a leaked token can't be silently grabbed by another local user.
-    4. ``--ws-token`` → use as-is. Visible in process listings; the
-       help text discourages it for production.
-    5. Otherwise → auto-generate a 32-byte url-safe token and print it
-       to stderr (Jupyter-style). The generated value is not persisted;
-       restarting the daemon issues a fresh one.
+    3. ``--ws-token`` → use as-is (discouraged — visible in process list).
+    4. ``--ws-token-file PATH`` → read that path, enforce mode 0600.
+    5. **Default:** read/create ``~/.jaato/ws.token``. If the file
+       exists, use it (mode 0600 check applies). If it doesn't exist,
+       generate a fresh 32-byte token, write it with 0600, and use it.
+       This gives a stable token across restarts without any CLI flag
+       and matches Jupyter/SSH-style "well-known config file" UX.
 
     Conflicting flags exit with a clear error rather than picking a
     silent winner.
@@ -922,46 +980,44 @@ def _resolve_ws_token(args) -> Optional[str]:
         )
         sys.exit(2)
 
-    if args.ws_token_file:
-        path = Path(args.ws_token_file).expanduser()
-        try:
-            mode = path.stat().st_mode
-        except OSError as exc:
-            print(f"Error: cannot read --ws-token-file {path}: {exc}", file=sys.stderr)
-            sys.exit(2)
-        # Reject world/group readable files. Same check ssh applies to
-        # private keys — leaked tokens are private keys for the daemon.
-        if sys.platform != "win32" and mode & (stat.S_IRWXG | stat.S_IRWXO):
-            print(
-                f"Error: --ws-token-file {path} is group/other accessible "
-                f"(mode {oct(mode & 0o777)}); restrict to 0600",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        token = path.read_text().splitlines()[0].strip() if path.read_text() else ""
-        if not token:
-            print(f"Error: --ws-token-file {path} is empty", file=sys.stderr)
-            sys.exit(2)
-        return token
-
     if args.ws_token:
         return args.ws_token
 
-    # Auto-generate. Print once to stderr in a banner so it's visible
-    # even when stdout is redirected. Not persisted to the restart
-    # config — each daemon start gets a fresh token.
-    token = secrets.token_urlsafe(32)
+    token_path = Path(args.ws_token_file).expanduser() if args.ws_token_file \
+        else Path(DEFAULT_WS_TOKEN_FILE)
+
+    if token_path.exists():
+        return _load_token_file(token_path)
+
+    # Default path doesn't exist yet → first-time WS daemon start on
+    # this host. Create the file so subsequent starts and local clients
+    # see a stable value.
+    if args.ws_token_file:
+        # User explicitly named a file that doesn't exist — that's a
+        # config error, not a request to create one.
+        print(
+            f"Error: --ws-token-file {token_path} does not exist",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        token = _create_default_token_file(token_path)
+    except OSError as exc:
+        print(
+            f"Error: could not create default WS token file "
+            f"{token_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     banner_line = "─" * 64
     print(banner_line, file=sys.stderr)
-    print("WS bearer token (auto-generated, not persisted):", file=sys.stderr)
-    print(f"  {token}", file=sys.stderr)
-    print("Pass to clients via:", file=sys.stderr)
+    print(f"WS bearer token created at {token_path} (mode 0600)", file=sys.stderr)
+    print("Clients on this host can read it from the same path.", file=sys.stderr)
+    print("For cross-host clients, pass the token via:", file=sys.stderr)
     print("  Authorization: Bearer <token>   (Python / curl / proxies)", file=sys.stderr)
     print("  ws://host:port/?token=<token>   (browsers)", file=sys.stderr)
-    print(
-        "Set --ws-token-file PATH to use a stable token across restarts.",
-        file=sys.stderr,
-    )
     print(banner_line, file=sys.stderr)
     return token
 
@@ -1019,8 +1075,10 @@ Examples:
         "--ws-token-file",
         metavar="PATH",
         default=None,
-        help="Path to a file containing the bearer token (one line). "
-             "File must be mode 0600 or stricter.",
+        help=f"Path to a file containing the bearer token (one line). "
+             f"File must be mode 0600 or stricter. "
+             f"Defaults to {DEFAULT_WS_TOKEN_FILE} — created automatically "
+             f"on first WS-bound daemon start if it does not exist.",
     )
     parser.add_argument(
         "--ws-unsafe-no-auth",
