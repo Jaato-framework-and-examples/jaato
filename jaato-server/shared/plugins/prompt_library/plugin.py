@@ -2450,62 +2450,67 @@ Examples:
             ("    - Skills from github paths are saved to skills/ directory", "dim"),
         ])
 
-    def _format_prompt_help(self, info: PromptInfo) -> str:
-        """Format per-prompt help derived from frontmatter.
+    def _format_prompt_help(self, info: PromptInfo) -> HelpLines:
+        """Build per-prompt help from YAML frontmatter.
 
-        Shown when the user types ``prompt <name> --help`` or
-        ``%<name> --help``.  Returned as a plain string (not
-        :class:`HelpLines`) so it works identically through the command
-        path and the server-side ``%``-reference expansion path — the
-        latter embeds the return value into the model message via an
-        f-string, which can't render styled ``HelpLines``.
+        Invoked for both ``/prompt <name> --help`` (user command path)
+        and ``%<name> --help`` (server-side reference interception in
+        ``session_manager``).  Returned as :class:`HelpLines` so the
+        server emits a :class:`HelpTextEvent` for pager display in both
+        paths — the session manager detects ``HelpLines`` directly when
+        handling ``%`` help references, and
+        :meth:`JaatoServer.execute_command` does the same conversion
+        for the command path.
 
         Args:
             info: The resolved :class:`PromptInfo` for the target prompt.
 
         Returns:
-            Human-readable text describing the prompt, its source, and
-            every parameter declared in its YAML frontmatter (with
-            required/optional status, default, allowed ``enum`` values,
-            and description).
+            Styled help lines listing the description, tags, source,
+            path, a usage line showing ``<required>`` and ``[optional]``
+            placeholders, and a parameter block with each parameter's
+            required/optional status, default, ``enum`` choices, and
+            description (all drawn from the prompt's frontmatter).
         """
-        lines: List[str] = []
-        lines.append(f"Prompt: {info.name}")
+        lines: List[tuple] = []
+        lines.append((f"Prompt: {info.name}", "bold"))
         if info.description:
-            lines.append(f"  {info.description}")
-        lines.append("")
-        lines.append(f"Source: {info.source}")
-        lines.append(f"Path:   {info.path}")
+            lines.append((f"  {info.description}", ""))
+        lines.append(("", ""))
+        lines.append((f"Source: {info.source}", "dim"))
+        lines.append((f"Path:   {info.path}", "dim"))
         if info.tags:
-            lines.append(f"Tags:   {', '.join(info.tags)}")
-        lines.append("")
+            lines.append((f"Tags:   {', '.join(info.tags)}", "dim"))
+        lines.append(("", ""))
 
         if not info.params:
-            lines.append("This prompt takes no parameters.")
-            lines.append("")
-            lines.append(f"Usage: prompt {info.name}")
-            lines.append(f"   or: %{info.name}")
-            return "\n".join(lines)
+            lines.append(("This prompt takes no parameters.", ""))
+            lines.append(("", ""))
+            lines.append(("USAGE", "bold"))
+            lines.append((f"    prompt {info.name}", ""))
+            lines.append((f"    %{info.name}", ""))
+            return HelpLines(lines=lines)
 
         placeholders: List[str] = []
         for pname, param in info.params.items():
             token = f"<{pname}>" if param.required else f"[{pname}]"
             placeholders.append(token)
         placeholder_str = " ".join(placeholders)
-        lines.append(f"Usage: prompt {info.name} {placeholder_str}")
-        lines.append(f"   or: %{info.name} {placeholder_str}")
-        lines.append("")
-        lines.append("Parameters:")
+        lines.append(("USAGE", "bold"))
+        lines.append((f"    prompt {info.name} {placeholder_str}", ""))
+        lines.append((f"    %{info.name} {placeholder_str}", ""))
+        lines.append(("", ""))
+        lines.append(("PARAMETERS", "bold"))
         for pname, param in info.params.items():
             meta_parts = ["required" if param.required else "optional"]
             if param.default is not None:
                 meta_parts.append(f"default={param.default!r}")
             if param.enum:
                 meta_parts.append(f"choices={param.enum}")
-            lines.append(f"  {pname} ({', '.join(meta_parts)})")
+            lines.append((f"    {pname} ({', '.join(meta_parts)})", ""))
             if param.description:
-                lines.append(f"    {param.description}")
-        return "\n".join(lines)
+                lines.append((f"        {param.description}", "dim"))
+        return HelpLines(lines=lines)
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.

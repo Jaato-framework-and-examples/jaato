@@ -800,6 +800,8 @@ Hello {{$1}}!
             assert "not found" in result.lower()
 
     def test_prompt_command_help_flag_shows_params(self):
+        from jaato_sdk.plugins.base import HelpLines
+
         plugin = PromptLibraryPlugin()
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin.set_workspace_path(tmpdir)
@@ -822,18 +824,22 @@ Forecast for {{city}} over {{days}} days.
 
             result = plugin._execute_prompt_command({"args": ["forecast", "--help"]})
 
-            assert "Prompt: forecast" in result
-            assert "Get a detailed weather forecast" in result
-            assert "Usage: prompt forecast <city> [days]" in result
-            assert "%forecast <city> [days]" in result
-            assert "city (required)" in result
-            assert "Spanish city name" in result
-            assert "days (optional, default='3')" in result
-            assert "Number of forecast days" in result
+            assert isinstance(result, HelpLines)
+            flat = "\n".join(text for text, _style in result.lines)
+            assert "Prompt: forecast" in flat
+            assert "Get a detailed weather forecast" in flat
+            assert "prompt forecast <city> [days]" in flat
+            assert "%forecast <city> [days]" in flat
+            assert "city (required)" in flat
+            assert "Spanish city name" in flat
+            assert "days (optional, default='3')" in flat
+            assert "Number of forecast days" in flat
             # Must not execute the prompt body
-            assert "Forecast for" not in result
+            assert "Forecast for" not in flat
 
     def test_prompt_command_short_help_flag(self):
+        from jaato_sdk.plugins.base import HelpLines
+
         plugin = PromptLibraryPlugin()
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin.set_workspace_path(tmpdir)
@@ -848,10 +854,12 @@ Hello {{$1}}!
 
             result = plugin._execute_prompt_command({"args": ["greet", "-h"]})
 
-            assert "Prompt: greet" in result
-            assert "Say hello" in result
-            assert "This prompt takes no parameters." in result
-            assert "Hello" not in result.split("Usage:")[0] or "Hello {{$1}}" not in result
+            assert isinstance(result, HelpLines)
+            flat = "\n".join(text for text, _style in result.lines)
+            assert "Prompt: greet" in flat
+            assert "Say hello" in flat
+            assert "This prompt takes no parameters." in flat
+            assert "Hello {{$1}}" not in flat  # prompt body must not execute
 
     def test_prompt_command_help_flag_unknown_prompt(self):
         plugin = PromptLibraryPlugin()
@@ -860,6 +868,9 @@ Hello {{$1}}!
 
             result = plugin._execute_prompt_command({"args": ["nope", "--help"]})
 
+            # Unknown prompt short-circuits to a plain error string so the
+            # caller can surface it as a SystemMessageEvent or plain text.
+            assert isinstance(result, str)
             assert "not found" in result.lower()
 
 

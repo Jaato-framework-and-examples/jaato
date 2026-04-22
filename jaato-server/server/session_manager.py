@@ -1953,6 +1953,111 @@ class SessionManager:
 
     _PROMPT_REF_PATTERN = re.compile(r'%([a-zA-Z][a-zA-Z0-9_-]*)')
 
+    # ``%<name> --help`` / ``%<name> -h`` — the leading whitespace and the
+    # flag are consumed together so the span can be excised cleanly from
+    # the outgoing message without leaving a dangling ``--help`` token.
+    _PROMPT_HELP_REF_PATTERN = re.compile(
+        r'%([a-zA-Z][a-zA-Z0-9_-]*)[ \t]+(--help|-h)\b'
+    )
+
+    def _intercept_prompt_help_refs(
+        self,
+        text: str,
+        server: 'JaatoServer',
+        client_id: Optional[str],
+    ) -> str:
+        """Handle ``%<name> --help`` references before model dispatch.
+
+        Scans *text* for ``%name --help`` (or ``-h``) tokens, resolves
+        each via the prompt library plugin, emits the resulting help as
+        a :class:`HelpTextEvent` (pager) directly to *client_id*, and
+        returns *text* with those tokens excised.  This runs *before*
+        :meth:`_expand_prompt_references` so the help content never
+        reaches the model — the user types ``%foo --help`` and sees the
+        help, without the model also being asked to respond.
+
+        If the prompt library plugin is unavailable, or a referenced
+        prompt doesn't exist, the reference is left untouched and
+        flows through to the normal expansion path for graceful
+        degradation.
+
+        Args:
+            text: Raw message text from the client.
+            server: The session's :class:`JaatoServer` for plugin access.
+            client_id: Target client for the emitted help events. When
+                ``None`` (rare — only during offline replay), the
+                matched spans are still stripped but no events fire.
+
+        Returns:
+            The message text with matched ``%<name> --help`` spans
+            removed.  If the entire original message consisted only of
+            such references, the return value is the surrounding
+            whitespace — the caller should check ``.strip()`` and skip
+            the model call.
+        """
+        if not text or '%' not in text:
+            return text
+
+        matches = list(self._PROMPT_HELP_REF_PATTERN.finditer(text))
+        if not matches:
+            return text
+
+        prompt_plugin = None
+        if server._jaato:
+            runtime = server._jaato.get_runtime()
+            if runtime and runtime.registry:
+                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+        if prompt_plugin is None or not hasattr(
+            prompt_plugin, '_execute_prompt_command'
+        ):
+            return text
+
+        from jaato_sdk.plugins.base import HelpLines
+        from jaato_sdk.events import HelpTextEvent, SystemMessageEvent
+
+        result = text
+        # Walk matches in reverse so earlier spans' positions remain
+        # valid while we cut later spans out of ``result``.
+        for match in reversed(matches):
+            # ``%`` must stand alone — skip if preceded by an
+            # alphanumeric (e.g. ``100%foo`` is not a prompt reference).
+            if match.start() > 0 and text[match.start() - 1].isalnum():
+                continue
+
+            prompt_name = match.group(1)
+            try:
+                help_result = prompt_plugin._execute_prompt_command(
+                    {'args': [prompt_name, '--help']}
+                )
+            except Exception:
+                continue
+
+            if isinstance(help_result, HelpLines):
+                if client_id is not None:
+                    self._emit_to_client(
+                        client_id, HelpTextEvent(lines=help_result.lines)
+                    )
+            elif isinstance(help_result, str):
+                # Fallback: plugin returned an error string (e.g.
+                # "Prompt not found") — surface it as a system message
+                # rather than pushing it to the model.
+                if client_id is not None:
+                    self._emit_to_client(
+                        client_id, SystemMessageEvent(
+                            message=help_result, style="error"
+                            if help_result.startswith('Prompt not found')
+                            else "info",
+                        )
+                    )
+            else:
+                # Unknown return type — leave reference in place and
+                # let the normal expansion path handle it.
+                continue
+
+            result = result[:match.start()] + result[match.end():]
+
+        return result
+
     def _expand_prompt_references(self, text: str, server: 'JaatoServer') -> str:
         """Expand ``%prompt-name`` references in a message.
 
@@ -2023,10 +2128,12 @@ class SessionManager:
                     content = prompt_plugin._execute_prompt_command(
                         {'args': [prompt_name] + prompt_args}
                     )
-                    # _execute_prompt_command returns error strings for
-                    # missing prompts; only use content that doesn't
-                    # start with "Prompt not found"
-                    if content and not content.startswith('Prompt not found'):
+                    # _execute_prompt_command usually returns strings,
+                    # but ``help``-style calls can return HelpLines — the
+                    # latter shouldn't be embedded in the outgoing message
+                    # (both because it has no sensible f-string form and
+                    # because it's meant for the user, not the model).
+                    if isinstance(content, str) and content and not content.startswith('Prompt not found'):
                         expanded.append({'name': prompt_name, 'content': content})
                 except Exception:
                     pass  # Graceful degradation
@@ -2697,11 +2804,26 @@ class SessionManager:
                 session.user_inputs.append(event.text)
                 session.is_dirty = True
 
+            # ``%<name> --help`` is intercepted first: the help is
+            # emitted straight to the client via a HelpTextEvent and the
+            # reference is stripped so it never reaches the model.
+            message_text = self._intercept_prompt_help_refs(
+                event.text, server, client_id
+            )
+
+            # If the message was purely help requests, the user just
+            # wanted documentation — don't dispatch anything to the
+            # model.  Persist the (already-appended) user input and
+            # return early.
+            if not (message_text and message_text.strip()):
+                self._save_session(session)
+                return
+
             # Server-side prompt skill expansion: expand %prompt-name
             # references so all clients (TUI, WS, IPC) get automatic
             # prompt content injection regardless of client capabilities.
             message_text = self._expand_prompt_references(
-                event.text, server
+                message_text, server
             )
 
             # Capture context for thread (ContextVars don't propagate to threads)
