@@ -2106,6 +2106,18 @@ description: {description}
         prompt_name = positional_args[0]
         prompt_args_raw = positional_args[1:]
 
+        # ``--help``/``-h`` immediately after the prompt name shows the
+        # prompt's parameter documentation instead of executing it.  This
+        # works for both the ``/prompt <name> --help`` command path and
+        # the ``%<name> --help`` reference path.
+        if prompt_args_raw and prompt_args_raw[0] in ('--help', '-h'):
+            prompts = self._discover_prompts()
+            if prompt_name not in prompts:
+                available = list(prompts.keys())
+                hint = f'Available prompts: {", ".join(available[:5])}{"..." if len(available) > 5 else ""}'
+                return f'Prompt not found: {prompt_name}\n{hint}'
+            return self._format_prompt_help(prompts[prompt_name])
+
         # Caller-supplied named params take precedence over anything
         # parsed from positional ``key=value`` tokens.
         explicit_named: Dict[str, str] = dict(args.get('named') or {})
@@ -2437,6 +2449,63 @@ Examples:
             ("    - Use 'prompt' without args to see available prompts", "dim"),
             ("    - Skills from github paths are saved to skills/ directory", "dim"),
         ])
+
+    def _format_prompt_help(self, info: PromptInfo) -> str:
+        """Format per-prompt help derived from frontmatter.
+
+        Shown when the user types ``prompt <name> --help`` or
+        ``%<name> --help``.  Returned as a plain string (not
+        :class:`HelpLines`) so it works identically through the command
+        path and the server-side ``%``-reference expansion path — the
+        latter embeds the return value into the model message via an
+        f-string, which can't render styled ``HelpLines``.
+
+        Args:
+            info: The resolved :class:`PromptInfo` for the target prompt.
+
+        Returns:
+            Human-readable text describing the prompt, its source, and
+            every parameter declared in its YAML frontmatter (with
+            required/optional status, default, allowed ``enum`` values,
+            and description).
+        """
+        lines: List[str] = []
+        lines.append(f"Prompt: {info.name}")
+        if info.description:
+            lines.append(f"  {info.description}")
+        lines.append("")
+        lines.append(f"Source: {info.source}")
+        lines.append(f"Path:   {info.path}")
+        if info.tags:
+            lines.append(f"Tags:   {', '.join(info.tags)}")
+        lines.append("")
+
+        if not info.params:
+            lines.append("This prompt takes no parameters.")
+            lines.append("")
+            lines.append(f"Usage: prompt {info.name}")
+            lines.append(f"   or: %{info.name}")
+            return "\n".join(lines)
+
+        placeholders: List[str] = []
+        for pname, param in info.params.items():
+            token = f"<{pname}>" if param.required else f"[{pname}]"
+            placeholders.append(token)
+        placeholder_str = " ".join(placeholders)
+        lines.append(f"Usage: prompt {info.name} {placeholder_str}")
+        lines.append(f"   or: %{info.name} {placeholder_str}")
+        lines.append("")
+        lines.append("Parameters:")
+        for pname, param in info.params.items():
+            meta_parts = ["required" if param.required else "optional"]
+            if param.default is not None:
+                meta_parts.append(f"default={param.default!r}")
+            if param.enum:
+                meta_parts.append(f"choices={param.enum}")
+            lines.append(f"  {pname} ({', '.join(meta_parts)})")
+            if param.description:
+                lines.append(f"    {param.description}")
+        return "\n".join(lines)
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
