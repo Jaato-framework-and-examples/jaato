@@ -151,6 +151,14 @@ class EventType(str, Enum):
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
 
+    # File staging into a workspace (Client <-> Server, WS only).
+    # Multi-frame protocol: client sends one TEXT frame with this request
+    # carrying file metadata, then N raw BINARY frames (one per file) in
+    # declared order.  Server responds with WORKSPACE_FILES_STAGED.  See
+    # docs/sdk-file-staging.md for the wire protocol.
+    WORKSPACE_FILES_STAGE_REQUEST = "workspace.files.stage_request"  # Client -> Server
+    WORKSPACE_FILES_STAGED = "workspace.files.staged"  # Server -> Client
+
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
 
@@ -1169,6 +1177,116 @@ class ConfigUpdateRequest(Event):
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
 
 
+@dataclass
+class StagedFileSpec:
+    """Per-file metadata sent inside a :class:`StageFilesRequest`.
+
+    The ``size`` is the exact byte length of the binary frame that will
+    follow for this file. The server validates the matching binary
+    frame's length against this value; a mismatch is fatal for the
+    whole staging operation.
+
+    ``content_type`` is informational — the server uses it for logging
+    and may reflect it in the response. It does not gate writing.
+
+    ``mode`` is reserved for future POSIX permission bits (e.g. 0o755
+    for executables in the workspace). Currently ignored by the server;
+    files are written with the daemon's umask. Add the field now so
+    clients don't need a protocol bump later.
+    """
+    name: str = ""  # Workspace-relative path; rejected if absolute or contains ".."
+    size: int = 0   # Exact byte length of the upcoming binary frame
+    content_type: Optional[str] = None
+    mode: Optional[int] = None
+
+
+@dataclass
+class StageFilesRequest(Event):
+    """Stage files into a workspace via a multi-frame WS protocol.
+
+    **Wire protocol:**
+
+    1. Client sends *this* event as one TEXT WS frame.  ``files``
+       declares the names, sizes, and (optional) content types of the
+       payloads that will follow.
+    2. Client immediately sends ``len(files)`` raw BINARY WS frames in
+       the **same order** as ``files``.  Each frame's byte length must
+       equal the corresponding ``files[i].size``.
+    3. Server responds with a TEXT frame carrying
+       :class:`StageFilesEvent` summarising what was written.
+
+    The handler reads the binary frames inline (the per-connection
+    receive loop preserves frame order, so other event types cannot
+    interleave between the request and its blobs).
+
+    ``workspace_id`` identifies the target workspace.  Clients learn
+    valid IDs from :class:`WorkspaceCreatedEvent` and
+    :class:`SessionInfoEvent`.  An empty value targets the connection's
+    currently-selected workspace (the WS server tracks one
+    selected workspace per client).
+
+    Caps (server-enforced, configurable per deployment):
+
+    - Per-file ``size`` cap (default 10 MB)
+    - Sum of ``size`` values cap (default 50 MB)
+
+    Limits exceeded → server emits a :class:`StageFilesEvent` with the
+    failure recorded; no binary frames are read.  Clients should check
+    the response before considering files staged.
+
+    Compared to the legacy ``staged_files`` field on the
+    ``session.new`` envelope (kept for premium back-compat), this is
+    the canonical SDK primitive: workspace-scoped (not session-scoped),
+    binary-framed (no base64 inflation), and supports staging into an
+    already-existing workspace mid-session.
+    """
+    type: EventType = field(default=EventType.WORKSPACE_FILES_STAGE_REQUEST)
+    workspace_id: str = ""
+    files: List[StagedFileSpec] = field(default_factory=list)
+
+    def __post_init__(self):
+        # ``deserialize_event`` passes raw dicts for nested dataclasses;
+        # coerce so callers always see ``StagedFileSpec`` instances
+        # regardless of construction path.
+        self.files = [
+            f if isinstance(f, StagedFileSpec) else StagedFileSpec(
+                name=f.get("name", "") if isinstance(f, dict) else "",
+                size=f.get("size", 0) if isinstance(f, dict) else 0,
+                content_type=f.get("content_type") if isinstance(f, dict) else None,
+                mode=f.get("mode") if isinstance(f, dict) else None,
+            )
+            for f in self.files
+        ]
+
+
+@dataclass
+class StageFilesEvent(Event):
+    """Server's response to :class:`StageFilesRequest`.
+
+    Reports which files were written (by ``name``, in declared order)
+    and which failed.  Failures are surfaced per-file so clients can
+    retry just the ones that didn't make it.
+
+    Possible per-file error categories:
+
+    - ``"unsafe_path"`` — name is absolute, contains ``..``, or escapes
+      the workspace root.
+    - ``"size_mismatch"`` — declared ``size`` did not match the binary
+      frame length.
+    - ``"size_limit_per_file"`` — file exceeded the per-file cap.
+    - ``"size_limit_total"`` — sum of declared sizes exceeded the
+      total payload cap.
+    - ``"workspace_not_found"`` — ``workspace_id`` doesn't match a
+      known workspace for this client.
+    - ``"io_error"`` — write failed (disk full, permission denied,
+      AppArmor refusal, ...).  ``error`` carries the OS message.
+    """
+    type: EventType = field(default=EventType.WORKSPACE_FILES_STAGED)
+    workspace_id: str = ""
+    staged: List[str] = field(default_factory=list)  # successfully written, by name
+    failed: List[Dict[str, str]] = field(default_factory=list)  # [{"name", "category", "error"}]
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -1683,6 +1801,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file monitoring
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
+    # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
+    EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
+    EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,

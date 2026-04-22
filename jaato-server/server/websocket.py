@@ -73,30 +73,64 @@ logger = logging.getLogger(__name__)
 _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 
 
+# ── File-staging caps (defaults; both apply to every staging call) ──
+# Per-file: protects against a single huge upload tying up the daemon.
+# Total:    protects against many smaller uploads totalling something huge.
+# Both are advisory defaults — when we add per-deployment config, these
+# become the fallback when the operator hasn't set values themselves.
+DEFAULT_STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024   # 10 MB
+DEFAULT_STAGE_TOTAL_LIMIT    = 50 * 1024 * 1024   # 50 MB
+
+
+def _safe_staged_filename(name: str) -> Optional[Path]:
+    """Validate a staged-file name and return the workspace-relative ``Path``.
+
+    Returns ``None`` when the name is unsafe (absolute, contains ``..``
+    components, or empty).  The caller logs a warning and skips the
+    entry — never raises.
+    """
+    if not name:
+        return None
+    clean = Path(name)
+    if clean.is_absolute() or ".." in clean.parts:
+        return None
+    return clean
+
+
+def _write_staged_payload(ws_path: Path, name: Path, payload: bytes) -> None:
+    """Atomically write ``payload`` into ``ws_path / name``.
+
+    Caller is responsible for path-safety validation (use
+    :func:`_safe_staged_filename`) and size enforcement.  Creates parent
+    directories as needed.
+    """
+    dest = ws_path / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(payload)
+
+
 def _materialize_staged_files(
     ws_path: Path,
     staged_files: list,
 ) -> int:
-    """Write inline ``staged_files`` entries into a freshly-provisioned workspace.
+    """Write inline base64 ``staged_files`` entries into a workspace.
 
-    The <jaato-task> web component ships files inline on ``session.new``
-    (``[{"name": <relpath>, "data": <base64>}, ...]``) to avoid the
-    HTTP ``/api/task/artifacts`` upload roundtrip and its SSO cookie
-    dependency.  This helper applies the same path-traversal protections
-    as the HTTP route (``routes.py:upload_artifacts``) and the same
-    base64 decoding, then writes each payload under ``ws_path``.
+    Legacy entry point used by the premium ``session.new`` envelope
+    (``[{"name": <relpath>, "data": <base64>}, ...]``) and by the
+    HTTP ``/api/task/artifacts`` upload route.  Kept for back-compat
+    with those clients; new code should prefer the binary-framed
+    :class:`~jaato_sdk.events.StageFilesRequest` flow handled by
+    :meth:`JaatoWSServer._handle_stage_files_request`.
 
     Unsafe entries (absolute paths, ``..`` components, invalid base64,
     non-dict entries, missing ``name``) are logged and skipped; the
-    caller never sees an exception.  Extracted as a module-level
-    function so unit tests can exercise the security-sensitive
-    validation without standing up a WebSocket server.
+    caller never sees an exception.
 
     Args:
-        ws_path: Root of the newly-provisioned workspace.  All writes
-            are rooted here; the protections ensure they stay here.
+        ws_path: Root of the workspace.  All writes are rooted here;
+            the protections ensure they stay here.
         staged_files: Iterable of ``{"name": str, "data": base64_str}``
-            dicts.  Non-dict entries in the list are skipped.
+            dicts.  Non-dict entries are skipped.
 
     Returns:
         The number of files successfully written.
@@ -109,11 +143,8 @@ def _materialize_staged_files(
             continue
         name = entry.get("name", "")
         data = entry.get("data", "")
-        if not name:
-            continue
-        # Path-traversal protection — matches routes.py upload validation.
-        clean = Path(name)
-        if clean.is_absolute() or ".." in clean.parts:
+        clean = _safe_staged_filename(name)
+        if clean is None:
             logger.warning("Rejecting staged_file with unsafe path: %s", name)
             continue
         try:
@@ -127,9 +158,7 @@ def _materialize_staged_files(
                 "Rejecting staged_file %s: invalid base64 (%s)", name, exc,
             )
             continue
-        dest = ws_path / clean
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(payload)
+        _write_staged_payload(ws_path, clean, payload)
         written += 1
     return written
 
@@ -1002,6 +1031,15 @@ class JaatoWSServer:
             await self._handle_external_event(client_id, event)
             return
 
+        # --- File staging into a workspace (multi-frame: TEXT + N binary) ---
+        # The handler reads the raw binary payload frames inline before
+        # the per-connection receive loop can dispatch the next message,
+        # so frame ordering is preserved without coordination state.
+        from jaato_sdk.events import StageFilesRequest
+        if isinstance(event, StageFilesRequest):
+            await self._handle_stage_files_request(client_id, event)
+            return
+
         # --- Daemon-mode delegation ---
         # When running as part of JaatoDaemon, route session/command events
         # through the CommandRouter for unified dispatch across transports.
@@ -1207,6 +1245,236 @@ class JaatoWSServer:
             await self._handle_config_update(
                 client_id, event.provider, event.model, event.api_key,
             )
+
+    async def _handle_stage_files_request(self, client_id: str, event) -> None:
+        """Handle ``StageFilesRequest`` — multi-frame staging into a workspace.
+
+        Wire protocol (per-connection, frames preserve order):
+
+        1. Caller has just sent this :class:`StageFilesRequest` as one
+           TEXT frame (``deserialize_event`` already produced the object).
+        2. ``len(event.files)`` raw BINARY frames follow, one per file,
+           in the same order as ``event.files``.
+        3. We respond with one TEXT frame carrying
+           :class:`StageFilesEvent`.
+
+        Frame ordering is guaranteed because the caller's
+        ``async for message in websocket`` loop awaits this coroutine to
+        completion before pulling the next message — so our explicit
+        ``websocket.recv()`` calls below pick up exactly the binary
+        payloads the client sent next.
+
+        Validation runs *before* any binary frames are read so a
+        rejection case (no workspace, total cap exceeded, bad name) is
+        a single round-trip rather than a half-consumed stream.  When we
+        do reject mid-stream (per-frame size mismatch) we still drain
+        the remaining binary frames so the connection state stays in
+        sync — otherwise the next text-frame would arrive while the
+        server is still expecting binary.
+        """
+        from jaato_sdk.events import StageFilesEvent
+
+        workspace_path = self._resolve_staging_workspace(client_id, event.workspace_id)
+        if workspace_path is None:
+            # No workspace context — refuse without reading any binary
+            # frames.  Client must catch up by sending a workspace.select
+            # or session.new before retrying.
+            await self._send_to_client(client_id, StageFilesEvent(
+                workspace_id=event.workspace_id,
+                staged=[],
+                failed=[{
+                    "name": spec.name,
+                    "category": "workspace_not_found",
+                    "error": (
+                        f"No workspace selected for client {client_id} "
+                        f"(workspace_id={event.workspace_id!r})"
+                    ),
+                } for spec in event.files],
+            ))
+            # Still drain the binary frames the client is about to send;
+            # otherwise the per-connection receive loop reads them as
+            # the next ``message`` and dispatch breaks.
+            await self._drain_binary_frames(client_id, len(event.files))
+            return
+
+        # Up-front size validation — both per-file and total.  Refusing
+        # before reading binary frames keeps a misbehaving client from
+        # tying up the daemon with a 500 MB upload that we'd reject
+        # anyway.
+        cap_per_file = DEFAULT_STAGE_PER_FILE_LIMIT
+        cap_total = DEFAULT_STAGE_TOTAL_LIMIT
+        declared_total = sum(max(spec.size, 0) for spec in event.files)
+        if declared_total > cap_total:
+            await self._send_to_client(client_id, StageFilesEvent(
+                workspace_id=event.workspace_id,
+                staged=[],
+                failed=[{
+                    "name": spec.name,
+                    "category": "size_limit_total",
+                    "error": (
+                        f"declared total {declared_total} bytes exceeds "
+                        f"cap {cap_total}"
+                    ),
+                } for spec in event.files],
+            ))
+            await self._drain_binary_frames(client_id, len(event.files))
+            return
+
+        async with self._lock:
+            client = self._clients.get(client_id)
+        if client is None:
+            return  # Disconnected mid-flight; nothing to do.
+
+        ws = client.websocket
+        staged: list = []
+        failed: list = []
+
+        for spec in event.files:
+            # Per-file declared-size and name validation BEFORE pulling
+            # the binary.  When we skip pulling we still need to drain
+            # one frame to keep the stream aligned.
+            if spec.size > cap_per_file:
+                failed.append({
+                    "name": spec.name,
+                    "category": "size_limit_per_file",
+                    "error": (
+                        f"declared size {spec.size} bytes exceeds "
+                        f"per-file cap {cap_per_file}"
+                    ),
+                })
+                await self._drain_binary_frames(client_id, 1)
+                continue
+
+            clean = _safe_staged_filename(spec.name)
+            if clean is None:
+                failed.append({
+                    "name": spec.name,
+                    "category": "unsafe_path",
+                    "error": (
+                        "name must be a non-empty workspace-relative "
+                        "path with no '..' components"
+                    ),
+                })
+                await self._drain_binary_frames(client_id, 1)
+                continue
+
+            try:
+                payload = await ws.recv()
+            except Exception as exc:
+                # Connection died mid-stream; return whatever we have so
+                # far.  Subsequent files can't be drained.
+                failed.append({
+                    "name": spec.name,
+                    "category": "io_error",
+                    "error": f"connection closed mid-staging: {exc}",
+                })
+                break
+
+            if isinstance(payload, str):
+                # Client sent a TEXT frame where we expected BINARY.
+                # Treat as fatal — the protocol is violated and any
+                # further drain attempts would be reading misordered
+                # data.  Mark this file failed and stop reading.
+                failed.append({
+                    "name": spec.name,
+                    "category": "size_mismatch",
+                    "error": "expected BINARY frame, got TEXT (protocol violation)",
+                })
+                break
+
+            if len(payload) != spec.size:
+                failed.append({
+                    "name": spec.name,
+                    "category": "size_mismatch",
+                    "error": (
+                        f"declared {spec.size} bytes, frame carried "
+                        f"{len(payload)} bytes"
+                    ),
+                })
+                continue
+
+            try:
+                _write_staged_payload(Path(workspace_path), clean, payload)
+            except OSError as exc:
+                failed.append({
+                    "name": spec.name,
+                    "category": "io_error",
+                    "error": str(exc),
+                })
+                continue
+
+            staged.append(spec.name)
+
+        await self._send_to_client(client_id, StageFilesEvent(
+            workspace_id=event.workspace_id,
+            staged=staged,
+            failed=failed,
+        ))
+        logger.info(
+            "Stage files for %s: workspace=%s staged=%d failed=%d",
+            client_id, workspace_path, len(staged), len(failed),
+        )
+
+    def _resolve_staging_workspace(
+        self, client_id: str, workspace_id: str,
+    ) -> Optional[str]:
+        """Resolve the absolute workspace path for a staging request.
+
+        Empty ``workspace_id`` → the client's currently-attached
+        workspace.  Non-empty → must match that workspace's basename;
+        cross-client staging is intentionally not allowed without a
+        per-user auth model (see project_backlog_ws_per_user_auth).
+
+        Returns the absolute path, or ``None`` if the client has no
+        workspace or the requested id doesn't match.
+        """
+        provisioned = self._client_provisioned.get(client_id)
+        if provisioned is not None:
+            current_path = provisioned.path
+        elif self._workspace_manager is not None:
+            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+            current_path = selected.path if selected else None
+        else:
+            current_path = None
+
+        if not current_path:
+            return None
+
+        if workspace_id and os.path.basename(current_path) != workspace_id:
+            return None
+
+        return current_path
+
+    async def _drain_binary_frames(self, client_id: str, count: int) -> None:
+        """Consume ``count`` binary frames without processing them.
+
+        Used after a fatal validation failure so the per-connection
+        receive loop doesn't dispatch the leftover binary payloads as
+        if they were JSON messages.  Best-effort: a closed connection
+        or a TEXT frame appearing where we expected BINARY both stop
+        the drain loop.
+        """
+        if count <= 0:
+            return
+        async with self._lock:
+            client = self._clients.get(client_id)
+        if client is None:
+            return
+        ws = client.websocket
+        for _ in range(count):
+            try:
+                frame = await ws.recv()
+            except Exception:
+                return
+            if isinstance(frame, str):
+                # Out of sync with the client; further drains would be
+                # consuming the wrong frames.  Leave whatever's left for
+                # the main loop to surface as "Unknown message type".
+                logger.warning(
+                    "stage_files: drain hit TEXT frame for %s; "
+                    "stream alignment lost", client_id,
+                )
+                return
 
     async def _handle_message_daemon(
         self,
