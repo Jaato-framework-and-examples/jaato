@@ -799,6 +799,69 @@ Hello {{$1}}!
 
             assert "not found" in result.lower()
 
+    def test_prompt_command_help_flag_shows_params(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "forecast.md").write_text("""---
+description: Get a detailed weather forecast
+params:
+  city:
+    required: true
+    description: Spanish city name (e.g., Madrid, Barcelona)
+  days:
+    required: false
+    default: "3"
+    description: Number of forecast days (1-7)
+---
+Forecast for {{city}} over {{days}} days.
+""")
+
+            result = plugin._execute_prompt_command({"args": ["forecast", "--help"]})
+
+            assert "Prompt: forecast" in result
+            assert "Get a detailed weather forecast" in result
+            assert "Usage: prompt forecast <city> [days]" in result
+            assert "%forecast <city> [days]" in result
+            assert "city (required)" in result
+            assert "Spanish city name" in result
+            assert "days (optional, default='3')" in result
+            assert "Number of forecast days" in result
+            # Must not execute the prompt body
+            assert "Forecast for" not in result
+
+    def test_prompt_command_short_help_flag(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "greet.md").write_text("""---
+description: Say hello
+---
+Hello {{$1}}!
+""")
+
+            result = plugin._execute_prompt_command({"args": ["greet", "-h"]})
+
+            assert "Prompt: greet" in result
+            assert "Say hello" in result
+            assert "This prompt takes no parameters." in result
+            assert "Hello" not in result.split("Usage:")[0] or "Hello {{$1}}" not in result
+
+    def test_prompt_command_help_flag_unknown_prompt(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            result = plugin._execute_prompt_command({"args": ["nope", "--help"]})
+
+            assert "not found" in result.lower()
+
 
 class TestCommandCompletions:
     """Tests for command completions."""
