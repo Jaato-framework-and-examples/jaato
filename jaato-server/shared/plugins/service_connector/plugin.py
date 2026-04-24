@@ -12,7 +12,7 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,9 @@ from .types import (
     ServiceConfig,
 )
 from .validation import SchemaValidator
+
+if TYPE_CHECKING:
+    from .auth import AuthAttempt
 
 
 class ServiceConnectorPlugin:
@@ -1035,24 +1038,36 @@ class ServiceConnectorPlugin:
     def _build_auth_context(
         service_config: 'ServiceConfig',
         resolved: bool,
+        attempts: Optional[List['AuthAttempt']] = None,
     ) -> Dict[str, Any]:
         """Build structured auth context for error diagnostics.
 
         Included in tool results when a named service returns 401/403
         or when an ``AuthError`` is raised before the request.  Gives
         the model enough context to diagnose the failure accurately
-        instead of guessing (e.g. "env var not available in this
-        session" vs "credentials expired or revoked").
+        — naming the exact provenance (``pass://...``, env var) and
+        the rotation command when known, instead of generic boilerplate.
 
         Args:
             service_config: The service configuration with auth details.
             resolved: ``True`` if the auth credentials were resolved
                 (env vars found) and the server rejected them.
                 ``False`` if resolution itself failed (env var missing).
+            attempts: Per-credential :class:`AuthAttempt` list captured
+                during ``AuthManager.get_auth_headers`` (or attached to
+                the ``AuthError`` on the failure path).  When provided,
+                each attempt contributes a ``credentials[]`` entry with
+                ``method`` / ``resolved_from`` / ``token_prefix`` /
+                ``token_len`` / ``rotation_hint`` fields.  The hint
+                text is sharpened to name the provenance and rotation
+                command verbatim when only one credential is involved
+                (the common bearer case).
 
         Returns:
-            Dict with ``auth_type``, ``service_name``, ``resolved``,
-            and a ``hint`` explaining the failure mode.
+            Dict with ``auth_type``, ``service_name``,
+            ``credentials_resolved``, ``credentials[]`` (per-credential
+            provenance), and a ``hint`` explaining the failure mode and
+            (when known) the exact rotation command to run.
         """
         auth = service_config.auth
         ctx: Dict[str, Any] = {
@@ -1061,35 +1076,120 @@ class ServiceConnectorPlugin:
             "credentials_resolved": resolved,
         }
 
-        # Include the env var name so the model can reference it
-        # accurately — but never include the actual value.
-        from .types import AuthType
-        if auth.type == AuthType.API_KEY and auth.value_env:
-            ctx["env_var"] = auth.value_env
-        elif auth.type == AuthType.BEARER and auth.value_env:
-            ctx["env_var"] = auth.value_env
-        elif auth.type == AuthType.BASIC:
-            if auth.username_env:
-                ctx["env_var_username"] = auth.username_env
-            if auth.password_env:
-                ctx["env_var_password"] = auth.password_env
-        elif auth.type == AuthType.OAUTH2_CLIENT:
-            ctx["auth_method"] = "oauth2_client_credentials"
+        # Build per-credential provenance entries from attempts.  When
+        # attempts is empty (legacy callers, or OAuth2 cache hit) fall
+        # back to the static *_env names so the model still has *some*
+        # provenance to reference.
+        credentials: List[Dict[str, Any]] = []
+        if attempts:
+            for attempt in attempts:
+                source = attempt.source
+                entry: Dict[str, Any] = {
+                    "method": source.method,
+                    "resolved": attempt.resolved,
+                }
+                if source.kind == "env" and source.env_var:
+                    entry["resolved_from"] = f"env://{source.env_var}"
+                    entry["env_var"] = source.env_var
+                elif source.kind == "uri" and source.uri:
+                    entry["resolved_from"] = source.uri
+                if source.rotation_hint:
+                    entry["rotation_hint"] = source.rotation_hint
+                if attempt.token_len is not None:
+                    entry["token_len"] = attempt.token_len
+                if attempt.token_prefix is not None:
+                    entry["token_prefix"] = attempt.token_prefix
+                credentials.append(entry)
+        else:
+            from .types import AuthType
+            if auth.type in (AuthType.API_KEY, AuthType.BEARER) and auth.value_env:
+                credentials.append({"env_var": auth.value_env})
+            elif auth.type == AuthType.BASIC:
+                if auth.username_env:
+                    credentials.append({
+                        "method": "basic.username",
+                        "env_var": auth.username_env,
+                    })
+                if auth.password_env:
+                    credentials.append({
+                        "method": "basic.password",
+                        "env_var": auth.password_env,
+                    })
+
+        if credentials:
+            ctx["credentials"] = credentials
 
         if resolved:
-            ctx["hint"] = (
-                "The credentials were found and sent, but the server "
-                "rejected them (401/403). This usually means the token "
-                "is expired or revoked — not a framework configuration "
-                "problem. Do NOT tell the user their config is broken."
-            )
+            # Build a concrete hint when there's a single secret-like
+            # credential with a known rotation command — that's the
+            # bearer/api_key case where the agent can recommend the
+            # exact `pass edit X/Y` to run.  Multi-credential or
+            # unknown-scheme cases get the generic message.
+            rotation_pointer: Optional[str] = None
+            provenance_pointer: Optional[str] = None
+            if attempts:
+                secret_attempts = [
+                    a for a in attempts if a.token_prefix is not None
+                ]
+                if len(secret_attempts) == 1:
+                    a = secret_attempts[0]
+                    if a.source.uri:
+                        provenance_pointer = a.source.uri
+                    elif a.source.env_var:
+                        provenance_pointer = f"env var {a.source.env_var}"
+                    rotation_pointer = a.source.rotation_hint
+
+            if provenance_pointer and rotation_pointer:
+                ctx["hint"] = (
+                    f"The credentials were resolved from {provenance_pointer} "
+                    f"and sent, but the server rejected them (401/403). "
+                    f"The token is almost certainly stale (expired or revoked). "
+                    f"Rotate it with: `{rotation_pointer}` and retry. "
+                    f"Do NOT tell the user their config is broken."
+                )
+            elif provenance_pointer:
+                ctx["hint"] = (
+                    f"The credentials were resolved from {provenance_pointer} "
+                    f"and sent, but the server rejected them (401/403). "
+                    f"The token is almost certainly stale (expired or revoked). "
+                    f"Ask the user to rotate the credential at the source. "
+                    f"Do NOT tell the user their config is broken."
+                )
+            else:
+                ctx["hint"] = (
+                    "The credentials were found and sent, but the server "
+                    "rejected them (401/403). This usually means the token "
+                    "is expired or revoked — not a framework configuration "
+                    "problem. Do NOT tell the user their config is broken."
+                )
         else:
-            ctx["hint"] = (
-                "The environment variable was not available in this "
-                "session context. This is a session/environment issue, "
-                "not a credential configuration problem. Report it as: "
-                "'environment variable not set in this session.'"
-            )
+            # Resolution failed.  Name the failing source explicitly
+            # when we have it so the user knows whether the issue is a
+            # missing env var or an unregistered secret-URI scheme.
+            failing: Optional[str] = None
+            if attempts:
+                for a in attempts:
+                    if not a.resolved:
+                        failing = a.source.provenance
+                        break
+
+            if failing:
+                ctx["hint"] = (
+                    f"Could not resolve the credential from {failing}. "
+                    f"For env vars: the variable is not set in this "
+                    f"session context. For secret URIs: either no "
+                    f"resolver is registered for the scheme (e.g. "
+                    f"jaato-premium not installed for `pass://`) or the "
+                    f"resolver returned an empty value. This is a "
+                    f"configuration issue, not a stale-credential issue."
+                )
+            else:
+                ctx["hint"] = (
+                    "The environment variable was not available in this "
+                    "session context. This is a session/environment issue, "
+                    "not a credential configuration problem. Report it as: "
+                    "'environment variable not set in this session.'"
+                )
 
         return ctx
 
@@ -1690,10 +1790,14 @@ class ServiceConnectorPlugin:
 
             # Augment 401/403 responses with auth context so the model
             # can diagnose accurately (e.g. "env var not set in this
-            # session" vs "credentials expired").
+            # session" vs "credentials expired").  attempts come back
+            # via response.auth_attempts (populated by ServiceHttpClient
+            # during get_auth_headers).
             if response.status in (401, 403) and service_config and service_config.auth:
                 result["auth_context"] = self._build_auth_context(
-                    service_config, resolved=True
+                    service_config,
+                    resolved=True,
+                    attempts=response.auth_attempts,
                 )
 
             return result
@@ -1701,11 +1805,14 @@ class ServiceConnectorPlugin:
         except AuthError as e:
             # Auth failed before the request — env var missing or
             # placeholder didn't resolve.  Include structured context
-            # so the model reports accurately.
+            # so the model reports accurately.  AuthError carries the
+            # partial attempts list captured up to the failure point.
             result: Dict[str, Any] = {"error": f"Authentication error: {e}"}
             if service_config and service_config.auth:
                 result["auth_context"] = self._build_auth_context(
-                    service_config, resolved=False
+                    service_config,
+                    resolved=False,
+                    attempts=e.attempts,
                 )
             return result
         except HttpClientError as e:

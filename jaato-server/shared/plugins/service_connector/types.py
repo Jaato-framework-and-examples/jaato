@@ -504,6 +504,11 @@ class HttpResponse:
         full_length: Original body length before truncation.
         request_validation: Validation result for the request (if schema exists).
         response_validation: Validation result for the response (if schema exists).
+        auth_attempts: Per-credential resolution attempts that produced
+            the auth headers for this request.  Internal metadata used
+            by ``call_service``'s 401/403 path to build the
+            ``auth_context`` diagnostic — deliberately excluded from
+            :meth:`to_dict` so successful responses don't leak provenance.
     """
     status: int
     headers: Dict[str, str]
@@ -513,9 +518,18 @@ class HttpResponse:
     full_length: Optional[int] = None
     request_validation: Optional[ValidationResult] = None
     response_validation: Optional[ValidationResult] = None
+    # Typed as List[Any] in this module because importing AuthAttempt
+    # would create a types ↔ auth import cycle.  Concrete type is
+    # List[shared.plugins.service_connector.auth.AuthAttempt].
+    auth_attempts: List[Any] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for tool response."""
+        """Convert to dictionary for tool response.
+
+        Note: ``auth_attempts`` is intentionally excluded — provenance
+        metadata is only relevant on the auth-error path and the plugin
+        consumes it directly from the dataclass.
+        """
         result: Dict[str, Any] = {
             "status": self.status,
             "headers": self.headers,
