@@ -1024,6 +1024,7 @@ class SessionManager:
         agent_name: Optional[str] = None,
         workspace_path: Optional[str] = None,
         initial_prompt: Optional[str] = None,
+        initial_history: Optional[List[Any]] = None,
         session_name: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
@@ -1049,6 +1050,15 @@ class SessionManager:
                 cwd if not provided.
             initial_prompt: If set, a ``SendMessageRequest`` is dispatched
                 to the new session immediately after creation.
+            initial_history: Optional list of ``Message`` objects to
+                seed the new session's conversation history with.  Used
+                by spawn-from-snapshot callers (premium handoff via
+                ``fork_session_from_history``, waypoint fork-to-session)
+                so the new agent picks up where another session left off.
+                Loaded after ``server.initialize()`` succeeds and before
+                any ``initial_prompt`` is dispatched.  Typed as ``Any``
+                here to avoid a top-level SDK import; concrete type is
+                ``List[jaato_sdk.plugins.model_provider.types.Message]``.
             session_name: Optional human-readable name.
 
         Returns:
@@ -1064,6 +1074,24 @@ class SessionManager:
         if not session_id:
             return ""
 
+        if initial_history:
+            # Seed history before any model turn fires.  Look up the
+            # session record we just created and call the JaatoSession's
+            # public initial-history primitive.  Any failure is
+            # surfaced — partial state (session created, history not
+            # loaded) would silently mislead the caller.
+            with self._lock:
+                session_record = self._sessions.get(session_id)
+            if session_record is None:
+                logger.error(
+                    "create_headless_session: session %s vanished after "
+                    "create; cannot seed initial_history",
+                    session_id,
+                )
+                return ""
+            jaato_session = session_record.server.get_session()
+            jaato_session.set_initial_history(initial_history)
+
         if initial_prompt:
             from jaato_sdk.events import SendMessageRequest
             self.handle_request(
@@ -1073,6 +1101,57 @@ class SessionManager:
             )
 
         return session_id
+
+    def inject_prompt_to_session(
+        self,
+        target_session_id: str,
+        text: str,
+        source_id: Optional[str] = None,
+        source_type: Optional[Any] = None,
+    ) -> bool:
+        """Deliver a prompt to a loaded session by ID.
+
+        Routing primitive used by daemon extensions (reactor rules,
+        webhook handlers, peer-clustering message routers) that need
+        to deliver a prompt to a session other than the one whose
+        event triggered them.  Generalises ``JaatoSession.inject_prompt``
+        from "self-targeting" to "addressable by ID".
+
+        Thread-safe.  ``inject_prompt`` itself queues mid-turn for
+        busy sessions, so the caller doesn't need to check session
+        state — this method only fails when the target isn't loaded.
+
+        Args:
+            target_session_id: The destination session.  Must be loaded
+                in ``self._sessions`` (not just persisted on disk —
+                attach first if needed).
+            text: The prompt to inject.
+            source_id: Identifier of the sender (e.g. ``"reactor"``,
+                ``"webhook:github"``).  Defaults to ``"unknown"``
+                downstream.
+            source_type: ``SourceType`` enum value controlling priority
+                (USER/PARENT/SYSTEM/EVENT/CHILD).  Defaults to USER
+                downstream.  Typed as ``Any`` here to avoid a top-level
+                import of the SDK enum.
+
+        Returns:
+            ``True`` if the prompt was delivered (queued or fired
+            immediately), ``False`` if the session isn't loaded or
+            doesn't yet have an active ``JaatoSession``.
+        """
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return False
+        try:
+            jaato_session = session.server.get_session()
+        except RuntimeError:
+            # Session record exists but no underlying JaatoSession yet.
+            return False
+        jaato_session.inject_prompt(
+            text, source_id=source_id, source_type=source_type
+        )
+        return True
 
     def get_session_workspace(self, session_id: str) -> Optional[str]:
         """Get the workspace path of a session.

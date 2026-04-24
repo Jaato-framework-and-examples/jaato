@@ -7603,6 +7603,52 @@ NOTES
         finally:
             self._fork_gate.set()
 
+    def set_initial_history(self, messages: List[Message]) -> None:
+        """Seed an empty session with replayed conversation history.
+
+        Pre-turn-loop primitive used by spawn-from-snapshot callers
+        (premium handoff via ``fork_session_from_history``, waypoint
+        fork-to-session, test harnesses).  The session must be **idle**
+        and its history must be **empty** at call time — both are true
+        for a freshly created session before any user/agent turn.
+
+        Replayed messages may include tool-use / tool-result blocks for
+        tools the new session's profile doesn't expose.  These remain
+        as inert context for the model to read; we deliberately do not
+        strip them, so handoff preserves the source agent's reasoning
+        trace.  If a provider chokes on unknown tool references at
+        sampling time, that's a provider-specific concern surfaced via
+        the normal tool-result reconciliation path on the first new
+        turn.
+
+        The session's system instruction is NOT touched — it comes
+        from the new session's own agent/profile, independently of the
+        replayed user/assistant turns.
+
+        Args:
+            messages: The conversation history to seed.  Caller owns
+                the list; a shallow copy is taken.
+
+        Raises:
+            RuntimeError: If the session is not idle or its history
+                already contains messages.  This is a defensive guard
+                — the right place to call this method is between
+                ``server.initialize()`` and any ``inject_prompt`` /
+                ``handle_request``.
+        """
+        if self._is_running:
+            raise RuntimeError(
+                "set_initial_history requires an idle session; this one "
+                "is mid-turn."
+            )
+        if self._history.messages_ref:
+            raise RuntimeError(
+                "set_initial_history requires an empty history; this "
+                f"session already has {len(self._history.messages_ref)} "
+                "messages."
+            )
+        self._history.replace(messages)
+
     def resolve_fork_point(
         self,
         history: List[Message],

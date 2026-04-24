@@ -809,3 +809,70 @@ class TestContextLimitRecovery:
 
         # Should return False (GC didn't help)
         assert result is False
+
+
+class TestSetInitialHistory:
+    """set_initial_history is the spawn-from-snapshot primitive consumed by
+    create_headless_session(initial_history=...) and (downstream) premium's
+    fork_session_from_history reactor action."""
+
+    def _fresh_session(self):
+        mock_runtime = MagicMock()
+        return JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+    def _make_user_message(self, text: str):
+        from jaato_sdk.plugins.model_provider.types import Message
+        return Message.from_text(Role.USER, text)
+
+    def test_seeds_empty_history(self):
+        session = self._fresh_session()
+        msgs = [
+            self._make_user_message("hello"),
+            self._make_user_message("world"),
+        ]
+
+        session.set_initial_history(msgs)
+
+        assert len(session._history.messages_ref) == 2
+        assert session._history.messages_ref[0].parts[0].text == "hello"
+        assert session._history.messages_ref[1].parts[0].text == "world"
+
+    def test_takes_a_copy_not_aliased(self):
+        """Caller mutations to the source list must not bleed into the
+        seeded history (delegated to SessionHistory.replace)."""
+        session = self._fresh_session()
+        msgs = [self._make_user_message("first")]
+
+        session.set_initial_history(msgs)
+        msgs.append(self._make_user_message("second"))
+
+        assert len(session._history.messages_ref) == 1
+
+    def test_rejects_non_empty_history(self):
+        """Defensive guard: refuse to overwrite an existing conversation."""
+        session = self._fresh_session()
+        session._history.append(self._make_user_message("preexisting"))
+
+        with pytest.raises(RuntimeError, match="empty history"):
+            session.set_initial_history(
+                [self._make_user_message("attempted overwrite")]
+            )
+
+    def test_rejects_mid_turn_session(self):
+        """Defensive guard: refuse if session is in the middle of a turn."""
+        session = self._fresh_session()
+        session._is_running = True
+
+        with pytest.raises(RuntimeError, match="idle session"):
+            session.set_initial_history([self._make_user_message("nope")])
+
+    def test_does_not_touch_system_instruction(self):
+        """The new session's system instruction is independent of the
+        replayed user/assistant turns — confirm we don't accidentally
+        write to it."""
+        session = self._fresh_session()
+        session._system_instruction = "you are agent X"
+
+        session.set_initial_history([self._make_user_message("turn 1")])
+
+        assert session._system_instruction == "you are agent X"
