@@ -597,6 +597,21 @@ class SubagentProfile:
     inherits: Optional[List[str]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
     runtime_limits: Optional[RuntimeLimits] = None
+    # Per-turn model-tier config.  Empty dict means "single-model
+    # mode" — the framework falls back to env vars (JAATO_TIER_*) at
+    # session-init time, and from there to single-model behavior using
+    # ``model``.  When non-empty, ``model`` is silently ignored (with a
+    # warning at load time) because the active model is selected per
+    # turn from ``model_tiers[<active_tier>]``.
+    #
+    # Single-level dict mixing tier→model entries (keys in
+    # ``VALID_TIER_NAMES``) with reserved control keys (``initial`` /
+    # ``fallback``).  Each tier entry is either a model-name string or
+    # a dict with ``model`` (required) and ``provider`` (optional, V1
+    # enforces same-provider across all tiers).  See
+    # ``shared/model_tiers.py`` for the resolver and validation, and
+    # ``project_backlog_per_turn_model`` for the full design.
+    model_tiers: Dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -1008,6 +1023,18 @@ def _scan_profiles_dir(
         raw_env = data.get('env', {})
         env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
 
+        raw_model_tiers = data.get('model_tiers') or {}
+        model_tiers = (
+            {str(k): v for k, v in raw_model_tiers.items()}
+            if isinstance(raw_model_tiers, dict) else {}
+        )
+        if model_tiers and data.get('model'):
+            logger.warning(
+                "Profile '%s' declares both 'model' and 'model_tiers'; "
+                "'model' will be ignored — the active model is selected "
+                "per turn from 'model_tiers[<active_tier>]'.", name,
+            )
+
         profiles[name] = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -1023,6 +1050,7 @@ def _scan_profiles_dir(
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             runtime_limits=runtime_limits,
+            model_tiers=model_tiers,
         )
         if data.get('system_instructions'):
             import warnings
@@ -1152,6 +1180,17 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         raw_env = data.get('env', {})
         env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
 
+        raw_model_tiers = data.get('model_tiers') or {}
+        model_tiers = (
+            {str(k): v for k, v in raw_model_tiers.items()}
+            if isinstance(raw_model_tiers, dict) else {}
+        )
+        if model_tiers and data.get('model'):
+            logger.warning(
+                "Premium profile '%s' declares both 'model' and 'model_tiers'; "
+                "'model' will be ignored.", name,
+            )
+
         profile = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -1167,6 +1206,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             runtime_limits=runtime_limits,
+            model_tiers=model_tiers,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -1398,6 +1438,17 @@ class SubagentConfig:
             raw_env = profile_data.get('env', {})
             env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
 
+            raw_model_tiers = profile_data.get('model_tiers') or {}
+            model_tiers = (
+                {str(k): v for k, v in raw_model_tiers.items()}
+                if isinstance(raw_model_tiers, dict) else {}
+            )
+            if model_tiers and profile_data.get('model'):
+                logger.warning(
+                    "Inline profile '%s' declares both 'model' and "
+                    "'model_tiers'; 'model' will be ignored.", name,
+                )
+
             profiles[name] = SubagentProfile(
                 name=name,
                 description=profile_data.get('description', ''),
@@ -1413,6 +1464,7 @@ class SubagentConfig:
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
                 runtime_limits=runtime_limits,
+                model_tiers=model_tiers,
             )
 
         return cls(

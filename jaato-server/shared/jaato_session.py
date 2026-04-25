@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from .plugins.subagent.ui_hooks import AgentUIHooks
     from .plugins.telemetry import TelemetryPlugin
     from .plugins.thinking import ThinkingPlugin
+    from .model_tiers import ModelTierConfig
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -225,6 +226,17 @@ class JaatoSession:
         # construction time; when present the legacy ``summary: str`` parameter
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
+
+        # Per-turn model-tier config.  ``_tier_config`` is the resolved
+        # view (built from profile.tiers or env vars).  ``_active_tier``
+        # tracks which tier the session is currently operating in;
+        # mutated by the ``enter_tier`` lifecycle tool, consulted by
+        # provider model selection and by system-instruction assembly.
+        # Both ``None`` means single-model mode — no ``enter_tier`` tool
+        # is registered, no system-prompt augmentation, the provider
+        # uses the legacy ``self._model_name``.
+        self._tier_config: Optional['ModelTierConfig'] = None
+        self._active_tier: Optional[str] = None
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
@@ -1262,6 +1274,7 @@ class JaatoSession:
         suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
+        tier_config: Optional['ModelTierConfig'] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1309,6 +1322,23 @@ class JaatoSession:
         # LifecycleTools at construction time using session.workspace_path)
         if completion_payload_schema is not None:
             self._completion_payload_schema = completion_payload_schema
+
+        # Tier mode: when a tier_config is supplied, the session's
+        # initial model is overridden by the initial tier's model so the
+        # provider connects to the right model from turn 0.  The active
+        # tier is set to the config's initial_tier.  When None, the
+        # session stays in single-model mode (legacy behaviour).
+        if tier_config is not None:
+            self._tier_config = tier_config
+            self._active_tier = tier_config.initial_tier
+            initial_model = tier_config.tiers[tier_config.initial_tier].model
+            if self._model_name and self._model_name != initial_model:
+                logger.info(
+                    "Tier mode active: overriding session model %s with "
+                    "initial tier %s's model %s",
+                    self._model_name, tier_config.initial_tier, initial_model,
+                )
+            self._model_name = initial_model
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
@@ -4129,7 +4159,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                                 on_chunk=streaming_callback,
                                 cancel_token=self._cancel_token,
@@ -4150,7 +4180,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
                             context="complete",
@@ -5860,7 +5890,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
@@ -5877,7 +5907,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
                         context="complete_tool_results",
@@ -6008,7 +6038,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
@@ -6027,7 +6057,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
                         context="complete_mid_turn",
@@ -6987,7 +7017,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
                         context="complete_with_parts",
@@ -7137,7 +7167,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
                             context="complete_tool_results_parts",
@@ -7618,12 +7648,107 @@ NOTES
         try:
             result = self._provider.complete(
                 messages,
-                system_instruction=self._system_instruction,
+                system_instruction=self._get_effective_system_instruction(),
             )
             response = self._unwrap_turn_result(result)
             return response.get_text() or ""
         finally:
             self._fork_gate.set()
+
+    def _get_effective_system_instruction(self) -> Optional[str]:
+        """System instruction to send to the provider on this turn.
+
+        Equal to the assembled :attr:`_system_instruction` plus a single
+        line naming the current tier when tier mode is active.
+        Recomputed dynamically (not stored on ``_system_instruction``)
+        so tier switches take effect immediately without re-assembling
+        the whole prompt — and so the assembled instruction stays a
+        stable cache anchor for providers that key prompt cache on it.
+        """
+        if self._active_tier is None:
+            return self._system_instruction
+        tier_line = (
+            f"You are currently operating in the `{self._active_tier}` tier."
+        )
+        if self._system_instruction:
+            return self._system_instruction + "\n\n" + tier_line
+        return tier_line
+
+    def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
+        """Switch the session's active model tier.
+
+        Called by the ``enter_tier`` lifecycle tool.  Resolves the
+        requested tier through ``_tier_config.model_for`` (which routes
+        to the configured fallback when the tier isn't declared),
+        re-points the active provider at the new tier's model via
+        ``provider.connect(model, skip_model_test=True)`` (cheap — no
+        network round-trip, just sets ``self._model_name`` on the
+        provider), updates ``_active_tier``, and returns a structured
+        result the tool surfaces back to the model.
+
+        The returned dict tells the model exactly what happened:
+            * ``status``: ``"switched"`` (tier changed),
+              ``"already_at_tier"`` (idempotent no-op), or
+              ``"fallback_used"`` (requested tier wasn't declared, fell
+              back to ``tier_config.tier_fallback``).
+            * ``active_tier``: the actual tier the session is now in.
+            * ``requested_tier``: what the model asked for (helps the
+              model self-correct when fallback fired).
+            * ``model``: the model name now in use.
+
+        Raises:
+            RuntimeError: If tier mode isn't active for this session
+                (the ``enter_tier`` tool shouldn't be registered then,
+                so this is a programmer-error guard).
+            ValueError: If ``requested_tier`` isn't one of the framework's
+                three valid names; raised through to surface as an
+                ``error`` in the tool result.
+        """
+        if self._tier_config is None or self._active_tier is None:
+            raise RuntimeError(
+                "switch_tier called but session is in single-model mode "
+                "(no tier config); enter_tier tool should not be registered"
+            )
+
+        actual_tier, entry = self._tier_config.model_for(requested_tier)
+
+        if actual_tier == self._active_tier:
+            return {
+                "status": "already_at_tier",
+                "active_tier": actual_tier,
+                "requested_tier": requested_tier,
+                "model": entry.model,
+            }
+
+        if self._provider is not None:
+            try:
+                self._provider.connect(entry.model, skip_model_test=True)
+            except Exception as exc:
+                logger.warning(
+                    "switch_tier: provider.connect(%s) failed: %s",
+                    entry.model, exc,
+                )
+                raise
+
+        previous_tier = self._active_tier
+        self._active_tier = actual_tier
+        self._model_name = entry.model
+
+        logger.info(
+            "Tier switch: %s → %s (model %s)",
+            previous_tier, actual_tier, entry.model,
+        )
+
+        return {
+            "status": (
+                "fallback_used"
+                if actual_tier != requested_tier
+                else "switched"
+            ),
+            "active_tier": actual_tier,
+            "requested_tier": requested_tier,
+            "model": entry.model,
+        }
 
     def set_initial_history(self, messages: List[Message]) -> None:
         """Seed an empty session with replayed conversation history.

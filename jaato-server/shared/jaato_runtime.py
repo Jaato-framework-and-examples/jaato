@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .plugins.permission import PermissionPlugin
     from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
+    from .model_tiers import ModelTierConfig
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +845,7 @@ class JaatoRuntime:
         suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
+        tier_config: Optional['ModelTierConfig'] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -917,6 +919,7 @@ class JaatoRuntime:
             suppress_base_instructions=suppress_base_instructions,
             workspace_path=workspace_path,
             completion_payload_schema=completion_payload_schema,
+            tier_config=tier_config,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

@@ -1585,6 +1585,30 @@ class JaatoServer:
                     self._profile.completion_payload_schema
                 )
 
+        # Per-turn model-tier config: profile-declared model_tiers win;
+        # otherwise env vars (JAATO_TIER_*) are consulted; otherwise
+        # the session stays in single-model mode (no enter_tier tool,
+        # no system-prompt augmentation).  Resolved here so the
+        # env-var fallback works regardless of whether a profile is
+        # set at all.
+        from shared.model_tiers import ModelTierConfig
+        try:
+            tier_config = ModelTierConfig.resolve(
+                profile_model_tiers=(
+                    self._profile.model_tiers
+                    if self._profile and self._profile.model_tiers
+                    else None
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Tier config rejected for session (falling back to "
+                "single-model mode): %s", exc,
+            )
+            tier_config = None
+        if tier_config is not None:
+            kwargs["tier_config"] = tier_config
+
         # Apply the per-session system-instruction knobs last so they
         # win over any profile-supplied system_instructions.  Distinct
         # from None (which means "no override") — the empty string is a

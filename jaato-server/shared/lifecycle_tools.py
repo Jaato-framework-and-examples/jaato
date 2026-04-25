@@ -92,7 +92,7 @@ class LifecycleTools:
                 "required": ["payload"],
             }
 
-        return [
+        schemas: List[ToolSchema] = [
             ToolSchema(
                 name="signal_completion",
                 description=(
@@ -106,11 +106,120 @@ class LifecycleTools:
             ),
         ]
 
+        # Per-turn model-tier switching.  Only registered when the
+        # session has tier mode active — single-model sessions don't
+        # see this tool at all (no protocol noise, full backwards
+        # compat).  See ``shared/model_tiers.py`` for the resolved
+        # config and ``project_backlog_per_turn_model.md`` for the design.
+        if getattr(self._session, '_tier_config', None) is not None:
+            schemas.append(self._enter_tier_schema())
+
+        return schemas
+
+    def _enter_tier_schema(self) -> ToolSchema:
+        """Build the ``enter_tier`` tool schema.
+
+        Three named tiers (``planner`` / ``dispatcher`` / ``executor``)
+        constrain the parameter via ``oneOf`` so providers that enforce
+        tool params at sampling time reject invalid names before they
+        ever reach the executor.  The description block enumerates each
+        tier's role explicitly — that's the model's main protocol
+        reference once the system-prompt augmentation reminds it of
+        which tier it currently occupies.
+        """
+        from .model_tiers import TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR
+        return ToolSchema(
+            name="enter_tier",
+            description=(
+                "Switch the session's active model tier.  Three tiers "
+                "are available; pick the one that matches what you're "
+                "about to do:\n\n"
+                "* `planner` — deep thought, multi-step reasoning, "
+                "complex problem decomposition.  Most expensive; use "
+                "when you genuinely need the strongest model.\n"
+                "* `dispatcher` — coordination, light reasoning, "
+                "deciding which tools to call.  Default starting tier.\n"
+                "* `executor` — mechanical tool calls and result "
+                "interpretation when the plan is clear.  Cheapest; use "
+                "when the work doesn't need reasoning.\n\n"
+                "Switching is cheap (no network round-trip; just "
+                "re-points the active provider).  After your work at "
+                "the new tier is done, switch back via another "
+                "`enter_tier` call.  Calling with the tier you're "
+                "already in is a no-op."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "enum": [TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR],
+                        "description": (
+                            "Target tier name.  Must be one of "
+                            f"{TIER_PLANNER}/{TIER_DISPATCHER}/{TIER_EXECUTOR}."
+                        ),
+                    },
+                },
+                "required": ["name"],
+            },
+            discoverability="core",
+        )
+
     def get_executors(self) -> Dict[str, Any]:
-        return {"signal_completion": self._execute_signal_completion}
+        executors: Dict[str, Any] = {
+            "signal_completion": self._execute_signal_completion,
+        }
+        if getattr(self._session, '_tier_config', None) is not None:
+            executors["enter_tier"] = self._execute_enter_tier
+        return executors
 
     def get_auto_approved_tools(self) -> List[str]:
-        return ["signal_completion"]
+        approved = ["signal_completion"]
+        if getattr(self._session, '_tier_config', None) is not None:
+            approved.append("enter_tier")
+        return approved
+
+    def _execute_enter_tier(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Switch the session's active tier per the model's request.
+
+        Validates the ``name`` argument against the three valid tier
+        identifiers (the schema's ``enum`` already constrains compliant
+        providers, but defence-in-depth — providers without enum
+        enforcement could leak through), then delegates to
+        ``JaatoSession.switch_tier`` for the actual provider mutation.
+        Tool errors are returned as ``error`` fields the model can
+        read and self-correct from.
+        """
+        from .model_tiers import VALID_TIER_NAMES
+
+        requested = args.get("name")
+        if not isinstance(requested, str) or not requested.strip():
+            return {
+                "error": "invalid_argument",
+                "message": "enter_tier requires 'name' to be a non-empty string.",
+            }
+        requested = requested.strip()
+        if requested not in VALID_TIER_NAMES:
+            return {
+                "error": "invalid_tier",
+                "message": (
+                    f"unknown tier {requested!r}; "
+                    f"must be one of {sorted(VALID_TIER_NAMES)}."
+                ),
+            }
+        try:
+            return self._session.switch_tier(requested)
+        except RuntimeError as exc:
+            return {"error": "tier_mode_inactive", "message": str(exc)}
+        except Exception as exc:
+            logger.warning("enter_tier failed for tier %r: %s", requested, exc)
+            return {
+                "error": "switch_failed",
+                "message": (
+                    f"Could not switch to tier {requested!r}: {exc}. "
+                    f"The session is still at its previous tier."
+                ),
+            }
 
     def _execute_signal_completion(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Emit AgentCompletedEvent for the calling agent.
