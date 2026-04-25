@@ -67,7 +67,7 @@ import os
 import platform
 import shutil
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 # RuntimeLimits is defined in shared/ so SubagentProfile can reference it
 # statically.  We re-export it here so callers that already import from
@@ -319,6 +319,70 @@ class CgroupsManager:
                 f.write(str(os.getpid()))
 
         return _attach
+
+    # ------------------------------------------------------------------
+    # Telemetry primitives
+    # ------------------------------------------------------------------
+
+    def read_event_counts(self, session_id: str) -> Optional[Dict[str, int]]:
+        """Snapshot ``cgroup.events`` for a session's slice.
+
+        ``cgroup.events`` is a kernel-managed file in every cgroup v2
+        directory containing one ``key value`` pair per line.  The
+        keys defined by the kernel (Linux ≥ 4.20):
+
+        * ``populated`` — 1 while the cgroup or any descendant has at
+          least one running process; 0 otherwise.
+        * ``frozen``    — 1 when the cgroup is in the freezer state.
+
+        Plus, when the memory controller reports OOM events:
+
+        * ``oom``        — count of OOM events the cgroup has hit.
+        * ``oom_kill``   — count of processes killed by the OOM-killer
+          inside this cgroup.
+
+        Use case: callers wishing to attribute a non-zero subprocess
+        exit code to a kernel-enforced limit (e.g. a SIGKILL'd child
+        whose ``oom_kill`` counter incremented during its lifetime)
+        can snapshot before spawn and compare after wait().  The
+        counter is monotonic for the lifetime of the cgroup, so a
+        ``delta > 0`` on the relevant key means "this child contributed
+        to that event" — modulo the inherent attribution race when
+        multiple children run in parallel under the same cgroup.
+
+        Returns:
+            A dict of ``{key: int}`` for every line in ``cgroup.events``,
+            or ``None`` if cgroups are unavailable, the per-session
+            cgroup doesn't exist (e.g. session has no kernel limits),
+            or the file can't be read.  Never raises — telemetry must
+            not break the call path it's observing.
+        """
+        if not self.is_available():
+            return None
+        cg_path = self.get_cgroup_path(session_id)
+        events_file = cg_path / "cgroup.events"
+        if not events_file.exists():
+            return None
+        try:
+            text = events_file.read_text()
+        except OSError as exc:
+            logger.debug("read_event_counts: %s read failed: %s", events_file, exc)
+            return None
+
+        counts: Dict[str, int] = {}
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            key, value = parts
+            try:
+                counts[key] = int(value)
+            except ValueError:
+                # Skip non-integer values (no current kernel keys
+                # produce them, but we don't want a future format
+                # change to break telemetry callers).
+                continue
+        return counts
 
     # ------------------------------------------------------------------
     # Internals

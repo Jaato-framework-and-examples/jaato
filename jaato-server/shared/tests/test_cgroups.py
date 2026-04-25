@@ -330,6 +330,91 @@ class TestAttachPid:
         assert procs.read_text() == "99999"
 
 
+class TestReadEventCounts:
+    """Tests for ``CgroupsManager.read_event_counts`` — the telemetry
+    primitive that surfaces ``cgroup.events`` (populated, oom_kill,
+    etc.) so callers can attribute kernel-killed exits.
+    """
+
+    def test_unavailable_returns_none(self, manager):
+        manager._available = False
+        assert manager.read_event_counts("s1") is None
+
+    def test_missing_cgroup_returns_none(self, manager):
+        # Session never provisioned a cgroup — read returns None,
+        # not a crash.  This is the "session has only app-layer
+        # limits" path.
+        manager._available = True
+        assert manager.read_event_counts("never-provisioned") is None
+
+    def test_missing_events_file_returns_none(self, manager):
+        # Cgroup exists but cgroup.events file is absent (older
+        # kernel?  partially-constructed fake?) — read returns None.
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        # Provisioning doesn't auto-create cgroup.events; the kernel
+        # would in real cgroupfs.  No file → None.
+        assert manager.read_event_counts("s1") is None
+
+    def test_parses_kernel_format(self, manager):
+        # cgroup.events is `key value\n` per line.  Verify the parser
+        # picks up all keys and converts to int.
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        (cg / "cgroup.events").write_text(
+            "populated 1\n"
+            "frozen 0\n"
+            "oom 2\n"
+            "oom_kill 3\n"
+        )
+        counts = manager.read_event_counts("s1")
+        assert counts == {
+            "populated": 1,
+            "frozen": 0,
+            "oom": 2,
+            "oom_kill": 3,
+        }
+
+    def test_skips_malformed_lines(self, manager):
+        # A future kernel could add non-integer values or
+        # multi-token formats.  We must not crash — skip the line.
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        (cg / "cgroup.events").write_text(
+            "populated 1\n"
+            "future_key not_an_int\n"
+            "weird three tokens here\n"
+            "oom_kill 0\n"
+        )
+        counts = manager.read_event_counts("s1")
+        assert counts == {"populated": 1, "oom_kill": 0}
+
+    def test_empty_file_returns_empty_dict(self, manager):
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        (cg / "cgroup.events").write_text("")
+        # Distinct from None — file exists but has no content.
+        assert manager.read_event_counts("s1") == {}
+
+    def test_attribution_pattern_works(self, manager):
+        # The intended use: snapshot before spawn, snapshot after
+        # wait, compare deltas.  The kernel writes are monotonic.
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        (cg / "cgroup.events").write_text("oom_kill 0\n")
+
+        before = manager.read_event_counts("s1")
+        # Simulate the kernel bumping the counter mid-call.
+        (cg / "cgroup.events").write_text("oom_kill 2\n")
+        after = manager.read_event_counts("s1")
+
+        assert after["oom_kill"] - before["oom_kill"] == 2
+
+
 class TestMakeAttachCallback:
     def test_unavailable_returns_noop(self, manager):
         manager._available = False
