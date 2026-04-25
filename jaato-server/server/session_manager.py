@@ -790,6 +790,7 @@ class SessionManager:
         agent_params: Optional[Dict[str, str]] = None,
         system_instruction_override: Optional[str] = None,
         suppress_base_instructions: bool = False,
+        initial_session_state: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -823,6 +824,22 @@ class SessionManager:
                 window (the BASE layer is typically the single biggest
                 token consumer).  Ignored when ``system_instruction_override``
                 is also set.
+            initial_session_state: Optional opaque dict seeded onto the
+                new session's session-attached-state container BEFORE
+                ``_run_session_hooks`` fires.  Consumer hooks read keys
+                via ``session.get_session_state(...)`` to rebuild
+                runtime structure (e.g. premium pseudonymization
+                instantiates a ``PseudonymTable`` from the encrypted
+                blob carried under ``"pseudonym_table"`` and registers
+                a provider for it on the new session).  Forking the
+                CURRENT state of an existing session is the caller's
+                job: snapshot the source via
+                ``source.get_all_session_state()`` before calling this
+                method (the snapshot invokes registered providers so
+                live values are captured, not stale set-state values).
+                Values must be JSON-serialisable; encrypt before
+                attach if confidentiality is needed (the framework
+                treats values as opaque).
 
         Returns:
             The session ID (empty string on failure).
@@ -972,6 +989,21 @@ class SessionManager:
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
 
+        # Seed session-attached state BEFORE hooks fire.  Consumer
+        # hooks (e.g. premium pseudonymization) read these keys via
+        # session.get_session_state(...) to rebuild runtime structure
+        # and register providers for incrementally-mutated state.  Any
+        # JSON-serialisability error surfaces here at the call site
+        # (set_session_state validates the value at attach time).
+        if initial_session_state:
+            try:
+                jaato_session = server.get_session()
+            except RuntimeError:
+                jaato_session = None
+            if jaato_session is not None:
+                for key, value in initial_session_state.items():
+                    jaato_session.set_session_state(key, value)
+
         # Run session hooks after the Session is stored so hooks can
         # call get_session() to modify session attributes (e.g. sandbox_mode).
         self._run_session_hooks(server, session_id)
@@ -1025,6 +1057,7 @@ class SessionManager:
         workspace_path: Optional[str] = None,
         initial_prompt: Optional[str] = None,
         initial_history: Optional[List[Any]] = None,
+        initial_session_state: Optional[Dict[str, Any]] = None,
         session_name: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
@@ -1059,6 +1092,16 @@ class SessionManager:
                 any ``initial_prompt`` is dispatched.  Typed as ``Any``
                 here to avoid a top-level SDK import; concrete type is
                 ``List[jaato_sdk.plugins.model_provider.types.Message]``.
+            initial_session_state: Optional opaque dict seeded onto the
+                new session's session-attached-state container BEFORE
+                its session-hook fires.  Threaded through to
+                :meth:`create_session`; see that method's docstring for
+                semantics and the fork-carry contract.  Forking the
+                CURRENT state of an existing session is the caller's
+                job — snapshot the source via
+                ``source.get_all_session_state()`` first so the dict
+                reflects live values (registered providers are
+                invoked), not stale set-state.
             session_name: Optional human-readable name.
 
         Returns:
@@ -1070,6 +1113,7 @@ class SessionManager:
             workspace_path=workspace_path,
             profile_name=profile_name,
             agent_name=agent_name,
+            initial_session_state=initial_session_state,
         )
         if not session_id:
             return ""

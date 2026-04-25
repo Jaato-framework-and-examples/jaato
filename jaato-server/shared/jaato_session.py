@@ -247,6 +247,31 @@ class JaatoSession:
         # as parameters to stateless complete().
         self._history = SessionHistory()
 
+        # Session-attached state — opaque per-key storage that
+        # extensions persist alongside the journal and that fork
+        # primitives carry across to the new session.  Values must be
+        # JSON-serialisable (extensions encrypt before attach if they
+        # need confidentiality — the framework treats values as
+        # opaque).  Two write modes coexist:
+        #
+        # ``_session_state`` — explicit values pushed via
+        # ``set_session_state(key, value)``.  Right shape for static
+        # or rarely-mutated state (audit chain head, version markers).
+        #
+        # ``_state_providers`` — callbacks registered via
+        # ``register_session_state_provider(key, fn)`` that the
+        # framework invokes at journal-save / waypoint-snapshot /
+        # fork-snapshot time to obtain the current value.  Right
+        # shape for incrementally-mutated state (e.g.
+        # pseudonymization lookup table that grows turn-by-turn) where
+        # forcing the consumer to re-attach after every mutation
+        # would scatter the persistence concern across every mutation
+        # site.  A registered provider takes precedence over any
+        # value previously set via ``set_session_state`` for the
+        # same key.
+        self._session_state: Dict[str, Any] = {}
+        self._state_providers: Dict[str, Callable[[], Any]] = {}
+
         # Session always owns history and uses stateless provider.complete().
         # Legacy send_message()/send_tool_results() path removed in Phase 4.
 
@@ -1507,6 +1532,14 @@ class JaatoSession:
                         serialize_history(msgs)
                     ),
                     get_turn_index=lambda: self._turn_index,
+                    # Snapshot session-attached state alongside history so
+                    # a fork-from-waypoint primitive can carry extension-
+                    # owned state across the fork (premium pseudonymization
+                    # lookup table, audit chain head, etc.).  Routes
+                    # through get_all_session_state so registered providers
+                    # are invoked — the snapshot reflects live values, not
+                    # stale set-state pushes.
+                    get_session_state=self.get_all_session_state,
                 )
 
         # Auto-wire plugins that need session access
@@ -6776,6 +6809,108 @@ NOTES
         """
         self._history.set_raw_view_transformer(fn)
 
+    # ─── Session-attached state ──────────────────────────────────────
+    #
+    # Generic facility for extensions to attach opaque state to a
+    # session.  The framework owns the storage container, the
+    # persistence path (via the session journal), and the fork-carry
+    # plumbing (via the ``initial_session_state`` kwarg on
+    # ``SessionManager.create_*_session`` and the
+    # ``session_state_snapshot`` field on ``Waypoint``).  Encryption,
+    # schema validation, and cross-session sharing stay out of scope
+    # — extensions handle those.
+
+    def set_session_state(self, key: str, value: Any) -> None:
+        """Attach opaque state under a string key.
+
+        Right shape for **static or rarely-mutated state** (audit chain
+        head, version markers, telemetry counters the consumer updates
+        explicitly).  For **incrementally-mutated state** (e.g. a
+        lookup table that grows turn-by-turn) prefer
+        :meth:`register_session_state_provider` — pushing on every
+        mutation is brittle.
+
+        ``value`` must be JSON-serialisable; non-serialisable values
+        raise ``TypeError`` at attach time so the failure surfaces at
+        the call site rather than at journal-save.
+
+        Setting a key that has a registered provider does not unregister
+        the provider — providers always win for both reads and
+        snapshot-for-persistence.  The pushed value is retained as a
+        fallback that surfaces only if the provider is later
+        unregistered.
+        """
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"set_session_state({key!r}): value must be JSON-serialisable "
+                f"(the framework persists session_state as JSON; encrypt before "
+                f"attach if confidentiality is needed). Underlying error: {exc}"
+            ) from exc
+        self._session_state[key] = value
+
+    def register_session_state_provider(
+        self, key: str, fn: Callable[[], Any]
+    ) -> None:
+        """Register a callback returning the current value for ``key``.
+
+        Plug-in surface for **incrementally-mutated state** (e.g. the
+        pseudonymization lookup table that grows whenever a new
+        sensitive value is encountered).  ``fn`` is invoked by the
+        framework at journal-save, waypoint-snapshot, and fork-snapshot
+        time (i.e. inside :meth:`get_all_session_state` /
+        :meth:`get_session_state` for this key) and must return a
+        JSON-serialisable value.  Encryption (if needed) happens inside
+        ``fn`` — the framework treats the return value as opaque JSON.
+
+        At most one provider per key — registering a second time
+        replaces the prior registration.  A registered provider takes
+        precedence over any value previously set via
+        :meth:`set_session_state` for the same key (for both
+        :meth:`get_session_state` reads and snapshot-for-persistence).
+        """
+        if not callable(fn):
+            raise TypeError(
+                f"register_session_state_provider({key!r}): fn must be callable"
+            )
+        self._state_providers[key] = fn
+
+    def get_session_state(self, key: str, default: Any = None) -> Any:
+        """Read the current value for ``key``, or ``default`` if absent.
+
+        If a provider is registered for ``key``, returns the provider's
+        current value (so the read reflects live state, not whatever
+        was last pushed via :meth:`set_session_state`).  Otherwise
+        returns the value last set via :meth:`set_session_state`, or
+        ``default`` if the key has neither.
+        """
+        provider = self._state_providers.get(key)
+        if provider is not None:
+            return provider()
+        if key in self._session_state:
+            return self._session_state[key]
+        return default
+
+    def get_all_session_state(self) -> Dict[str, Any]:
+        """Snapshot of all currently-attached state.
+
+        Invokes every registered provider once (so the snapshot
+        reflects live values at call time, not whatever was last
+        pushed) and merges with set-state values; provider values win
+        on key collision.  Returns a copy — mutation of the returned
+        dict doesn't propagate back into the session.
+
+        This is the right call for fork primitives and the journal
+        save path: it materialises the current state into a plain
+        dict that can be carried across to a new session via
+        ``initial_session_state`` or persisted on disk.
+        """
+        snapshot: Dict[str, Any] = dict(self._session_state)
+        for key, fn in self._state_providers.items():
+            snapshot[key] = fn()
+        return snapshot
+
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
         return list(self._turn_accounting)
@@ -7610,6 +7745,13 @@ NOTES
         if self._session_plugin and hasattr(self._session_plugin, '_session_description'):
             description = self._session_plugin._session_description
 
+        # Snapshot session-attached state at save time.  Invokes every
+        # registered provider so the snapshot reflects live values
+        # (extension-owned incrementally-mutated structures stay
+        # correct without push-on-every-mutation).  Empty dict
+        # collapses to None so old persistence files round-trip
+        # unchanged when nothing has been attached.
+        attached_state = self.get_all_session_state()
         return SessionState(
             session_id=session_id,
             history=self.get_history(),
@@ -7622,12 +7764,25 @@ NOTES
             location=self._runtime.location,
             model=self._model_name,
             description=description,
+            session_state=attached_state if attached_state else None,
         )
 
     def _restore_session_state(self, state: SessionState) -> None:
         """Restore session state from a SessionState."""
         self.reset_session(state.history)
         self._turn_accounting = list(state.turn_accounting)
+        # Re-attach session-state values from the persisted snapshot.
+        # Routes through set_session_state so the JSON-serialisability
+        # check fires (defensive: persisted state should already be
+        # serialisable, but a corrupted file shouldn't silently
+        # inject a non-JSON value into the live container).
+        # Consumer hooks fire via the normal session-creation path
+        # (when the persisted session is loaded by SessionManager) and
+        # can re-register providers / instantiate runtime structures
+        # from the restored values.
+        if state.session_state:
+            for key, value in state.session_state.items():
+                self.set_session_state(key, value)
 
     def _notify_session_turn_complete(self) -> None:
         """Notify session plugin that a turn completed."""

@@ -87,6 +87,14 @@ class WaypointPlugin:
         self._get_history: Optional[Callable[[], List["Message"]]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
         self._get_turn_index: Optional[Callable[[], int]] = None
+        # Optional snapshotter for session-attached state (extension-owned
+        # opaque dict).  Wired from JaatoSession alongside the history
+        # callbacks so the manager can capture session_state_snapshot on
+        # waypoint create — required for fork-from-waypoint to carry
+        # extension state across the fork (e.g. premium pseudonymization
+        # lookup table).  None means the manager skips state capture
+        # (legacy callers / tests that don't wire this).
+        self._get_session_state: Optional[Callable[[], Dict[str, Any]]] = None
 
         # Pending restore notification for prompt enrichment
         self._pending_restore_notification: Optional[Dict[str, Any]] = None
@@ -174,6 +182,12 @@ class WaypointPlugin:
                 serialize_history=self._serialize_history,
             )
 
+        # Wire up the session-state callback if it was set before the manager
+        # was created.  Required for waypoints to capture extension-owned
+        # session-attached state.
+        if self._get_session_state is not None:
+            self._manager.set_session_state_callback(self._get_session_state)
+
         return True
 
     def shutdown(self) -> None:
@@ -187,6 +201,7 @@ class WaypointPlugin:
         get_history: Callable[[], List["Message"]],
         serialize_history: Callable[[List["Message"]], str],
         get_turn_index: Optional[Callable[[], int]] = None,
+        get_session_state: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         """Set callbacks for session state access.
 
@@ -197,16 +212,30 @@ class WaypointPlugin:
             get_history: Returns current conversation history.
             serialize_history: Converts history to JSON string.
             get_turn_index: Returns current turn index (optional).
+            get_session_state: Returns the session's currently-attached
+                opaque state as a JSON-serialisable dict (typically
+                ``JaatoSession.get_all_session_state``, which invokes
+                registered providers so the snapshot is live).  When
+                provided, the waypoint manager captures the dict into
+                ``Waypoint.session_state_snapshot`` at create time so
+                a fork-from-waypoint primitive can replay extension-
+                owned state (e.g. premium pseudonymization lookup
+                table) across the fork.  When ``None``, the manager
+                skips state capture — backward-compatible for
+                callers that haven't been updated.
         """
         self._get_history = get_history
         self._serialize_history = serialize_history
         self._get_turn_index = get_turn_index
+        self._get_session_state = get_session_state
 
         if self._manager:
             self._manager.set_history_callbacks(
                 get_history=get_history,
                 serialize_history=serialize_history,
             )
+            if get_session_state is not None:
+                self._manager.set_session_state_callback(get_session_state)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for model waypoint access.

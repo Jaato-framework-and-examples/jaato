@@ -206,7 +206,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.1',  # Bumped for budget_state and interrupted_turn
+        'version': '2.2',  # Bumped for session_state (extension-attached opaque dict)
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -224,6 +224,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
         'interrupted_turn': state.interrupted_turn,
+        'session_state': state.session_state,
     }
 
 
@@ -262,6 +263,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         workspace_path=data.get('workspace_path'),
         budget_state=data.get('budget_state'),
         interrupted_turn=data.get('interrupted_turn'),
+        session_state=data.get('session_state'),
     )
 
 

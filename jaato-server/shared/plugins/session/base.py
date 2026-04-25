@@ -77,6 +77,21 @@ class SessionState:
     reconnecting clients.
     """
 
+    session_state: Optional[Dict[str, Any]] = None
+    """Snapshot of session-attached state (extension-owned opaque
+    storage) at save time.
+
+    Captured from ``JaatoSession.get_all_session_state()`` — invokes
+    every registered state provider so the snapshot reflects live
+    values, not whatever was last pushed via ``set_session_state``.
+    Persisted as JSON; the framework treats values as opaque
+    (extensions encrypt before attach if confidentiality is needed).
+    On resume, restored by re-attaching each key via
+    ``JaatoSession.set_session_state``; consumer hooks fire and can
+    re-register providers / instantiate runtime structures from the
+    restored values.
+    """
+
 
 @dataclass
 class SessionInfo:
