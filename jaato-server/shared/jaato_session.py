@@ -6718,11 +6718,63 @@ NOTES
     def get_history(self) -> List[Message]:
         """Get current conversation history.
 
-        Returns the session's canonical copy of the history. The session
-        is the sole owner of conversation state; providers receive messages
-        as parameters to ``complete()``.
+        Returns the session's canonical copy of the history.  When an
+        inbound history transformer is registered (e.g. a
+        pseudonymization consumer), this returns the **transformed**
+        view — the form that lives in the canonical container.  Trusted
+        callers that need the un-transformed form should use
+        :meth:`get_history_raw` instead.
+
+        The session is the sole owner of conversation state; providers
+        receive messages as parameters to ``complete()``.
         """
         return self._history.messages
+
+    def get_history_raw(self) -> List[Message]:
+        """Get the trusted-caller view of conversation history.
+
+        When a raw-view transformer is registered on the underlying
+        :class:`SessionHistory`, this returns the result of running
+        each stored Message through that transformer (typically the
+        un-pseudonymized form for premium's user-display swap-back
+        path).  When no transformer is registered, this returns the
+        same data as :meth:`get_history`.
+
+        Trusted callers (user-display renderer, audit logger, the
+        narrow set of components that legitimately need raw values)
+        should call this accessor explicitly so the trust grant is
+        visible at the call site.
+        """
+        return self._history.messages_raw
+
+    def set_history_inbound_transformer(
+        self, fn: Optional[Callable[[Message], Message]]
+    ) -> None:
+        """Register an inbound transformer on the session's history.
+
+        Plug-in surface for pseudonymization / redaction / audit /
+        content-filter consumers that need to transform every Message
+        before it lands in the canonical container.  See
+        :meth:`SessionHistory.set_inbound_transformer` for semantics.
+
+        Premium typically calls this from a session hook
+        (:meth:`SessionManager.add_session_hook`) so the transformer
+        is wired before any user message arrives.
+        """
+        self._history.set_inbound_transformer(fn)
+
+    def set_history_raw_view_transformer(
+        self, fn: Optional[Callable[[Message], Message]]
+    ) -> None:
+        """Register a raw-view transformer on the session's history.
+
+        Plug-in surface paired with :meth:`set_history_inbound_transformer`
+        — when the inbound transformer redacts, the raw-view transformer
+        un-redacts for trusted callers via :meth:`get_history_raw`.
+        See :meth:`SessionHistory.set_raw_view_transformer` for
+        semantics.
+        """
+        self._history.set_raw_view_transformer(fn)
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""

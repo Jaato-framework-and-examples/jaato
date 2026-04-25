@@ -371,3 +371,225 @@ class TestAddModelResponseProvenance:
         session._add_model_response_to_history(response)
 
         assert len(session._history) == 0
+
+
+# ==================== Plug-in Transformer Tests ====================
+#
+# Seat 1 of the four-seat pseudonymization design — see
+# project_backlog_pseudonymization_plugin_surface.md and
+# jaato-premium/docs/design/pseudonymization-four-seat.md.  The
+# transformers are deliberately generic (any per-Message rewrite is
+# allowed); these tests cover the behavioural contract, not specific
+# pseudonymization use cases.
+
+
+def _redact_text(prefix: str):
+    """Build a transformer that prepends a marker to every text part.
+
+    Cheap stand-in for "redact PII" so the tests can verify ordering
+    and chokepoint coverage without pulling in Presidio.
+    """
+    def _fn(msg: Message) -> Message:
+        new_parts = [
+            Part.from_text(prefix + p.text) if p.text else p
+            for p in msg.parts
+        ]
+        return Message(
+            role=msg.role,
+            parts=new_parts,
+            message_id=msg.message_id,
+            model=msg.model,
+            provider=msg.provider,
+        )
+    return _fn
+
+
+class TestSessionHistoryInboundTransformer:
+    """The inbound transformer fires on every append() / replace()
+    before the message lands in the canonical container."""
+
+    def test_unset_inbound_is_identity(self):
+        h = SessionHistory()
+        msg = Message.from_text(Role.USER, "hello")
+        h.append(msg)
+        assert h.messages[0].parts[0].text == "hello"
+
+    def test_inbound_transformer_runs_on_append(self):
+        h = SessionHistory()
+        h.set_inbound_transformer(_redact_text("[REDACTED]"))
+        h.append(Message.from_text(Role.USER, "secret"))
+        assert h.messages[0].parts[0].text == "[REDACTED]secret"
+
+    def test_inbound_transformer_runs_on_replace(self):
+        h = SessionHistory()
+        h.set_inbound_transformer(_redact_text("[R]"))
+        h.replace([
+            Message.from_text(Role.USER, "a"),
+            Message.from_text(Role.MODEL, "b"),
+        ])
+        assert [m.parts[0].text for m in h.messages] == ["[R]a", "[R]b"]
+
+    def test_inbound_transformer_can_be_cleared(self):
+        h = SessionHistory()
+        h.set_inbound_transformer(_redact_text("[R]"))
+        h.append(Message.from_text(Role.USER, "first"))
+        h.set_inbound_transformer(None)
+        h.append(Message.from_text(Role.USER, "second"))
+        assert h.messages[0].parts[0].text == "[R]first"
+        assert h.messages[1].parts[0].text == "second"
+
+    def test_canonical_container_holds_transformed_form(self):
+        """Subsequent reads via every accessor see the transformed view
+        — pop_last, last, messages_ref all return what landed."""
+        h = SessionHistory()
+        h.set_inbound_transformer(_redact_text("[R]"))
+        h.append(Message.from_text(Role.USER, "x"))
+        assert h.last.parts[0].text == "[R]x"
+        assert h.messages_ref[0].parts[0].text == "[R]x"
+        popped = h.pop_last()
+        assert popped.parts[0].text == "[R]x"
+
+    def test_dirty_flag_still_set_after_transform(self):
+        h = SessionHistory()
+        h.set_inbound_transformer(_redact_text("[R]"))
+        assert not h.dirty
+        h.append(Message.from_text(Role.USER, "x"))
+        assert h.dirty
+
+
+class TestSessionHistoryRawViewTransformer:
+    """The raw-view transformer fires when ``messages_raw`` is accessed,
+    giving trusted callers an un-transformed view."""
+
+    def test_unset_raw_view_returns_stored(self):
+        h = SessionHistory()
+        h.append(Message.from_text(Role.USER, "x"))
+        assert h.messages_raw[0].parts[0].text == "x"
+
+    def test_raw_view_transformer_runs_on_each_message(self):
+        h = SessionHistory()
+        h.set_raw_view_transformer(_redact_text("[U]"))
+        h.append(Message.from_text(Role.USER, "stored"))
+        assert h.messages_raw[0].parts[0].text == "[U]stored"
+
+    def test_raw_view_does_not_mutate_stored(self):
+        """Stored messages stay untouched; the transformer runs on
+        each read."""
+        h = SessionHistory()
+        h.set_raw_view_transformer(_redact_text("[U]"))
+        h.append(Message.from_text(Role.USER, "stored"))
+        # Read once — get transformed
+        assert h.messages_raw[0].parts[0].text == "[U]stored"
+        # Stored copy untouched
+        assert h.messages[0].parts[0].text == "stored"
+        assert h.messages_ref[0].parts[0].text == "stored"
+
+    def test_raw_view_transformer_can_be_cleared(self):
+        h = SessionHistory()
+        h.set_raw_view_transformer(_redact_text("[U]"))
+        h.append(Message.from_text(Role.USER, "x"))
+        assert h.messages_raw[0].parts[0].text == "[U]x"
+        h.set_raw_view_transformer(None)
+        assert h.messages_raw[0].parts[0].text == "x"
+
+
+class TestSessionHistoryInboundAndRawViewCompose:
+    """Premium's typical pseudonymization pattern: inbound redacts on
+    write, raw-view un-redacts on trusted read.  Confirms the two
+    transformers compose to round-trip the original value."""
+
+    def test_round_trip_via_lookup_table(self):
+        # Stand-in for premium's PseudonymTable: a dict lookup.
+        table = {}
+        counter = [0]
+
+        def inbound(msg: Message) -> Message:
+            new_parts = []
+            for p in msg.parts:
+                if not p.text:
+                    new_parts.append(p)
+                    continue
+                counter[0] += 1
+                placeholder = f"<TOKEN_{counter[0]}>"
+                table[placeholder] = p.text
+                new_parts.append(Part.from_text(placeholder))
+            return Message(
+                role=msg.role, parts=new_parts,
+                message_id=msg.message_id,
+                model=msg.model, provider=msg.provider,
+            )
+
+        def raw_view(msg: Message) -> Message:
+            new_parts = []
+            for p in msg.parts:
+                if not p.text:
+                    new_parts.append(p)
+                    continue
+                # Replace each placeholder back to its raw value.
+                text = p.text
+                for placeholder, raw in table.items():
+                    text = text.replace(placeholder, raw)
+                new_parts.append(Part.from_text(text))
+            return Message(
+                role=msg.role, parts=new_parts,
+                message_id=msg.message_id,
+                model=msg.model, provider=msg.provider,
+            )
+
+        h = SessionHistory()
+        h.set_inbound_transformer(inbound)
+        h.set_raw_view_transformer(raw_view)
+
+        h.append(Message.from_text(Role.USER, "email me at alice@example.com"))
+        # Stored form is redacted
+        assert "<TOKEN_1>" in h.messages[0].parts[0].text
+        assert "alice@example.com" not in h.messages[0].parts[0].text
+        # Raw view round-trips back to original
+        assert h.messages_raw[0].parts[0].text == "email me at alice@example.com"
+
+
+class TestJaatoSessionTransformerPassthroughs:
+    """JaatoSession exposes the same plug-in surface so callers don't
+    need to reach through .history."""
+
+    def _session(self):
+        mock_runtime = MagicMock()
+        mock_runtime.create_provider.return_value = MagicMock()
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.permission_plugin = None
+        mock_runtime.registry = None
+        mock_runtime.reliability_plugin = None
+        return JaatoSession(mock_runtime, "model")
+
+    def test_set_history_inbound_transformer_propagates(self):
+        s = self._session()
+        s.set_history_inbound_transformer(_redact_text("[R]"))
+        s._history.append(Message.from_text(Role.USER, "x"))
+        assert s.get_history()[0].parts[0].text == "[R]x"
+
+    def test_get_history_raw_returns_transformed_view(self):
+        s = self._session()
+        s.set_history_raw_view_transformer(_redact_text("[U]"))
+        s._history.append(Message.from_text(Role.USER, "stored"))
+        assert s.get_history_raw()[0].parts[0].text == "[U]stored"
+
+    def test_get_history_returns_canonical_form(self):
+        """get_history is the redacted (canonical) view; get_history_raw
+        is the trusted-caller view.  Confirm they diverge when both
+        transformers are set."""
+        s = self._session()
+        s.set_history_inbound_transformer(_redact_text("[R]"))
+        s.set_history_raw_view_transformer(_redact_text("[U]"))
+        s._history.append(Message.from_text(Role.USER, "x"))
+        # Stored: [R]x.  Raw view runs [U] on top of stored.
+        assert s.get_history()[0].parts[0].text == "[R]x"
+        assert s.get_history_raw()[0].parts[0].text == "[U][R]x"
+
+    def test_passthroughs_accept_none_to_clear(self):
+        s = self._session()
+        s.set_history_inbound_transformer(_redact_text("[R]"))
+        s.set_history_inbound_transformer(None)
+        s._history.append(Message.from_text(Role.USER, "x"))
+        assert s.get_history()[0].parts[0].text == "x"
