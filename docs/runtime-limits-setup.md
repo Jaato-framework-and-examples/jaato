@@ -39,36 +39,123 @@ If you see `/sys/fs/cgroup/memory/`, `/sys/fs/cgroup/pids/`, etc. as separate di
 
 ## Operator setup
 
-### 1. Create the parent cgroup directory
+There are three supported paths, in decreasing order of preference. Start at (1) unless you know you need (2) or (3).
 
-The server writes per-session cgroups under a parent directory (default `/sys/fs/cgroup/jaato`). Create it and grant write access to the jaato server user:
+### 1. Recommended: run jaato-server as a systemd unit with `Delegate=yes`
+
+On any systemd-managed host this is the only setup that doesn't fight systemd. systemd creates the cgroup, chowns the three delegate files (`cgroup.procs`, `cgroup.subtree_control`, `cgroup.threads`) to the service user atomically at unit start, enables the controllers, and rebuilds the tree across reboots and `daemon-reload`s. No manual `chown` dance, no controllers-not-available surprises.
+
+Create the unit:
+
+```ini
+# /etc/systemd/system/jaato-server.service
+[Unit]
+Description=jaato-server
+After=network.target
+
+[Service]
+Type=simple
+User=jaato
+Group=jaato
+ExecStart=/usr/local/bin/jaato-server --web-socket :8089
+Restart=on-failure
+
+# This line is what makes per-session cgroups work without root:
+# systemd hands the service its own cgroup with cpu/memory/pids
+# delegated to the User= account.
+Delegate=yes
+# Equivalently, be explicit about which controllers to delegate:
+# Delegate=cpu memory pids
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and verify:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now jaato-server
+systemd-cgls /sys/fs/cgroup/system.slice/jaato-server.service
+ls -la /sys/fs/cgroup/system.slice/jaato-server.service/
+# → directory + cgroup.procs + cgroup.subtree_control + cgroup.threads
+#   should all be owned by jaato:jaato
+cat /sys/fs/cgroup/system.slice/jaato-server.service/cgroup.controllers
+# → must include: cpu memory pids
+```
+
+Then point jaato at the delegated cgroup:
+
+```bash
+sudo systemctl edit jaato-server
+# Add an Environment= or extend ExecStart=:
+#   ExecStart=/usr/local/bin/jaato-server --web-socket :8089 \
+#       --cgroups-root /sys/fs/cgroup/system.slice/jaato-server.service
+```
+
+The default `--cgroups-root` (`/sys/fs/cgroup/jaato`) is the manual-fallback path; with `Delegate=yes` the systemd-managed path is the right target.
+
+### 2. Developer / interactive testing under your own user
+
+When you're not running jaato as a system service — e.g. ad-hoc testing as your normal login uid — the cgroup that systemd delegates to you isn't `user-$UID.slice` (that one is owned by root by design); it's one level deeper at:
+
+```
+/sys/fs/cgroup/user.slice/user-$UID.slice/user@$UID.service/
+```
+
+`user@$UID.service` is a separate unit with `Delegate=yes` baked in by systemd. It's started for you when `loginctl enable-linger` is set (so it survives between SSH sessions). Verify ownership:
+
+```bash
+loginctl enable-linger $USER   # one-time, persists across reboots
+ls -la /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/
+# → cgroup.procs / cgroup.subtree_control / cgroup.threads owned by you
+cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
+# → cpu memory pids
+```
+
+Point jaato at a sub-slice you create inside it:
+
+```bash
+USER_CG="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"
+mkdir "$USER_CG/jaato"
+# Enable controllers in the user@.service's subtree_control so the
+# child cgroup we just made actually has cpu/memory/pids available.
+echo "+cpu +memory +pids" > "$USER_CG/cgroup.subtree_control"
+jaato-server --web-socket :8089 --cgroups-root "$USER_CG/jaato"
+```
+
+Common mistake: writing into `user-$UID.slice/` directly. That directory is root:root — by systemd design — and your `mkdir`/`chown` will fail with `EACCES`. The delegated subtree starts one level deeper at `user@$UID.service/`.
+
+### 3. Manual fallback: top-level `/sys/fs/cgroup/jaato` outside systemd's tree
+
+Only use this when (1) and (2) aren't an option (e.g. running outside systemd, or in a tightly controlled container init). cgroup v2 technically allows it, but on a systemd host the daemon may log warnings about an unmanaged cgroup and a `systemctl daemon-reload` may rebuild parts of the tree.
+
+The minimum recipe — note the four `chown` lines, not just one:
 
 ```bash
 sudo mkdir /sys/fs/cgroup/jaato
 sudo chown jaato:jaato /sys/fs/cgroup/jaato
+# Without these three the user can't actually populate or configure
+# the cgroup — chowning just the directory is insufficient.
+sudo chown jaato:jaato /sys/fs/cgroup/jaato/cgroup.procs \
+                      /sys/fs/cgroup/jaato/cgroup.subtree_control \
+                      /sys/fs/cgroup/jaato/cgroup.threads
+
+# A controller is only available *inside* a cgroup if its parent has
+# enabled it in subtree_control.  For /sys/fs/cgroup/jaato/ to expose
+# cpu/memory/pids, the *root* cgroup must list them in its
+# subtree_control.  On systemd hosts these are usually already there
+# because systemd needs them; print and only add what's missing.
+cat /sys/fs/cgroup/cgroup.subtree_control
+echo "+cpu +memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control
 ```
 
-If the server runs as your own user:
-
-```bash
-sudo mkdir /sys/fs/cgroup/jaato
-sudo chown $USER /sys/fs/cgroup/jaato
-```
-
-### 2. Delegate controllers
-
-cgroup v2 requires the parent's `cgroup.subtree_control` to enable each controller before its child cgroups can use them. This needs root **once at boot**:
-
-```bash
-echo "+memory +pids +cpu" | sudo tee /sys/fs/cgroup/jaato/cgroup.subtree_control
-```
-
-To make this persist across reboots, add a systemd drop-in or a `tmpfiles.d` entry. Example for systemd:
+To persist this across reboots, prefer a systemd oneshot over `tmpfiles.d` so the four chowns and the `subtree_control` write happen in order:
 
 ```ini
-# /etc/systemd/system/jaato-cgroup.service
+# /etc/systemd/system/jaato-cgroup.service — manual-fallback only
 [Unit]
-Description=Provision jaato cgroup parent
+Description=Provision jaato cgroup parent (manual fallback)
 DefaultDependencies=no
 After=sysinit.target
 Before=basic.target
@@ -78,7 +165,8 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/mkdir -p /sys/fs/cgroup/jaato
 ExecStart=/bin/chown jaato:jaato /sys/fs/cgroup/jaato
-ExecStart=/bin/sh -c 'echo "+memory +pids +cpu" > /sys/fs/cgroup/jaato/cgroup.subtree_control'
+ExecStart=/bin/chown jaato:jaato /sys/fs/cgroup/jaato/cgroup.procs /sys/fs/cgroup/jaato/cgroup.subtree_control /sys/fs/cgroup/jaato/cgroup.threads
+ExecStart=/bin/sh -c 'echo "+memory +pids +cpu" > /sys/fs/cgroup/cgroup.subtree_control'
 
 [Install]
 WantedBy=basic.target
@@ -88,19 +176,17 @@ WantedBy=basic.target
 sudo systemctl enable --now jaato-cgroup.service
 ```
 
-### Alternative: systemd user slice
+### What's NOT a knob
 
-If the server runs under a systemd user session, point the server at the user's delegated slice instead of `/sys/fs/cgroup/jaato`:
+A few things people reach for that don't help:
 
-```bash
-jaato-server \
-  --web-socket :8089 \
-  --cgroups-root "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/jaato.slice"
-```
+- **Kernel boot parameters** (`cgroup_no_v1=all`, `systemd.unified_cgroup_hierarchy=1`) — these are about cgroup v1 vs v2 generally, not delegation. Modern Ubuntu/Fedora/Debian default to v2 already.
+- **PAM modules** — PAM doesn't gate cgroup access.
+- **`chmod 777` on a cgroupfs file** — should work in principle (cgroupfs honours mode bits), but if you found it didn't actually change the mode, you were almost certainly not root (running inside a container, user namespace, or WSL where the cgroup root is read-only). Verify with `stat`, not `ls`, immediately after.
 
-You'll need to create that path with `loginctl enable-linger` and a user-level `tmpfiles.d` rule, but you avoid touching the system cgroup root.
+The only knobs that matter are: (a) `loginctl enable-linger` for the user-session path, (b) `Delegate=` on the unit for the system-service path, (c) the manual chown-the-directory-plus-three-files dance for the fallback.
 
-### 3. Start the server
+### 4. Start the server
 
 Auto-detect mode is the default — when the parent cgroup exists with controllers delegated, the feature activates:
 
@@ -245,24 +331,32 @@ Both only appear when the delta is non-zero — successful tool calls produce no
 
 ### "Cgroups runtime limits not available" at startup
 
-The auto-detection found a missing prerequisite. Check each:
+The auto-detection found a missing prerequisite. Substitute `$ROOT` with whichever cgroups-root applies to your setup (`/sys/fs/cgroup/system.slice/jaato-server.service` for the recommended path, `/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/jaato` for interactive testing, `/sys/fs/cgroup/jaato` for the manual fallback). Check each:
 
 ```bash
+ROOT=/sys/fs/cgroup/system.slice/jaato-server.service   # adjust for your setup
+
 # 1. Is cgroup v2 mounted?
 ls /sys/fs/cgroup/cgroup.controllers
 
-# 2. Does the parent directory exist and is it writable?
-ls -la /sys/fs/cgroup/jaato/
+# 2. Does the cgroups-root exist and are the three delegate files
+#    owned by the server user (not root)?
+ls -la "$ROOT/cgroup.procs" "$ROOT/cgroup.subtree_control" "$ROOT/cgroup.threads"
 
-# 3. Are the required controllers delegated?
-cat /sys/fs/cgroup/jaato/cgroup.subtree_control
-# Must include: memory pids cpu
+# 3. Are the required controllers available *inside* the cgroups-root?
+#    (Driven by the PARENT's subtree_control — cgroup.controllers
+#    here lists what the parent has actually delegated down.)
+cat "$ROOT/cgroup.controllers"
+# Must include: cpu memory pids
 
 # 4. What did the server log?
 grep -i "cgroup" /tmp/jaato.log
 ```
 
-The log message after `Cgroups runtime limits not available` includes the specific reason (e.g. `controllers ['cpu'] not delegated`).
+The log message after `Cgroups runtime limits not available` includes the specific reason (e.g. `controllers ['cpu'] not delegated`). The two most common causes:
+
+- **Delegate files still root-owned** — for the manual-fallback path, you chowned the directory but forgot the three files; re-run the chown for `cgroup.procs` / `cgroup.subtree_control` / `cgroup.threads`. With `Delegate=yes` this should never happen — if it does, your unit didn't actually take effect (`systemctl status jaato-server` for the cgroup line).
+- **Controllers missing from `cgroup.controllers`** — the controller is enabled in the *parent's* `subtree_control`, not the cgroup's own. For the manual-fallback path, that means writing to `/sys/fs/cgroup/cgroup.subtree_control` (the root cgroup), not `/sys/fs/cgroup/jaato/cgroup.subtree_control`.
 
 ### Profile rejected at load time
 
@@ -276,19 +370,28 @@ The `validate_profile()` function delegates to `RuntimeLimits.from_dict()`, so a
 
 ### Inspecting a live session's cgroup
 
+`$ROOT` is whichever path you set in `--cgroups-root` (or the auto-detected default — see the operator-setup section above for which root applies to your install).
+
 ```bash
-# Find the session's cgroup
-ls /sys/fs/cgroup/jaato/
+ROOT=/sys/fs/cgroup/system.slice/jaato-server.service   # adjust as needed
+SESSION=jaato-ws-20260425_120000                         # from the session log
 
 # What processes are in it?
-cat /sys/fs/cgroup/jaato/jaato-ws-20260425_120000/cgroup.procs
+cat "$ROOT/$SESSION/cgroup.procs"
 
 # Current memory usage vs limit
-cat /sys/fs/cgroup/jaato/jaato-ws-20260425_120000/memory.current
-cat /sys/fs/cgroup/jaato/jaato-ws-20260425_120000/memory.max
+cat "$ROOT/$SESSION/memory.current"
+cat "$ROOT/$SESSION/memory.max"
 
 # OOM-kill events so far
-cat /sys/fs/cgroup/jaato/jaato-ws-20260425_120000/cgroup.events
+cat "$ROOT/$SESSION/cgroup.events"
+```
+
+`systemd-cgls` is also handy for the recommended path:
+
+```bash
+systemd-cgls /sys/fs/cgroup/system.slice/jaato-server.service
+# → tree view of the daemon's cgroup with every per-session child
 ```
 
 ### Subprocesses not joining the cgroup
