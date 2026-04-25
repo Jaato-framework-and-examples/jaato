@@ -16,7 +16,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +219,96 @@ class ToolExecutor:
         # unconditionally.
         self._cgroup_event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None
 
+        # Plug-in transformer chains for the tool-dispatch boundary
+        # (seat 2 of the four-seat pseudonymization design — see
+        # docs/design/daemon-extensions.md and
+        # project_backlog_pseudonymization_plugin_surface.md).
+        # Each list entry is registered via ``register_*_transformer``;
+        # ``execute()`` runs the args chain before ``_execute_impl`` and
+        # the result chain on the returned value.  Empty lists = no-op
+        # (full backwards-compat).  Per-transformer ``trusted_tools``
+        # set lets a registration skip specific tool names so the
+        # transformer applies only to *untrusted* tools.
+        self._args_transformers: List[
+            Tuple[Callable[[str, Dict[str, Any]], Dict[str, Any]],
+                  Optional[Set[str]]]
+        ] = []
+        self._result_transformers: List[Callable[[str, Any], Any]] = []
+
+
+    def register_args_transformer(
+        self,
+        fn: Callable[[str, Dict[str, Any]], Dict[str, Any]],
+        *,
+        trusted_tools: Optional[Set[str]] = None,
+    ) -> None:
+        """Register a transformer for tool args before ``_execute_impl``.
+
+        Plug-in surface for redaction / content-filter / audit consumers
+        that need to inspect or mutate args before the tool runs.
+        Multiple transformers stack — registered in order, applied as
+        a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, args)`` and returning
+                the args dict to actually pass to the tool.  Must
+                always return a dict (returning ``None`` would silently
+                strip args).
+            trusted_tools: Optional set of tool names this transformer
+                should NOT touch — when provided, ``fn`` is invoked
+                only for tools whose name is **not** in the set.  Use
+                this to give a redaction transformer an allowlist of
+                tools that legitimately need raw values (e.g. a tool
+                that sends an email needs the real address, not a
+                placeholder).  Default ``None`` = transformer applies
+                to every tool.
+        """
+        self._args_transformers.append((fn, trusted_tools))
+
+    def register_result_transformer(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a transformer for tool results before they return.
+
+        Plug-in surface for re-redacting tool outputs (e.g. a tool
+        returns a database query result that contains PII; the
+        transformer pseudonymizes those values before the result is
+        appended to history).  Multiple transformers stack — registered
+        in order, applied as a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, result)`` and returning
+                the value to actually surface.  ``result`` is whatever
+                the tool's executor returned (typically dict or str).
+                Must return a value of the same shape; returning
+                ``None`` would silently drop the result.
+        """
+        self._result_transformers.append(fn)
+
+    def _apply_args_transformers(
+        self, name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run the args transformer chain in registration order.
+
+        Each transformer's ``trusted_tools`` set determines whether it
+        runs for this tool name.  Result of one transformer feeds the
+        next.  Empty chain returns args unchanged (cheap fast path).
+        """
+        if not self._args_transformers:
+            return args
+        for fn, trusted in self._args_transformers:
+            if trusted is not None and name in trusted:
+                continue
+            args = fn(name, args)
+        return args
+
+    def _apply_result_transformers(self, name: str, result: Any) -> Any:
+        """Run the result transformer chain in registration order."""
+        if not self._result_transformers:
+            return result
+        for fn in self._result_transformers:
+            result = fn(name, result)
+        return result
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
@@ -703,6 +793,12 @@ class ToolExecutor:
         if self._cgroup_event_reader is not None:
             before_events = self._cgroup_event_reader()
 
+        # Apply args transformer chain (seat 2 of pseudonymization
+        # design).  Untrusted tools see redacted args; trusted tools
+        # (per each transformer's trusted_tools set) see raw args.  No
+        # transformers registered = identity, no overhead.
+        args = self._apply_args_transformers(name, args)
+
         try:
             success, result = self._execute_impl(name, args, debug, call_id)
         finally:
@@ -710,6 +806,11 @@ class ToolExecutor:
                 _thread_local.tool_output_callback = None
             if cancel_token is not None:
                 _thread_local.cancel_token = None
+
+        # Apply result transformer chain — re-redact (or otherwise
+        # transform) what the tool returned before it reaches the
+        # session's history-append path or its caller.
+        result = self._apply_result_transformers(name, result)
 
         # Compute event-counter deltas and inject into result's
         # ``_telemetry`` dict.  The session's tool span already
