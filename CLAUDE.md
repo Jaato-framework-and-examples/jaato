@@ -677,6 +677,18 @@ The `open_editor` keybinding (Ctrl+G) opens the current input in your external e
 
 The `workspace_open_file` keybinding (Enter by default, when workspace panel is open) opens the file at the cursor in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). The workspace panel must be visible and the input buffer empty for this keybinding to activate.
 
+**Per-extension openers**: the launched program can be customized per file pattern via `.jaato/openers.json` (project) or `~/.jaato/openers.json` (user). Maps fnmatch globs to commands; project entries override user entries. `$EDITOR` and `$VISUAL` are valid placeholders (both resolve to the default editor). Longest matching pattern wins; on a tie, basename match beats path match.
+
+```json
+{
+  "*.md":       "glow -p",
+  "*.markdown": "glow -p",
+  "*.png":      "chafa",
+  "docs/*":     "less",
+  "*":          "$EDITOR"
+}
+```
+
 The `search` keybinding (Ctrl+F) opens search mode to find text in session output. When in search mode: Enter=next match, Ctrl+P=previous match, Escape=close search.
 
 Large pastes (>10 lines or >1000 chars) are automatically replaced with placeholders like `[paste #1: +50 lines]` to prevent UI freezing. The original content is stored and expanded when you submit the prompt.
