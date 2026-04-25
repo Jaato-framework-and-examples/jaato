@@ -282,6 +282,54 @@ class TestSandboxEventTracking:
         finally:
             monitor.stop()
 
+    def test_sandbox_respects_gitignore_defaults(self, workspace, sandbox_dir):
+        """Files in gitignore-default dirs (e.g. __pycache__) under a sandbox
+        path must not be tracked.  Regression test: previously the sandbox
+        event handler only filtered files whose own basename starts with
+        ``.``, so files inside ``__pycache__/`` or ``output/`` leaked into
+        the workspace panel.
+        """
+        monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
+        monitor.start()
+        try:
+            monitor.add_sandbox_path(sandbox_dir)
+
+            for rel in ("__pycache__/foo.pyc", ".pytest_cache/v/cache/lastfailed", ".jaato/log.txt"):
+                target = os.path.join(sandbox_dir, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                open(target, "w").close()
+                monitor._on_sandbox_fs_event(target, "created", sandbox_dir)
+                assert target not in monitor.tracked, f"{rel} leaked into tracked"
+        finally:
+            monitor.stop()
+
+    def test_sandbox_respects_workspace_gitignore(self, workspace, sandbox_dir, tmp_path):
+        """User patterns in the workspace .gitignore must apply to sandbox paths."""
+        (tmp_path / "workspace" / ".gitignore").write_text("scratch/\n*.bak\n")
+
+        monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
+        monitor.start()
+        try:
+            monitor.add_sandbox_path(sandbox_dir)
+
+            ignored = os.path.join(sandbox_dir, "scratch", "draft.txt")
+            os.makedirs(os.path.dirname(ignored), exist_ok=True)
+            open(ignored, "w").close()
+            monitor._on_sandbox_fs_event(ignored, "created", sandbox_dir)
+            assert ignored not in monitor.tracked
+
+            bak = os.path.join(sandbox_dir, "config.json.bak")
+            open(bak, "w").close()
+            monitor._on_sandbox_fs_event(bak, "created", sandbox_dir)
+            assert bak not in monitor.tracked
+
+            kept = os.path.join(sandbox_dir, "kept.txt")
+            open(kept, "w").close()
+            monitor._on_sandbox_fs_event(kept, "created", sandbox_dir)
+            assert kept in monitor.tracked
+        finally:
+            monitor.stop()
+
     def test_sandbox_and_workspace_coexist(self, workspace, sandbox_dir):
         """Sandbox and workspace changes should coexist in tracked dict."""
         monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
