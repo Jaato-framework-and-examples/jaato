@@ -52,6 +52,12 @@ class PaneSlot:
     processor: object = None  # StyledOutputProcessor
     window: Optional[Window] = None
     dirty: bool = True
+    # (start_offset, end_offset, button_index) per copy-button region
+    # found in the rendered plain_text.  Populated during ``_sync_*``,
+    # consulted by ``ScrollableBufferControl.mouse_handler`` to map a
+    # MOUSE_DOWN cursor position back to a CopyButton index for clipboard
+    # delivery.
+    copy_button_regions: List[Tuple[int, int, int]] = field(default_factory=list)
 
 
 class PaneManager:

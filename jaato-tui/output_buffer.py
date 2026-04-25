@@ -206,6 +206,145 @@ class ActiveToolsMarker:
     pass  # No data needed - just a position marker
 
 
+# Sentinel markers used to embed a copy-button click target inside the
+# rendered plain-text stream so ``ScrollableBufferControl.mouse_handler``
+# can map a cursor position back to the originating button without losing
+# the BufferControl-based text-selection behaviour the rest of the output
+# panel relies on.  ``​`` (zero-width space) anchors the boundaries;
+# ```` (a Private-Use-Area code point) is the discriminator with the
+# button index in between so multiple buttons coexist on the same screen
+# without collision.  Plain ``[copy]`` is also rendered for the user to
+# see — the marker tail is invisible.
+COPY_BUTTON_VISIBLE = "[copy]"
+COPY_BUTTON_MARKER_OPEN = "​"
+COPY_BUTTON_MARKER_CLOSE = "​"
+COPY_BUTTON_MARKER_RE = re.compile(
+    re.escape(COPY_BUTTON_MARKER_OPEN) + r"(\d+)" + re.escape(COPY_BUTTON_MARKER_CLOSE)
+)
+
+
+@dataclass
+class CopyButton:
+    """A clickable [copy] affordance rendered on its own line below a
+    completed conversational turn.
+
+    Carries a snapshot of the buffer items that made up the turn so the
+    formatter can produce paste-ready markdown when the user clicks.
+    Holding the items by reference (not deep-copy) is fine — when the
+    CopyButton itself is evicted from the ring buffer its references
+    drop with it, and ToolBlocks already deep-copy their tools at
+    finalization time so we don't risk capturing live mutating state.
+
+    Lifecycle:
+        1. Created and appended to ``OutputBuffer._lines`` when a new
+           conversational turn starts (``_close_current_turn()``) or
+           the buffer is closed.
+        2. Rendered by ``_render_copy_button()`` as a single dim line
+           with the visible marker ``[copy]`` and an embedded
+           ``COPY_BUTTON_MARKER_*`` sentinel carrying the button index.
+        3. Clicked: ``ScrollableBufferControl`` extracts the index from
+           the cursor offset, calls back into this buffer to format the
+           captured items, copies to the clipboard.
+
+    Attributes:
+        turn_items: Ordered slice of OutputLines and ToolBlocks that
+            belong to the closed turn.  Iterate to format.
+    """
+    turn_items: List["OutputBuffer.LineItem"]
+
+
+def format_turn_for_clipboard(items: List[Any]) -> str:
+    """Render a turn's worth of buffer items as paste-ready markdown.
+
+    Groups consecutive same-role lines under a single header (only
+    emitting a new ``### User`` / ``### Assistant`` when the role flips)
+    so the output reads naturally rather than as alternating one-line
+    headers.  Tool blocks render as ``**Tool: name**`` with fenced args
+    and result; system / error / enrichment lines are included as
+    blockquotes so the copy is faithful but visually distinct.
+
+    Args:
+        items: Slice of ``OutputLine`` / ``ToolBlock`` (and any other
+            ``LineItem`` types that grow over time).  Order is
+            preserved as-rendered.
+
+    Returns:
+        Markdown string suitable for pasting into chat apps, GitHub
+        issues, etc.
+    """
+    SOURCE_TO_ROLE = {
+        "user": "User",
+        "parent": "User",
+        "model": "Assistant",
+        "thinking": "Assistant",
+    }
+
+    parts: List[str] = []
+    current_role: Optional[str] = None
+    current_role_lines: List[str] = []
+
+    def _flush_role():
+        if current_role is None:
+            return
+        if current_role_lines:
+            parts.append(f"### {current_role}\n\n" + "\n".join(current_role_lines))
+
+    for item in items:
+        if isinstance(item, OutputLine):
+            text = item.text
+            # Strip any embedded copy-button markers that may have
+            # leaked in from prior renders (defensive — should never
+            # appear in stored OutputLines but cheap to be safe).
+            text = COPY_BUTTON_MARKER_RE.sub("", text)
+            text = text.replace(COPY_BUTTON_VISIBLE, "")
+            text = _ANSI_ESCAPE_PATTERN.sub("", text)
+
+            role = SOURCE_TO_ROLE.get(item.source)
+            if role is None:
+                # System / error / enrichment / tool — render as
+                # blockquote so it's preserved without disrupting the
+                # User/Assistant rhythm.  Skip empty content.
+                if text.strip():
+                    _flush_role()
+                    if current_role_lines:
+                        current_role_lines = []
+                    current_role = None
+                    label = item.source.capitalize()
+                    parts.append(f"> _{label}:_ {text.strip()}")
+                continue
+
+            if role != current_role:
+                _flush_role()
+                current_role = role
+                current_role_lines = []
+            if text.strip() or current_role_lines:
+                current_role_lines.append(text)
+
+        elif isinstance(item, ToolBlock):
+            _flush_role()
+            current_role = None
+            current_role_lines = []
+            for tool in item.tools:
+                name = tool.display_name or tool.name
+                args = tool.args_full or tool.args_summary or ""
+                args = _ANSI_ESCAPE_PATTERN.sub("", args).strip()
+                parts.append(f"**Tool: {name}**")
+                if args:
+                    parts.append(f"```\n{args}\n```")
+                if tool.output_lines:
+                    output = "\n".join(tool.output_lines).strip()
+                    output = _ANSI_ESCAPE_PATTERN.sub("", output)
+                    if output:
+                        parts.append(f"_Output:_\n```\n{output}\n```")
+                if tool.error_message:
+                    parts.append(f"_Error:_ {tool.error_message}")
+        # Other item types (CopyButton, ActiveToolsMarker, ActiveToolCall)
+        # are framework chrome and intentionally excluded from the copy.
+
+    _flush_role()
+    return "\n\n".join(p for p in parts if p)
+
+
 @dataclass
 class ActiveToolCall:
     """Represents a tool call through its full lifecycle.
@@ -291,7 +430,7 @@ class OutputBuffer:
     SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
     # Type alias for items that can be stored in the line buffer
-    LineItem = Union[OutputLine, ToolBlock]
+    LineItem = Union[OutputLine, ToolBlock, CopyButton]
 
     def __init__(self, max_lines: int = 1000, agent_type: str = "main", tools_expanded: bool = False):
         """Initialize the output buffer.
@@ -302,7 +441,19 @@ class OutputBuffer:
             tools_expanded: Initial tool block expansion state. False (collapsed) for
                 interactive TUI, True (expanded) for headless mode.
         """
-        self._lines: deque[Union[OutputLine, ToolBlock]] = deque(maxlen=max_lines)
+        self._lines: deque[Union[OutputLine, ToolBlock, CopyButton]] = deque(maxlen=max_lines)
+        # Conversational-turn accumulator + button registry.
+        # ``_current_turn_items`` collects every OutputLine/ToolBlock added
+        # since the last conversational-turn boundary (last user/parent
+        # message).  When the next user/parent input arrives we close the
+        # turn: snapshot the accumulator into a CopyButton, append it to
+        # ``_lines`` (so it's eligible for eviction with its content), and
+        # reset.  ``_copy_buttons`` is the click-target registry consulted
+        # by the BufferControl mouse handler — buttons are appended in
+        # render order so the index embedded in the on-screen marker
+        # round-trips back to the right snapshot.
+        self._current_turn_items: List["OutputBuffer.LineItem"] = []
+        self._copy_buttons: List[CopyButton] = []
         self._current_block: Optional[Tuple[str, List[str], bool]] = None
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
@@ -533,7 +684,7 @@ class OutputBuffer:
             return action
 
     def _safe_insert_line(
-        self, index: int, item: "Union[OutputLine, ToolBlock]"
+        self, index: int, item: "Union[OutputLine, ToolBlock, CopyButton]"
     ) -> int:
         """Insert into _lines, removing from front if at max capacity.
 
@@ -552,7 +703,45 @@ class OutputBuffer:
             self._lines.popleft()
             index = max(0, index - 1)
         self._lines.insert(index, item)
+        # Track non-button items in the conversational-turn accumulator
+        # so the eventual CopyButton snapshot includes them.  CopyButton
+        # itself is excluded — it's chrome, not turn content.
+        if not isinstance(item, CopyButton):
+            self._current_turn_items.append(item)
         return index
+
+    def _close_current_turn(self) -> None:
+        """Snapshot the in-progress conversational turn into a CopyButton.
+
+        Called right before a new user/parent OutputLine is appended.
+        Builds a CopyButton from the accumulator, registers it in
+        ``_copy_buttons`` so the BufferControl mouse handler can look it
+        up by index, appends it to ``_lines`` so it renders inline at
+        the boundary, and resets the accumulator for the next turn.
+        Skipped when the accumulator is empty (initial session, or
+        consecutive user-with-no-response cases).
+        """
+        if not self._current_turn_items:
+            return
+        button = CopyButton(turn_items=list(self._current_turn_items))
+        self._copy_buttons.append(button)
+        # Append directly — _safe_insert_line would re-add to accumulator.
+        if self._lines.maxlen is not None and len(self._lines) >= self._lines.maxlen:
+            self._lines.popleft()
+        self._lines.append(button)
+        self._current_turn_items = []
+
+    def get_copy_button(self, index: int) -> Optional[CopyButton]:
+        """Return the CopyButton at the given registry index, or None.
+
+        Used by ``ScrollableBufferControl.mouse_handler`` after parsing
+        the index from the on-screen marker — out-of-range indices
+        return None so a stale click (e.g. button evicted from the
+        ring buffer mid-render) fails closed instead of crashing.
+        """
+        if 0 <= index < len(self._copy_buttons):
+            return self._copy_buttons[index]
+        return None
 
     def _measure_display_lines(self, source: str, text: str, is_turn_start: bool = False) -> int:
         """Measure how many display lines a piece of text will take.
@@ -668,8 +857,18 @@ class OutputBuffer:
             style: Style for the line.
             is_turn_start: Whether this is the first line of a new turn.
         """
+        # Conversational-turn boundary: a new user/parent OutputLine
+        # marks the *start* of the next turn, which means the previous
+        # turn (everything between the prior boundary and now) is
+        # complete.  Close it out before appending this line so the
+        # CopyButton lands on the correct side of the boundary.
+        if is_turn_start and source in ("user", "parent"):
+            self._close_current_turn()
+
         display_lines = self._measure_display_lines(source, text, is_turn_start)
-        self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start))
+        line = OutputLine(source, text, style, display_lines, is_turn_start)
+        self._lines.append(line)
+        self._current_turn_items.append(line)
 
     def append(self, source: str, text: str, mode: str) -> None:
         """Append output to the buffer.
@@ -953,6 +1152,8 @@ class OutputBuffer:
         self._tool_placeholder_index = None
         self._tool_nav_active = False
         self._selected_block_index = None
+        self._current_turn_items = []
+        self._copy_buttons = []
         self._selected_tool_index = None
 
     def start_spinner(self) -> None:
@@ -2686,8 +2887,8 @@ class OutputBuffer:
 
         return height
 
-    def _get_item_display_lines(self, item: Union[OutputLine, ToolBlock, ActiveToolsMarker]) -> int:
-        """Get display line count for a line item (OutputLine, ToolBlock, or ActiveToolsMarker)."""
+    def _get_item_display_lines(self, item: Union[OutputLine, ToolBlock, ActiveToolsMarker, CopyButton]) -> int:
+        """Get display line count for a line item."""
         if isinstance(item, OutputLine):
             return item.display_lines
         elif isinstance(item, ToolBlock):
@@ -2695,6 +2896,9 @@ class OutputBuffer:
         elif isinstance(item, ActiveToolsMarker):
             # Active tools marker takes the same space as the active tool tree
             return self._calculate_tool_tree_height()
+        elif isinstance(item, CopyButton):
+            # Single line: ` [copy] ` rendered dim/right-aligned.
+            return 1
         return 1
 
     def _calculate_tool_block_height(self, block: ToolBlock) -> int:
@@ -4445,6 +4649,38 @@ class OutputBuffer:
             # Handle ActiveToolsMarker - render active tools inline at their position
             if isinstance(item, ActiveToolsMarker):
                 self._render_active_tools_inline(output, wrap_width)
+                continue
+
+            # Handle CopyButton - rendered as its own dim line below a
+            # completed conversational turn.  The visible text is just
+            # ``[copy]`` (right-aligned with a soft separator); the
+            # invisible marker tail (``​<index>​``) carries
+            # the registry index so ``ScrollableBufferControl.mouse_handler``
+            # can map a click back to ``OutputBuffer.get_copy_button``.
+            if isinstance(item, CopyButton):
+                try:
+                    button_index = self._copy_buttons.index(item)
+                except ValueError:
+                    # Defensive: if the button isn't in the registry the
+                    # click handler can't recover it anyway, so skip
+                    # rendering rather than emit a dead button.
+                    continue
+                marker = (
+                    COPY_BUTTON_MARKER_OPEN
+                    + str(button_index)
+                    + COPY_BUTTON_MARKER_CLOSE
+                )
+                # Right-align inside the wrap width so the button hugs
+                # the panel's trailing edge (visually distinct from
+                # turn content which starts at the left margin).
+                visible_width = _display_width(COPY_BUTTON_VISIBLE)
+                pad_count = max(1, wrap_width - visible_width - 1)
+                output.append(" " * pad_count)
+                output.append(
+                    COPY_BUTTON_VISIBLE,
+                    style=self._style("copy_button", "dim italic"),
+                )
+                output.append(marker)
                 continue
 
             # For OutputLine items, render based on source

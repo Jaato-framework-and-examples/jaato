@@ -233,7 +233,10 @@ class ScrollableBufferControl(BufferControl):
     DOUBLE_CLICK_THRESHOLD = 0.4
 
     def __init__(self, on_scroll_up=None, on_scroll_down=None, input_buffer=None,
-                 on_selection_complete=None, **kwargs):
+                 on_selection_complete=None,
+                 get_copy_button_regions=None,
+                 on_copy_button_clicked=None,
+                 **kwargs):
         super().__init__(**kwargs)
         self._on_scroll_up = on_scroll_up
         self._on_scroll_down = on_scroll_down
@@ -242,6 +245,14 @@ class ScrollableBufferControl(BufferControl):
         self._on_selection_complete = on_selection_complete  # Callback with selected text
         self._last_click_time = 0.0  # For double-click detection
         self._last_click_pos = None  # Position of last click
+        # Copy-button click routing.  ``get_copy_button_regions`` returns
+        # the live list of (start_offset, end_offset, button_index) tuples
+        # for the slot this control is wired to (recomputed each sync);
+        # ``on_copy_button_clicked`` is invoked with the matched index
+        # when MOUSE_DOWN lands inside a region — short-circuits the
+        # selection flow so a click on the button doesn't start a drag.
+        self._get_copy_button_regions = get_copy_button_regions
+        self._on_copy_button_clicked = on_copy_button_clicked
 
     def _select_word_at_cursor(self) -> str | None:
         """Select the word at the current cursor position and return it."""
@@ -293,6 +304,30 @@ class ScrollableBufferControl(BufferControl):
                 app.layout.focus(self)
             # Call parent handler to set cursor position
             super().mouse_handler(mouse_event)
+
+            # Copy-button hit-test BEFORE entering selection mode — if
+            # the click landed on a [copy] button we copy the turn,
+            # show feedback, and short-circuit so no selection starts
+            # (otherwise the user would see a stray cursor on the
+            # button row and the next drag would extend selection from
+            # there).  Region offsets are character positions in the
+            # plain_text the BufferControl reads from.
+            current_pos = self.buffer.cursor_position
+            if self._get_copy_button_regions and self._on_copy_button_clicked:
+                for region_start, region_end, button_index in self._get_copy_button_regions():
+                    if region_start <= current_pos < region_end:
+                        self._on_copy_button_clicked(button_index)
+                        # Reset double-click tracking so this click
+                        # doesn't pair with a future click on adjacent
+                        # text into an accidental word-select.
+                        self._last_click_time = 0.0
+                        self._last_click_pos = None
+                        self._mouse_down_cursor_pos = None
+                        # Return focus to input — the user shouldn't
+                        # have to click again to type.
+                        if app and app.layout and self._input_buffer:
+                            app.layout.focus(self._input_buffer)
+                        return None
 
             current_time = time.time()
             current_pos = self.buffer.cursor_position
@@ -1580,6 +1615,33 @@ class PTDisplay:
         else:
             self._sync_multi_pane()
 
+    @staticmethod
+    def _compute_copy_button_regions(plain_text: str) -> List[Tuple[int, int, int]]:
+        """Locate copy-button click regions in ``plain_text``.
+
+        Each rendered button emits ``[copy]<marker>`` where the marker
+        carries the registry index.  We anchor on the marker (which has
+        a stable, distinctive Unicode pattern) and back up across the
+        adjacent visible ``[copy]`` text — that gives us the full
+        clickable extent (visible label + invisible marker tail).  The
+        ``button_index`` flows into ``OutputBuffer.get_copy_button``.
+        """
+        from output_buffer import (
+            COPY_BUTTON_MARKER_RE,
+            COPY_BUTTON_VISIBLE,
+        )
+        regions: List[Tuple[int, int, int]] = []
+        visible_len = len(COPY_BUTTON_VISIBLE)
+        for match in COPY_BUTTON_MARKER_RE.finditer(plain_text):
+            marker_start = match.start()
+            visible_start = marker_start - visible_len
+            if (
+                visible_start >= 0
+                and plain_text[visible_start:marker_start] == COPY_BUTTON_VISIBLE
+            ):
+                regions.append((visible_start, match.end(), int(match.group(1))))
+        return regions
+
     def _sync_single_pane(self):
         """Sync output for single-pane mode (original behavior)."""
         ansi_content = self._renderer.render(self._get_output_panel_content())
@@ -1602,6 +1664,11 @@ class PTDisplay:
 
         if current_line_fragments:
             slot.line_fragments[line_num] = current_line_fragments
+
+        # Recompute copy-button click regions for the BufferControl
+        # mouse handler.  Done after fragments are populated so the
+        # offsets line up with what pt-toolkit sees as cursor positions.
+        slot.copy_button_regions = self._compute_copy_button_regions(plain_text)
 
         old_selection = slot.pt_buffer.selection_state
         old_cursor = slot.pt_buffer.cursor_position
@@ -1666,6 +1733,8 @@ class PTDisplay:
 
             if current_line_fragments:
                 slot.line_fragments[line_num] = current_line_fragments
+
+            slot.copy_button_regions = self._compute_copy_button_regions(plain_text)
 
             old_selection = slot.pt_buffer.selection_state
             old_cursor = slot.pt_buffer.cursor_position
@@ -2592,6 +2661,37 @@ class PTDisplay:
                 else:
                     self.set_status_message(f"Copy failed ({provider_name})")
 
+        def on_copy_button_clicked_for_pane(pane_index: int):
+            """Build the click handler for a pane.
+
+            Resolves the active OutputBuffer for the slot at click time
+            (so agent-switching within a pane Just Works), looks up the
+            captured turn snapshot via index, formats it as markdown, and
+            writes to the system clipboard.  Emits a status-bar message
+            so the user gets immediate feedback (the clipboard op is
+            otherwise silent and easy to second-guess).
+            """
+            def _handle(button_index: int) -> None:
+                from output_buffer import format_turn_for_clipboard
+                # Resolve the active buffer for this pane.
+                slot = self._pane_manager.get_slot(pane_index)
+                buf = None
+                if slot and slot.visible_agent_id and self._agent_registry:
+                    buf = self._agent_registry.get_buffer(slot.visible_agent_id)
+                if buf is None:
+                    buf = self._output_buffer
+                button = buf.get_copy_button(button_index)
+                if button is None:
+                    self.set_status_message("Copy button no longer available (turn evicted)")
+                    return
+                content = format_turn_for_clipboard(button.turn_items)
+                ok = self._clipboard.copy(content)
+                if ok:
+                    self.set_status_message(f"Copied turn ({len(content)} chars) to clipboard")
+                else:
+                    self.set_status_message("Copy failed (clipboard unavailable)")
+            return _handle
+
         # Pre-allocate 4 pane slots with their own rendering pipelines
         for i in range(PaneManager.MAX_PANES):
             pt_buf = Buffer(document=Document("", 0), read_only=True)
@@ -2608,6 +2708,16 @@ class PTDisplay:
                     self._on_pane_mouse_scroll(idx, "down")
                 return _scroll_down
 
+            # Closures over the slot index so each pane gets its own
+            # region accessor (regions are stored on the slot during
+            # _sync_*) and click handler (resolves the slot's active
+            # OutputBuffer at click time).
+            def _make_get_regions(idx):
+                def _get():
+                    s = self._pane_manager.get_slot(idx)
+                    return s.copy_button_regions if s else []
+                return _get
+
             ctrl = ScrollableBufferControl(
                 buffer=pt_buf,
                 input_processors=[proc],
@@ -2616,6 +2726,8 @@ class PTDisplay:
                 on_scroll_down=_make_scroll_down(i),
                 input_buffer=self._input_buffer,
                 on_selection_complete=on_selection_complete,
+                get_copy_button_regions=_make_get_regions(i),
+                on_copy_button_clicked=on_copy_button_clicked_for_pane(i),
             )
             win = Window(
                 ctrl,
