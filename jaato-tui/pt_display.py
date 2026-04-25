@@ -439,6 +439,11 @@ class PTDisplay:
         # Theme configuration (needed for styling)
         self._theme = theme_config or load_theme()
 
+        # Per-extension openers used by the workspace panel "open file" action.
+        # See ``openers.py`` for config schema and search order.
+        from openers import load_openers
+        self._openers = load_openers()
+
         # Agent registry and tab bar (horizontal tabs at top)
         self._agent_registry = agent_registry
         self._agent_tab_bar: Optional[AgentTabBar] = None
@@ -1102,17 +1107,20 @@ class PTDisplay:
         )
 
     def _open_workspace_file(self) -> None:
-        """Open the workspace panel's selected file in the external editor.
+        """Open the workspace panel's selected file in an external program.
 
         Resolves the relative file path shown in the workspace panel against
-        the session workspace root, then launches ``$EDITOR`` (or ``$VISUAL``,
-        falling back to ``vi``) via ``run_in_terminal`` so the TUI is properly
-        suspended and restored.  Does nothing if the cursor is on a directory
-        or the file doesn't exist on disk.
+        the session workspace root, then chooses a launcher via
+        :func:`openers.resolve_opener`.  By default this is ``$EDITOR`` (or
+        ``$VISUAL``, falling back to ``vi``); users can override per-extension
+        via ``.jaato/openers.json`` or ``~/.jaato/openers.json`` (e.g. open
+        ``*.md`` with ``glow``).  The launch happens inside ``run_in_terminal``
+        so the TUI is properly suspended and restored.  Does nothing if the
+        cursor is on a directory or the file doesn't exist on disk.
         """
         import os
         import subprocess
-        from editor_utils import get_editor
+        from openers import resolve_opener
         from prompt_toolkit.application import run_in_terminal
 
         rel_path = self._workspace_panel.get_selected_file_path()
@@ -1132,11 +1140,11 @@ class PTDisplay:
         if not os.path.isfile(abs_path):
             return
 
-        editor = get_editor()
+        argv = resolve_opener(rel_path, self._openers) + [abs_path]
 
         async def _open():
             def _run():
-                subprocess.call([editor, abs_path])
+                subprocess.call(argv)
             await run_in_terminal(_run, in_executor=False)
 
         self._app.create_background_task(_open())
