@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from shared.plugins.permission import PermissionPlugin
     from shared.plugins.background.protocol import BackgroundCapable
     from shared.plugins.reliability import ReliabilityPlugin
+    from shared.runtime_limits import RuntimeLimits
 
 
 class ToolExecutor:
@@ -189,6 +190,25 @@ class ToolExecutor:
         # subject to the same AppArmor profile as subprocess commands.
         # Set via set_apparmor_context() from the server layer.
         self._apparmor_context: Optional[Callable] = None
+
+        # Per-session runtime limits surfaced to subprocess-launching
+        # plugins (cli, interactive_shell).  Set via the server layer
+        # in the same hook that installs ``_apparmor_context``.
+        #
+        # ``_cgroup_attach`` is a zero-argument callable suitable for
+        # ``subprocess.Popen(preexec_fn=...)``: it writes the forked
+        # child's PID to the session's cgroup ``cgroup.procs`` between
+        # fork() and exec(), so the new program comes up already inside
+        # the cgroup with the kernel-enforced limits in effect.
+        #
+        # ``_runtime_limits`` carries the *application-layer* caps
+        # (``tool_timeout_seconds``, ``max_output_bytes``) that have no
+        # cgroup equivalent — plugins read them via ``get_runtime_limits()``
+        # and apply them at the Python layer.  Both fields stay ``None``
+        # when no profile-level runtime_limits is configured, leaving
+        # the host's defaults in effect.
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits: Optional['RuntimeLimits'] = None
 
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
@@ -260,6 +280,63 @@ class ToolExecutor:
                 manager, or ``None`` to disable confinement.
         """
         self._apparmor_context = context_factory
+
+    def set_runtime_limits(
+        self,
+        attach_callback: Optional[Callable[[], None]],
+        limits: Optional['RuntimeLimits'],
+    ) -> None:
+        """Install per-session cgroup attach + app-layer limits.
+
+        Called by the server layer after the cgroup has been provisioned
+        (or, for sessions without kernel limits, with ``attach_callback``
+        set to a no-op).  Subprocess-launching plugins read both via
+        :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`, OR
+        via the forwarded ``set_runtime_limits`` method on the plugin
+        if it implements one — this matches the pattern used by
+        ``set_tool_output_callback``.
+
+        Args:
+            attach_callback: Zero-argument callable suitable for use as
+                ``Popen(preexec_fn=...)``.  Migrates the forked child
+                into the session's cgroup before ``exec``.  ``None``
+                means no attach (host defaults).
+            limits: :class:`RuntimeLimits` carrying the app-layer caps
+                (``tool_timeout_seconds``, ``max_output_bytes``).  May
+                be ``None`` when no profile-level runtime_limits is set.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+
+        # Forward to exposed plugins that support it.  Subprocess-
+        # launching plugins (cli, interactive_shell) implement
+        # ``set_runtime_limits`` to capture the values at Popen time;
+        # plugins that don't launch subprocesses don't need to know.
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_runtime_limits'):
+                    plugin.set_runtime_limits(attach_callback, limits)
+
+    def get_cgroup_attach(self) -> Optional[Callable[[], None]]:
+        """Return the cgroup-attach callable, or ``None`` if not set.
+
+        Subprocess-launching plugins pass the result as
+        ``Popen(preexec_fn=...)``; passing ``None`` is identical to not
+        attaching, which is the correct behaviour when the session has
+        no kernel-enforced limits.
+        """
+        return self._cgroup_attach
+
+    def get_runtime_limits(self) -> Optional['RuntimeLimits']:
+        """Return the per-session :class:`RuntimeLimits`, or ``None``.
+
+        Plugins consult this to read app-layer caps such as
+        ``tool_timeout_seconds`` and ``max_output_bytes``; the kernel
+        portion has already been written to the cgroup at provision
+        time and need not be re-read here.
+        """
+        return self._runtime_limits
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time plugin output.

@@ -512,22 +512,34 @@ class JaatoWSServer:
             # Provisioned independently of AppArmor — a session may have
             # limits without sandboxing (or vice versa).  The limits
             # come from the SubagentProfile attached to the JaatoServer.
-            if cgroups and cgroups.is_available():
-                profile = getattr(server, "_profile", None)
-                limits = getattr(profile, "runtime_limits", None) if profile else None
-                if limits is not None:
+            #
+            # Whether or not the kernel layer is available, we still
+            # hand the app-layer ``RuntimeLimits`` to the executor so
+            # that ``tool_timeout_seconds`` and ``max_output_bytes`` are
+            # enforced at the Python layer.  The attach callback is a
+            # no-op when the cgroup wasn't created (or doesn't exist),
+            # so passing it through unconditionally is safe.
+            profile = getattr(server, "_profile", None)
+            limits = getattr(profile, "runtime_limits", None) if profile else None
+            if limits is not None:
+                attach_cb = None
+                if cgroups and cgroups.is_available():
                     if cgroups.provision_cgroup(session_id, limits):
-                        # Record mapping so the workspace reaper can also
-                        # teardown the cgroup (same key the AppArmor branch
-                        # below uses; teardown looks both up).
                         ws_workspace_id = os.path.basename(sess.workspace_path)
                         ws_server._workspace_to_session_id[ws_workspace_id] = session_id
-                        logger.info(
-                            "Cgroup runtime limits applied to session %s "
-                            "(memory=%s pids=%s cpu_weight=%s)",
-                            session_id, limits.memory_max_mb,
-                            limits.pids_max, limits.cpu_weight,
-                        )
+                        if limits.has_kernel_limits():
+                            logger.info(
+                                "Cgroup runtime limits applied to session %s "
+                                "(memory=%s pids=%s cpu_weight=%s)",
+                                session_id, limits.memory_max_mb,
+                                limits.pids_max, limits.cpu_weight,
+                            )
+                    attach_cb = cgroups.make_attach_callback(session_id)
+                # Hand attach_cb + limits to the executor so subprocess
+                # plugins can pick them up.  attach_cb is a no-op when
+                # cgroups are unavailable; that's the documented contract
+                # of make_attach_callback().
+                server.set_runtime_limits(attach_cb, limits)
 
             # ---------- AppArmor: per-session sandboxing ----------
             # AppArmor confinement is intended for WS-provisioned sessions
