@@ -1,15 +1,21 @@
-"""Cgroups v2 manager for per-session resource limits.
+"""Cgroups v2 manager for per-session runtime limits.
 
-Companion to :mod:`server.apparmor`.  Where AppArmor enforces *what* a
-session can touch (paths, capabilities), this module enforces *how much*
-it can consume — RAM, process count, CPU share — by attaching every
-subprocess the session launches into a per-session cgroup v2 slice.
+Companion to :mod:`server.apparmor`, on the orthogonal axis:
+
+* **Sandboxing** (``server.apparmor``) — *what's reachable*: paths,
+  capabilities, network.  Enforced by AppArmor.
+* **Runtime limits** (this module) — *how much can be consumed*:
+  memory, PIDs, CPU share, plus app-layer caps like wall-clock
+  timeouts and output size.  The kernel-enforceable subset is
+  applied here via cgroup v2; the rest is carried in
+  :class:`RuntimeLimits` for the CLI / interactive_shell plugins to
+  apply at the Python layer.
 
 Lifecycle (called by the WebSocket server / workspace provisioner):
 
 1. :meth:`CgroupsManager.provision_cgroup` — creates
-   ``{root}/jaato-ws-{session_id}/`` and writes the limits from the
-   :class:`SandboxConfig` into the controller files.
+   ``{root}/jaato-ws-{session_id}/`` and writes the kernel-enforced
+   limits from the :class:`RuntimeLimits` into the controller files.
 2. Subprocess launch — the CLI / interactive_shell plugin uses
    :meth:`CgroupsManager.make_attach_callback` as
    ``subprocess.Popen(preexec_fn=...)``.  The callback writes the child
@@ -84,27 +90,32 @@ _PIDS_MAX_LIMIT = 1_000_000
 
 
 @dataclass(frozen=True)
-class SandboxConfig:
-    """Per-session resource limits.
+class RuntimeLimits:
+    """Per-session resource consumption caps.
 
-    Top-level field on a session profile (parallel to ``gc``).  Any
-    field left as ``None`` means "no limit / inherit host default".
-    The fields split into two groups:
+    Top-level field on a session profile (planned name:
+    ``runtime_limits``, parallel to ``gc``).  Answers the question
+    "how much can this session consume?" — orthogonal to *sandboxing*
+    (AppArmor), which answers "what can it touch?".
 
-    * **Kernel-enforced** (cgroup v2): ``memory_max_mb``, ``pids_max``,
-      ``cpu_weight``.  These are written to controller files when the
-      cgroup is provisioned.
-    * **Application-enforced**: ``tool_timeout_seconds``,
-      ``max_output_bytes``.  These are read by the CLI /
-      interactive_shell plugins and applied at the Python layer.  They
-      are carried here for a single source of truth — the runtime that
-      provisions kernel limits is also the one that surfaces the
-      app-layer limits to subprocess execution code.
+    Any field left as ``None`` means "no limit / inherit host default".
+    The fields split into two enforcement layers, but a profile author
+    treats them as one knob set:
 
-    The ``network`` field is a hint, not an enforcement point: AppArmor
-    today allows outbound traffic, and bwrap-style network namespacing
-    is not part of this runtime.  When/if the bwrap composition layer
-    lands, this field becomes its input.
+    * **Kernel-enforced** (cgroup v2) — written once into the cgroup
+      controller files; the kernel enforces them for every process in
+      the slice for the lifetime of the session:
+      ``memory_max_mb`` → ``memory.max``,
+      ``pids_max`` → ``pids.max``,
+      ``cpu_weight`` → ``cpu.weight``.
+    * **Application-enforced** — read by the CLI / interactive_shell
+      plugins and applied per-tool-call at the Python layer because
+      cgroup v2 has no kernel knob for them:
+      ``tool_timeout_seconds`` (passed to ``subprocess.run(timeout=)``),
+      ``max_output_bytes`` (truncates captured stdout/stderr).
+
+    Single config, two layers — a profile author writing JSON shouldn't
+    need to know which limits happen in the kernel vs in Python.
     """
 
     memory_max_mb: Optional[int] = None
@@ -112,7 +123,6 @@ class SandboxConfig:
     cpu_weight: Optional[int] = None
     tool_timeout_seconds: Optional[float] = None
     max_output_bytes: Optional[int] = None
-    network: str = "outbound"  # "outbound" | "none" — reserved for bwrap layer
 
     # Future-proof: forward-compat passthrough for fields the runtime
     # doesn't recognise yet.  Profile schema validation should reject
@@ -165,22 +175,19 @@ class SandboxConfig:
                 raise ValueError(
                     f"max_output_bytes must be a positive int, got {self.max_output_bytes!r}"
                 )
-        if self.network not in ("outbound", "none"):
-            raise ValueError(
-                f"network must be 'outbound' or 'none', got {self.network!r}"
-            )
 
     @classmethod
-    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "SandboxConfig":
-        """Build a config from a profile dict, ignoring unknown keys.
+    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
+        """Build limits from a profile dict, parking unknown keys in ``extra``.
 
-        Returns the default (no-limits) config when ``data`` is ``None``
-        or empty, so callers don't need to special-case missing config.
+        Returns the default (no-limits) instance when ``data`` is
+        ``None`` or empty, so callers don't need to special-case
+        missing config.
         """
         if not data:
             return cls()
         known_fields = {"memory_max_mb", "pids_max", "cpu_weight",
-                        "tool_timeout_seconds", "max_output_bytes", "network"}
+                        "tool_timeout_seconds", "max_output_bytes"}
         kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         return cls(extra=extra, **kwargs)
@@ -291,7 +298,7 @@ class CgroupsManager:
         """Return the absolute path to the per-session cgroup."""
         return self._root / self.get_cgroup_name(session_id)
 
-    def provision_cgroup(self, session_id: str, config: SandboxConfig) -> bool:
+    def provision_cgroup(self, session_id: str, config: RuntimeLimits) -> bool:
         """Create the per-session cgroup and write its limits.
 
         Idempotent: re-provisioning an existing cgroup overwrites its
@@ -393,7 +400,7 @@ class CgroupsManager:
         cg_path = self.get_cgroup_path(session_id)
         if not cg_path.exists():
             # No cgroup means no kernel limits configured for this
-            # session (e.g. SandboxConfig had no kernel-enforced fields
+            # session (e.g. RuntimeLimits had no kernel-enforced fields
             # set).  Attach is a silent no-op — the subprocess just
             # inherits the parent's cgroup, which is fine.
             return
@@ -437,7 +444,7 @@ class CgroupsManager:
     # Internals
     # ------------------------------------------------------------------
 
-    def _write_limits(self, cg_path: Path, config: SandboxConfig) -> None:
+    def _write_limits(self, cg_path: Path, config: RuntimeLimits) -> None:
         """Write each non-None limit to its controller file.
 
         cgroup v2 controller files take a single value followed by a

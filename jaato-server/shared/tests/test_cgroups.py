@@ -1,4 +1,4 @@
-"""Tests for SandboxConfig and CgroupsManager.
+"""Tests for RuntimeLimits and CgroupsManager.
 
 These tests run on any OS — they fake the cgroup v2 filesystem inside
 ``tmp_path`` and stub out the v2 marker check.  Real-kernel integration
@@ -21,90 +21,85 @@ if "server" not in sys.modules:
     sys.modules["server"] = _stub
 
 import server.cgroups as _cg
-SandboxConfig = _cg.SandboxConfig
+RuntimeLimits = _cg.RuntimeLimits
 CgroupsManager = _cg.CgroupsManager
 
 
 # ---------------------------------------------------------------------------
-# SandboxConfig
+# RuntimeLimits
 # ---------------------------------------------------------------------------
 
-class TestSandboxConfigDefaults:
+class TestRuntimeLimitsDefaults:
     def test_all_none_means_no_limits(self):
-        cfg = SandboxConfig()
+        cfg = RuntimeLimits()
         assert cfg.memory_max_mb is None
         assert cfg.pids_max is None
         assert cfg.cpu_weight is None
         assert cfg.tool_timeout_seconds is None
         assert cfg.max_output_bytes is None
-        assert cfg.network == "outbound"
         assert cfg.has_kernel_limits() is False
 
     def test_has_kernel_limits_only_when_kernel_field_set(self):
         # App-layer fields don't count as kernel limits.
-        assert SandboxConfig(tool_timeout_seconds=30).has_kernel_limits() is False
-        assert SandboxConfig(max_output_bytes=1024).has_kernel_limits() is False
+        assert RuntimeLimits(tool_timeout_seconds=30).has_kernel_limits() is False
+        assert RuntimeLimits(max_output_bytes=1024).has_kernel_limits() is False
         # Kernel fields do.
-        assert SandboxConfig(memory_max_mb=512).has_kernel_limits() is True
-        assert SandboxConfig(pids_max=256).has_kernel_limits() is True
-        assert SandboxConfig(cpu_weight=200).has_kernel_limits() is True
+        assert RuntimeLimits(memory_max_mb=512).has_kernel_limits() is True
+        assert RuntimeLimits(pids_max=256).has_kernel_limits() is True
+        assert RuntimeLimits(cpu_weight=200).has_kernel_limits() is True
 
 
-class TestSandboxConfigValidation:
+class TestRuntimeLimitsValidation:
     @pytest.mark.parametrize("value", [0, -1, "512", 1.5])
     def test_memory_max_mb_invalid(self, value):
         with pytest.raises(ValueError, match="memory_max_mb"):
-            SandboxConfig(memory_max_mb=value)
+            RuntimeLimits(memory_max_mb=value)
 
     def test_memory_max_mb_sanity_ceiling(self):
         # 2 TiB — likely a unit typo.
         with pytest.raises(ValueError, match="sanity ceiling"):
-            SandboxConfig(memory_max_mb=2 * 1024 * 1024)
+            RuntimeLimits(memory_max_mb=2 * 1024 * 1024)
 
     @pytest.mark.parametrize("value", [0, -1, "256"])
     def test_pids_max_invalid(self, value):
         with pytest.raises(ValueError, match="pids_max"):
-            SandboxConfig(pids_max=value)
+            RuntimeLimits(pids_max=value)
 
     @pytest.mark.parametrize("value", [0, 10_001, "100"])
     def test_cpu_weight_out_of_range(self, value):
         with pytest.raises(ValueError, match="cpu_weight"):
-            SandboxConfig(cpu_weight=value)
+            RuntimeLimits(cpu_weight=value)
 
     @pytest.mark.parametrize("value", [1, 100, 10_000])
     def test_cpu_weight_valid_bounds(self, value):
-        SandboxConfig(cpu_weight=value)
+        RuntimeLimits(cpu_weight=value)
 
     @pytest.mark.parametrize("value", [0, -1.0, "30"])
     def test_tool_timeout_invalid(self, value):
         with pytest.raises(ValueError, match="tool_timeout_seconds"):
-            SandboxConfig(tool_timeout_seconds=value)
+            RuntimeLimits(tool_timeout_seconds=value)
 
     def test_max_output_bytes_invalid(self):
         with pytest.raises(ValueError, match="max_output_bytes"):
-            SandboxConfig(max_output_bytes=0)
-
-    def test_network_invalid(self):
-        with pytest.raises(ValueError, match="network"):
-            SandboxConfig(network="bridge")
+            RuntimeLimits(max_output_bytes=0)
 
 
-class TestSandboxConfigFromDict:
+class TestRuntimeLimitsFromDict:
     def test_none_returns_default(self):
-        assert SandboxConfig.from_dict(None) == SandboxConfig()
+        assert RuntimeLimits.from_dict(None) == RuntimeLimits()
 
     def test_empty_dict_returns_default(self):
-        assert SandboxConfig.from_dict({}) == SandboxConfig()
+        assert RuntimeLimits.from_dict({}) == RuntimeLimits()
 
     def test_partial_dict(self):
-        cfg = SandboxConfig.from_dict({"memory_max_mb": 1024, "pids_max": 512})
+        cfg = RuntimeLimits.from_dict({"memory_max_mb": 1024, "pids_max": 512})
         assert cfg.memory_max_mb == 1024
         assert cfg.pids_max == 512
         assert cfg.cpu_weight is None
 
     def test_unknown_keys_land_in_extra_not_kwargs(self):
         # Unknown keys must NOT crash from_dict (forward-compat).
-        cfg = SandboxConfig.from_dict({
+        cfg = RuntimeLimits.from_dict({
             "memory_max_mb": 256,
             "future_knob": "value",
         })
@@ -113,7 +108,7 @@ class TestSandboxConfigFromDict:
 
     def test_validation_runs_on_from_dict(self):
         with pytest.raises(ValueError):
-            SandboxConfig.from_dict({"cpu_weight": 99999})
+            RuntimeLimits.from_dict({"cpu_weight": 99999})
 
 
 # ---------------------------------------------------------------------------
@@ -226,18 +221,18 @@ class TestCgroupNaming:
 class TestProvisionCgroup:
     def test_unavailable_returns_true_no_op(self, manager):
         manager._available = False
-        cfg = SandboxConfig(memory_max_mb=512)
+        cfg = RuntimeLimits(memory_max_mb=512)
         assert manager.provision_cgroup("s1", cfg) is True
 
     def test_no_kernel_limits_skips_creation(self, manager):
         manager._available = True
-        cfg = SandboxConfig(tool_timeout_seconds=30)  # app-only
+        cfg = RuntimeLimits(tool_timeout_seconds=30)  # app-only
         assert manager.provision_cgroup("s1", cfg) is True
         assert not manager.get_cgroup_path("s1").exists()
 
     def test_writes_memory_limit_in_bytes(self, manager):
         manager._available = True
-        cfg = SandboxConfig(memory_max_mb=512)
+        cfg = RuntimeLimits(memory_max_mb=512)
         assert manager.provision_cgroup("s1", cfg) is True
         cg = manager.get_cgroup_path("s1")
         assert cg.is_dir()
@@ -245,7 +240,7 @@ class TestProvisionCgroup:
 
     def test_writes_pids_and_cpu_limits(self, manager):
         manager._available = True
-        cfg = SandboxConfig(pids_max=256, cpu_weight=200)
+        cfg = RuntimeLimits(pids_max=256, cpu_weight=200)
         assert manager.provision_cgroup("s1", cfg) is True
         cg = manager.get_cgroup_path("s1")
         assert (cg / "pids.max").read_text() == "256"
@@ -253,7 +248,7 @@ class TestProvisionCgroup:
 
     def test_skips_unset_limits(self, manager):
         manager._available = True
-        cfg = SandboxConfig(memory_max_mb=128)  # only memory
+        cfg = RuntimeLimits(memory_max_mb=128)  # only memory
         assert manager.provision_cgroup("s1", cfg) is True
         cg = manager.get_cgroup_path("s1")
         assert (cg / "memory.max").exists()
@@ -262,14 +257,14 @@ class TestProvisionCgroup:
 
     def test_idempotent_reprovision_overwrites(self, manager):
         manager._available = True
-        manager.provision_cgroup("s1", SandboxConfig(memory_max_mb=128))
-        manager.provision_cgroup("s1", SandboxConfig(memory_max_mb=256))
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=128))
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=256))
         cg = manager.get_cgroup_path("s1")
         assert (cg / "memory.max").read_text() == str(256 * 1024 * 1024)
 
     def test_rolls_back_on_write_failure(self, manager):
         manager._available = True
-        cfg = SandboxConfig(memory_max_mb=128, pids_max=64)
+        cfg = RuntimeLimits(memory_max_mb=128, pids_max=64)
 
         # Make the second write fail by patching _write_one.
         original = manager._write_one
@@ -299,7 +294,7 @@ class TestTeardownCgroup:
 
     def test_removes_cgroup_directory(self, manager):
         manager._available = True
-        manager.provision_cgroup("s1", SandboxConfig(memory_max_mb=128))
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=128))
         assert manager.get_cgroup_path("s1").exists()
         assert manager.teardown_cgroup("s1") is True
         assert not manager.get_cgroup_path("s1").exists()
@@ -307,7 +302,7 @@ class TestTeardownCgroup:
     def test_writes_cgroup_kill_when_present(self, manager):
         """Modern kernels (5.14+) — cgroup.kill exists, we write '1' to it."""
         manager._available = True
-        manager.provision_cgroup("s1", SandboxConfig(pids_max=64))
+        manager.provision_cgroup("s1", RuntimeLimits(pids_max=64))
         cg = manager.get_cgroup_path("s1")
         # Simulate kernel ≥ 5.14: cgroup.kill exists.
         (cg / "cgroup.kill").write_text("0")
@@ -329,7 +324,7 @@ class TestAttachPid:
 
     def test_writes_pid_to_cgroup_procs(self, manager):
         manager._available = True
-        manager.provision_cgroup("s1", SandboxConfig(memory_max_mb=128))
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=128))
         manager.attach_pid("s1", 99999)
         procs = manager.get_cgroup_path("s1") / "cgroup.procs"
         assert procs.read_text() == "99999"
@@ -348,7 +343,7 @@ class TestMakeAttachCallback:
 
     def test_callback_writes_current_pid(self, manager):
         manager._available = True
-        manager.provision_cgroup("s1", SandboxConfig(pids_max=16))
+        manager.provision_cgroup("s1", RuntimeLimits(pids_max=16))
         cb = manager.make_attach_callback("s1")
         cb()
         procs = manager.get_cgroup_path("s1") / "cgroup.procs"
