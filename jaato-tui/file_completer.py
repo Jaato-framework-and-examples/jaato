@@ -985,28 +985,32 @@ class FileReferenceProcessor:
         """Expand @file references to include file contents inline.
 
         Returns a new prompt with file contents appended in a structured format.
-        The @ prefixes are removed from the prompt text since they were only
-        used for autocompletion and file resolution.
+        The @ prefix is stripped only for references that actually resolve to
+        an existing file or directory — those go into the ``--- Referenced
+        Files ---`` section and the model gets the bare path inline.
 
-        Non-existent paths have their @ stripped but are not included in the
-        Referenced Files section - the user may be referring to paths they
-        want to create.
+        References that DON'T resolve are left **unchanged** — including
+        the literal ``@``.  This preserves user intent for non-file uses
+        of ``@`` (handles like ``@username``, decorators like
+        ``@deprecated``, email addresses, etc.) which would otherwise
+        get silently stripped to a bare word.  If the user really did
+        mean a file path that doesn't exist yet, the ``@`` carries the
+        intent through to the model, which can ask or assume creation.
         """
         processed_text, references = self.process(text)
 
         if not references:
             return text
 
-        # Remove @ prefixes from the original text
-        # Replace each @path with just path (without the @)
+        # Strip @ only for references that resolved to a real file/dir.
+        # Non-resolving references stay as-is (preserves @ for non-file
+        # usage like @username / @deprecated / email addresses).
+        existing_refs = [ref for ref in references if ref.get('exists', False)]
         clean_text = text
-        for ref in references:
+        for ref in existing_refs:
             clean_text = clean_text.replace(ref['reference'], ref['path'])
 
-        # Filter to only existing files/directories for the context section
-        existing_refs = [ref for ref in references if ref.get('exists', False)]
-
-        # If no existing references, just return the clean text without @ symbols
+        # If no existing references, return the original text (with @s intact).
         if not existing_refs:
             return clean_text
 
