@@ -1619,27 +1619,19 @@ class PTDisplay:
     def _compute_copy_button_regions(plain_text: str) -> List[Tuple[int, int, int]]:
         """Locate copy-button click regions in ``plain_text``.
 
-        Each rendered button emits ``[copy]<marker>`` where the marker
-        carries the registry index.  We anchor on the marker (which has
-        a stable, distinctive Unicode pattern) and back up across the
-        adjacent visible ``[copy]`` text — that gives us the full
-        clickable extent (visible label + invisible marker tail).  The
-        ``button_index`` flows into ``OutputBuffer.get_copy_button``.
+        Each rendered button is a literal ``[copy N]`` (1-based ``N``);
+        the regex matches the whole label and captures ``N`` for the
+        ``OutputBuffer.get_copy_button(N - 1)`` lookup.  No invisible
+        marker tail — Rich's wrap algorithm could split the marker
+        from the visible label whenever right-padding placed it at
+        the panel's wrap boundary.
         """
-        from output_buffer import (
-            COPY_BUTTON_MARKER_RE,
-            COPY_BUTTON_VISIBLE,
-        )
+        from output_buffer import COPY_BUTTON_RE
         regions: List[Tuple[int, int, int]] = []
-        visible_len = len(COPY_BUTTON_VISIBLE)
-        for match in COPY_BUTTON_MARKER_RE.finditer(plain_text):
-            marker_start = match.start()
-            visible_start = marker_start - visible_len
-            if (
-                visible_start >= 0
-                and plain_text[visible_start:marker_start] == COPY_BUTTON_VISIBLE
-            ):
-                regions.append((visible_start, match.end(), int(match.group(1))))
+        for match in COPY_BUTTON_RE.finditer(plain_text):
+            # Convert 1-based visible label back to 0-based registry index.
+            button_index = int(match.group(1)) - 1
+            regions.append((match.start(), match.end(), button_index))
         return regions
 
     def _sync_single_pane(self):

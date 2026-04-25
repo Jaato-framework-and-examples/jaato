@@ -37,9 +37,7 @@ ToolBlock = _ob.ToolBlock
 CopyButton = _ob.CopyButton
 ActiveToolCall = _ob.ActiveToolCall
 format_turn_for_clipboard = _ob.format_turn_for_clipboard
-COPY_BUTTON_VISIBLE = _ob.COPY_BUTTON_VISIBLE
-COPY_BUTTON_MARKER_OPEN = _ob.COPY_BUTTON_MARKER_OPEN
-COPY_BUTTON_MARKER_CLOSE = _ob.COPY_BUTTON_MARKER_CLOSE
+COPY_BUTTON_RE = _ob.COPY_BUTTON_RE
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +153,14 @@ class TestFormatTurnForClipboard:
         assert "\x1b[" not in out
         assert "red text and normal" in out
 
-    def test_strips_leaked_button_markers(self):
-        """If a previous render somehow leaked the click marker into a
-        captured OutputLine, format defensively strips it so the copy
-        doesn't reveal the sentinel chars."""
-        leaked_text = (
-            "agent reply"
-            + COPY_BUTTON_VISIBLE
-            + COPY_BUTTON_MARKER_OPEN + "0" + COPY_BUTTON_MARKER_CLOSE
-        )
+    def test_strips_leaked_button_labels(self):
+        """If a previous render somehow leaked the [copy N] label into
+        a captured OutputLine, format defensively strips it so the copy
+        doesn't reveal the affordance text inside the prose copy."""
+        leaked_text = "agent reply [copy 1] tail"
         items = [OutputLine(source="model", text=leaked_text, style="line", is_turn_start=True)]
         out = format_turn_for_clipboard(items)
-        assert COPY_BUTTON_VISIBLE not in out
-        assert COPY_BUTTON_MARKER_OPEN not in out
+        assert "[copy 1]" not in out
         assert "agent reply" in out
 
     def test_empty_items_returns_empty_string(self):
@@ -265,29 +258,22 @@ class TestTurnBoundaryDetection:
 class TestComputeCopyButtonRegions:
     """Reimplements the helper inline (avoiding pulling in pt_display
     which has prompt_toolkit dependencies) — same logic, narrower
-    surface for testing."""
+    surface for testing.
+
+    The button label is a literal ``[copy N]`` (1-based ``N``).  The
+    helper recovers the 0-based registry index for ``get_copy_button``.
+    """
 
     @staticmethod
     def _compute(plain_text):
         regions = []
-        visible_len = len(COPY_BUTTON_VISIBLE)
-        for match in _ob.COPY_BUTTON_MARKER_RE.finditer(plain_text):
-            marker_start = match.start()
-            visible_start = marker_start - visible_len
-            if (
-                visible_start >= 0
-                and plain_text[visible_start:marker_start] == COPY_BUTTON_VISIBLE
-            ):
-                regions.append((visible_start, match.end(), int(match.group(1))))
+        for match in COPY_BUTTON_RE.finditer(plain_text):
+            button_index = int(match.group(1)) - 1
+            regions.append((match.start(), match.end(), button_index))
         return regions
 
     def _emit_button(self, index):
-        return (
-            COPY_BUTTON_VISIBLE
-            + COPY_BUTTON_MARKER_OPEN
-            + str(index)
-            + COPY_BUTTON_MARKER_CLOSE
-        )
+        return f"[copy {index + 1}]"
 
     def test_empty_text_no_regions(self):
         assert self._compute("") == []
@@ -299,7 +285,7 @@ class TestComputeCopyButtonRegions:
         assert len(regions) == 1
         start, end, idx = regions[0]
         assert idx == 0
-        assert text[start:start + len(COPY_BUTTON_VISIBLE)] == COPY_BUTTON_VISIBLE
+        assert text[start:end] == "[copy 1]"
 
     def test_multiple_buttons_distinct_indices(self):
         text = (
@@ -311,13 +297,79 @@ class TestComputeCopyButtonRegions:
         regions = self._compute(text)
         assert [idx for _, _, idx in regions] == [0, 1, 2]
 
-    def test_marker_without_visible_label_skipped(self):
-        """Defensive: a marker that isn't preceded by the literal
-        ``[copy]`` label is not a button (could be stray content)."""
-        text = "noise" + COPY_BUTTON_MARKER_OPEN + "0" + COPY_BUTTON_MARKER_CLOSE
-        assert self._compute(text) == []
-
     def test_two_digit_index(self):
         text = self._emit_button(42)
         regions = self._compute(text)
         assert regions == [(0, len(text), 42)]
+
+
+class TestEndToEndRender:
+    """Lock in that the affordance survives the full render pipeline —
+    OutputBuffer.render_panel → Rich → ANSI → plain_text.  This is the
+    test that would have caught the regression where Rich's word-wrap
+    pushed the (formerly) invisible marker tail onto a separate line
+    from the visible label."""
+
+    def _render_plain(self, buf, width=80, height=20):
+        # Local import — pt_display brings in prompt_toolkit.
+        from pt_display import RichRenderer, ansi_to_plain_and_fragments
+        panel = buf.render_panel(height=height, width=width)
+        ansi = RichRenderer(width).render(panel)
+        plain, _ = ansi_to_plain_and_fragments(ansi)
+        return plain
+
+    def test_button_label_survives_render_unsplit(self):
+        """The ``[copy N]`` label must appear intact in the rendered
+        plain_text — i.e. the regex finds at least one match.  When
+        the marker tail was used, Rich would word-wrap the line at the
+        panel's trailing edge and split the marker onto a separate
+        line, breaking the regex."""
+        buf = OutputBuffer(max_lines=200, agent_type="main")
+        buf.set_width(80)
+        buf.append("user", "first", mode="write")
+        buf.append("model", "reply one", mode="write")
+        buf.append("user", "second", mode="write")
+        buf.append("model", "reply two", mode="write")  # forces flush of second user
+        plain = self._render_plain(buf, width=80)
+
+        regions = []
+        for m in COPY_BUTTON_RE.finditer(plain):
+            regions.append((m.start(), m.end(), int(m.group(1)) - 1))
+        assert len(regions) == 1, f"expected 1 button in plain_text, got {len(regions)}"
+        assert regions[0][2] == 0  # first button is registry index 0
+
+
+class TestStopSpinnerClosesTurn:
+    """stop_spinner is the agent-idle hook.  Closing the turn from
+    there is what makes the [copy N] button appear immediately when
+    the agent finishes, instead of waiting for the user's next
+    message to trigger the close from _add_line."""
+
+    def test_stop_spinner_emits_button_for_completed_turn(self):
+        buf = OutputBuffer(max_lines=200, agent_type="main")
+        buf.set_width(80)
+        buf.append("user", "hello", mode="write")
+        buf.append("model", "hi", mode="write")
+        # Simulate the agent finishing: bridge calls stop_spinner.
+        buf.stop_spinner()
+        # Button should now exist without needing a follow-up user msg.
+        assert len(buf._copy_buttons) == 1
+
+    def test_stop_spinner_on_empty_buffer_is_noop(self):
+        """Calling stop_spinner before the agent has produced anything
+        must not emit a button (nothing to copy)."""
+        buf = OutputBuffer(max_lines=200, agent_type="main")
+        buf.set_width(80)
+        buf.stop_spinner()
+        assert buf._copy_buttons == []
+
+    def test_stop_spinner_idempotent(self):
+        """Calling stop_spinner twice in a row (e.g. spurious idle
+        events) must not emit a duplicate button."""
+        buf = OutputBuffer(max_lines=200, agent_type="main")
+        buf.set_width(80)
+        buf.append("user", "q", mode="write")
+        buf.append("model", "a", mode="write")
+        buf.stop_spinner()
+        buf.stop_spinner()
+        assert len(buf._copy_buttons) == 1

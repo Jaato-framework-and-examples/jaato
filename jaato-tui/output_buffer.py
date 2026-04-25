@@ -206,21 +206,17 @@ class ActiveToolsMarker:
     pass  # No data needed - just a position marker
 
 
-# Sentinel markers used to embed a copy-button click target inside the
-# rendered plain-text stream so ``ScrollableBufferControl.mouse_handler``
-# can map a cursor position back to the originating button without losing
-# the BufferControl-based text-selection behaviour the rest of the output
-# panel relies on.  ``​`` (zero-width space) anchors the boundaries;
-# ```` (a Private-Use-Area code point) is the discriminator with the
-# button index in between so multiple buttons coexist on the same screen
-# without collision.  Plain ``[copy]`` is also rendered for the user to
-# see — the marker tail is invisible.
-COPY_BUTTON_VISIBLE = "[copy]"
-COPY_BUTTON_MARKER_OPEN = "​"
-COPY_BUTTON_MARKER_CLOSE = "​"
-COPY_BUTTON_MARKER_RE = re.compile(
-    re.escape(COPY_BUTTON_MARKER_OPEN) + r"(\d+)" + re.escape(COPY_BUTTON_MARKER_CLOSE)
-)
+# Visible affordance for the per-turn copy button.  The 1-based button
+# index is embedded in the visible text (e.g. ``[copy 3]``) rather than
+# via a hidden Unicode marker tail — that older approach lost
+# reliability the moment Rich's wrap algorithm pushed the marker chars
+# onto a separate line, which always happened when right-padding placed
+# the button at the panel's wrap boundary.  Visible-index pairing has
+# none of that fragility: the regex matches the literal text the user
+# clicks on, the index round-trips through Document.cursor_position
+# cleanly, and stale clicks (button evicted from the ring buffer) fail
+# closed via ``OutputBuffer.get_copy_button`` returning ``None``.
+COPY_BUTTON_RE = re.compile(r"\[copy (\d+)\]")
 
 
 @dataclass
@@ -241,7 +237,8 @@ class CopyButton:
            the buffer is closed.
         2. Rendered by ``_render_copy_button()`` as a single dim line
            with the visible marker ``[copy]`` and an embedded
-           ``COPY_BUTTON_MARKER_*`` sentinel carrying the button index.
+           ``[copy N]`` label whose 1-based ``N`` is the registry index
+           recovered by the mouse handler via :data:`COPY_BUTTON_RE`.
         3. Clicked: ``ScrollableBufferControl`` extracts the index from
            the cursor offset, calls back into this buffer to format the
            captured items, copies to the clipboard.
@@ -292,11 +289,10 @@ def format_turn_for_clipboard(items: List[Any]) -> str:
     for item in items:
         if isinstance(item, OutputLine):
             text = item.text
-            # Strip any embedded copy-button markers that may have
-            # leaked in from prior renders (defensive — should never
-            # appear in stored OutputLines but cheap to be safe).
-            text = COPY_BUTTON_MARKER_RE.sub("", text)
-            text = text.replace(COPY_BUTTON_VISIBLE, "")
+            # Strip any embedded copy-button affordance text that may
+            # have leaked in from prior renders (defensive — should
+            # never appear in stored OutputLines but cheap to be safe).
+            text = COPY_BUTTON_RE.sub("", text)
             text = _ANSI_ESCAPE_PATTERN.sub("", text)
 
             role = SOURCE_TO_ROLE.get(item.source)
@@ -1170,12 +1166,22 @@ class OutputBuffer:
         self._spinner_index = 0
 
     def stop_spinner(self) -> None:
-        """Stop showing spinner and finalize tool tree if complete."""
+        """Stop showing spinner and finalize tool tree if complete.
+
+        Also closes the in-progress conversational turn so the
+        ``[copy N]`` button appears immediately when the agent goes
+        idle, without waiting for the user's next message to trigger
+        the close from ``_add_line``.  Fires only when the accumulator
+        has content — calls during initial idle (no agent activity
+        yet) are no-ops.
+        """
         self._spinner_active = False
         # Flush any pending streaming text before finalizing the turn
         self._flush_current_block()
         # Convert tool tree to scrollable lines if all tools are done
         self.finalize_tool_tree()
+        # Conversational turn is complete — emit the copy button now.
+        self._close_current_turn()
 
     def flush(self) -> None:
         """Flush the current streaming block to finalized lines.
@@ -4665,22 +4671,23 @@ class OutputBuffer:
                     # click handler can't recover it anyway, so skip
                     # rendering rather than emit a dead button.
                     continue
-                marker = (
-                    COPY_BUTTON_MARKER_OPEN
-                    + str(button_index)
-                    + COPY_BUTTON_MARKER_CLOSE
-                )
-                # Right-align inside the wrap width so the button hugs
-                # the panel's trailing edge (visually distinct from
-                # turn content which starts at the left margin).
-                visible_width = _display_width(COPY_BUTTON_VISIBLE)
-                pad_count = max(1, wrap_width - visible_width - 1)
+                # Embed the 1-based index in the visible label so the
+                # mouse handler can recover it via regex without needing
+                # an invisible marker tail (which Rich's wrap algorithm
+                # would push onto a separate line whenever the line was
+                # near the panel's trailing edge).
+                visible = f"[copy {button_index + 1}]"
+                visible_width = _display_width(visible)
+                # Right-align with a generous safety margin so Rich
+                # doesn't wrap the button mid-label even when the
+                # selected pane is unusually narrow.
+                safety = max(8, wrap_width // 8)
+                pad_count = max(1, wrap_width - visible_width - safety)
                 output.append(" " * pad_count)
                 output.append(
-                    COPY_BUTTON_VISIBLE,
+                    visible,
                     style=self._style("copy_button", "dim italic"),
                 )
-                output.append(marker)
                 continue
 
             # For OutputLine items, render based on source
