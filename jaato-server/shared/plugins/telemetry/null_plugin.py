@@ -5,7 +5,7 @@ All methods are no-ops that return immediately without any OTel imports.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 
 class _NoOpSpan:
@@ -156,3 +156,15 @@ class NullTelemetryPlugin:
 
     def get_current_span_id(self) -> Optional[str]:
         return None
+
+    def register_attribute_redactor(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """No-op attribute redactor registration.
+
+        The Null plugin produces no spans, so registered redactors
+        would never fire.  Accept and ignore so callers can
+        unconditionally register without checking which plugin is
+        active.
+        """
+        pass

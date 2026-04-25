@@ -20,7 +20,7 @@ import os
 import threading
 from contextlib import contextmanager
 from importlib.metadata import entry_points
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -174,9 +174,29 @@ class _SpanWrapper:
 
     Handles OpenInference message flattening, metadata serialization,
     and auto-computation of ``llm.token_count.total``.
+
+    Two layers of attribute transformation, applied in order on every
+    ``set_attribute`` call (and on every set-attribute path the wrapper
+    delegates to internally):
+
+    1. **Built-in redaction** for the hardcoded ``_SENSITIVE_ATTRS``
+       set when ``redact_content`` is enabled.  Replaces the value
+       with a length-preserving placeholder.
+    2. **Registered redactor chain** (seat 4 of the four-seat
+       pseudonymization design — see
+       ``project_backlog_pseudonymization_plugin_surface.md``).  Each
+       redactor is a ``Callable[[str, Any], Any]`` taking
+       ``(attribute_key, value)`` and returning the transformed
+       value.  Premium consumers register a redactor on the
+       :class:`OTelPlugin` and the same chain runs on every span the
+       plugin produces — single registration covers all
+       ``set_attribute`` call sites without per-site instrumentation.
     """
 
-    __slots__ = ("_span", "_redact", "_prompt_tokens", "_completion_tokens")
+    __slots__ = (
+        "_span", "_redact", "_redactors",
+        "_prompt_tokens", "_completion_tokens",
+    )
 
     # Attributes that may contain sensitive content
     _SENSITIVE_ATTRS = frozenset({
@@ -184,9 +204,15 @@ class _SpanWrapper:
         "output.value",
     })
 
-    def __init__(self, span, redact_content: bool):
+    def __init__(
+        self,
+        span,
+        redact_content: bool,
+        redactors: Optional[List[Callable[[str, Any], Any]]] = None,
+    ):
         self._span = span
         self._redact = redact_content
+        self._redactors = redactors if redactors is not None else []
         self._prompt_tokens: Optional[int] = None
         self._completion_tokens: Optional[int] = None
 
@@ -195,6 +221,11 @@ class _SpanWrapper:
 
         Also auto-computes ``llm.token_count.total`` when both prompt
         and completion token counts have been set.
+
+        All attribute-setting paths in this wrapper (including
+        :meth:`set_input_messages`, :meth:`set_output_messages`,
+        :meth:`set_metadata`) route through this method so the
+        redactor chain catches every value uniformly.
         """
         if self._redact and key in self._SENSITIVE_ATTRS:
             # Redact but preserve length info for debugging
@@ -208,6 +239,13 @@ class _SpanWrapper:
                     value = "[REDACTED]"
             else:
                 value = "[REDACTED]"
+        # Run the registered redactor chain on every attribute, not
+        # just the hardcoded sensitive-key set.  This is the seat-4
+        # plug-in point — premium uses it to pseudonymize span
+        # attribute values that pass through here without being
+        # caught by the built-in _SENSITIVE_ATTRS list.
+        for fn in self._redactors:
+            value = fn(key, value)
         self._span.set_attribute(key, value)
 
         # Auto-compute llm.token_count.total
@@ -248,15 +286,17 @@ class _SpanWrapper:
         """Flatten input messages to OpenInference indexed attributes.
 
         Each message dict should have 'role' and 'content' keys.
-        Content is redacted when ``redact_content`` is enabled.
+        Content is redacted when ``redact_content`` is enabled, and
+        the registered redactor chain runs on every attribute via
+        :meth:`set_attribute` (the single chokepoint).
         """
         for i, msg in enumerate(messages):
             prefix = f"llm.input_messages.{i}.message"
-            self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
+            self.set_attribute(f"{prefix}.role", msg.get("role", ""))
             content = msg.get("content", "")
             if self._redact and content:
                 content = f"[REDACTED: {len(content)} chars]"
-            self._span.set_attribute(f"{prefix}.content", content)
+            self.set_attribute(f"{prefix}.content", content)
 
     def set_output_messages(self, messages: List[Dict[str, Any]]) -> None:
         """Flatten output messages to OpenInference indexed attributes.
@@ -264,30 +304,34 @@ class _SpanWrapper:
         Each message dict should have 'role', 'content', and optionally
         'tool_calls' (list of dicts with 'name' and 'arguments').
         Content and tool call arguments are redacted when enabled.
-        Tool call function names are never redacted.
+        Tool call function names are never redacted.  All attribute
+        sets route through :meth:`set_attribute` so the registered
+        redactor chain applies uniformly.
         """
         for i, msg in enumerate(messages):
             prefix = f"llm.output_messages.{i}.message"
-            self._span.set_attribute(f"{prefix}.role", msg.get("role", ""))
+            self.set_attribute(f"{prefix}.role", msg.get("role", ""))
             content = msg.get("content", "")
             if self._redact and content:
                 content = f"[REDACTED: {len(content)} chars]"
-            self._span.set_attribute(f"{prefix}.content", content)
+            self.set_attribute(f"{prefix}.content", content)
             for j, tc in enumerate(msg.get("tool_calls", [])):
                 tc_prefix = f"{prefix}.tool_calls.{j}.tool_call"
-                self._span.set_attribute(
+                self.set_attribute(
                     f"{tc_prefix}.function.name", tc.get("name", ""))
                 args = tc.get("arguments", "")
                 if self._redact and args:
                     args = f"[REDACTED: {len(args)} chars]"
-                self._span.set_attribute(f"{tc_prefix}.function.arguments", args)
+                self.set_attribute(f"{tc_prefix}.function.arguments", args)
 
     def set_metadata(self, data: Dict[str, Any]) -> None:
         """Set OpenInference metadata attribute as a JSON string.
 
-        Used for jaato-specific fields that have no OpenInference equivalent.
+        Used for jaato-specific fields that have no OpenInference
+        equivalent.  Routes through :meth:`set_attribute` so the
+        registered redactor chain catches the serialised metadata.
         """
-        self._span.set_attribute("metadata", json.dumps(data))
+        self.set_attribute("metadata", json.dumps(data))
 
 
 class OTelPlugin:
@@ -299,7 +343,8 @@ class OTelPlugin:
     """
 
     __slots__ = ("_enabled", "_tracer", "_redact_content", "_provider",
-                 "_agent_context", "_long_lived_spans")
+                 "_agent_context", "_long_lived_spans",
+                 "_attribute_redactors")
 
     def __init__(self):
         self._enabled = False
@@ -311,6 +356,44 @@ class OTelPlugin:
         # ``(span, otel_context)`` so child spans can be parented under
         # them.  Used for session spans and agent spans.
         self._long_lived_spans: Dict[str, Any] = {}
+        # Plug-in attribute-redactor chain (seat 4 of the four-seat
+        # pseudonymization design — see
+        # project_backlog_pseudonymization_plugin_surface.md).  Each
+        # redactor is a Callable[[str, Any], Any] taking
+        # (attribute_key, value) and returning the value to actually
+        # set.  Threaded into every _SpanWrapper so a single
+        # registration covers all set_attribute call sites without
+        # per-site instrumentation.  Empty list = no-op (full
+        # backwards-compat).
+        self._attribute_redactors: List[
+            Callable[[str, Any], Any]
+        ] = []
+
+    def register_attribute_redactor(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a redactor on every span attribute set via the wrapper.
+
+        Plug-in surface for redaction / pseudonymization / content-filter
+        consumers that need to inspect or rewrite span attribute values
+        before they reach the OTel exporter.  The redactor receives
+        ``(attribute_key, value)`` and returns the value to actually
+        set.  Multiple redactors stack — registered in order, applied
+        as a chain.
+
+        The redactor runs **after** the built-in length-preserving
+        redaction for ``input.value`` / ``output.value``, so a
+        registered redactor sees the already-redacted form for those
+        keys.  For all other attribute keys, the redactor sees the
+        raw value and is the only transformer in play.
+
+        Premium typically calls this from a session hook (or daemon
+        extension start()) so the redactor is wired before any span
+        is created.  The chain is shared across every span the
+        plugin produces in this process — there is no per-session or
+        per-span redactor registration.
+        """
+        self._attribute_redactors.append(fn)
 
     def initialize(self, config: Dict[str, Any]) -> None:
         """Initialize OpenTelemetry with the given configuration.
@@ -737,7 +820,7 @@ class OTelPlugin:
             with self._tracer.start_as_current_span(
                 span_name, attributes=attrs, context=parent_ctx,
             ) as span:
-                yield _SpanWrapper(span, self._redact_content)
+                yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
         finally:
             ctx.agent_id = prev_id
             ctx.agent_type = prev_type
@@ -781,7 +864,7 @@ class OTelPlugin:
         span_name = f"jaato.{session_id}.llm" if session_id else "jaato.llm"
 
         with self._tracer.start_as_current_span(span_name, attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+            yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
 
     @contextmanager
     def tool_span(
@@ -817,7 +900,7 @@ class OTelPlugin:
             attrs.update(attributes)
 
         with self._tracer.start_as_current_span(f"jaato.tool.{tool_name}", attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+            yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
 
     @contextmanager
     def retry_span(
@@ -852,7 +935,7 @@ class OTelPlugin:
             attrs.update(attributes)
 
         with self._tracer.start_as_current_span("jaato.retry", attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+            yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
 
     @contextmanager
     def gc_span(
@@ -885,7 +968,7 @@ class OTelPlugin:
             attrs.update(attributes)
 
         with self._tracer.start_as_current_span("jaato.gc", attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+            yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
 
     @contextmanager
     def permission_span(
@@ -916,7 +999,7 @@ class OTelPlugin:
             attrs.update(attributes)
 
         with self._tracer.start_as_current_span("jaato.permission", attributes=attrs) as span:
-            yield _SpanWrapper(span, self._redact_content)
+            yield _SpanWrapper(span, self._redact_content, self._attribute_redactors)
 
     def capture_context(self) -> Optional[Any]:
         """Capture the current OTel context for propagation to worker threads.

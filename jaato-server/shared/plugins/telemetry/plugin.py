@@ -6,7 +6,7 @@ span creation to ensure proper cleanup and timing.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Generator, List, Optional, Protocol, runtime_checkable
 
 
 class SpanContext(Protocol):
@@ -371,5 +371,33 @@ class TelemetryPlugin(Protocol):
 
         Returns:
             Hex-encoded span ID or None if no active span
+        """
+        ...
+
+    def register_attribute_redactor(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a redactor for every span attribute set via the wrapper.
+
+        Plug-in surface (seat 4 of the four-seat pseudonymization
+        design — see ``project_backlog_pseudonymization_plugin_surface.md``)
+        for redaction / pseudonymization / content-filter consumers
+        that need to inspect or rewrite span attribute values before
+        they reach the OTel exporter.
+
+        The redactor receives ``(attribute_key, value)`` and returns
+        the value to actually set.  Multiple redactors stack —
+        registered in order, applied as a chain.
+
+        Single registration covers every ``set_attribute`` call site
+        in the codebase (~20+ in ``jaato_session.py`` plus per-plugin
+        sites) without per-site instrumentation, because all attribute
+        paths in the span wrapper route through the single
+        ``set_attribute`` chokepoint.
+
+        Args:
+            fn: ``Callable[[str, Any], Any]`` taking
+                ``(attribute_key, value)`` and returning the
+                transformed value.
         """
         ...
