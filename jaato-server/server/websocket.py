@@ -523,6 +523,7 @@ class JaatoWSServer:
             limits = getattr(profile, "runtime_limits", None) if profile else None
             if limits is not None:
                 attach_cb = None
+                event_reader = None
                 if cgroups and cgroups.is_available():
                     if cgroups.provision_cgroup(session_id, limits):
                         ws_workspace_id = os.path.basename(sess.workspace_path)
@@ -535,11 +536,14 @@ class JaatoWSServer:
                                 limits.pids_max, limits.cpu_weight,
                             )
                     attach_cb = cgroups.make_attach_callback(session_id)
-                # Hand attach_cb + limits to the executor so subprocess
-                # plugins can pick them up.  attach_cb is a no-op when
-                # cgroups are unavailable; that's the documented contract
-                # of make_attach_callback().
-                server.set_runtime_limits(attach_cb, limits)
+                    event_reader = cgroups.make_event_reader(session_id)
+                # Hand attach_cb + limits + event_reader to the executor.
+                # attach_cb and event_reader are no-ops when cgroups are
+                # unavailable, so the call is unconditional once limits
+                # exist on the profile.  event_reader feeds OTel
+                # telemetry (jaato.cgroup.oom_kill_delta etc.) via the
+                # executor's per-tool-call snapshot/diff in execute().
+                server.set_runtime_limits(attach_cb, limits, event_reader)
 
             # ---------- AppArmor: per-session sandboxing ----------
             # AppArmor confinement is intended for WS-provisioned sessions

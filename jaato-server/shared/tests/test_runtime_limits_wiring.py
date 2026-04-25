@@ -135,3 +135,133 @@ class TestForwardingToPlugins:
         assert len(plugin.calls) == 2
         # Second call's limits override the first.
         assert plugin.calls[-1][1].memory_max_mb == 512
+
+
+class TestEventReaderTelemetryInjection:
+    """Tests for ``ToolExecutor.execute`` snapshotting cgroup.events
+    before/after each tool call and injecting deltas into the result's
+    ``_telemetry`` dict.  The session's tool span auto-forwards every
+    key in ``_telemetry`` as an OTel attribute, so we don't need to
+    test the OTel side here — just that the deltas land in the right
+    shape.
+    """
+
+    @staticmethod
+    def _make_executor_with_reader(reader):
+        executor = ToolExecutor()
+        # Register a no-op tool that returns an empty dict so we can
+        # observe the injected _telemetry keys.
+        executor.register("noop", lambda args: {"ok": True})
+        executor.set_runtime_limits(None, None, reader)
+        return executor
+
+    def test_no_reader_means_no_injection(self):
+        # When no event_reader is set, execute() must not invent a
+        # _telemetry dict on the result.  This is the IPC / no-cgroups
+        # path — runs that don't have a cgroup shouldn't get spurious
+        # zero-delta keys.
+        executor = ToolExecutor()
+        executor.register("noop", lambda args: {"ok": True})
+        success, result = executor.execute("noop", {})
+        assert success is True
+        assert "_telemetry" not in result
+
+    def test_zero_delta_means_no_injection(self):
+        # The reader returns the same dict before and after — no
+        # kernel events occurred during the tool call, so no delta
+        # keys are added.  Keeping spans clean in the common case.
+        snapshot = {"oom_kill": 0, "populated": 1}
+        executor = self._make_executor_with_reader(lambda: snapshot.copy())
+        success, result = executor.execute("noop", {})
+        assert success is True
+        assert "_telemetry" not in result
+
+    def test_oom_kill_delta_is_injected(self):
+        # The reader returns 0 before, 2 after — we should see
+        # ``jaato.cgroup.oom_kill_delta = 2`` in the result.
+        calls = {"n": 0}
+
+        def reader():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"oom_kill": 0, "populated": 1}
+            return {"oom_kill": 2, "populated": 1}
+
+        executor = self._make_executor_with_reader(reader)
+        success, result = executor.execute("noop", {})
+        assert success is True
+        assert result["_telemetry"]["jaato.cgroup.oom_kill_delta"] == 2
+
+    def test_oom_event_delta_is_injected(self):
+        # ``oom`` (the cgroup-level OOM-event count) increments when
+        # the OOM killer activates inside the cgroup, separate from
+        # ``oom_kill`` (per-process count).  Both get surfaced.
+        calls = {"n": 0}
+
+        def reader():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"oom": 0, "oom_kill": 0}
+            return {"oom": 1, "oom_kill": 3}
+
+        executor = self._make_executor_with_reader(reader)
+        success, result = executor.execute("noop", {})
+        telem = result["_telemetry"]
+        assert telem["jaato.cgroup.oom_delta"] == 1
+        assert telem["jaato.cgroup.oom_kill_delta"] == 3
+
+    def test_populated_is_not_treated_as_a_delta(self):
+        # ``populated`` is a level (0/1), not a counter — its delta
+        # would be noisy and meaningless.  Verify we skip it even
+        # when it changes between snapshots.
+        calls = {"n": 0}
+
+        def reader():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"populated": 0}
+            return {"populated": 1}
+
+        executor = self._make_executor_with_reader(reader)
+        success, result = executor.execute("noop", {})
+        # No deltas surfaced — populated transitions are skipped.
+        assert "_telemetry" not in result
+
+    def test_preserves_existing_telemetry_dict(self):
+        # If the tool already produced a ``_telemetry`` dict, our
+        # additions must merge in, not overwrite the plugin's keys.
+        executor = ToolExecutor()
+        executor.register(
+            "with_telem",
+            lambda args: {"_telemetry": {"plugin.attr": "value"}, "ok": True},
+        )
+        calls = {"n": 0}
+
+        def reader():
+            calls["n"] += 1
+            return {"oom_kill": 0 if calls["n"] == 1 else 1}
+
+        executor.set_runtime_limits(None, None, reader)
+        success, result = executor.execute("with_telem", {})
+        telem = result["_telemetry"]
+        # Plugin's attr survives.
+        assert telem["plugin.attr"] == "value"
+        # Our delta lands alongside it.
+        assert telem["jaato.cgroup.oom_kill_delta"] == 1
+
+    def test_reader_returning_none_after_does_not_crash(self):
+        # If cgroup is torn down mid-call, the after-snapshot returns
+        # None.  Wrapper must skip injection rather than crash on the
+        # subtraction.
+        calls = {"n": 0}
+
+        def reader():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"oom_kill": 0}
+            return None  # cgroup vanished
+
+        executor = self._make_executor_with_reader(reader)
+        success, result = executor.execute("noop", {})
+        assert success is True
+        assert "_telemetry" not in result

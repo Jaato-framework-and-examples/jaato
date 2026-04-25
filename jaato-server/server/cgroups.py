@@ -384,6 +384,34 @@ class CgroupsManager:
                 continue
         return counts
 
+    def make_event_reader(
+        self, session_id: str,
+    ) -> Callable[[], Optional[Dict[str, int]]]:
+        """Return a zero-arg callable that snapshots a session's events.
+
+        Used to plumb event-counter access across the
+        ``server → shared`` boundary without exposing the manager
+        itself: the executor stores the callable and invokes it
+        before / after each tool call, computing deltas to attribute
+        kernel-killed exits to specific tool invocations.
+
+        Returns a no-op callable (always returns ``None``) when
+        cgroups are unavailable or no per-session cgroup exists, so
+        callers don't need to special-case those paths.
+        """
+        if not self.is_available():
+            return _noop_event_reader
+        cg_path = self.get_cgroup_path(session_id)
+        if not cg_path.exists():
+            return _noop_event_reader
+
+        # Capture the manager + session_id in a closure so the
+        # caller doesn't need to retain either.
+        def _read() -> Optional[Dict[str, int]]:
+            return self.read_event_counts(session_id)
+
+        return _read
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -429,4 +457,14 @@ class CgroupsManager:
 
 def _noop() -> None:
     """Sentinel preexec callback — used when cgroups are unavailable."""
+    return None
+
+
+def _noop_event_reader() -> Optional[Dict[str, int]]:
+    """Sentinel event reader — returns None when cgroups are unavailable.
+
+    Used by :meth:`CgroupsManager.make_event_reader` so callers always
+    get a callable rather than ``None`` and can invoke it
+    unconditionally — same contract as :func:`_noop` for preexec.
+    """
     return None

@@ -415,6 +415,50 @@ class TestReadEventCounts:
         assert after["oom_kill"] - before["oom_kill"] == 2
 
 
+class TestMakeEventReader:
+    """Tests for ``CgroupsManager.make_event_reader`` — the
+    zero-arg-callable form of :meth:`read_event_counts`, used to plumb
+    snapshot access across the server → shared boundary without
+    exposing the manager itself.
+    """
+
+    def test_unavailable_returns_noop(self, manager):
+        manager._available = False
+        reader = manager.make_event_reader("s1")
+        # No-op reader returns None on every call.
+        assert reader() is None
+
+    def test_missing_cgroup_returns_noop(self, manager):
+        manager._available = True
+        reader = manager.make_event_reader("never-provisioned")
+        assert reader() is None
+
+    def test_reader_returns_current_snapshot(self, manager):
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        (cg / "cgroup.events").write_text("oom_kill 1\npopulated 1\n")
+
+        reader = manager.make_event_reader("s1")
+        assert reader() == {"oom_kill": 1, "populated": 1}
+
+    def test_reader_reflects_kernel_updates(self, manager):
+        # The reader closes over manager + session_id and re-reads on
+        # every call — the kernel's monotonic counters appear via
+        # subsequent invocations.
+        manager._available = True
+        manager.provision_cgroup("s1", RuntimeLimits(memory_max_mb=64))
+        cg = manager.get_cgroup_path("s1")
+        events = cg / "cgroup.events"
+
+        events.write_text("oom_kill 0\n")
+        reader = manager.make_event_reader("s1")
+        assert reader() == {"oom_kill": 0}
+
+        events.write_text("oom_kill 5\n")
+        assert reader() == {"oom_kill": 5}
+
+
 class TestMakeAttachCallback:
     def test_unavailable_returns_noop(self, manager):
         manager._available = False

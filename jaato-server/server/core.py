@@ -443,8 +443,9 @@ class JaatoServer:
         self,
         attach_callback: Optional[Callable[[], None]],
         limits: Optional[Any] = None,
+        event_reader: Optional[Callable[[], Optional[Any]]] = None,
     ) -> None:
-        """Install per-session cgroup attach + app-layer runtime caps.
+        """Install per-session cgroup attach + app-layer caps + event reader.
 
         Mirrors :meth:`set_apparmor_confinement` on the runtime-limits
         axis: AppArmor controls *what's reachable*, this controls *how
@@ -452,7 +453,7 @@ class JaatoServer:
 
         Called by the WebSocket server after :class:`CgroupsManager`
         provisions the session's cgroup.  Subprocess-launching plugins
-        (cli, interactive_shell) read both pieces via the executor's
+        (cli, interactive_shell) read attach + limits via the executor's
         accessors:
 
         * ``attach_callback`` is passed as ``Popen(preexec_fn=...)``,
@@ -461,19 +462,29 @@ class JaatoServer:
         * ``limits`` carries application-layer caps
           (``tool_timeout_seconds``, ``max_output_bytes``) that have no
           cgroup equivalent — plugins apply them at the Python layer.
+        * ``event_reader`` is consumed by ``ToolExecutor.execute`` (not
+          forwarded to plugins) — snapshots ``cgroup.events`` before /
+          after each tool call and injects deltas into the result's
+          ``_telemetry`` dict, where the session's tool span picks
+          them up as OTel attributes.
 
         Args:
             attach_callback: Zero-arg callable for ``preexec_fn``, or
                 ``None`` when no kernel-enforced limits are configured.
             limits: :class:`shared.runtime_limits.RuntimeLimits` with
                 the app-layer caps.  ``None`` means "no app caps either".
+            event_reader: Zero-arg callable returning a
+                ``cgroup.events`` snapshot dict, or ``None`` when
+                cgroups are unavailable.
         """
         if not self._jaato:
             logger.warning("set_runtime_limits called before client initialized")
             return
         session = self._jaato.get_session()
         if session and session._executor:
-            session._executor.set_runtime_limits(attach_callback, limits)
+            session._executor.set_runtime_limits(
+                attach_callback, limits, event_reader,
+            )
 
     def set_reference_authorizer(self, authorizer) -> None:
         """Install the per-session AppArmor reference-fragment authorizer.
