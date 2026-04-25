@@ -263,6 +263,21 @@ class JaatoServer:
         self._suppress_base_instructions = suppress_base_instructions
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
+
+        # Plug-in transformer chain for outbound events (seat 3 of the
+        # four-seat pseudonymization design — see
+        # docs/design/daemon-extensions.md and
+        # project_backlog_pseudonymization_plugin_surface.md).
+        # ``emit()`` runs every transformer in registration order
+        # before publishing to the EventBus and forwarding to the
+        # client transport.  Both internal subscribers (plugins,
+        # activity detector) and external clients (IPC/WS) see the
+        # same (transformed) view — the chokepoint is intentionally
+        # one stage upstream of both delivery paths so the canonical
+        # view is the transformed one.  Empty list = no-op.
+        self._outbound_event_transformers: List[
+            Callable[[Event], Event]
+        ] = []
         self._workspace_path = workspace_path
         self._session_id = session_id
 
@@ -631,7 +646,19 @@ class JaatoServer:
         Mapped events are published to the EventBus first, then forwarded
         to clients via the callback. Unmapped events (init, error, help,
         session list, etc.) go directly to clients without touching the bus.
+
+        When outbound transformers are registered (via
+        :meth:`register_outbound_event_transformer`), the chain runs
+        before both bus publish and client emission so the canonical
+        outbound view is consistently transformed.  Empty chain = no-op,
+        identical to pre-transformer behaviour.
         """
+        # Apply outbound transformer chain (seat 3 of the four-seat
+        # pseudonymization design).  Runs once at the top so both the
+        # bus and the client transport see the same transformed view.
+        for fn in self._outbound_event_transformers:
+            event = fn(event)
+
         # Publish to EventBus for internal subscribers (plugins, activity detector)
         bus = self._get_event_bus()
         if bus:
@@ -641,6 +668,30 @@ class JaatoServer:
 
         # Forward to clients (IPC/WebSocket)
         self._on_event(event)
+
+    def register_outbound_event_transformer(
+        self, fn: Callable[[Event], Event]
+    ) -> None:
+        """Register a transformer for every outbound Event.
+
+        Plug-in surface for redaction / un-redaction / audit /
+        content-filter consumers that need to inspect or rewrite events
+        before they leave the daemon (toward IPC/WS clients) or hit
+        the EventBus.  Multiple transformers stack — registered in
+        order, applied as a chain.
+
+        The transformer must return an Event of the same type
+        (returning ``None`` would silently drop the event for both
+        internal subscribers and external clients — V1 doesn't support
+        that semantics).  For premium's pseudonymization use case the
+        canonical purpose is un-redaction on the user-display path,
+        but the API is generic.
+
+        Premium typically calls this from a session hook
+        (:meth:`SessionManager.add_session_hook`) so the transformer is
+        wired before any event is emitted.
+        """
+        self._outbound_event_transformers.append(fn)
 
     def _get_event_bus(self):
         """Get the EventBus from the runtime, if available.
