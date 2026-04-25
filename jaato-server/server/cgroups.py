@@ -66,137 +66,17 @@ import logging
 import os
 import platform
 import shutil
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Callable, Optional, Tuple
+
+# RuntimeLimits is defined in shared/ so SubagentProfile can reference it
+# statically.  We re-export it here so callers that already import from
+# server.cgroups don't need to reach into shared.
+from shared.runtime_limits import RuntimeLimits
+
+__all__ = ["RuntimeLimits", "CgroupsManager"]
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-# cgroup v2 cpu.weight bounds (kernel: include/uapi/linux/cgroupv2.h).
-_CPU_WEIGHT_MIN = 1
-_CPU_WEIGHT_MAX = 10_000
-_CPU_WEIGHT_DEFAULT = 100  # kernel default; we don't write this value
-
-# Sanity ceilings for user-supplied values.  Not security boundaries —
-# just guardrails to catch obvious typos in profile JSON ("1024" GB
-# instead of MB, etc.) at load time rather than at session-start time.
-_MEMORY_MAX_MB_LIMIT = 1024 * 1024  # 1 TiB
-_PIDS_MAX_LIMIT = 1_000_000
-
-
-@dataclass(frozen=True)
-class RuntimeLimits:
-    """Per-session resource consumption caps.
-
-    Top-level field on a session profile (planned name:
-    ``runtime_limits``, parallel to ``gc``).  Answers the question
-    "how much can this session consume?" — orthogonal to *sandboxing*
-    (AppArmor), which answers "what can it touch?".
-
-    Any field left as ``None`` means "no limit / inherit host default".
-    The fields split into two enforcement layers, but a profile author
-    treats them as one knob set:
-
-    * **Kernel-enforced** (cgroup v2) — written once into the cgroup
-      controller files; the kernel enforces them for every process in
-      the slice for the lifetime of the session:
-      ``memory_max_mb`` → ``memory.max``,
-      ``pids_max`` → ``pids.max``,
-      ``cpu_weight`` → ``cpu.weight``.
-    * **Application-enforced** — read by the CLI / interactive_shell
-      plugins and applied per-tool-call at the Python layer because
-      cgroup v2 has no kernel knob for them:
-      ``tool_timeout_seconds`` (passed to ``subprocess.run(timeout=)``),
-      ``max_output_bytes`` (truncates captured stdout/stderr).
-
-    Single config, two layers — a profile author writing JSON shouldn't
-    need to know which limits happen in the kernel vs in Python.
-    """
-
-    memory_max_mb: Optional[int] = None
-    pids_max: Optional[int] = None
-    cpu_weight: Optional[int] = None
-    tool_timeout_seconds: Optional[float] = None
-    max_output_bytes: Optional[int] = None
-
-    # Future-proof: forward-compat passthrough for fields the runtime
-    # doesn't recognise yet.  Profile schema validation should reject
-    # truly unknown keys; this is just a safe landing pad if a newer
-    # profile is loaded by an older server.
-    extra: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if self.memory_max_mb is not None:
-            if not isinstance(self.memory_max_mb, int) or self.memory_max_mb <= 0:
-                raise ValueError(
-                    f"memory_max_mb must be a positive int, got {self.memory_max_mb!r}"
-                )
-            if self.memory_max_mb > _MEMORY_MAX_MB_LIMIT:
-                raise ValueError(
-                    f"memory_max_mb={self.memory_max_mb} exceeds sanity ceiling "
-                    f"{_MEMORY_MAX_MB_LIMIT} MiB — likely a unit typo"
-                )
-        if self.pids_max is not None:
-            if not isinstance(self.pids_max, int) or self.pids_max <= 0:
-                raise ValueError(
-                    f"pids_max must be a positive int, got {self.pids_max!r}"
-                )
-            if self.pids_max > _PIDS_MAX_LIMIT:
-                raise ValueError(
-                    f"pids_max={self.pids_max} exceeds sanity ceiling {_PIDS_MAX_LIMIT}"
-                )
-        if self.cpu_weight is not None:
-            if not isinstance(self.cpu_weight, int):
-                raise ValueError(
-                    f"cpu_weight must be int, got {type(self.cpu_weight).__name__}"
-                )
-            if not _CPU_WEIGHT_MIN <= self.cpu_weight <= _CPU_WEIGHT_MAX:
-                raise ValueError(
-                    f"cpu_weight={self.cpu_weight} out of range "
-                    f"[{_CPU_WEIGHT_MIN}, {_CPU_WEIGHT_MAX}]"
-                )
-        if self.tool_timeout_seconds is not None:
-            if not isinstance(self.tool_timeout_seconds, (int, float)):
-                raise ValueError(
-                    f"tool_timeout_seconds must be a number, got "
-                    f"{type(self.tool_timeout_seconds).__name__}"
-                )
-            if self.tool_timeout_seconds <= 0:
-                raise ValueError(
-                    f"tool_timeout_seconds must be > 0, got {self.tool_timeout_seconds}"
-                )
-        if self.max_output_bytes is not None:
-            if not isinstance(self.max_output_bytes, int) or self.max_output_bytes <= 0:
-                raise ValueError(
-                    f"max_output_bytes must be a positive int, got {self.max_output_bytes!r}"
-                )
-
-    @classmethod
-    def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
-        """Build limits from a profile dict, parking unknown keys in ``extra``.
-
-        Returns the default (no-limits) instance when ``data`` is
-        ``None`` or empty, so callers don't need to special-case
-        missing config.
-        """
-        if not data:
-            return cls()
-        known_fields = {"memory_max_mb", "pids_max", "cpu_weight",
-                        "tool_timeout_seconds", "max_output_bytes"}
-        kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
-        extra = {k: v for k, v in data.items() if k not in known_fields}
-        return cls(extra=extra, **kwargs)
-
-    def has_kernel_limits(self) -> bool:
-        """True if any cgroup-enforced limit is set."""
-        return any(v is not None for v in (
-            self.memory_max_mb, self.pids_max, self.cpu_weight,
-        ))
 
 
 # ---------------------------------------------------------------------------

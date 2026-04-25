@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
 
+from shared.runtime_limits import RuntimeLimits
+
 logger = logging.getLogger(__name__)
 
 
@@ -572,6 +574,14 @@ class SubagentProfile:
             emitting ``AgentCompletedEvent``. When ``None``, the legacy
             ``summary: str`` parameter is used. Inheritance follows the
             scalar-override rule (parents must agree or child overrides).
+        runtime_limits: Optional per-session resource consumption caps —
+            memory, PIDs, CPU weight, tool wall-clock timeout, and stdout
+            cap.  Orthogonal to sandboxing (AppArmor): answers "how much
+            can this session consume?" rather than "what can it touch?".
+            The kernel-enforceable subset (memory, PIDs, CPU weight) is
+            applied via cgroup v2 by ``server.cgroups.CgroupsManager``;
+            the rest is read by the CLI/interactive_shell plugins at
+            tool-call time.  ``None`` means "no limits" (host defaults).
     """
     name: str
     description: str
@@ -586,6 +596,7 @@ class SubagentProfile:
     env: Dict[str, str] = field(default_factory=dict)
     inherits: Optional[List[str]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    runtime_limits: Optional[RuntimeLimits] = None
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -824,6 +835,12 @@ def _merge_profiles(
     # gc: agreement-or-override (compare as dicts for equality)
     merged_gc = _resolve_scalar('gc', child.gc)
 
+    # runtime_limits: scalar-override (parents must agree or child
+    # overrides).  Compared via str() inside _resolve_scalar — frozen
+    # dataclasses with the same field values produce identical reprs,
+    # so two parents declaring the same limits don't conflict.
+    merged_runtime_limits = _resolve_scalar('runtime_limits', child.runtime_limits)
+
     # completion_payload_schema: scalar-override (parents must agree or
     # child overrides). Inline dicts and string paths both compared as-is
     # via str() in _resolve_scalar.
@@ -866,6 +883,7 @@ def _merge_profiles(
         env=merged_env,
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
+        runtime_limits=merged_runtime_limits,
     )
 
 
@@ -972,6 +990,17 @@ def _scan_profiles_dir(
         if 'gc' in data and data['gc']:
             gc_config = GCProfileConfig.from_dict(data['gc'])
 
+        runtime_limits = None
+        if 'runtime_limits' in data and data['runtime_limits']:
+            try:
+                runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+            except (ValueError, TypeError) as exc:
+                err = f"Invalid runtime_limits in profile '{name}': {exc}"
+                logger.warning(err)
+                if name not in errors:
+                    errors[name] = err
+                continue
+
         raw_plugins = data.get('plugins', [])
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
@@ -993,6 +1022,7 @@ def _scan_profiles_dir(
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+            runtime_limits=runtime_limits,
         )
         if data.get('system_instructions'):
             import warnings
@@ -1105,6 +1135,17 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         if 'gc' in data and data['gc']:
             gc_config = GCProfileConfig.from_dict(data['gc'])
 
+        runtime_limits = None
+        if 'runtime_limits' in data and data['runtime_limits']:
+            try:
+                runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Skipping premium profile '%s': invalid runtime_limits: %s",
+                    name, exc,
+                )
+                continue
+
         raw_plugins = data.get('plugins', [])
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
@@ -1125,6 +1166,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+            runtime_limits=runtime_limits,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -1259,6 +1301,19 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
                 elif gc_max_turns <= 0:
                     errors.append("gc.max_turns must be a positive integer")
 
+    # runtime_limits sub-validation: delegate to RuntimeLimits.from_dict
+    # which raises ValueError for any out-of-range value (kept in one
+    # place rather than duplicating the rules here).
+    runtime_data = data.get("runtime_limits")
+    if runtime_data is not None:
+        if not isinstance(runtime_data, dict):
+            errors.append("'runtime_limits' must be an object or null")
+        else:
+            try:
+                RuntimeLimits.from_dict(runtime_data)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"runtime_limits: {exc}")
+
     return len(errors) == 0, errors, warnings
 
 
@@ -1329,6 +1384,13 @@ class SubagentConfig:
             if 'gc' in profile_data and profile_data['gc']:
                 gc_config = GCProfileConfig.from_dict(profile_data['gc'])
 
+            # Parse runtime_limits (cgroup-enforced + app-enforced caps).
+            # Validation runs in __post_init__ — bad values raise here so
+            # the inline config rejects them at load time, same as gc.
+            runtime_limits = None
+            if 'runtime_limits' in profile_data and profile_data['runtime_limits']:
+                runtime_limits = RuntimeLimits.from_dict(profile_data['runtime_limits'])
+
             # Parse plugin entries, separating (preload) annotations
             raw_plugins = profile_data.get('plugins', [])
             clean_plugins, preloaded = parse_plugin_list(raw_plugins)
@@ -1350,6 +1412,7 @@ class SubagentConfig:
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
+                runtime_limits=runtime_limits,
             )
 
         return cls(

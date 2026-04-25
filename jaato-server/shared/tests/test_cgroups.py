@@ -21,7 +21,7 @@ if "server" not in sys.modules:
     sys.modules["server"] = _stub
 
 import server.cgroups as _cg
-RuntimeLimits = _cg.RuntimeLimits
+from shared.runtime_limits import RuntimeLimits
 CgroupsManager = _cg.CgroupsManager
 
 
