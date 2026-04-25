@@ -1457,6 +1457,28 @@ class JaatoSession:
             if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
                 subagent_plugin.set_parent_session(self)
 
+        # Wire the waypoint plugin with session-state accessors so it can
+        # capture conversation history snapshots when a waypoint is created.
+        # Without this the plugin's history-capture path is dormant: every
+        # waypoint is saved with history_snapshot=None and downstream
+        # consumers (waypoint_info metadata, premium handoff
+        # fork_from_waypoint) get nothing to work with.  The serializer
+        # adapter wraps shared.plugins.session.serialize_history (which
+        # returns List[Dict]) in json.dumps to match the plugin's
+        # Callable[[List[Message]], str] contract — bridges the asymmetry
+        # without changing the plugin's signature or Waypoint's schema.
+        if self._runtime.registry:
+            waypoint_plugin = self._runtime.registry.get_plugin("waypoint")
+            if waypoint_plugin and hasattr(waypoint_plugin, 'set_session_callbacks'):
+                from .plugins.session.serializer import serialize_history
+                waypoint_plugin.set_session_callbacks(
+                    get_history=self.get_history,
+                    serialize_history=lambda msgs: json.dumps(
+                        serialize_history(msgs)
+                    ),
+                    get_turn_index=lambda: self._turn_index,
+                )
+
         # Auto-wire plugins that need session access
         # Any plugin with set_session() will receive this session reference.
         # When the session has an explicit plugin list (agent profile), only

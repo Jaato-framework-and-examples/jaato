@@ -811,6 +811,126 @@ class TestContextLimitRecovery:
         assert result is False
 
 
+class TestWaypointWiring:
+    """Tests for the JaatoSession → WaypointPlugin set_session_callbacks
+    wiring.  Without this, every waypoint is saved with
+    history_snapshot=None — and downstream consumers (waypoint_info
+    metadata, premium handoff fork_from_waypoint) get nothing to read."""
+
+    def _build_session_with_waypoint_plugin(self):
+        mock_runtime = MagicMock()
+        mock_runtime.create_provider.return_value = MagicMock()
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.permission_plugin = None
+
+        # Registry returns a waypoint plugin (and nothing else for other
+        # lookups so wire-loop iterates cleanly).
+        mock_waypoint_plugin = MagicMock()
+        mock_runtime.registry = MagicMock()
+        mock_runtime.registry._exposed = []
+        mock_runtime.registry.get_plugin.side_effect = lambda name: (
+            mock_waypoint_plugin if name == "waypoint" else None
+        )
+        mock_runtime.registry.collect_prerequisite_policies.return_value = []
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        return session, mock_waypoint_plugin
+
+    def test_set_session_callbacks_invoked_on_configure(self):
+        """The wiring fires during configure() so waypoints created
+        afterwards capture history."""
+        session, waypoint_plugin = self._build_session_with_waypoint_plugin()
+
+        session.configure()
+
+        waypoint_plugin.set_session_callbacks.assert_called_once()
+        kwargs = waypoint_plugin.set_session_callbacks.call_args.kwargs
+        assert "get_history" in kwargs
+        assert "serialize_history" in kwargs
+        assert "get_turn_index" in kwargs
+
+    def test_get_history_callback_returns_session_history(self):
+        """The wired get_history callable must return the actual session's
+        live history list (not a stale snapshot)."""
+        session, waypoint_plugin = self._build_session_with_waypoint_plugin()
+        session.configure()
+
+        # Append a message after wiring — the callback should see it.
+        from jaato_sdk.plugins.model_provider.types import Message
+        session._history.append(Message.from_text(Role.USER, "hi"))
+
+        get_history = waypoint_plugin.set_session_callbacks.call_args.kwargs[
+            "get_history"
+        ]
+        history = get_history()
+        assert len(history) == 1
+        assert history[0].parts[0].text == "hi"
+
+    def test_serialize_history_produces_json_string_round_trippable(self):
+        """The json.dumps wrapper must produce a string that
+        deserialize_history can round-trip — that's the contract premium's
+        future fork_from_waypoint will rely on."""
+        import json
+        from jaato_sdk.plugins.model_provider.types import Message
+        from ..plugins.session.serializer import deserialize_history
+
+        session, waypoint_plugin = self._build_session_with_waypoint_plugin()
+        session.configure()
+
+        serialize_history = waypoint_plugin.set_session_callbacks.call_args.kwargs[
+            "serialize_history"
+        ]
+        msgs = [
+            Message.from_text(Role.USER, "first"),
+            Message.from_text(Role.MODEL, "second"),
+        ]
+        snapshot = serialize_history(msgs)
+
+        assert isinstance(snapshot, str)
+        round_tripped = deserialize_history(json.loads(snapshot))
+        assert len(round_tripped) == 2
+        assert round_tripped[0].parts[0].text == "first"
+        assert round_tripped[1].parts[0].text == "second"
+        assert round_tripped[0].role == Role.USER
+        assert round_tripped[1].role == Role.MODEL
+
+    def test_get_turn_index_callback_tracks_session_turn(self):
+        """Turn index callback reads the live session counter, so a
+        waypoint created mid-session captures the right turn position."""
+        session, waypoint_plugin = self._build_session_with_waypoint_plugin()
+        session.configure()
+
+        get_turn_index = waypoint_plugin.set_session_callbacks.call_args.kwargs[
+            "get_turn_index"
+        ]
+        assert get_turn_index() == 0  # fresh session
+
+        session._turn_index = 7
+        assert get_turn_index() == 7  # tracks live state
+
+    def test_no_wiring_when_waypoint_plugin_absent(self):
+        """When waypoint isn't in the profile's plugin set, registry
+        returns None and the wiring is silently skipped — no crash."""
+        mock_runtime = MagicMock()
+        mock_runtime.create_provider.return_value = MagicMock()
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.permission_plugin = None
+        mock_runtime.registry = MagicMock()
+        mock_runtime.registry._exposed = []
+        mock_runtime.registry.get_plugin.return_value = None
+        mock_runtime.registry.collect_prerequisite_policies.return_value = []
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+
+        # Should not raise.
+        session.configure()
+        assert session.is_configured
+
+
 class TestSetInitialHistory:
     """set_initial_history is the spawn-from-snapshot primitive consumed by
     create_headless_session(initial_history=...) and (downstream) premium's
