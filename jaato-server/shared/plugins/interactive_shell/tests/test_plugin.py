@@ -288,6 +288,80 @@ class TestListTool:
         plugin._exec_close({'session_id': 'beta'})
 
 
+class TestRuntimeLimits:
+    """Tests for the per-session runtime-limits wiring (cgroup attach +
+    app-layer caps).  The InteractiveShellPlugin stores the values from
+    set_runtime_limits and passes the attach callback as preexec_fn to
+    ShellSession at spawn time.
+    """
+
+    def test_default_state_has_no_attach_no_limits(self, plugin):
+        # Plugin starts with no per-session limits; spawn must behave
+        # exactly as before in this state.
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None
+
+    def test_set_runtime_limits_stores_values(self, plugin):
+        from shared.runtime_limits import RuntimeLimits
+
+        attach_calls = []
+
+        def fake_attach():
+            attach_calls.append(True)
+
+        limits = RuntimeLimits(memory_max_mb=512)
+        plugin.set_runtime_limits(fake_attach, limits)
+
+        assert plugin._cgroup_attach is fake_attach
+        assert plugin._runtime_limits is limits
+        # Sanity: zero-arg call works (the preexec_fn contract).
+        plugin._cgroup_attach()
+        assert attach_calls == [True]
+
+    def test_clear_runtime_limits_with_none(self, plugin):
+        from shared.runtime_limits import RuntimeLimits
+
+        plugin.set_runtime_limits(lambda: None, RuntimeLimits(pids_max=64))
+        plugin.set_runtime_limits(None, None)
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None
+
+    def test_attach_passed_as_preexec_fn_at_spawn(self, plugin):
+        # Verify the spawn site reads ``self._cgroup_attach`` and
+        # passes it to ShellSession as preexec_fn.  Replace
+        # ShellSession in the plugin module with a recorder so we
+        # don't actually fork/exec.
+        from shared.plugins.interactive_shell import plugin as plugin_mod
+
+        recorded = {}
+
+        class _RecordingSession:
+            is_alive = False
+            session_id = None
+
+            def __init__(self, **kwargs):
+                recorded.update(kwargs)
+                _RecordingSession.session_id = kwargs.get('session_id')
+
+            def read_initial_output(self):
+                return ''
+
+            def close(self):
+                pass
+
+        attach = lambda: None
+        plugin._cgroup_attach = attach
+
+        original = plugin_mod.ShellSession
+        plugin_mod.ShellSession = _RecordingSession
+        try:
+            plugin._exec_spawn({'command': 'whatever'})
+        finally:
+            plugin_mod.ShellSession = original
+
+        assert recorded.get('preexec_fn') is attach
+
+
 class TestWorkspacePath:
     """Test workspace path wiring."""
 

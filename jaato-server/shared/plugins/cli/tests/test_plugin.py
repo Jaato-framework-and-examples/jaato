@@ -763,3 +763,45 @@ class TestCLIPluginPathSandboxing:
         plugin.initialize()
 
         assert plugin._workspace_root is None
+
+
+class TestCLIPluginRuntimeLimits:
+    """Tests for the per-session runtime-limits wiring (cgroup attach +
+    app-layer caps).  See ``set_runtime_limits`` and the Popen branches
+    in ``CLIToolPlugin``.
+    """
+
+    def test_default_state_has_no_attach_no_limits(self):
+        # Plugins start with no per-session limits; the Popen branches
+        # must treat this as "behave like before".
+        plugin = CLIToolPlugin()
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None
+
+    def test_set_runtime_limits_stores_values(self):
+        from shared.runtime_limits import RuntimeLimits
+
+        attach_calls = []
+
+        def fake_attach():
+            attach_calls.append(True)
+
+        plugin = CLIToolPlugin()
+        limits = RuntimeLimits(memory_max_mb=512, tool_timeout_seconds=30)
+        plugin.set_runtime_limits(fake_attach, limits)
+
+        assert plugin._cgroup_attach is fake_attach
+        assert plugin._runtime_limits is limits
+        # Sanity: the attach is callable with no args (the preexec_fn
+        # contract) and our fake records the invocation.
+        plugin._cgroup_attach()
+        assert attach_calls == [True]
+
+    def test_clear_runtime_limits_with_none(self):
+        from shared.runtime_limits import RuntimeLimits
+
+        plugin = CLIToolPlugin()
+        plugin.set_runtime_limits(lambda: None, RuntimeLimits(memory_max_mb=128))
+        plugin.set_runtime_limits(None, None)
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None

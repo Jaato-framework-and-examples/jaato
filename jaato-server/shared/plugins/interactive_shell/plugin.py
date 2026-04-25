@@ -74,6 +74,19 @@ class InteractiveShellPlugin:
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
+
+        # Per-session runtime limits installed by the executor via
+        # set_runtime_limits().  ``_cgroup_attach`` becomes preexec_fn
+        # at spawn time so the new PTY child joins the session's cgroup
+        # before exec().  ``_runtime_limits`` is currently informational
+        # — interactive sessions are inherently long-lived, so the
+        # ``tool_timeout_seconds`` cap doesn't apply per-call; the
+        # max_lifetime config remains the relevant ceiling.  Output
+        # caps from RuntimeLimits are not enforced here either: each
+        # ``shell_input``/``shell_read`` already trims to a fixed
+        # buffer at the protocol layer (see read_until_idle in session.py).
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits = None
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
         self._reaper_stop = threading.Event()
@@ -194,6 +207,30 @@ class InteractiveShellPlugin:
         else:
             self._workspace_root = None
         self._trace(f"set_workspace_path: {self._workspace_root}")
+
+    def set_runtime_limits(self, attach_callback, limits) -> None:
+        """Receive per-session cgroup attach + app-layer caps from the executor.
+
+        Forwarded by ``ToolExecutor.set_runtime_limits``.  At spawn
+        time, ``attach_callback`` becomes ``preexec_fn`` on the
+        backend's spawn call so the forked PTY child joins the
+        session's cgroup before ``exec``.  Existing sessions are not
+        re-attached — operators tuning limits mid-session must close
+        and respawn (rare for interactive PTY workflows).
+
+        ``limits`` is stored but not actively enforced here:
+        ``tool_timeout_seconds`` doesn't map cleanly to a long-lived
+        PTY (the existing ``max_lifetime`` config covers that), and
+        per-read output caps are already enforced by
+        ``read_until_idle``'s buffer.  Stored for future use and so
+        operators can introspect what the plugin received.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._trace(
+            f"set_runtime_limits: attach={attach_callback is not None} "
+            f"limits={limits!r}"
+        )
 
     # --- Tool schemas ---
 
@@ -506,6 +543,10 @@ IMPORTANT NOTES:
 
         # AppArmor confinement (if any) is inherited from the parent
         # thread via fork+exec — see ToolExecutor.set_apparmor_context.
+        # Cgroup attach (if any) runs as preexec_fn on the backend's
+        # spawn — moves the forked PTY child into the session's cgroup
+        # before exec, so memory.max / pids.max / cpu.weight apply from
+        # the first instruction of the new program.
         spawn_command = command
 
         self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
@@ -519,6 +560,7 @@ IMPORTANT NOTES:
                 idle_timeout=self._idle_timeout,
                 max_lifetime=self._max_lifetime,
                 cwd=self._workspace_root,
+                preexec_fn=self._cgroup_attach,
             )
 
             # Read initial output (program banner, first prompt, etc.)

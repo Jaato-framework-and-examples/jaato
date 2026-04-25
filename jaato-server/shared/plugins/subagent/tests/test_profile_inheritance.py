@@ -8,6 +8,7 @@ from shared.plugins.subagent.config import (
     _normalize_inherits,
     resolve_profiles,
 )
+from shared.runtime_limits import RuntimeLimits
 
 
 class TestNormalizeInherits:
@@ -111,6 +112,79 @@ class TestResolveSingleInheritance:
         resolved, errors = resolve_profiles(profiles)
         assert not errors
         assert resolved["child"].model == "claude-sonnet-4-20250514"
+
+    def test_child_inherits_runtime_limits(self):
+        limits = RuntimeLimits(memory_max_mb=512, pids_max=256)
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                runtime_limits=limits,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits == limits
+
+    def test_child_overrides_runtime_limits(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                runtime_limits=RuntimeLimits(memory_max_mb=512),
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                runtime_limits=RuntimeLimits(memory_max_mb=2048),
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits.memory_max_mb == 2048
+
+    def test_runtime_limits_conflict_between_parents_is_error(self):
+        # Two parents declaring different limits without child override
+        # must produce a conflict (scalar-override semantics).
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="",
+                runtime_limits=RuntimeLimits(memory_max_mb=512),
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="",
+                runtime_limits=RuntimeLimits(memory_max_mb=2048),
+            ),
+            "child": SubagentProfile(
+                name="child", description="",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert "child" in errors
+        assert "runtime_limits" in errors["child"]
+
+    def test_runtime_limits_parents_agree_no_conflict(self):
+        # Two parents declaring the *same* limits should merge without
+        # conflict — frozen dataclass equality drives the agreement check.
+        limits = RuntimeLimits(memory_max_mb=512, pids_max=256)
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="", runtime_limits=limits,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="", runtime_limits=limits,
+            ),
+            "child": SubagentProfile(
+                name="child", description="",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits == limits
 
     def test_system_instructions_concatenated(self):
         profiles = {

@@ -126,6 +126,7 @@ def run_command(
     extra_env: Optional[Dict[str, str]] = None,
     on_stdout_line: Optional[Callable[[str], None]] = None,
     check_cancel: bool = True,
+    preexec_fn: Optional[Callable[[], None]] = None,
 ) -> RunResult:
     """Execute *command* and return a :class:`RunResult`.
 
@@ -149,6 +150,12 @@ def run_command(
         check_cancel: When ``True`` (the default), the current thread's
                       ``CancelToken`` is checked between reads and the
                       process is killed if it fires.
+        preexec_fn: Optional zero-arg callable run between fork() and
+                    exec() in the child.  Used by the cgroups runtime
+                    to attach the child to a per-session cgroup before
+                    the new program starts.  ``None`` means no
+                    preexec.  POSIX-only (ignored on Windows by
+                    ``subprocess`` itself).
 
     Returns:
         A :class:`RunResult` with captured output and status flags.
@@ -184,7 +191,10 @@ def run_command(
 
     # ---- spawn ----
     # AppArmor confinement (if any) is inherited from the parent thread
-    # via fork+exec.
+    # via fork+exec.  Cgroup attach (if any) runs as preexec_fn — moves
+    # the forked child into the session's cgroup before exec, so the
+    # kernel-enforced memory.max / pids.max / cpu.weight apply from the
+    # first instruction of the new program.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -195,6 +205,7 @@ def run_command(
         env=env,
         shell=use_shell,
         cwd=cwd,
+        preexec_fn=preexec_fn,
     )
 
     stdout_parts: List[str] = []

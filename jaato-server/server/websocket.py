@@ -37,6 +37,7 @@ except ImportError:
 from .core import JaatoServer
 from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
 from .apparmor import AppArmorManager
+from .cgroups import CgroupsManager
 from .session_logging import set_logging_context, clear_logging_context
 from jaato_sdk.events import (
     Event,
@@ -326,6 +327,8 @@ class JaatoWSServer:
         port: int = 8080,
         workspace_root: Optional[str] = None,
         apparmor: Optional[bool] = None,
+        cgroups: Optional[bool] = None,
+        cgroups_root: str = "/sys/fs/cgroup/jaato",
         default_template: str = "default",
         workspace_max_age: int = 86400,
         ssl_context: Optional[ssl.SSLContext] = None,
@@ -342,6 +345,17 @@ class JaatoWSServer:
             apparmor: Enable AppArmor confinement for provisioned workspaces.
                 ``None`` (default) auto-detects availability.  ``True`` requires
                 AppArmor.  ``False`` disables confinement.
+            cgroups: Enable per-session cgroup v2 runtime limits.
+                ``None`` (default) auto-detects availability.  ``True`` requires
+                cgroup v2 with the configured root delegated.  ``False`` disables
+                kernel-enforced limits — application-layer limits
+                (``tool_timeout_seconds``, ``max_output_bytes``) still apply.
+                Orthogonal to ``apparmor``: AppArmor controls *what's reachable*,
+                cgroups controls *how much can be consumed*.
+            cgroups_root: Parent cgroup v2 directory.  Must already exist with
+                ``memory``, ``pids``, and ``cpu`` listed in
+                ``cgroup.subtree_control`` (operator setup; see
+                :mod:`server.cgroups`).
             default_template: Name of the default workspace template to copy
                 when auto-provisioning (default: ``"default"``).
             workspace_max_age: Maximum age in seconds for provisioned workspaces
@@ -396,6 +410,13 @@ class JaatoWSServer:
         # AppArmor manager for per-session confinement
         self._apparmor: Optional[AppArmorManager] = None
         self._apparmor_mode = apparmor  # None=auto, True=required, False=disabled
+
+        # Cgroups manager for per-session runtime limits.  Sibling to
+        # AppArmor — same lifecycle, same graceful degradation.
+        self._cgroups: Optional["CgroupsManager"] = None  # noqa: F821 (lazy import)
+        self._cgroups_mode = cgroups
+        self._cgroups_root = cgroups_root
+
         self._default_template = default_template
         self._workspace_max_age = workspace_max_age
 
@@ -455,11 +476,76 @@ class JaatoWSServer:
                 return
 
             apparmor = ws_server._apparmor
-            if not apparmor or not apparmor.is_available():
-                if apparmor is not None:
-                    sess.sandbox_mode = "soft"
+            cgroups = ws_server._cgroups
+
+            # The "WS-provisioned" gate that AppArmor uses also applies
+            # to cgroups: kernel-enforced runtime limits target untrusted
+            # WS clients, not local IPC sessions.  We compute it once
+            # against whichever manager exists.  If neither is configured,
+            # nothing to do.
+            anchor = apparmor if apparmor else cgroups
+            if anchor is None:
                 return
 
+            # WS-provisioned sessions live under the manager's
+            # workspace_root.  Reuse the AppArmor manager's path even when
+            # AppArmor is disabled — both managers' workspace root is the
+            # same WS server workspace_root, so this gate is correct for
+            # cgroups too.
+            try:
+                ws_workspace_root = os.path.realpath(ws_server._workspace_root)
+                sess_workspace = os.path.realpath(sess.workspace_path)
+            except OSError:
+                return
+            if not (
+                sess_workspace == ws_workspace_root
+                or sess_workspace.startswith(ws_workspace_root + os.sep)
+            ):
+                logger.debug(
+                    "Sandbox/limits skipped for non-provisioned session %s "
+                    "(workspace %s not under %s — IPC or user-CWD session)",
+                    session_id, sess_workspace, ws_workspace_root,
+                )
+                return
+
+            # ---------- Cgroups: per-session runtime limits ----------
+            # Provisioned independently of AppArmor — a session may have
+            # limits without sandboxing (or vice versa).  The limits
+            # come from the SubagentProfile attached to the JaatoServer.
+            #
+            # Whether or not the kernel layer is available, we still
+            # hand the app-layer ``RuntimeLimits`` to the executor so
+            # that ``tool_timeout_seconds`` and ``max_output_bytes`` are
+            # enforced at the Python layer.  The attach callback is a
+            # no-op when the cgroup wasn't created (or doesn't exist),
+            # so passing it through unconditionally is safe.
+            profile = getattr(server, "_profile", None)
+            limits = getattr(profile, "runtime_limits", None) if profile else None
+            if limits is not None:
+                attach_cb = None
+                event_reader = None
+                if cgroups and cgroups.is_available():
+                    if cgroups.provision_cgroup(session_id, limits):
+                        ws_workspace_id = os.path.basename(sess.workspace_path)
+                        ws_server._workspace_to_session_id[ws_workspace_id] = session_id
+                        if limits.has_kernel_limits():
+                            logger.info(
+                                "Cgroup runtime limits applied to session %s "
+                                "(memory=%s pids=%s cpu_weight=%s)",
+                                session_id, limits.memory_max_mb,
+                                limits.pids_max, limits.cpu_weight,
+                            )
+                    attach_cb = cgroups.make_attach_callback(session_id)
+                    event_reader = cgroups.make_event_reader(session_id)
+                # Hand attach_cb + limits + event_reader to the executor.
+                # attach_cb and event_reader are no-ops when cgroups are
+                # unavailable, so the call is unconditional once limits
+                # exist on the profile.  event_reader feeds OTel
+                # telemetry (jaato.cgroup.oom_kill_delta etc.) via the
+                # executor's per-tool-call snapshot/diff in execute().
+                server.set_runtime_limits(attach_cb, limits, event_reader)
+
+            # ---------- AppArmor: per-session sandboxing ----------
             # AppArmor confinement is intended for WS-provisioned sessions
             # only — multi-tenant deployments where untrusted or semi-
             # trusted clients attach over WebSocket and need kernel-
@@ -476,28 +562,9 @@ class JaatoWSServer:
             # - Thread-pool workers leak profile state across sessions when
             #   the restore-to-unconfined transition fails (it's gated on a
             #   file-write rule that the profile doesn't grant).
-            #
-            # WS-provisioned sessions live under ``apparmor._workspace_root``
-            # (typically ``~/.jaato/workspaces/``).  Sessions whose workspace
-            # is elsewhere — IPC clients using the terminal's CWD, or any
-            # other non-provisioned workspace — are trusted-by-transport and
-            # skip confinement here.
-            try:
-                ws_workspace_root = os.path.realpath(
-                    str(apparmor._workspace_root)
-                )
-                sess_workspace = os.path.realpath(sess.workspace_path)
-            except OSError:
-                return
-            if not (
-                sess_workspace == ws_workspace_root
-                or sess_workspace.startswith(ws_workspace_root + os.sep)
-            ):
-                logger.debug(
-                    "AppArmor skipped for non-provisioned session %s "
-                    "(workspace %s not under %s — IPC or user-CWD session)",
-                    session_id, sess_workspace, ws_workspace_root,
-                )
+            if not apparmor or not apparmor.is_available():
+                if apparmor is not None:
+                    sess.sandbox_mode = "soft"
                 return
 
             # Provision the AppArmor profile using the session manager's
@@ -651,16 +718,39 @@ class JaatoWSServer:
             elif self._apparmor and self._apparmor.is_available():
                 logger.info("AppArmor confinement enabled")
 
+            # Initialize cgroups manager (orthogonal to AppArmor — runtime
+            # limits, not sandboxing).  Same auto-detect / required /
+            # disabled tristate as AppArmor.
+            self._cgroups = CgroupsManager(root=self._cgroups_root)
+            if self._cgroups_mode is False:
+                logger.info("Cgroups runtime limits disabled by configuration")
+                self._cgroups = None
+            elif self._cgroups_mode is True and not self._cgroups.is_available():
+                logger.warning(
+                    "Cgroups runtime limits required but not available — "
+                    "kernel-enforced caps will be skipped (app-layer caps still apply)"
+                )
+            elif self._cgroups and self._cgroups.is_available():
+                logger.info("Cgroups runtime limits enabled (root=%s)",
+                            self._cgroups_root)
+
             # Start workspace reaper
             def _on_workspace_reaped(workspace_id: str) -> None:
+                # Look up the session manager's session ID from the
+                # workspace ID.  Both AppArmor profiles and cgroups are
+                # provisioned under the session manager's ID, not the
+                # workspace UUID.
+                # ``pop`` here would race with a still-active reverse
+                # lookup if we extend teardown later, so we read first
+                # and pop only at the end.
+                session_id = self._workspace_to_session_id.get(
+                    workspace_id, workspace_id
+                )
                 if self._apparmor and self._apparmor.is_available():
-                    # Look up the session manager's session ID from the
-                    # workspace ID.  The profile was provisioned under the
-                    # session manager's ID, not the workspace UUID.
-                    profile_id = self._workspace_to_session_id.pop(
-                        workspace_id, workspace_id
-                    )
-                    self._apparmor.teardown_profile(profile_id)
+                    self._apparmor.teardown_profile(session_id)
+                if self._cgroups and self._cgroups.is_available():
+                    self._cgroups.teardown_cgroup(session_id)
+                self._workspace_to_session_id.pop(workspace_id, None)
 
             self._provisioner.start_reaper(
                 interval_seconds=3600,
@@ -2171,6 +2261,25 @@ async def main():
         help="Disable AppArmor confinement",
     )
     parser.add_argument(
+        "--cgroups",
+        default=None,
+        action="store_true",
+        dest="cgroups",
+        help="Enable per-session cgroup v2 runtime limits (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--no-cgroups",
+        action="store_false",
+        dest="cgroups",
+        help="Disable cgroup v2 runtime limits (app-layer caps still apply)",
+    )
+    parser.add_argument(
+        "--cgroups-root",
+        default="/sys/fs/cgroup/jaato",
+        help="Parent cgroup v2 directory with delegated controllers "
+             "(default: /sys/fs/cgroup/jaato)",
+    )
+    parser.add_argument(
         "--workspace-template",
         default="default",
         help="Default template for auto-provisioned workspaces (default: 'default')",
@@ -2195,6 +2304,8 @@ async def main():
         port=args.port,
         workspace_root=args.workspace_root,
         apparmor=args.apparmor,
+        cgroups=args.cgroups,
+        cgroups_root=args.cgroups_root,
         default_template=args.workspace_template,
         workspace_max_age=args.workspace_max_age,
     )

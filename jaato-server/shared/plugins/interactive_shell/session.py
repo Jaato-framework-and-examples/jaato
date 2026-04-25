@@ -19,7 +19,7 @@ import os
 import sys
 import time
 import threading
-from typing import Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any
 
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_cancel_token
@@ -226,6 +226,7 @@ class ShellSession:
         max_lifetime: float = DEFAULT_MAX_LIFETIME,
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
+        preexec_fn: Optional[Callable[[], None]] = None,
     ):
         """Spawn an interactive process and prepare idle-based I/O.
 
@@ -240,6 +241,12 @@ class ShellSession:
             max_lifetime: Session lifetime ceiling (seconds).
             env: Extra environment variables merged into ``os.environ``.
             cwd: Working directory for the spawned process.
+            preexec_fn: Optional zero-arg callable run between fork() and
+                exec() in the child.  Used by the cgroups runtime to
+                attach the spawned PTY child to a per-session cgroup
+                before the new program starts.  Honoured by the
+                ``pexpect`` and ``popen_spawn`` backends.  Ignored by
+                ``wexpect`` (Windows native — no fork).
 
         Raises:
             ImportError: If no backend is available (``_spawn is None``).
@@ -274,16 +281,24 @@ class ShellSession:
             # PopenSpawn: subprocess.Popen with piped stdin/stdout.
             # No PTY (no terminal dimensions, child isatty() returns False)
             # but reliable timeout behavior on all platforms including MSYS2.
+            # PopenSpawn forwards **kwargs to subprocess.Popen, so
+            # preexec_fn passes through unchanged.
+            popen_kwargs: Dict[str, Any] = {}
+            if preexec_fn is not None:
+                popen_kwargs['preexec_fn'] = preexec_fn
             self._process = _spawn(
                 command,
                 encoding='utf-8',
                 timeout=max_wait,
                 env=spawn_env,
                 cwd=cwd,
+                **popen_kwargs,
             )
         elif _BACKEND == 'wexpect':
             # wexpect uses codepage instead of encoding, and doesn't
             # support the dimensions parameter.  codepage=65001 → UTF-8.
+            # No preexec_fn equivalent on Windows (no fork model);
+            # cgroups don't apply on this platform anyway.
             self._process = _spawn(
                 command,
                 timeout=max_wait,
@@ -293,6 +308,11 @@ class ShellSession:
             )
         else:
             # pexpect with full PTY support (Unix or MSYS Python with pty).
+            # pexpect.spawn accepts preexec_fn directly — runs in the
+            # forked child between fork() and exec() of the PTY slave.
+            spawn_kwargs: Dict[str, Any] = {}
+            if preexec_fn is not None:
+                spawn_kwargs['preexec_fn'] = preexec_fn
             self._process = _spawn(
                 command,
                 encoding='utf-8',
@@ -300,6 +320,7 @@ class ShellSession:
                 dimensions=(rows, cols),
                 env=spawn_env,
                 cwd=cwd,
+                **spawn_kwargs,
             )
 
         # Lock for thread-safe access to the process

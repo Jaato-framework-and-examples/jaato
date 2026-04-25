@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from shared.plugins.permission import PermissionPlugin
     from shared.plugins.background.protocol import BackgroundCapable
     from shared.plugins.reliability import ReliabilityPlugin
+    from shared.runtime_limits import RuntimeLimits
 
 
 class ToolExecutor:
@@ -189,6 +190,34 @@ class ToolExecutor:
         # subject to the same AppArmor profile as subprocess commands.
         # Set via set_apparmor_context() from the server layer.
         self._apparmor_context: Optional[Callable] = None
+
+        # Per-session runtime limits surfaced to subprocess-launching
+        # plugins (cli, interactive_shell).  Set via the server layer
+        # in the same hook that installs ``_apparmor_context``.
+        #
+        # ``_cgroup_attach`` is a zero-argument callable suitable for
+        # ``subprocess.Popen(preexec_fn=...)``: it writes the forked
+        # child's PID to the session's cgroup ``cgroup.procs`` between
+        # fork() and exec(), so the new program comes up already inside
+        # the cgroup with the kernel-enforced limits in effect.
+        #
+        # ``_runtime_limits`` carries the *application-layer* caps
+        # (``tool_timeout_seconds``, ``max_output_bytes``) that have no
+        # cgroup equivalent — plugins read them via ``get_runtime_limits()``
+        # and apply them at the Python layer.  Both fields stay ``None``
+        # when no profile-level runtime_limits is configured, leaving
+        # the host's defaults in effect.
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits: Optional['RuntimeLimits'] = None
+
+        # Zero-arg event-snapshot callable for cgroup.events (oom_kill,
+        # populated, ...).  Used by ``execute()`` to take before/after
+        # snapshots around each tool call and inject deltas into the
+        # result's ``_telemetry`` dict, where the session's tool span
+        # auto-forwards them as OTel attributes.  Returns ``None`` when
+        # cgroups are unavailable, so the wrapper is safe to invoke
+        # unconditionally.
+        self._cgroup_event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None
 
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
@@ -260,6 +289,74 @@ class ToolExecutor:
                 manager, or ``None`` to disable confinement.
         """
         self._apparmor_context = context_factory
+
+    def set_runtime_limits(
+        self,
+        attach_callback: Optional[Callable[[], None]],
+        limits: Optional['RuntimeLimits'],
+        event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None,
+    ) -> None:
+        """Install per-session cgroup attach + app-layer limits + event reader.
+
+        Called by the server layer after the cgroup has been provisioned
+        (or, for sessions without kernel limits, with ``attach_callback``
+        set to a no-op).  Subprocess-launching plugins read attach +
+        limits via :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`,
+        OR via the forwarded ``set_runtime_limits`` method on the plugin
+        if it implements one — same pattern as ``set_tool_output_callback``.
+
+        The ``event_reader`` is consumed *here* in :meth:`execute` rather
+        than forwarded to plugins: snapshotting before/after each tool
+        call and injecting deltas into the result's ``_telemetry`` dict
+        means the existing OTel forwarder picks up
+        ``jaato.cgroup.oom_kill_delta`` etc. without any plugin needing
+        to know about cgroup telemetry.
+
+        Args:
+            attach_callback: Zero-argument callable suitable for use as
+                ``Popen(preexec_fn=...)``.  Migrates the forked child
+                into the session's cgroup before ``exec``.  ``None``
+                means no attach (host defaults).
+            limits: :class:`RuntimeLimits` carrying the app-layer caps
+                (``tool_timeout_seconds``, ``max_output_bytes``).  May
+                be ``None`` when no profile-level runtime_limits is set.
+            event_reader: Zero-arg callable returning the current
+                ``cgroup.events`` snapshot dict, or ``None`` when no
+                cgroup is available.  Used by :meth:`execute` to compute
+                per-tool deltas.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._cgroup_event_reader = event_reader
+
+        # Forward attach + limits to exposed plugins that support it.
+        # event_reader is intentionally NOT forwarded — it's owned by
+        # the executor's wrapper, not by individual plugins.
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_runtime_limits'):
+                    plugin.set_runtime_limits(attach_callback, limits)
+
+    def get_cgroup_attach(self) -> Optional[Callable[[], None]]:
+        """Return the cgroup-attach callable, or ``None`` if not set.
+
+        Subprocess-launching plugins pass the result as
+        ``Popen(preexec_fn=...)``; passing ``None`` is identical to not
+        attaching, which is the correct behaviour when the session has
+        no kernel-enforced limits.
+        """
+        return self._cgroup_attach
+
+    def get_runtime_limits(self) -> Optional['RuntimeLimits']:
+        """Return the per-session :class:`RuntimeLimits`, or ``None``.
+
+        Plugins consult this to read app-layer caps such as
+        ``tool_timeout_seconds`` and ``max_output_bytes``; the kernel
+        portion has already been written to the cgroup at provision
+        time and need not be re-read here.
+        """
+        return self._runtime_limits
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time plugin output.
@@ -598,13 +695,66 @@ class ToolExecutor:
         if cancel_token is not None:
             _thread_local.cancel_token = cancel_token
 
+        # Snapshot cgroup.events so we can attribute kernel-killed
+        # exits to *this* tool call.  No-op when cgroups are unavailable
+        # — the no-op reader returns None and the post-call comparison
+        # short-circuits.
+        before_events: Optional[Dict[str, int]] = None
+        if self._cgroup_event_reader is not None:
+            before_events = self._cgroup_event_reader()
+
         try:
-            return self._execute_impl(name, args, debug, call_id)
+            success, result = self._execute_impl(name, args, debug, call_id)
         finally:
             if tool_output_callback is not None:
                 _thread_local.tool_output_callback = None
             if cancel_token is not None:
                 _thread_local.cancel_token = None
+
+        # Compute event-counter deltas and inject into result's
+        # ``_telemetry`` dict.  The session's tool span already
+        # auto-forwards every key in ``_telemetry`` as an OTel
+        # attribute (jaato_session.py:4914), so adding the deltas here
+        # is the only step needed to surface them as
+        # ``jaato.cgroup.oom_kill_delta`` etc. on the span.
+        if before_events is not None and self._cgroup_event_reader is not None:
+            after_events = self._cgroup_event_reader()
+            if after_events is not None and isinstance(result, dict):
+                self._inject_cgroup_deltas(result, before_events, after_events)
+
+        return success, result
+
+    @staticmethod
+    def _inject_cgroup_deltas(
+        result: Dict[str, Any],
+        before: Dict[str, int],
+        after: Dict[str, int],
+    ) -> None:
+        """Add cgroup.events deltas to a tool result's ``_telemetry`` dict.
+
+        Only deltas > 0 are emitted — the common case (no kernel events
+        during the tool call) produces no extra attributes, keeping
+        spans clean.  ``populated`` is monotonic only in transitions
+        and isn't useful as a delta, so it's skipped.
+
+        Attribution caveat: when multiple tool calls run concurrently
+        in the same per-session cgroup, an OOM in tool A also shows up
+        as a non-zero delta on a parallel tool B that happened to
+        straddle the event.  The heuristic is good enough for
+        telemetry — operators correlating spans with dmesg can
+        disambiguate when needed.
+        """
+        # Skip 'populated' — it's a level, not a counter; deltas are
+        # noisy and uninteresting (the cgroup is "populated" while
+        # any process exists in it).
+        for key in ("oom", "oom_kill"):
+            before_val = before.get(key, 0)
+            after_val = after.get(key, 0)
+            delta = after_val - before_val
+            if delta > 0:
+                telem = result.setdefault("_telemetry", {})
+                if isinstance(telem, dict):
+                    telem[f"jaato.cgroup.{key}_delta"] = delta
 
     def _execute_impl(
         self,

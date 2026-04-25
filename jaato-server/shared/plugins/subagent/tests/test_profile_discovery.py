@@ -73,6 +73,46 @@ class TestDiscoverProfiles:
             assert "agent2" in result.profiles
             assert "agent3" in result.profiles
 
+    def test_discover_runtime_limits_field(self):
+        """runtime_limits is parsed into a RuntimeLimits dataclass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_data = {
+                "name": "limited",
+                "description": "Limited",
+                "plugins": ["cli"],
+                "runtime_limits": {
+                    "memory_max_mb": 1024,
+                    "pids_max": 256,
+                    "tool_timeout_seconds": 60,
+                },
+            }
+            profile_path = Path(tmpdir) / "limited.json"
+            profile_path.write_text(json.dumps(profile_data))
+
+            result = discover_profiles(tmpdir)
+            assert "limited" in result.profiles
+            limits = result.profiles["limited"].runtime_limits
+            assert limits is not None
+            assert limits.memory_max_mb == 1024
+            assert limits.pids_max == 256
+            assert limits.tool_timeout_seconds == 60
+            assert limits.cpu_weight is None  # not set
+
+    def test_discover_invalid_runtime_limits_reports_error(self):
+        """Invalid runtime_limits surface as a parse error, not a crash."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_data = {
+                "name": "bad",
+                "description": "Bad limits",
+                "runtime_limits": {"cpu_weight": 99999},  # out of range
+            }
+            (Path(tmpdir) / "bad.json").write_text(json.dumps(profile_data))
+
+            result = discover_profiles(tmpdir)
+            assert "bad" not in result.profiles
+            assert "bad" in result.errors
+            assert "runtime_limits" in result.errors["bad"]
+
     def test_discover_nonexistent_directory(self):
         """Test that non-existent directory returns empty dict."""
         result = discover_profiles("/nonexistent/path/to/profiles")

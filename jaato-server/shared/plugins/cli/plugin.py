@@ -114,6 +114,13 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
+
+        # Per-session runtime limits installed by ToolExecutor via
+        # set_runtime_limits().  None until the executor calls; the
+        # Popen branches treat None as "no kernel attach, no app-layer
+        # cap override, no wall-clock timeout".
+        self._cgroup_attach = None
+        self._runtime_limits = None
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Note: tool output callback is managed by BackgroundCapableMixin
@@ -256,6 +263,33 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._plugin_registry = registry
         registry.register_category("system", "Shell commands, environment, system operations")
         self._trace("set_plugin_registry: registry set")
+
+    def set_runtime_limits(self, attach_callback, limits) -> None:
+        """Receive per-session cgroup attach + app-layer caps from the executor.
+
+        Forwarded by ``ToolExecutor.set_runtime_limits`` whenever the
+        WS server provisions a session's cgroup.  At Popen time:
+
+        * ``attach_callback`` becomes ``preexec_fn`` so the forked child
+          joins the session's cgroup before ``exec``, picking up the
+          kernel-enforced ``memory.max`` / ``pids.max`` / ``cpu.weight``.
+        * ``limits.tool_timeout_seconds`` becomes a wall-clock deadline
+          enforced by the Python layer (cgroup v2 has no equivalent).
+        * ``limits.max_output_bytes`` overrides the static
+          ``_max_output_chars`` for stdout/stderr truncation in the
+          final result.
+
+        Both arguments may be ``None`` when no profile-level
+        ``runtime_limits`` is configured — in that case Popen falls
+        back to the previous behaviour (no preexec_fn, no timeout,
+        static output cap).
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._trace(
+            f"set_runtime_limits: attach={attach_callback is not None} "
+            f"limits={limits!r}"
+        )
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
@@ -613,6 +647,11 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Start process with pipes.
             # AppArmor confinement (if any) is inherited from the parent
             # thread via fork+exec — see ToolExecutor.set_apparmor_context.
+            # Cgroup attach (if any) runs as preexec_fn — writes the
+            # forked child's PID to cgroup.procs between fork() and exec(),
+            # so the new program comes up under the session's
+            # memory.max / pids.max / cpu.weight.  See
+            # server.cgroups.CgroupsManager.make_attach_callback.
             cmd = command if use_shell else argv
 
             proc = subprocess.Popen(
@@ -621,7 +660,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 stderr=subprocess.PIPE,
                 env=env,
                 shell=use_shell,
-                cwd=self._workspace_root
+                cwd=self._workspace_root,
+                preexec_fn=self._cgroup_attach,
             )
 
             # Collect output while streaming to callbacks
@@ -661,8 +701,28 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             stdout_thread.start()
             stderr_thread.start()
 
-            # Wait for process and readers to complete
-            proc.wait()
+            # Wait for process and readers to complete.
+            # When the session's RuntimeLimits sets a wall-clock cap,
+            # we honour it here at the Python layer (cgroup v2 has no
+            # equivalent knob).  On expiry: SIGTERM, brief grace, then
+            # SIGKILL.  The reader threads observe EOF on the now-closed
+            # pipes and exit naturally.
+            tool_timeout = (
+                self._runtime_limits.tool_timeout_seconds
+                if self._runtime_limits is not None
+                else None
+            )
+            timed_out = False
+            try:
+                proc.wait(timeout=tool_timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
             stdout_done.wait()
             stderr_done.wait()
 
@@ -673,22 +733,39 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
             stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
 
+            # Per-session override of the static max_output_chars.  When
+            # the profile sets ``runtime_limits.max_output_bytes`` it
+            # takes precedence; otherwise the plugin's configured cap
+            # applies.  Bytes vs chars: we truncate the decoded string
+            # by character count, accepting that a multi-byte UTF-8
+            # tail might be slightly over the byte budget.  The cap is
+            # an order-of-magnitude guardrail, not a hard byte ceiling.
+            output_cap = self._max_output_chars
+            if (
+                self._runtime_limits is not None
+                and self._runtime_limits.max_output_bytes is not None
+            ):
+                output_cap = self._runtime_limits.max_output_bytes
+
             # Truncate for final result (streaming already captured full output)
             truncated = False
-            if len(stdout) > self._max_output_chars:
-                stdout = stdout[:self._max_output_chars]
+            if len(stdout) > output_cap:
+                stdout = stdout[:output_cap]
                 truncated = True
-            if len(stderr) > self._max_output_chars:
-                stderr = stderr[:self._max_output_chars]
+            if len(stderr) > output_cap:
+                stderr = stderr[:output_cap]
                 truncated = True
 
             result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
             if truncated:
                 result['truncated'] = True
                 result['truncation_message'] = (
-                    f"Output truncated to {self._max_output_chars} chars in final result. "
+                    f"Output truncated to {output_cap} chars in final result. "
                     "Full output available via getBackgroundTaskOutput."
                 )
+            if timed_out:
+                result['timed_out'] = True
+                result['timeout_seconds'] = tool_timeout
 
             return result
 
@@ -1008,14 +1085,29 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             effective_callback = self._get_effective_output_callback()
             self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
 
+            # Per-session runtime limits (from RuntimeLimits) override
+            # the static plugin-level caps when present.  Bare attribute
+            # reads guard against profiles that set only kernel limits
+            # — limits=None is fine, fields default to None.
+            limits = self._runtime_limits
+            effective_max_output = self._max_output_chars
+            effective_timeout: Optional[float] = None
+            if limits is not None:
+                if limits.max_output_bytes is not None:
+                    effective_max_output = limits.max_output_bytes
+                if limits.tool_timeout_seconds is not None:
+                    effective_timeout = limits.tool_timeout_seconds
+
             # Delegate to shared subprocess runner
             r: RunResult = run_command(
                 command,
                 cwd=self._workspace_root,
-                max_output_chars=self._max_output_chars,
+                timeout=effective_timeout,
+                max_output_chars=effective_max_output,
                 extra_env=extra_env,
                 on_stdout_line=effective_callback,
                 check_cancel=True,
+                preexec_fn=self._cgroup_attach,
             )
 
             # Executable-not-found is surfaced as an error dict so the
