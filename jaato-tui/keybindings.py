@@ -167,6 +167,9 @@ DEFAULT_KEYBINDINGS = {
     "workspace_open_file": "enter",  # Open selected file in external editor
     "workspace_clear": "delete",  # Clear workspace file list
     "workspace_paste_ref": ["escape", "p"],  # Paste selected file/dir as @reference into input
+    "workspace_hide": "h",  # Hide selected entry (per-session, client-side filter)
+    "workspace_show_hidden": "s-h",  # Toggle visibility of hidden entries
+    "workspace_gitignore": "i",  # Add or remove selected entry from workspace .gitignore
 
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
@@ -370,6 +373,9 @@ class KeybindingConfig:
     workspace_open_file: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_open_file"])
     workspace_clear: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_clear"])
     workspace_paste_ref: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_paste_ref"].copy() if isinstance(DEFAULT_KEYBINDINGS["workspace_paste_ref"], list) else DEFAULT_KEYBINDINGS["workspace_paste_ref"])
+    workspace_hide: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_hide"])
+    workspace_show_hidden: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_show_hidden"])
+    workspace_gitignore: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_gitignore"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
@@ -576,6 +582,9 @@ class KeybindingConfig:
             "workspace_open_file": self.workspace_open_file,
             "workspace_clear": self.workspace_clear,
             "workspace_paste_ref": self.workspace_paste_ref,
+            "workspace_hide": self.workspace_hide,
+            "workspace_show_hidden": self.workspace_show_hidden,
+            "workspace_gitignore": self.workspace_gitignore,
             "split_pane": self.split_pane,
             "join_pane": self.join_pane,
             "move_agent": self.move_agent,
@@ -765,5 +774,8 @@ def generate_example_config() -> str:
         "workspace_open_file": "enter",
         "workspace_clear": "delete",
         "workspace_paste_ref": ["escape", "p"],
+        "workspace_hide": "h",
+        "workspace_show_hidden": "s-h",
+        "workspace_gitignore": "i",
     }
     return json.dumps(example, indent=2)

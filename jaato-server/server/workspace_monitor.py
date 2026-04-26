@@ -605,6 +605,20 @@ class WorkspaceMonitor:
             return self._gitignore.is_ignored(p)
         return self._gitignore.is_ignored(p)
 
+    def _reload_gitignore(self) -> None:
+        """Rebuild the ``GitignoreParser`` from the current ``.gitignore``.
+
+        Called from ``_on_fs_event`` whenever ``<workspace>/.gitignore``
+        changes (created, modified, or deleted) so that subsequent events
+        see the updated patterns without a server restart.  Files that
+        are already in ``self.tracked`` are *not* retroactively pruned —
+        existing tracking is preserved; only future events are filtered
+        against the new ruleset.
+        """
+        self._gitignore = GitignoreParser(
+            Path(self.workspace_path), include_defaults=True
+        )
+
     def _on_fs_event(
         self,
         abs_path: str,
@@ -640,6 +654,14 @@ class WorkspaceMonitor:
             rel = os.path.relpath(abs_path, self.workspace_path)
         except ValueError:
             return
+
+        # Reload the gitignore parser whenever the workspace ``.gitignore``
+        # changes so user edits (typically from the TUI's gitignore-toggle
+        # binding) take effect immediately for subsequent events.  The
+        # event for ``.gitignore`` itself still falls through to be tracked
+        # normally so the user sees the file appear in the workspace panel.
+        if rel == ".gitignore":
+            self._reload_gitignore()
 
         # Filter ignored paths.
         if self._is_ignored(abs_path, is_dir=False):

@@ -505,6 +505,9 @@ class PTDisplay:
             open_file_key=self._keybinding_config.workspace_open_file,
             clear_key=self._keybinding_config.workspace_clear,
             paste_ref_key=self._keybinding_config.workspace_paste_ref,
+            hide_key=self._keybinding_config.workspace_hide,
+            show_hidden_key=self._keybinding_config.workspace_show_hidden,
+            gitignore_key=self._keybinding_config.workspace_gitignore,
         )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
@@ -1184,6 +1187,70 @@ class PTDisplay:
             await run_in_terminal(_run, in_executor=False)
 
         self._app.create_background_task(_open())
+
+    def _toggle_workspace_gitignore(self) -> None:
+        """Add or remove the cursor entry from ``<workspace>/.gitignore``.
+
+        The pattern written matches the entry id used by the workspace
+        panel (directories keep their trailing ``/``, files are written
+        verbatim).  Removal is exact-match only — partial matches and
+        commented lines are never touched.  When the entry is sandbox-
+        monitored (absolute path) this is a no-op since the path lies
+        outside the workspace root that ``.gitignore`` covers.
+
+        The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
+        reloads its parser on the modification event so the new pattern
+        takes effect on subsequent file events.
+        """
+        import os
+
+        path = self._workspace_panel.get_selected_path()
+        if not path:
+            return
+        # Sandbox-monitored entries use absolute paths and don't live
+        # under the workspace root, so they're not addressable via the
+        # workspace ``.gitignore``.
+        if os.path.isabs(path):
+            return
+
+        workspace = (
+            os.path.expanduser(self._session_workspace)
+            if self._session_workspace
+            else os.getcwd()
+        )
+        gitignore_path = os.path.join(workspace, ".gitignore")
+        pattern = path  # already has trailing "/" for dirs
+
+        try:
+            existing = ""
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            lines = existing.splitlines()
+            stripped = [ln.strip() for ln in lines]
+
+            if pattern in stripped:
+                # Drop every exact-match occurrence.
+                new_lines = [
+                    ln for ln, s in zip(lines, stripped) if s != pattern
+                ]
+                new_content = "\n".join(new_lines)
+                if new_content and not new_content.endswith("\n"):
+                    new_content += "\n"
+            else:
+                # Append, ensuring the previous content ends with a newline.
+                if existing and not existing.endswith("\n"):
+                    existing += "\n"
+                new_content = existing + pattern + "\n"
+
+            with open(gitignore_path, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+        except OSError:
+            # Best-effort UI affordance — never blow up the TUI on a
+            # failed disk write (read-only mount, permission denied).
+            return
+
+        self._app.invalidate()
 
     def _on_pane_mouse_scroll(self, pane_index: int, direction: str) -> None:
         """Handle mouse scroll in a specific pane.
@@ -2363,7 +2430,43 @@ class PTDisplay:
             buf.insert_text(snippet)
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
+        @kb.add(*keys.get_key_args("workspace_hide"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_hide(event):
+            """Hide the entry under the cursor (per-session, client-side).
+
+            Hidden entries disappear from the list.  Use ``workspace_show_hidden``
+            to bring them back temporarily so they can be unhidden.
+            """
+            self._workspace_panel.hide_at_cursor()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_show_hidden"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_show_hidden(event):
+            """Toggle visibility of the hidden entry set."""
+            self._workspace_panel.toggle_show_hidden()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_gitignore"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_gitignore(event):
+            """Add or remove the cursor entry from the workspace ``.gitignore``.
+
+            Writes the workspace's ``.gitignore`` directly (creating it
+            when missing).  The line written matches the exact entry id
+            (directories keep their trailing ``/``).  Removal is exact-
+            match only — a line containing comments or differently
+            spelled patterns is left alone.
+
+            The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
+            reloads its parser when this file changes, so the new pattern
+            takes effect on subsequent filesystem events without a
+            session restart.  Files already tracked are unaffected — use
+            ``workspace_clear`` if you also want to drop them from the
+            current view.
+            """
+            self._toggle_workspace_gitignore()
         def handle_ctrl_b(event):
             """Handle Ctrl+B - toggle budget panel visibility."""
             self._budget_panel.toggle()
