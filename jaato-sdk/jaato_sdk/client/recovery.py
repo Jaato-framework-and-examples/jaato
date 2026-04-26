@@ -553,6 +553,24 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.respond_to_tool_execution(call_id, result, error)
 
+    async def end_session(self) -> None:
+        """Terminate the currently-attached session.
+
+        See :meth:`IPCClient.end_session` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.end_session()
+
+    async def delete_session(self, session_id: str) -> None:
+        """Permanently delete a session by ID.
+
+        See :meth:`IPCClient.delete_session` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.delete_session(session_id)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

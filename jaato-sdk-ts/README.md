@@ -286,6 +286,8 @@ event stream and are correlated by `request_id` where applicable.
 | `getDefaultSession()` | `command.execute` `session.default` |
 | `listSessions()` | `command.execute` `session.list` |
 | `listProfiles()` | `command.execute` `session.profiles` |
+| `endSession()` | `command.execute` `session.end` (terminate current attached session) |
+| `deleteSession(sessionId)` | `command.execute` `session.delete` (purge from disk + memory) |
 
 **Tools (model-callable + client-registered)**
 

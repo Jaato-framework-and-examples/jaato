@@ -522,6 +522,45 @@ export class JaatoClient {
     } as CommandRequest);
   }
 
+  /**
+   * Terminate the currently-attached session.
+   *
+   * Sends ``session.end`` — the server stops the session's
+   * in-flight activity and emits a ``[SESSION_TERMINATED]``
+   * marker so attached clients know the session is no longer
+   * active.  The session record itself stays on disk; use
+   * {@link deleteSession} to purge it.  Mirror of Python
+   * ``IPCClient.end_session``.
+   */
+  async endSession(): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.end",
+      args: [],
+    } as CommandRequest);
+  }
+
+  /**
+   * Permanently delete a session by ID.
+   *
+   * Sends ``session.delete`` — the server removes both
+   * in-memory state and the on-disk journal for the named
+   * session.  Response arrives via the event stream as a
+   * ``SystemMessageEvent`` ("Session 'X' deleted." on success;
+   * "Session 'X' not found." otherwise).  Mirror of Python
+   * ``IPCClient.delete_session``.
+   *
+   * @param sessionId The session to delete.  Must be a known
+   *   session ID (visible in {@link listSessions}).
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.delete",
+      args: [sessionId],
+    } as CommandRequest);
+  }
+
   async executeCommand(command: string, args?: string[]): Promise<void> {
     await this._sendEvent({
       type: EventTypeValue.COMMAND,

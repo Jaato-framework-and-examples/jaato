@@ -2411,7 +2411,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             await client.stop()
                         if client.session_id:
                             try:
-                                await client.execute_command("session.delete", [client.session_id])
+                                await client.delete_session(client.session_id)
                             except Exception as exc:
                                 logger.debug(f"session.delete failed: {exc}")
                         display.add_system_message("Session ended.", style="system_warning")

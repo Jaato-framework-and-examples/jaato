@@ -228,3 +228,26 @@ class TestToolExecutionResponse:
         assert ev.call_id == "call_99"
         assert ev.result == ""
         assert ev.error == "tool crashed"
+
+
+class TestSessionLifecycle:
+
+    @pytest.mark.asyncio
+    async def test_end_session_sends_session_end_command(self, client_capture):
+        from jaato_sdk.events import CommandRequest
+        client, captured = client_capture
+        await client.end_session()
+        ev = captured[0]
+        assert isinstance(ev, CommandRequest)
+        assert ev.command == "session.end"
+        assert ev.args == []
+
+    @pytest.mark.asyncio
+    async def test_delete_session_carries_session_id(self, client_capture):
+        from jaato_sdk.events import CommandRequest
+        client, captured = client_capture
+        await client.delete_session("sess_xyz")
+        ev = captured[0]
+        assert isinstance(ev, CommandRequest)
+        assert ev.command == "session.delete"
+        assert ev.args == ["sess_xyz"]

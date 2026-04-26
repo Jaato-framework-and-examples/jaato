@@ -964,6 +964,38 @@ class IPCClient:
             args=[],
         ))
 
+    async def end_session(self) -> None:
+        """Terminate the currently-attached session.
+
+        Sends ``session.end`` — the server stops the session's
+        in-flight activity and emits a ``[SESSION_TERMINATED]``
+        marker so attached clients know the session is no longer
+        active.  The session record itself stays on disk; use
+        :meth:`delete_session` to purge it.
+        """
+        await self._send_event(CommandRequest(
+            command="session.end",
+            args=[],
+        ))
+
+    async def delete_session(self, session_id: str) -> None:
+        """Permanently delete a session by ID.
+
+        Sends ``session.delete`` — the server removes both
+        in-memory state and the on-disk journal for the named
+        session.  Response arrives via the event stream as a
+        ``SystemMessageEvent`` ("Session 'X' deleted." on success;
+        "Session 'X' not found." otherwise).
+
+        Args:
+            session_id: The session to delete.  Must be a known
+                session ID (visible in :meth:`list_sessions`).
+        """
+        await self._send_event(CommandRequest(
+            command="session.delete",
+            args=[session_id],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

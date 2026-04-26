@@ -147,7 +147,7 @@ async def run_headless_mode(
     # Set default permission policy to "allow" for headless mode
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses
     print("[headless] Setting permission policy to auto-approve...", file=sys.stderr)
-    await client.execute_command("permissions", ["default", "allow"])
+    await client.set_default_policy("allow")
 
     # Disable clarification tool - no user to answer questions in headless mode
     # Uses direct registry call (no response events to consume)
@@ -409,9 +409,9 @@ async def run_headless_mode(
     try:
         session_id = client.session_id
         if session_id:
-            await client.execute_command("session.delete", [session_id])
+            await client.delete_session(session_id)
         else:
-            await client.execute_command("session.end", [])
+            await client.end_session()
         print("[headless] Session ended", file=sys.stderr)
     except Exception as e:
         # Best-effort: connection may already be closing

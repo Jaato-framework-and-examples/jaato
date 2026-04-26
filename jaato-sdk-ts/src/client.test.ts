@@ -406,6 +406,22 @@ describe("JaatoClient session management", () => {
     const [ev] = getSent();
     assert.equal((ev as { command?: string }).command, "session.profiles");
   });
+
+  test("endSession sends session.end with no args", async () => {
+    await client.endSession();
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "session.end");
+    assert.deepEqual((ev as { args?: string[] }).args, []);
+  });
+
+  test("deleteSession carries the session id as the first arg", async () => {
+    await client.deleteSession("sess_xyz");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "session.delete");
+    assert.deepEqual((ev as { args?: string[] }).args, ["sess_xyz"]);
+  });
 });
 
 describe("JaatoClient.stageFiles", () => {
