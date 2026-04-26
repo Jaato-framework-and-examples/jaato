@@ -184,11 +184,15 @@ function handle(event: JaatoEvent): void {
 Full client (connect, send, subscribe):
 
 ```typescript
-import { JaatoClient, ConnectionState, EventType } from "@jaato/sdk";
+import { JaatoClient, EventType } from "@jaato/sdk";
 
 const client = new JaatoClient({
   url: "ws://localhost:8080",
   token: "<bearer-token>",  // omit when behind a proxy that injects it
+  recovery: {
+    autoReconnect: true,
+    autoReattachSessionId: true,  // re-attach session automatically after a reconnect
+  },
 });
 
 // Subscribe to all events.
@@ -198,18 +202,52 @@ const unsub = client.subscribe((event) => {
   }
 });
 
-// Status notifications (CONNECTED / RECONNECTING / CLOSED).
-client.onStatus((status) => {
-  if (status.state === ConnectionState.CONNECTED && client.sessionId) {
-    // Re-attach after a reconnect so the server replays buffered events.
-    void client.attachSession(client.sessionId);
-  }
-});
-
 await client.connect();
 await client.createSession({ profile: "researcher" });
 await client.sendMessage("Summarise the latest commits.");
 ```
+
+If you want to react to connection-state transitions yourself
+(e.g. show a "Reconnecting…" banner) instead of relying on the
+opt-in re-attach, drop `autoReattachSessionId` and wire the
+handler explicitly:
+
+```typescript
+import { ConnectionState } from "@jaato/sdk";
+
+client.onStatus((status) => {
+  if (status.state === ConnectionState.RECONNECTING) {
+    showBanner(`Reconnecting (attempt ${status.reconnectAttempt})…`);
+  }
+  if (status.state === ConnectionState.CONNECTED && client.sessionId) {
+    void client.attachSession(client.sessionId);
+    hideBanner();
+  }
+});
+```
+
+File staging (multi-frame protocol — TEXT request + N binary
+frames + typed response):
+
+```typescript
+const fileBlob = await fetch("/some-asset.png").then((r) => r.arrayBuffer());
+
+const result = await client.stageFiles("workspace_abc", [
+  { name: "logo.png", data: fileBlob, contentType: "image/png" },
+  { name: "config.json", data: new TextEncoder().encode(JSON.stringify(cfg)) },
+]);
+
+if (result.failed.length > 0) {
+  console.error("Some files failed:", result.failed);
+}
+console.log("Staged:", result.staged.map((f) => f.name));
+```
+
+The call resolves with the typed `StageFilesEvent` once the
+server reports back; per-file failures are surfaced in
+`result.failed` so partial successes are recoverable.
+Concurrent `stageFiles` calls on the same client must be
+serialised (the response correlation is by ordering, not by ID).
 
 ## API reference
 
@@ -373,6 +411,12 @@ Option A / B / C instead.
 
 ### Recommended workflow for premium webcomponent migration
 
+The SDK surface is feature-complete as of Phase 3.2 (commit
+`1181fb7e`) — every wire verb the dashboard's webcomponents use
+today (including `stageFiles` and the auto re-attach pattern)
+is exposed as a typed method.  No "premium keeps it inline"
+caveats remain.
+
 1. Use **Option A** during active development — fastest iteration.
 2. Switch to **Option C** right before any publish to verify the
    tarball contents are correct.
@@ -381,6 +425,10 @@ Option A / B / C instead.
    esbuild + single-file bundle output). That unlocks
    tree-shaking, type-checking, and pulls the SDK into the same
    module graph instead of relying on a script tag.
+4. Pin **`jaato-server >= 0.5.28`** in production so the
+   migrated webcomponent gets the `AgentCompletedEvent.token_usage`
+   regression fix (the SDK floor itself is `0.5.27`, but the
+   server pin is operationally stricter).
 
 ## Publishing
 
