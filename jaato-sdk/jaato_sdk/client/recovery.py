@@ -539,6 +539,20 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.respond_to_reference_selection(request_id, response)
 
+    async def respond_to_tool_execution(
+        self,
+        call_id: str,
+        result: str = "",
+        error: str = "",
+    ) -> None:
+        """Return the result of a client-side tool execution.
+
+        See :meth:`IPCClient.respond_to_tool_execution` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.respond_to_tool_execution(call_id, result, error)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

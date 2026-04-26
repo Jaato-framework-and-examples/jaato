@@ -200,3 +200,31 @@ class TestPermissionPolicyMethods:
         ev = captured[0]
         assert isinstance(ev, PermissionPolicySnapshotRequest)
         assert ev.request_id == "snap1"
+
+
+class TestToolExecutionResponse:
+
+    @pytest.mark.asyncio
+    async def test_respond_to_tool_execution_success_path(self, client_capture):
+        from jaato_sdk.events import ToolExecuteResultEvent
+        client, captured = client_capture
+        await client.respond_to_tool_execution(
+            call_id="call_42", result='{"ok": true}',
+        )
+        ev = captured[0]
+        assert isinstance(ev, ToolExecuteResultEvent)
+        assert ev.call_id == "call_42"
+        assert ev.result == '{"ok": true}'
+        assert ev.error == ""
+
+    @pytest.mark.asyncio
+    async def test_respond_to_tool_execution_error_path(self, client_capture):
+        from jaato_sdk.events import ToolExecuteResultEvent
+        client, captured = client_capture
+        await client.respond_to_tool_execution(
+            call_id="call_99", error="tool crashed",
+        )
+        ev = captured[0]
+        assert ev.call_id == "call_99"
+        assert ev.result == ""
+        assert ev.error == "tool crashed"

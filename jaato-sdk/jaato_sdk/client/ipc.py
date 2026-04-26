@@ -1052,6 +1052,36 @@ class IPCClient:
             response=response,
         ))
 
+    async def respond_to_tool_execution(
+        self,
+        call_id: str,
+        result: str = "",
+        error: str = "",
+    ) -> None:
+        """Return the result of a client-side tool execution.
+
+        Sends ``ToolExecuteResultEvent`` so the server can resume the
+        model loop with the tool's result.  Caller-side counterpart of
+        the ``ToolExecuteRequestEvent`` the server emits when the
+        model invokes a client-registered tool (see
+        :meth:`register_client_tools`).
+
+        Args:
+            call_id: The ``call_id`` from the originating
+                ``ToolExecuteRequestEvent``.  Server uses this to
+                correlate the response with the in-flight tool call.
+            result: JSON-encoded tool result.  Empty string when
+                ``error`` is set.
+            error: Error message when execution failed.  Empty when
+                ``result`` is set.  Setting both is undefined.
+        """
+        from jaato_sdk.events import ToolExecuteResultEvent
+        await self._send_event(ToolExecuteResultEvent(
+            call_id=call_id,
+            result=result,
+            error=error,
+        ))
+
     async def stop(self) -> None:
         """Stop current operation."""
         await self._send_event(StopRequest())

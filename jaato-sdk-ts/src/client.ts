@@ -45,6 +45,7 @@ import {
   type HistoryRequest,
   type ToolDisableRequest,
   type ToolsRegisterClientRequest,
+  type ToolExecuteResultEvent,
   type InjectPromptRequest,
   type ReplayMessagesRequest,
   type ResolveForkPointRequest,
@@ -357,6 +358,138 @@ export class JaatoClient {
       request_id: requestId,
       response,
     } as ReferenceSelectionResponseRequest);
+  }
+
+  /**
+   * Return the result of a client-side tool execution.
+   *
+   * Sends ``ToolExecuteResultEvent`` so the server can resume the
+   * model loop with the tool's result.  Caller-side counterpart of
+   * the ``ToolExecuteRequestEvent`` the server emits when the model
+   * invokes a client-registered tool (see {@link registerClientTools}).
+   *
+   * Mirror of Python ``IPCClient.respond_to_tool_execution``.
+   *
+   * @param callId The ``call_id`` from the originating
+   *   ``ToolExecuteRequestEvent``.  Server uses this to correlate
+   *   the response with the in-flight tool call.
+   * @param result JSON-encoded tool result.  Empty string when
+   *   ``error`` is set.
+   * @param error Error message when execution failed.  Empty when
+   *   ``result`` is set.  Setting both is undefined.
+   */
+  async respondToToolExecution(callId: string, result = "", error = ""): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.TOOL_EXECUTE_RESULT,
+      call_id: callId,
+      result,
+      error,
+    } as ToolExecuteResultEvent);
+  }
+
+  // ──── Session management (mirror of Python IPCClient) ────────────
+
+  /**
+   * Create a new session on the server.
+   *
+   * Fire-and-forget: the resulting ``SessionInfoEvent`` arrives
+   * via the event stream and updates {@link sessionId}.  Subscribe
+   * via {@link subscribe} to react to session creation.
+   *
+   * Mirror of Python ``IPCClient.create_session``.
+   *
+   * @param options Session-creation parameters.  When omitted the
+   *   server uses its defaults.
+   */
+  async createSession(options: {
+    name?: string;
+    profile?: string;
+    agent?: string;
+    agentParams?: Record<string, string>;
+  } = {}): Promise<void> {
+    const args: string[] = options.name ? [options.name] : [];
+    if (options.profile) {
+      args.push("--profile", options.profile);
+    }
+    if (options.agent) {
+      args.push("--agent", options.agent);
+    }
+    if (options.agentParams) {
+      for (const [k, v] of Object.entries(options.agentParams)) {
+        args.push(`${k}=${v}`);
+      }
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.new",
+      args,
+    } as CommandRequest);
+  }
+
+  /**
+   * Attach to an existing session.
+   *
+   * After successful attach, the server replays buffered events
+   * from the session journal (per the WS reconnect contract) so
+   * the client picks up where it left off.  Combined with the
+   * reconnect state-machine, this is the building block for
+   * "survive a network blip" workflows.
+   *
+   * Mirror of Python ``IPCClient.attach_session``.
+   *
+   * @param sessionId The session to attach to.
+   */
+  async attachSession(sessionId: string): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.attach",
+      args: [sessionId],
+    } as CommandRequest);
+    this._sessionId = sessionId;
+  }
+
+  /**
+   * Get or create the default session.
+   *
+   * Fire-and-forget: response arrives via the event stream as a
+   * ``SessionInfoEvent``.  Mirror of Python
+   * ``IPCClient.get_default_session``.
+   */
+  async getDefaultSession(): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.default",
+      args: [],
+    } as CommandRequest);
+  }
+
+  /**
+   * Request the list of sessions on the server.
+   *
+   * Response arrives via the event stream.  Mirror of Python
+   * ``IPCClient.list_sessions``.
+   */
+  async listSessions(): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.list",
+      args: [],
+    } as CommandRequest);
+  }
+
+  /**
+   * Request the list of available agent profiles.
+   *
+   * Response arrives via the event stream as a
+   * ``SessionProfilesEvent``.  Mirror of Python
+   * ``IPCClient.list_profiles``.
+   */
+  async listProfiles(): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "session.profiles",
+      args: [],
+    } as CommandRequest);
   }
 
   async executeCommand(command: string, args?: string[]): Promise<void> {

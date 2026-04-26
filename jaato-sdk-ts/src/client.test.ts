@@ -309,6 +309,92 @@ describe("JaatoClient typed methods", () => {
     assert.equal(ev.type, EventTypeValue.TOOLS_REGISTER_CLIENT);
     assert.deepEqual((ev as { tools?: unknown }).tools, tools);
   });
+
+  test("respondToToolExecution success path", async () => {
+    await client.respondToToolExecution("call_42", '{"ok":true}');
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.TOOL_EXECUTE_RESULT);
+    assert.equal((ev as { call_id?: string }).call_id, "call_42");
+    assert.equal((ev as { result?: string }).result, '{"ok":true}');
+    assert.equal((ev as { error?: string }).error, "");
+  });
+
+  test("respondToToolExecution error path", async () => {
+    await client.respondToToolExecution("call_99", "", "tool crashed");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.TOOL_EXECUTE_RESULT);
+    assert.equal((ev as { call_id?: string }).call_id, "call_99");
+    assert.equal((ev as { error?: string }).error, "tool crashed");
+  });
+});
+
+describe("JaatoClient session management", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  test("createSession with no options sends bare session.new", async () => {
+    await client.createSession();
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "session.new");
+    assert.deepEqual((ev as { args?: string[] }).args, []);
+  });
+
+  test("createSession threads name + profile + agent + agentParams", async () => {
+    await client.createSession({
+      name: "test-session",
+      profile: "researcher",
+      agent: "code-reviewer",
+      agentParams: { topic: "auth", depth: "deep" },
+    });
+    const [ev] = getSent();
+    const args = (ev as { args?: string[] }).args ?? [];
+    assert.equal(args[0], "test-session");
+    assert.ok(args.includes("--profile"));
+    assert.ok(args.includes("researcher"));
+    assert.ok(args.includes("--agent"));
+    assert.ok(args.includes("code-reviewer"));
+    assert.ok(args.includes("topic=auth"));
+    assert.ok(args.includes("depth=deep"));
+  });
+
+  test("attachSession sends session.attach and updates sessionId", async () => {
+    await client.attachSession("sess_abc");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "session.attach");
+    assert.deepEqual((ev as { args?: string[] }).args, ["sess_abc"]);
+    assert.equal(client.sessionId, "sess_abc");
+  });
+
+  test("getDefaultSession sends session.default", async () => {
+    await client.getDefaultSession();
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.default");
+  });
+
+  test("listSessions sends session.list", async () => {
+    await client.listSessions();
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.list");
+  });
+
+  test("listProfiles sends session.profiles", async () => {
+    await client.listProfiles();
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.profiles");
+  });
 });
 
 describe("JaatoClient event stream", () => {
