@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-sdk"
-version = "0.2.20"
+version = "0.3.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "python-dotenv",  # Environment loading: .env file support for SDK configuration (IPC socket paths, server settings)
+    "pydantic>=2.0,<3",  # Event-protocol model definitions (events.py); chosen for JSON Schema export so the upcoming TS SDK can codegen typed event shapes from the same source of truth.
 ]
 
 [project.urls]

@@ -1,20 +1,29 @@
 """Event Protocol for Jaato Server.
 
 This module defines all events for client-server communication.
-Events are JSON-serializable dataclasses that flow over WebSocket.
+Events are pydantic models serialised as JSON over WebSocket / IPC.
 
 Event Flow:
     Server -> Client: Status updates, output streaming, permission requests
     Client -> Server: Messages, permission responses, commands
 
 Protocol Version: 1.0
+
+Pydantic was chosen over plain ``@dataclass`` so the same model
+definitions can drive JSON Schema export (``Event.model_json_schema``)
+for the upcoming TypeScript SDK codegen — single source of truth for
+both languages.  Wire format is preserved byte-for-byte versus the
+previous dataclass implementation; see
+``jaato_sdk/tests/test_events_wire_format.py`` for the snapshot
+baselines that gate any drift.
 """
 
-from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 import json
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # =============================================================================
@@ -187,41 +196,51 @@ class EventType(str, Enum):
 # Base Event
 # =============================================================================
 
-@dataclass
-class Event:
-    """Base class for all events."""
+class Event(BaseModel):
+    """Base class for all events.
+
+    ``model_config['extra'] = 'ignore'`` mirrors the previous
+    ``deserialize_event`` behaviour of silently dropping unknown
+    fields — preserves forward compatibility when an older client
+    receives an event from a newer server with extra keys.
+    """
+
+    model_config = ConfigDict(extra='ignore')
+
     type: EventType
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        d = asdict(self)
-        # Convert enum to string
-        if isinstance(d.get('type'), EventType):
-            d['type'] = d['type'].value
-        return d
+        """Convert to dictionary for JSON serialization.
+
+        Uses ``mode='json'`` so str-Enum subclasses (``EventType``,
+        ``ClientType``, etc.) serialise as their string values
+        rather than as enum instances — matching the prior
+        ``asdict`` + manual enum coercion behaviour.
+        """
+        return self.model_dump(mode='json')
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
-        return json.dumps(self.to_dict())
+        return self.model_dump_json()
 
 
 # =============================================================================
 # Server -> Client Events
 # =============================================================================
 
-@dataclass
 class ConnectedEvent(Event):
     """Sent when client connects successfully."""
-    type: EventType = field(default=EventType.CONNECTED)
+    type: EventType = Field(default=EventType.CONNECTED)
     protocol_version: str = "1.0"
-    server_info: Dict[str, Any] = field(default_factory=dict)
+    server_info: Dict[str, Any] = Field(default_factory=dict)
 
 
-@dataclass
 class AgentCreatedEvent(Event):
     """Sent when a new agent (main or subagent) is created."""
-    type: EventType = field(default=EventType.AGENT_CREATED)
+    type: EventType = Field(default=EventType.AGENT_CREATED)
     agent_id: str = ""
     agent_name: str = ""
     agent_type: str = ""  # "main" or "subagent"
@@ -230,26 +249,23 @@ class AgentCreatedEvent(Event):
     created_at: Optional[str] = None
 
 
-@dataclass
 class AgentOutputEvent(Event):
     """Streaming text output from an agent."""
-    type: EventType = field(default=EventType.AGENT_OUTPUT)
+    type: EventType = Field(default=EventType.AGENT_OUTPUT)
     agent_id: str = ""
     source: str = ""  # "model", "tool", "system", plugin name
     text: str = ""
     mode: str = "write"  # "write" (new block) or "append" (continue)
 
 
-@dataclass
 class AgentStatusChangedEvent(Event):
     """Agent status change (active, idle, done, error)."""
-    type: EventType = field(default=EventType.AGENT_STATUS_CHANGED)
+    type: EventType = Field(default=EventType.AGENT_STATUS_CHANGED)
     agent_id: str = ""
     status: str = ""  # "active", "idle" (waiting for input), "done", "error"
     error: Optional[str] = None
 
 
-@dataclass
 class AgentCompletedEvent(Event):
     """Agent has completed its task.
 
@@ -261,7 +277,7 @@ class AgentCompletedEvent(Event):
     consumers fall back to reading the legacy ``summary`` field on the
     associated tool result.
     """
-    type: EventType = field(default=EventType.AGENT_COMPLETED)
+    type: EventType = Field(default=EventType.AGENT_COMPLETED)
     agent_id: str = ""
     completed_at: str = ""
     success: bool = True
@@ -271,20 +287,18 @@ class AgentCompletedEvent(Event):
     payload: Optional[Dict[str, Any]] = None  # Validated typed payload from signal_completion
 
 
-@dataclass
 class ToolCallStartEvent(Event):
     """Tool execution has started."""
-    type: EventType = field(default=EventType.TOOL_CALL_START)
+    type: EventType = Field(default=EventType.TOOL_CALL_START)
     agent_id: str = ""
     tool_name: str = ""
-    tool_args: Dict[str, Any] = field(default_factory=dict)
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
     call_id: Optional[str] = None
 
 
-@dataclass
 class ToolCallEndEvent(Event):
     """Tool execution has completed."""
-    type: EventType = field(default=EventType.TOOL_CALL_END)
+    type: EventType = Field(default=EventType.TOOL_CALL_END)
     agent_id: str = ""
     tool_name: str = ""
     call_id: Optional[str] = None
@@ -297,16 +311,14 @@ class ToolCallEndEvent(Event):
     show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
 
 
-@dataclass
 class ToolOutputEvent(Event):
     """Live output chunk from a running tool (tail -f style)."""
-    type: EventType = field(default=EventType.TOOL_OUTPUT)
+    type: EventType = Field(default=EventType.TOOL_OUTPUT)
     agent_id: str = ""
     call_id: str = ""  # Required to correlate with specific tool call
     chunk: str = ""  # Output text chunk (may contain newlines)
 
 
-@dataclass
 class PermissionResponseOption:
     """A valid response option for permission prompts."""
     key: str  # Single char like "y", "n", "a"
@@ -315,18 +327,17 @@ class PermissionResponseOption:
     description: Optional[str] = None
 
 
-@dataclass
 class PermissionRequestedEvent(Event):
     """Permission is requested for a tool execution.
 
     Includes pre-formatted prompt lines (with diff for file edits) when available.
     """
-    type: EventType = field(default=EventType.PERMISSION_REQUESTED)
+    type: EventType = Field(default=EventType.PERMISSION_REQUESTED)
     agent_id: str = ""  # Which agent is requesting permission
     request_id: str = ""
     tool_name: str = ""
-    tool_args: Dict[str, Any] = field(default_factory=dict)
-    response_options: List[Dict[str, str]] = field(default_factory=list)
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
+    response_options: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {key, label, action, description?}
     prompt_lines: Optional[List[str]] = None  # Pre-formatted prompt (with diff)
     format_hint: Optional[str] = None  # "diff" for colored diff display
@@ -334,19 +345,18 @@ class PermissionRequestedEvent(Event):
     warning_level: Optional[str] = None  # "info", "warning", "error"
 
 
-@dataclass
 class PermissionInputModeEvent(Event):
     """Signal client to enter permission input mode.
 
     Sent AFTER permission content has been emitted via AgentOutputEvent.
     This lightweight control event separates content delivery from input control.
     """
-    type: EventType = field(default=EventType.PERMISSION_INPUT_MODE)
+    type: EventType = Field(default=EventType.PERMISSION_INPUT_MODE)
     agent_id: str = ""  # Which agent is requesting permission
     request_id: str = ""
     tool_name: str = ""
     call_id: Optional[str] = None  # Unique ID for matching tool call (parallel execution)
-    response_options: List[Dict[str, str]] = field(default_factory=list)
+    response_options: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {key, label, action, description?}
     # Tool arguments for client-side editing (when edit option is available)
     tool_args: Optional[Dict[str, Any]] = None
@@ -354,10 +364,9 @@ class PermissionInputModeEvent(Event):
     editable_metadata: Optional[Dict[str, Any]] = None
 
 
-@dataclass
 class PermissionResolvedEvent(Event):
     """Permission has been resolved (granted or denied)."""
-    type: EventType = field(default=EventType.PERMISSION_RESOLVED)
+    type: EventType = Field(default=EventType.PERMISSION_RESOLVED)
     agent_id: str = ""  # Which agent's permission was resolved
     request_id: str = ""
     tool_name: str = ""
@@ -366,33 +375,30 @@ class PermissionResolvedEvent(Event):
     comment: str = ""  # Advisory comment (from yc: or ALLOW_WITH_COMMENT evaluator)
 
 
-@dataclass
 class PermissionStatusEvent(Event):
     """Permission status update for client toolbar display.
 
     Emitted after permission commands (default/suspend/resume) and
     permission resolutions that change the effective policy.
     """
-    type: EventType = field(default=EventType.PERMISSION_STATUS)
+    type: EventType = Field(default=EventType.PERMISSION_STATUS)
     effective_default: str = "ask"  # "allow", "deny", or "ask"
     suspension_scope: Optional[str] = None  # "turn", "idle", "session", or None
 
 
-@dataclass
 class ClarificationRequestedEvent(Event):
     """Clarification session has started."""
-    type: EventType = field(default=EventType.CLARIFICATION_REQUESTED)
+    type: EventType = Field(default=EventType.CLARIFICATION_REQUESTED)
     agent_id: str = ""  # Which agent is requesting clarification
     request_id: str = ""
     tool_name: str = ""
-    context_lines: List[str] = field(default_factory=list)
+    context_lines: List[str] = Field(default_factory=list)
     total_questions: int = 0
 
 
-@dataclass
 class ClarificationQuestionEvent(Event):
     """A single clarification question to answer."""
-    type: EventType = field(default=EventType.CLARIFICATION_QUESTION)
+    type: EventType = Field(default=EventType.CLARIFICATION_QUESTION)
     agent_id: str = ""  # Which agent is asking the question
     request_id: str = ""
     question_index: int = 0
@@ -402,14 +408,13 @@ class ClarificationQuestionEvent(Event):
     options: Optional[List[Dict[str, str]]] = None  # For choice questions
 
 
-@dataclass
 class ClarificationInputModeEvent(Event):
     """Signal client to enter clarification input mode.
 
     Sent AFTER clarification content has been emitted via AgentOutputEvent.
     This lightweight control event separates content delivery from input control.
     """
-    type: EventType = field(default=EventType.CLARIFICATION_INPUT_MODE)
+    type: EventType = Field(default=EventType.CLARIFICATION_INPUT_MODE)
     agent_id: str = ""  # Which agent is requesting clarification
     request_id: str = ""
     tool_name: str = ""
@@ -417,18 +422,16 @@ class ClarificationInputModeEvent(Event):
     total_questions: int = 0
 
 
-@dataclass
 class ClarificationResolvedEvent(Event):
     """All clarification questions have been answered."""
-    type: EventType = field(default=EventType.CLARIFICATION_RESOLVED)
+    type: EventType = Field(default=EventType.CLARIFICATION_RESOLVED)
     agent_id: str = ""  # Which agent's clarification was resolved
     request_id: str = ""
     tool_name: str = ""
-    qa_pairs: List[List[str]] = field(default_factory=list)
+    qa_pairs: List[List[str]] = Field(default_factory=list)
     # ^ List of [question_text, answer_text] pairs for overview display
 
 
-@dataclass
 class ClarificationBatchEvent(Event):
     """All clarification questions sent at once for batch answering (WS clients only).
 
@@ -436,49 +439,45 @@ class ClarificationBatchEvent(Event):
     questions simultaneously in a tabbed panel and let the user answer
     in any order.
     """
-    type: EventType = field(default=EventType.CLARIFICATION_BATCH)
+    type: EventType = Field(default=EventType.CLARIFICATION_BATCH)
     agent_id: str = ""
     request_id: str = ""
     tool_name: str = ""
     context: str = ""
-    questions: List[Dict[str, Any]] = field(default_factory=list)
+    questions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {index, text, question_type, required, choices: [{text, default?}]}
 
 
-@dataclass
 class ClarificationBatchResponseEvent(Event):
     """Client responds with all answers at once (WS batch mode)."""
-    type: EventType = field(default=EventType.CLARIFICATION_BATCH_RESPONSE)
+    type: EventType = Field(default=EventType.CLARIFICATION_BATCH_RESPONSE)
     request_id: str = ""
-    answers: List[str] = field(default_factory=list)
+    answers: List[str] = Field(default_factory=list)
     # ^ Ordered list of answers, one per question (by index)
 
 
-@dataclass
 class ReferenceSelectionRequestedEvent(Event):
     """Reference selection has been requested.
 
     Sent when the model calls selectReferences and the user needs to choose
     which references to include.
     """
-    type: EventType = field(default=EventType.REFERENCE_SELECTION_REQUESTED)
+    type: EventType = Field(default=EventType.REFERENCE_SELECTION_REQUESTED)
     agent_id: str = ""  # Which agent is requesting reference selection
     request_id: str = ""
     tool_name: str = ""
-    prompt_lines: List[str] = field(default_factory=list)
+    prompt_lines: List[str] = Field(default_factory=list)
 
 
-@dataclass
 class ReferenceSelectionResolvedEvent(Event):
     """Reference selection has been completed."""
-    type: EventType = field(default=EventType.REFERENCE_SELECTION_RESOLVED)
+    type: EventType = Field(default=EventType.REFERENCE_SELECTION_RESOLVED)
     agent_id: str = ""  # Which agent's reference selection was resolved
     request_id: str = ""
     tool_name: str = ""
-    selected_ids: List[str] = field(default_factory=list)
+    selected_ids: List[str] = Field(default_factory=list)
 
 
-@dataclass
 class WorkspaceMismatchResponseOption:
     """A valid response option for workspace mismatch prompts."""
     key: str  # Single char like "s", "n"
@@ -487,7 +486,6 @@ class WorkspaceMismatchResponseOption:
     description: Optional[str] = None
 
 
-@dataclass
 class WorkspaceMismatchRequestedEvent(Event):
     """Workspace mismatch detected when attaching to a session.
 
@@ -495,38 +493,36 @@ class WorkspaceMismatchRequestedEvent(Event):
     with a different workspace path. The client must choose to either
     switch to the session's workspace or create a new session.
     """
-    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_REQUESTED)
+    type: EventType = Field(default=EventType.WORKSPACE_MISMATCH_REQUESTED)
     request_id: str = ""
     session_id: str = ""
     session_workspace: str = ""  # The session's current workspace
     client_workspace: str = ""   # The client's workspace
-    response_options: List[Dict[str, str]] = field(default_factory=list)
+    response_options: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {key, label, action, description?}
-    prompt_lines: List[str] = field(default_factory=list)
+    prompt_lines: List[str] = Field(default_factory=list)
 
 
-@dataclass
 class WorkspaceMismatchResolvedEvent(Event):
     """Workspace mismatch has been resolved."""
-    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_RESOLVED)
+    type: EventType = Field(default=EventType.WORKSPACE_MISMATCH_RESOLVED)
     request_id: str = ""
     session_id: str = ""
     action: str = ""  # "switch", "new_session", "cancel"
     new_session_id: Optional[str] = None  # Set if action is "new_session"
 
 
-@dataclass
 class PostAuthSetupEvent(Event):
     """Offer session setup after successful authentication.
 
     Emitted by daemon after an auth command succeeds. The client renders a
     multi-step wizard and sends back a single PostAuthSetupResponse.
     """
-    type: EventType = field(default=EventType.POST_AUTH_SETUP)
+    type: EventType = Field(default=EventType.POST_AUTH_SETUP)
     request_id: str = ""
     provider_name: str = ""        # e.g., "zhipuai"
     provider_display_name: str = ""  # e.g., "Zhipu AI (Z.AI)"
-    available_models: List[Dict[str, str]] = field(default_factory=list)
+    available_models: List[Dict[str, str]] = Field(default_factory=list)
     # ^ [{name: "zhipuai/glm-4.7", description: "..."}, ...]
     has_active_session: bool = False
     current_provider: str = ""     # Only set if has_active_session
@@ -534,17 +530,15 @@ class PostAuthSetupEvent(Event):
     workspace_path: str = ""
 
 
-@dataclass
 class PostAuthSetupResponse(Event):
     """User's response to post-auth session setup prompt."""
-    type: EventType = field(default=EventType.POST_AUTH_SETUP_RESPONSE)
+    type: EventType = Field(default=EventType.POST_AUTH_SETUP_RESPONSE)
     request_id: str = ""
     connect: bool = False          # Whether to create/switch session
     model_name: str = ""           # Selected model (if connect=True)
     persist_env: bool = False      # Whether to save provider/model to .env
 
 
-@dataclass
 class PlanStepData:
     """A single step in a plan."""
     content: str
@@ -552,17 +546,15 @@ class PlanStepData:
     active_form: Optional[str] = None
 
 
-@dataclass
 class PlanUpdatedEvent(Event):
     """Plan has been created or updated."""
-    type: EventType = field(default=EventType.PLAN_UPDATED)
+    type: EventType = Field(default=EventType.PLAN_UPDATED)
     agent_id: str = ""
     plan_name: str = ""
-    steps: List[Dict[str, Any]] = field(default_factory=list)
+    steps: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {content, status, active_form?, blocked_by?, depends_on?, received_outputs?}
 
 
-@dataclass
 class PlanStepUpdatedEvent(Event):
     """Single step status change within a plan.
 
@@ -574,7 +566,7 @@ class PlanStepUpdatedEvent(Event):
     blocked, unblocked). Structural changes (plan created, steps added,
     plan completed) use ``PlanUpdatedEvent`` with the full snapshot.
     """
-    type: EventType = field(default=EventType.PLAN_STEP_UPDATED)
+    type: EventType = Field(default=EventType.PLAN_STEP_UPDATED)
     agent_id: str = ""
     step_id: str = ""
     sequence: int = 0
@@ -587,17 +579,15 @@ class PlanStepUpdatedEvent(Event):
     received_outputs: Optional[Dict[str, Any]] = None
 
 
-@dataclass
 class PlanClearedEvent(Event):
     """Plan has been cleared/completed."""
-    type: EventType = field(default=EventType.PLAN_CLEARED)
+    type: EventType = Field(default=EventType.PLAN_CLEARED)
     agent_id: str = ""
 
 
-@dataclass
 class ContextUpdatedEvent(Event):
     """Context window usage has changed."""
-    type: EventType = field(default=EventType.CONTEXT_UPDATED)
+    type: EventType = Field(default=EventType.CONTEXT_UPDATED)
     agent_id: str = ""
     total_tokens: int = 0
     prompt_tokens: int = 0
@@ -613,7 +603,6 @@ class ContextUpdatedEvent(Event):
     gc_continuous_mode: bool = False  # True if GC runs after every turn
 
 
-@dataclass
 class InstructionBudgetEvent(Event):
     """Instruction budget has been updated.
 
@@ -626,12 +615,11 @@ class InstructionBudgetEvent(Event):
     - gc_eligible_tokens, locked_tokens, preservable_tokens: GC info
     - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
     """
-    type: EventType = field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
+    type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_UPDATED)
     agent_id: str = ""
-    budget_snapshot: Dict[str, Any] = field(default_factory=dict)
+    budget_snapshot: Dict[str, Any] = Field(default_factory=dict)
 
 
-@dataclass
 class TurnCompletedEvent(Event):
     """A conversation turn has completed.
 
@@ -642,14 +630,14 @@ class TurnCompletedEvent(Event):
     write premium on Anthropic).  Both are ``None`` when the provider does
     not support prompt caching.
     """
-    type: EventType = field(default=EventType.TURN_COMPLETED)
+    type: EventType = Field(default=EventType.TURN_COMPLETED)
     agent_id: str = ""
     turn_number: int = 0
     prompt_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     duration_seconds: float = 0.0
-    function_calls: List[Dict[str, Any]] = field(default_factory=list)
+    function_calls: List[Dict[str, Any]] = Field(default_factory=list)
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
@@ -658,7 +646,6 @@ class TurnCompletedEvent(Event):
     cache_creation_tokens: Optional[int] = None
 
 
-@dataclass
 class TurnProgressEvent(Event):
     """Incremental progress during turn execution.
 
@@ -666,7 +653,7 @@ class TurnProgressEvent(Event):
     token tracking before the turn completes.  Includes optional cache
     token fields mirroring ``TurnCompletedEvent``.
     """
-    type: EventType = field(default=EventType.TURN_PROGRESS)
+    type: EventType = Field(default=EventType.TURN_PROGRESS)
     agent_id: str = ""
     total_tokens: int = 0
     prompt_tokens: int = 0
@@ -680,33 +667,30 @@ class TurnProgressEvent(Event):
     cache_creation_tokens: Optional[int] = None
 
 
-@dataclass
 class SystemMessageEvent(Event):
     """System message (info, warning, status)."""
-    type: EventType = field(default=EventType.SYSTEM_MESSAGE)
+    type: EventType = Field(default=EventType.SYSTEM_MESSAGE)
     message: str = ""
     style: str = ""  # "info", "warning", "error", "success", "dim"
 
 
-@dataclass
 class HelpTextEvent(Event):
     """Detailed help text for commands.
 
     Sent in response to 'help' subcommands to display formatted help
     using the pager. Each line is a (text, style) tuple.
     """
-    type: EventType = field(default=EventType.HELP_TEXT)
-    lines: List[tuple] = field(default_factory=list)  # List of (text, style) tuples
+    type: EventType = Field(default=EventType.HELP_TEXT)
+    lines: List[tuple] = Field(default_factory=list)  # List of (text, style) tuples
 
 
-@dataclass
 class InitProgressEvent(Event):
     """Initialization progress update.
 
     Sent during session initialization to show progress on each step.
     Steps are shown in sequence with their status.
     """
-    type: EventType = field(default=EventType.INIT_PROGRESS)
+    type: EventType = Field(default=EventType.INIT_PROGRESS)
     step: str = ""  # Step name (e.g., "Loading plugins")
     status: str = "running"  # "running", "done", "error"
     message: str = ""  # Optional details (e.g., error message)
@@ -714,23 +698,21 @@ class InitProgressEvent(Event):
     total_steps: int = 0  # Total number of steps
 
 
-@dataclass
 class ErrorEvent(Event):
     """Error occurred."""
-    type: EventType = field(default=EventType.ERROR)
+    type: EventType = Field(default=EventType.ERROR)
     error: str = ""
     error_type: str = ""  # Exception class name
     recoverable: bool = True
 
 
-@dataclass
 class RetryEvent(Event):
     """API retry notification with exponential backoff.
 
     Sent when a transient error (rate limit, server error) is encountered
     and the system is retrying the request.
     """
-    type: EventType = field(default=EventType.RETRY)
+    type: EventType = Field(default=EventType.RETRY)
     message: str = ""  # Human-readable retry message
     attempt: int = 0  # Current attempt number (1-indexed)
     max_attempts: int = 0  # Maximum attempts configured
@@ -738,47 +720,42 @@ class RetryEvent(Event):
     error_type: str = ""  # Type of error (rate_limit, transient)
 
 
-@dataclass
 class SessionListEvent(Event):
     """List of available sessions - for user display."""
-    type: EventType = field(default=EventType.SESSION_LIST)
-    sessions: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.SESSION_LIST)
+    sessions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
 
 
-@dataclass
 class MemoryListEvent(Event):
     """List of available memories - for completion cache and pager display."""
-    type: EventType = field(default=EventType.MEMORY_LIST)
-    memories: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.MEMORY_LIST)
+    memories: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {id: str, description: str, tags: List[str]}
 
 
-@dataclass
 class SandboxPathsEvent(Event):
     """List of sandbox-allowed paths - for @@ completion cache.
 
     Emitted after sandbox add/remove commands to refresh the client's
     completion list for @@ (sandbox path) references.
     """
-    type: EventType = field(default=EventType.SANDBOX_PATHS)
-    paths: List[Dict[str, str]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.SANDBOX_PATHS)
+    paths: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {path: str, description: str}
 
 
-@dataclass
 class ServiceListEvent(Event):
     """List of discovered services - for completion cache.
 
     Emitted after services commands to refresh the client's
     completion list for service names and HTTP methods.
     """
-    type: EventType = field(default=EventType.SERVICE_LIST)
-    services: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.SERVICE_LIST)
+    services: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {name: str, methods: List[str]}
 
 
-@dataclass
 class SessionInfoEvent(Event):
     """Session state snapshot - sent on connect/attach with all data client needs.
 
@@ -790,7 +767,7 @@ class SessionInfoEvent(Event):
     Client stores this locally and uses it for both completion and display.
     Server pushes updates when state changes.
     """
-    type: EventType = field(default=EventType.SESSION_INFO)
+    type: EventType = Field(default=EventType.SESSION_INFO)
     # Current session
     session_id: str = ""
     session_name: str = ""
@@ -798,33 +775,31 @@ class SessionInfoEvent(Event):
     model_name: str = ""
     profile_name: Optional[str] = None  # Agent profile used to create this session
     # State snapshot for local use
-    sessions: List[Dict[str, Any]] = field(default_factory=list)
+    sessions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ [{id, name, model_provider, model_name, is_loaded, client_count, turn_count}, ...]
-    tools: List[Dict[str, Any]] = field(default_factory=list)
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ [{name, description, enabled, plugin}, ...]
-    models: List[str] = field(default_factory=list)
+    models: List[str] = Field(default_factory=list)
     # ^ ["gemini-2.5-flash", "gemini-2.5-pro", ...]
-    user_inputs: List[str] = field(default_factory=list)
+    user_inputs: List[str] = Field(default_factory=list)
     # ^ Command history for prompt restoration on reconnect
-    memories: List[Dict[str, Any]] = field(default_factory=list)
+    memories: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ [{id, description, tags}, ...] for memory command completions
-    sandbox_paths: List[Dict[str, str]] = field(default_factory=list)
+    sandbox_paths: List[Dict[str, str]] = Field(default_factory=list)
     # ^ [{path, description}, ...] for @@ sandbox completion
-    services: List[Dict[str, Any]] = field(default_factory=list)
+    services: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ [{name, methods}, ...] for services command completions
-    tool_id_mappings: Dict[str, str] = field(default_factory=dict)
+    tool_id_mappings: Dict[str, str] = Field(default_factory=dict)
     # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
 
 
-@dataclass
 class SessionDescriptionUpdatedEvent(Event):
     """Session description was updated (by model calling session_describe)."""
-    type: EventType = field(default=EventType.SESSION_DESCRIPTION_UPDATED)
+    type: EventType = Field(default=EventType.SESSION_DESCRIPTION_UPDATED)
     session_id: str = ""
     description: str = ""
 
 
-@dataclass
 class SessionProfilesEvent(Event):
     """List of available agent profiles for session creation.
 
@@ -833,8 +808,8 @@ class SessionProfilesEvent(Event):
     model, provider, and list of plugins — enough for a client to
     display a profile picker.
     """
-    type: EventType = field(default=EventType.SESSION_PROFILES)
-    profiles: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.SESSION_PROFILES)
+    profiles: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ [{name, description, model, provider, plugins}, ...]
 
 
@@ -842,7 +817,6 @@ class SessionProfilesEvent(Event):
 # Workspace Management Events (Server -> Client)
 # =============================================================================
 
-@dataclass
 class WorkspaceInfo:
     """Information about a single workspace."""
     name: str  # Relative path from workspace root (e.g., "project-a")
@@ -852,39 +826,35 @@ class WorkspaceInfo:
     last_accessed: Optional[str] = None  # ISO timestamp
 
 
-@dataclass
 class WorkspaceListEvent(Event):
     """Response to workspace.list - list of available workspaces."""
-    type: EventType = field(default=EventType.WORKSPACE_LIST)
+    type: EventType = Field(default=EventType.WORKSPACE_LIST)
     root: str = ""  # Absolute path to workspace root
-    workspaces: List[Dict[str, Any]] = field(default_factory=list)
+    workspaces: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of WorkspaceInfo as dicts
 
 
-@dataclass
 class WorkspaceCreatedEvent(Event):
     """Response to workspace.create - new workspace created."""
-    type: EventType = field(default=EventType.WORKSPACE_CREATED)
+    type: EventType = Field(default=EventType.WORKSPACE_CREATED)
     name: str = ""  # Relative path from workspace root
     path: str = ""  # Absolute path
 
 
-@dataclass
 class ConfigStatusEvent(Event):
     """Response to workspace.select - configuration status of selected workspace."""
-    type: EventType = field(default=EventType.CONFIG_STATUS)
+    type: EventType = Field(default=EventType.CONFIG_STATUS)
     workspace: str = ""  # Workspace name (relative path)
     configured: bool = False  # Has valid provider config
     provider: Optional[str] = None  # Current provider if set
     model: Optional[str] = None  # Current model if set
-    available_providers: List[str] = field(default_factory=list)  # Providers that can be configured
-    missing_fields: List[str] = field(default_factory=list)  # What's needed to complete config
+    available_providers: List[str] = Field(default_factory=list)  # Providers that can be configured
+    missing_fields: List[str] = Field(default_factory=list)  # What's needed to complete config
 
 
-@dataclass
 class ConfigUpdatedEvent(Event):
     """Response to config.update - configuration was updated."""
-    type: EventType = field(default=EventType.CONFIG_UPDATED)
+    type: EventType = Field(default=EventType.CONFIG_UPDATED)
     workspace: str = ""  # Workspace name
     provider: str = ""  # New provider
     model: Optional[str] = None  # New model if set
@@ -896,7 +866,6 @@ class ConfigUpdatedEvent(Event):
 # Workspace File Monitoring Events (Server -> Client)
 # =============================================================================
 
-@dataclass
 class WorkspaceFilesChangedEvent(Event):
     """Incremental workspace file change notification.
 
@@ -910,12 +879,11 @@ class WorkspaceFilesChangedEvent(Event):
         ``"modified"`` – file existed at session start and was changed.
         ``"deleted"``  – file was previously tracked and is now gone.
     """
-    type: EventType = field(default=EventType.WORKSPACE_FILES_CHANGED)
-    changes: List[Dict[str, str]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_CHANGED)
+    changes: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
 
 
-@dataclass
 class WorkspaceFilesSnapshotEvent(Event):
     """Complete workspace file state snapshot.
 
@@ -923,8 +891,8 @@ class WorkspaceFilesSnapshotEvent(Event):
     its local mirror of the session's file tracking state without
     replaying individual deltas.
     """
-    type: EventType = field(default=EventType.WORKSPACE_FILES_SNAPSHOT)
-    files: List[Dict[str, str]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_SNAPSHOT)
+    files: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
     total: int = 0
     # ^ Convenience: count of non-deleted entries
@@ -934,71 +902,63 @@ class WorkspaceFilesSnapshotEvent(Event):
 # Client -> Server Events (Requests)
 # =============================================================================
 
-@dataclass
 class SendMessageRequest(Event):
     """Send a message to the model."""
-    type: EventType = field(default=EventType.SEND_MESSAGE)
+    type: EventType = Field(default=EventType.SEND_MESSAGE)
     text: str = ""
-    attachments: List[Dict[str, Any]] = field(default_factory=list)
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {type: "file", path: "..."} or {type: "image", data: "base64..."}
 
 
-@dataclass
 class PermissionResponseRequest(Event):
     """Respond to a permission request."""
-    type: EventType = field(default=EventType.PERMISSION_RESPONSE)
+    type: EventType = Field(default=EventType.PERMISSION_RESPONSE)
     request_id: str = ""
     response: str = ""  # "y", "n", "a", "never", etc.
     # Edited tool arguments (set when response is "e" and client handled editing)
     edited_arguments: Optional[Dict[str, Any]] = None
 
 
-@dataclass
 class ClarificationResponseRequest(Event):
     """Respond to a clarification question."""
-    type: EventType = field(default=EventType.CLARIFICATION_RESPONSE)
+    type: EventType = Field(default=EventType.CLARIFICATION_RESPONSE)
     request_id: str = ""
     question_index: int = 0
     response: str = ""  # User's answer
 
 
-@dataclass
 class ReferenceSelectionResponseRequest(Event):
     """Respond to a reference selection request."""
-    type: EventType = field(default=EventType.REFERENCE_SELECTION_RESPONSE)
+    type: EventType = Field(default=EventType.REFERENCE_SELECTION_RESPONSE)
     request_id: str = ""
     response: str = ""  # User's selection (e.g., "1,3,4", "all", "none")
 
 
-@dataclass
 class WorkspaceMismatchResponseRequest(Event):
     """Respond to a workspace mismatch request."""
-    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_RESPONSE)
+    type: EventType = Field(default=EventType.WORKSPACE_MISMATCH_RESPONSE)
     request_id: str = ""
     response: str = ""  # "s" (switch), "n" (new session), "c" (cancel)
 
 
-@dataclass
 class StopRequest(Event):
     """Stop current operation (cancel generation)."""
-    type: EventType = field(default=EventType.STOP)
+    type: EventType = Field(default=EventType.STOP)
     agent_id: Optional[str] = None  # None = all agents
 
 
-@dataclass
 class ExternalEventRequest(Event):
     """External event injected by the host page via the web component.
 
     Published on the session's ``EventBus`` as an ``external_event``
     so that agents subscribed via ``subscribeToEvents`` are notified.
     """
-    type: EventType = field(default=EventType.EVENT_EXTERNAL)
+    type: EventType = Field(default=EventType.EVENT_EXTERNAL)
     name: str = ""        # Event name (e.g., "order.placed")
-    data: Dict[str, Any] = field(default_factory=dict)  # Arbitrary payload
+    data: Dict[str, Any] = Field(default_factory=dict)  # Arbitrary payload
     timestamp: str = ""   # ISO 8601 timestamp from the client
 
 
-@dataclass
 class EventsSubscribedEvent(Event):
     """Notification that an agent has subscribed to external events.
 
@@ -1006,45 +966,40 @@ class EventsSubscribedEvent(Event):
     names the agent is listening for.  ``["*"]`` means all external
     events.
     """
-    type: EventType = field(default=EventType.EVENTS_SUBSCRIBED)
+    type: EventType = Field(default=EventType.EVENTS_SUBSCRIBED)
     agent_id: str = ""
-    event_names: List[str] = field(default_factory=list)
+    event_names: List[str] = Field(default_factory=list)
 
 
-@dataclass
 class CommandRequest(Event):
     """Execute a command (like 'model', 'save', 'resume', etc.)."""
-    type: EventType = field(default=EventType.COMMAND)
+    type: EventType = Field(default=EventType.COMMAND)
     command: str = ""
-    args: List[str] = field(default_factory=list)
+    args: List[str] = Field(default_factory=list)
 
 
-@dataclass
 class GetInstructionBudgetRequest(Event):
     """Request current instruction budget for an agent.
 
     Server responds with InstructionBudgetEvent containing the budget snapshot.
     If agent_id is None or empty, returns budget for main agent.
     """
-    type: EventType = field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
+    type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
     agent_id: Optional[str] = None  # None = main agent
 
 
-@dataclass
 class CommandListRequest(Event):
     """Request list of available commands from server."""
-    type: EventType = field(default=EventType.COMMAND_LIST_REQUEST)
+    type: EventType = Field(default=EventType.COMMAND_LIST_REQUEST)
 
 
-@dataclass
 class CommandListEvent(Event):
     """List of available commands from server/plugins."""
-    type: EventType = field(default=EventType.COMMAND_LIST)
-    commands: List[Dict[str, str]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.COMMAND_LIST)
+    commands: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {name, description, ?subcommands}
 
 
-@dataclass
 class CommandListRefreshEvent(Event):
     """Signal that the command list should be refreshed.
 
@@ -1052,19 +1007,17 @@ class CommandListRefreshEvent(Event):
     (e.g., references select/unselect). The IPC client handles this
     by re-requesting the full command list from the daemon.
     """
-    type: EventType = field(default=EventType.COMMAND_LIST_REFRESH)
+    type: EventType = Field(default=EventType.COMMAND_LIST_REFRESH)
 
 
-@dataclass
 class ToolStatusEvent(Event):
     """Tool status information for client display."""
-    type: EventType = field(default=EventType.TOOL_STATUS)
-    tools: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.TOOL_STATUS)
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {name, description, enabled, plugin}
     message: str = ""  # Optional result message (for enable/disable operations)
 
 
-@dataclass
 class ToolIdRegistryEvent(Event):
     """Hash-derived ID → human-readable name mapping for client display.
 
@@ -1075,22 +1028,20 @@ class ToolIdRegistryEvent(Event):
     The mapping is cumulative — each event carries the full current set,
     not a delta. Clients should replace their local lookup on each receive.
     """
-    type: EventType = field(default=EventType.TOOL_ID_REGISTRY)
-    mappings: Dict[str, str] = field(default_factory=dict)
+    type: EventType = Field(default=EventType.TOOL_ID_REGISTRY)
+    mappings: Dict[str, str] = Field(default_factory=dict)
 
 
-@dataclass
 class ToolDisableRequest(Event):
     """Client request to disable a tool.
 
     Directly calls registry.disable_tool() without generating response events.
     Used by headless mode to disable tools before starting event handling.
     """
-    type: EventType = field(default=EventType.TOOL_DISABLE_REQUEST)
+    type: EventType = Field(default=EventType.TOOL_DISABLE_REQUEST)
     tool_name: str = ""  # Tool to disable
 
 
-@dataclass
 class ToolsRegisterClientRequest(Event):
     """Register client-side tools that the browser/frontend can execute.
 
@@ -1098,49 +1049,45 @@ class ToolsRegisterClientRequest(Event):
     calls one, the server routes execution to the WS client via
     ``tool.execute_request`` and waits for ``tool.execute_result``.
     """
-    type: EventType = field(default=EventType.TOOLS_REGISTER_CLIENT)
-    tools: List[Dict[str, Any]] = field(default_factory=list)
+    type: EventType = Field(default=EventType.TOOLS_REGISTER_CLIENT)
+    tools: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {name, description, parameters: {type:'object', properties, required}, timeout}
-    categories: Dict[str, str] = field(default_factory=dict)
+    categories: Dict[str, str] = Field(default_factory=dict)
     # ^ Optional mapping of category name → description for categories
     # introduced by client-side tools.  Registered via
     # registry.register_category() so list_tools shows descriptions.
 
 
-@dataclass
 class ToolExecuteRequestEvent(Event):
     """Server requests the WS client to execute a client-registered tool."""
-    type: EventType = field(default=EventType.TOOL_EXECUTE_REQUEST)
+    type: EventType = Field(default=EventType.TOOL_EXECUTE_REQUEST)
     call_id: str = ""
     agent_id: str = ""
     tool_name: str = ""
-    tool_args: Dict[str, Any] = field(default_factory=dict)
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
 
 
-@dataclass
 class ToolExecuteResultEvent(Event):
     """Client returns the result of a client-side tool execution."""
-    type: EventType = field(default=EventType.TOOL_EXECUTE_RESULT)
+    type: EventType = Field(default=EventType.TOOL_EXECUTE_RESULT)
     call_id: str = ""
     result: str = ""  # JSON-encoded result
     error: str = ""   # Error message if execution failed
 
 
-@dataclass
 class HistoryRequest(Event):
     """Client request for conversation history."""
-    type: EventType = field(default=EventType.HISTORY_REQUEST)
+    type: EventType = Field(default=EventType.HISTORY_REQUEST)
     agent_id: str = "main"  # Which agent's history to get
 
 
-@dataclass
 class HistoryEvent(Event):
     """Conversation history from server."""
-    type: EventType = field(default=EventType.HISTORY)
+    type: EventType = Field(default=EventType.HISTORY)
     agent_id: str = "main"
-    history: List[Dict[str, Any]] = field(default_factory=list)
+    history: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of serialized Message objects
-    turn_accounting: List[Dict[str, int]] = field(default_factory=list)
+    turn_accounting: List[Dict[str, int]] = Field(default_factory=list)
     # ^ List of {prompt, output, total} per turn
 
 
@@ -1148,37 +1095,32 @@ class HistoryEvent(Event):
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
 
-@dataclass
 class WorkspaceListRequest(Event):
     """Client requests list of available workspaces."""
-    type: EventType = field(default=EventType.WORKSPACE_LIST_REQUEST)
+    type: EventType = Field(default=EventType.WORKSPACE_LIST_REQUEST)
 
 
-@dataclass
 class WorkspaceCreateRequest(Event):
     """Client requests creation of a new workspace."""
-    type: EventType = field(default=EventType.WORKSPACE_CREATE_REQUEST)
+    type: EventType = Field(default=EventType.WORKSPACE_CREATE_REQUEST)
     name: str = ""  # Name for the new workspace (becomes subdirectory name)
 
 
-@dataclass
 class WorkspaceSelectRequest(Event):
     """Client selects a workspace to use for the session."""
-    type: EventType = field(default=EventType.WORKSPACE_SELECT_REQUEST)
+    type: EventType = Field(default=EventType.WORKSPACE_SELECT_REQUEST)
     name: str = ""  # Workspace name (relative path from root)
 
 
-@dataclass
 class ConfigUpdateRequest(Event):
     """Client updates workspace configuration (provider, model, API key)."""
-    type: EventType = field(default=EventType.CONFIG_UPDATE_REQUEST)
+    type: EventType = Field(default=EventType.CONFIG_UPDATE_REQUEST)
     provider: str = ""  # Provider name (anthropic, google, github, etc.)
     model: Optional[str] = None  # Model name (optional, uses provider default)
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
 
 
-@dataclass
-class StagedFileSpec:
+class StagedFileSpec(BaseModel):
     """Per-file metadata sent inside a :class:`StageFilesRequest`.
 
     The ``size`` is the exact byte length of the binary frame that will
@@ -1194,13 +1136,14 @@ class StagedFileSpec:
     files are written with the daemon's umask. Add the field now so
     clients don't need a protocol bump later.
     """
+    model_config = ConfigDict(extra='ignore')
+
     name: str = ""  # Workspace-relative path; rejected if absolute or contains ".."
     size: int = 0   # Exact byte length of the upcoming binary frame
     content_type: Optional[str] = None
     mode: Optional[int] = None
 
 
-@dataclass
 class StageFilesRequest(Event):
     """Stage files into a workspace via a multi-frame WS protocol.
 
@@ -1240,26 +1183,14 @@ class StageFilesRequest(Event):
     binary-framed (no base64 inflation), and supports staging into an
     already-existing workspace mid-session.
     """
-    type: EventType = field(default=EventType.WORKSPACE_FILES_STAGE_REQUEST)
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_STAGE_REQUEST)
     workspace_id: str = ""
-    files: List[StagedFileSpec] = field(default_factory=list)
-
-    def __post_init__(self):
-        # ``deserialize_event`` passes raw dicts for nested dataclasses;
-        # coerce so callers always see ``StagedFileSpec`` instances
-        # regardless of construction path.
-        self.files = [
-            f if isinstance(f, StagedFileSpec) else StagedFileSpec(
-                name=f.get("name", "") if isinstance(f, dict) else "",
-                size=f.get("size", 0) if isinstance(f, dict) else 0,
-                content_type=f.get("content_type") if isinstance(f, dict) else None,
-                mode=f.get("mode") if isinstance(f, dict) else None,
-            )
-            for f in self.files
-        ]
+    files: List[StagedFileSpec] = Field(default_factory=list)
+    # Pydantic coerces nested raw dicts to ``StagedFileSpec`` instances
+    # automatically during validation; the ``__post_init__`` shim that
+    # used to do this manually under ``@dataclass`` is no longer needed.
 
 
-@dataclass
 class StageFilesEvent(Event):
     """Server's response to :class:`StageFilesRequest`.
 
@@ -1281,10 +1212,10 @@ class StageFilesEvent(Event):
     - ``"io_error"`` — write failed (disk full, permission denied,
       AppArmor refusal, ...).  ``error`` carries the OS message.
     """
-    type: EventType = field(default=EventType.WORKSPACE_FILES_STAGED)
+    type: EventType = Field(default=EventType.WORKSPACE_FILES_STAGED)
     workspace_id: str = ""
-    staged: List[str] = field(default_factory=list)  # successfully written, by name
-    failed: List[Dict[str, str]] = field(default_factory=list)  # [{"name", "category", "error"}]
+    staged: List[str] = Field(default_factory=list)  # successfully written, by name
+    failed: List[Dict[str, str]] = Field(default_factory=list)  # [{"name", "category", "error"}]
 
 
 class ClientType(str, Enum):
@@ -1315,7 +1246,6 @@ class CommunicationStyle(str, Enum):
     NARRATIVE = "narrative"
 
 
-@dataclass
 class PresentationContext:
     """Display capabilities and constraints of the connected client.
 
@@ -1494,7 +1424,6 @@ class PresentationContext:
         )
 
 
-@dataclass
 class ClientConfigRequest(Event):
     """Client sends its configuration to the server.
 
@@ -1502,7 +1431,7 @@ class ClientConfigRequest(Event):
     and display capabilities.  The ``presentation`` dict is deserialized into
     a ``PresentationContext`` on the server side.
     """
-    type: EventType = field(default=EventType.CLIENT_CONFIG)
+    type: EventType = Field(default=EventType.CLIENT_CONFIG)
     # Environment overrides from client's .env
     trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
     provider_trace_log: Optional[str] = None  # client: PROVIDER_TRACE_LOG → server: JAATO_PROVIDER_TRACE
@@ -1526,7 +1455,6 @@ class ClientConfigRequest(Event):
 # Mid-Turn Prompt Events
 # =============================================================================
 
-@dataclass
 class MidTurnPromptQueuedEvent(Event):
     """Sent when a user prompt is queued during model processing.
 
@@ -1534,23 +1462,21 @@ class MidTurnPromptQueuedEvent(Event):
     is running, the message is queued and will be injected at the next natural
     pause point (between tool executions, after subagent completion, etc.).
     """
-    type: EventType = field(default=EventType.MID_TURN_PROMPT_QUEUED)
+    type: EventType = Field(default=EventType.MID_TURN_PROMPT_QUEUED)
     text: str = ""
     position_in_queue: int = 0  # 0-based position (usually 0, can be >0 if multiple queued)
 
 
-@dataclass
 class MidTurnPromptInjectedEvent(Event):
     """Sent when a queued prompt is injected into the conversation.
 
     This notifies the client that the queued prompt is now being processed
     by the model.
     """
-    type: EventType = field(default=EventType.MID_TURN_PROMPT_INJECTED)
+    type: EventType = Field(default=EventType.MID_TURN_PROMPT_INJECTED)
     text: str = ""
 
 
-@dataclass
 class MidTurnInterruptEvent(Event):
     """Sent when streaming is interrupted to process a mid-turn user prompt.
 
@@ -1558,12 +1484,11 @@ class MidTurnInterruptEvent(Event):
     because a user prompt arrived and needs to be processed immediately.
     The partial response is preserved and the user's prompt is being processed.
     """
-    type: EventType = field(default=EventType.MID_TURN_INTERRUPT)
+    type: EventType = Field(default=EventType.MID_TURN_INTERRUPT)
     partial_response_chars: int = 0  # How much of the response was generated before interrupt
     user_prompt_preview: str = ""  # First 100 chars of the user's prompt
 
 
-@dataclass
 class InterruptedTurnRecoveredEvent(Event):
     """Sent when the server recovers from an interrupted turn after reconnection.
 
@@ -1571,7 +1496,7 @@ class InterruptedTurnRecoveredEvent(Event):
     restart) and has been recovered with synthetic error responses injected
     for any pending tool calls.
     """
-    type: EventType = field(default=EventType.INTERRUPTED_TURN_RECOVERED)
+    type: EventType = Field(default=EventType.INTERRUPTED_TURN_RECOVERED)
     session_id: str = ""
     agent_id: str = ""
     recovered_calls: int = 0  # Number of tool calls that were recovered
@@ -1582,7 +1507,6 @@ class InterruptedTurnRecoveredEvent(Event):
 # Peer Channel Events (Server-to-Server Gossip)
 # =============================================================================
 
-@dataclass
 class PeerHeartbeatEvent(Event):
     """Heartbeat sent between peer servers at a configurable interval.
 
@@ -1590,15 +1514,15 @@ class PeerHeartbeatEvent(Event):
     PeerRegistry to track peer liveness and by the environment aspect (Phase 2)
     to expose cluster state to the model.
     """
-    type: EventType = field(default=EventType.PEER_HEARTBEAT)
+    type: EventType = Field(default=EventType.PEER_HEARTBEAT)
     server_id: str = ""
     server_name: str = ""
     server_version: str = ""
     active_sessions: int = 0
     active_agents: int = 0
-    available_providers: List[str] = field(default_factory=list)
-    available_models: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
+    available_providers: List[str] = Field(default_factory=list)
+    available_models: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
     uptime_seconds: float = 0.0
@@ -1613,7 +1537,6 @@ class PeerHeartbeatEvent(Event):
 # Peer Spawn Events (Server-to-Server Remote Subagent Delegation)
 # =============================================================================
 
-@dataclass
 class PeerSpawnRequestEvent(Event):
     """Request to spawn a subagent on a remote peer server.
 
@@ -1622,7 +1545,7 @@ class PeerSpawnRequestEvent(Event):
     the subagent.  The ``request_id`` correlates all subsequent events in
     this spawn lifecycle.
     """
-    type: EventType = field(default=EventType.PEER_SPAWN_REQUEST)
+    type: EventType = Field(default=EventType.PEER_SPAWN_REQUEST)
     request_id: str = ""
     origin_server: str = ""
     agent_name: str = ""
@@ -1637,31 +1560,28 @@ class PeerSpawnRequestEvent(Event):
     workspace_temp_branch: str = ""
 
 
-@dataclass
 class PeerSpawnAcceptedEvent(Event):
     """Confirmation that a remote peer accepted the spawn request.
 
     Sent back to the origin server once the remote has created the
     ephemeral session and is about to start processing.
     """
-    type: EventType = field(default=EventType.PEER_SPAWN_ACCEPTED)
+    type: EventType = Field(default=EventType.PEER_SPAWN_ACCEPTED)
     request_id: str = ""
     remote_agent_id: str = ""
 
 
-@dataclass
 class PeerSpawnRejectedEvent(Event):
     """Notification that a remote peer rejected the spawn request.
 
     The ``reason`` field contains a human-readable explanation (e.g.
     capacity limits, missing provider, unknown profile).
     """
-    type: EventType = field(default=EventType.PEER_SPAWN_REJECTED)
+    type: EventType = Field(default=EventType.PEER_SPAWN_REJECTED)
     request_id: str = ""
     reason: str = ""
 
 
-@dataclass
 class PeerAgentOutputEvent(Event):
     """Streamed output chunk from a remote subagent.
 
@@ -1669,14 +1589,13 @@ class PeerAgentOutputEvent(Event):
     produces output.  The origin's ``RemoteSpawnHandler`` forwards these
     to the parent session via ``inject_prompt``.
     """
-    type: EventType = field(default=EventType.PEER_AGENT_OUTPUT)
+    type: EventType = Field(default=EventType.PEER_AGENT_OUTPUT)
     request_id: str = ""
     remote_agent_id: str = ""
     text: str = ""
     source: str = ""  # "model" or "tool"
 
 
-@dataclass
 class PeerAgentCompletedEvent(Event):
     """Signal that a remote subagent has finished execution.
 
@@ -1684,7 +1603,7 @@ class PeerAgentCompletedEvent(Event):
     ``summary`` contains a brief result description; ``error`` is
     populated only when ``success`` is False.
     """
-    type: EventType = field(default=EventType.PEER_AGENT_COMPLETED)
+    type: EventType = Field(default=EventType.PEER_AGENT_COMPLETED)
     request_id: str = ""
     remote_agent_id: str = ""
     success: bool = True
@@ -1694,22 +1613,20 @@ class PeerAgentCompletedEvent(Event):
     workspace_modified: bool = False
 
 
-@dataclass
 class PeerStopRequestEvent(Event):
     """Request to cancel a running remote subagent.
 
     Sent from the origin server when the parent session wants to stop
     a previously spawned remote subagent.
     """
-    type: EventType = field(default=EventType.PEER_STOP_REQUEST)
+    type: EventType = Field(default=EventType.PEER_STOP_REQUEST)
     request_id: str = ""
     remote_agent_id: str = ""
 
 
-@dataclass
 class PeerStopAcknowledgedEvent(Event):
     """Confirmation that a remote peer received and processed the stop request."""
-    type: EventType = field(default=EventType.PEER_STOP_ACKNOWLEDGED)
+    type: EventType = Field(default=EventType.PEER_STOP_ACKNOWLEDGED)
     request_id: str = ""
     remote_agent_id: str = ""
 
@@ -1842,14 +1759,11 @@ def deserialize_event(json_str: str) -> Event:
 
     event_class = _EVENT_CLASSES[event_type]
 
-    # Convert type string back to enum
-    data["type"] = EventType(event_type)
-
-    # Remove unknown fields (forward compatibility)
-    known_fields = {f.name for f in event_class.__dataclass_fields__.values()}
-    filtered_data = {k: v for k, v in data.items() if k in known_fields}
-
-    return event_class(**filtered_data)
+    # Pydantic ``model_config['extra'] = 'ignore'`` on the base Event
+    # silently drops unknown fields, so an older client deserialising an
+    # event from a newer server doesn't crash on extra keys — same
+    # forward-compat semantics as the previous manual filtering.
+    return event_class.model_validate(data)
 
 
 def create_event(event_type: EventType, **kwargs) -> Event:

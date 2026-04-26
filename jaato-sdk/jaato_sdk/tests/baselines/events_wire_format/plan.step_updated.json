@@ -1,0 +1,14 @@
+{
+  "type": "plan.step_updated",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "step_id": "",
+  "sequence": 0,
+  "content": "",
+  "status": "",
+  "result": null,
+  "error": null,
+  "blocked_by": null,
+  "depends_on": null,
+  "received_outputs": null
+}

@@ -1,0 +1,11 @@
+{
+  "type": "agent.completed",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "completed_at": "",
+  "success": true,
+  "token_usage": null,
+  "turns_used": null,
+  "error": "",
+  "payload": null
+}

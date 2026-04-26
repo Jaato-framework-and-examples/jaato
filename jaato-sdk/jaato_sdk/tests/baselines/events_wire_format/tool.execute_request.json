@@ -1,0 +1,8 @@
+{
+  "type": "tool.execute_request",
+  "timestamp": "<TIMESTAMP>",
+  "call_id": "",
+  "agent_id": "",
+  "tool_name": "",
+  "tool_args": {}
+}

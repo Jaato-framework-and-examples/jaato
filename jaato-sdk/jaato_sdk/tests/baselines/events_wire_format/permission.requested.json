@@ -1,0 +1,13 @@
+{
+  "type": "permission.requested",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "tool_args": {},
+  "response_options": [],
+  "prompt_lines": null,
+  "format_hint": null,
+  "warnings": null,
+  "warning_level": null
+}

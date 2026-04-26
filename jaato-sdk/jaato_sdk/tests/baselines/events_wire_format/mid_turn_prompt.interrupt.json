@@ -1,0 +1,6 @@
+{
+  "type": "mid_turn_prompt.interrupt",
+  "timestamp": "<TIMESTAMP>",
+  "partial_response_chars": 0,
+  "user_prompt_preview": ""
+}

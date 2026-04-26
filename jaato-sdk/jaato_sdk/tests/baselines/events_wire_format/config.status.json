@@ -1,0 +1,10 @@
+{
+  "type": "config.status",
+  "timestamp": "<TIMESTAMP>",
+  "workspace": "",
+  "configured": false,
+  "provider": null,
+  "model": null,
+  "available_providers": [],
+  "missing_fields": []
+}

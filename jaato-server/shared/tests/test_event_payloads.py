@@ -1,17 +1,16 @@
-"""Verify payload TypedDicts stay aligned with server event dataclasses.
+"""Verify payload TypedDicts stay aligned with server event models.
 
 The TypedDict payload schemas in ``jaato_sdk.event_payloads`` are the
 single source of truth for bus event payloads.  Bridged events (server →
-bus) are produced by flattening a server event dataclass's fields (minus
+bus) are produced by flattening a server event's fields (minus
 ``type`` and ``timestamp``) into the bus event's ``payload`` dict.
 
-This test ensures every key in the server event dataclass has a
-corresponding key in the payload TypedDict, and vice versa.  If someone
-adds a field to a server event but forgets to update the TypedDict (or
+This test ensures every key in the server event has a corresponding
+key in the payload TypedDict, and vice versa.  If someone adds a
+field to a server event but forgets to update the TypedDict (or
 the reverse), this test fails.
 """
 
-import dataclasses
 from typing import get_type_hints
 
 import pytest
@@ -20,20 +19,20 @@ from jaato_sdk.event_payloads import BRIDGED_PAYLOAD_SOURCES
 import jaato_sdk.events as events_module
 
 
-# Fields on the base Event dataclass that are NOT part of the payload.
+# Fields on the base Event model that are NOT part of the payload.
 _BASE_EVENT_FIELDS = {"type", "timestamp"}
 
 
 def _get_server_event_payload_fields(event_class: type) -> set:
-    """Extract payload-relevant field names from a server event dataclass.
+    """Extract payload-relevant field names from a server event model.
 
-    Returns all dataclass field names except the base Event fields
+    Returns all pydantic field names except the base Event fields
     (type, timestamp) which are stripped during bus bridging.
     """
     return {
-        f.name
-        for f in dataclasses.fields(event_class)
-        if f.name not in _BASE_EVENT_FIELDS
+        name
+        for name in event_class.model_fields
+        if name not in _BASE_EVENT_FIELDS
     }
 
 

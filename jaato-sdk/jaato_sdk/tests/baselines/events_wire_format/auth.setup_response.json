@@ -1,0 +1,8 @@
+{
+  "type": "auth.setup_response",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "connect": false,
+  "model_name": "",
+  "persist_env": false
+}

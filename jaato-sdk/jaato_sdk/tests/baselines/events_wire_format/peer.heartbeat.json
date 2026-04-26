@@ -1,0 +1,18 @@
+{
+  "type": "peer.heartbeat",
+  "timestamp": "<TIMESTAMP>",
+  "server_id": "",
+  "server_name": "",
+  "server_version": "",
+  "active_sessions": 0,
+  "active_agents": 0,
+  "available_providers": [],
+  "available_models": [],
+  "tags": [],
+  "cpu_percent": 0.0,
+  "memory_percent": 0.0,
+  "uptime_seconds": 0.0,
+  "trust_state": "trusted",
+  "success_rate_1h": 1.0,
+  "escalated_tools": 0
+}

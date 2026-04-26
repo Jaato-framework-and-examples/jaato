@@ -1,0 +1,8 @@
+{
+  "type": "tool.call_start",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "tool_name": "",
+  "tool_args": {},
+  "call_id": null
+}

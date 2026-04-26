@@ -1,0 +1,9 @@
+{
+  "type": "clarification.batch",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "context": "",
+  "questions": []
+}
