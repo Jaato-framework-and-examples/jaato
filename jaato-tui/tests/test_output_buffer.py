@@ -225,6 +225,40 @@ class TestToolTreePositioning:
         assert len(tool_blocks) == 0, "No tool block should be created while permission is pending"
         assert len(self.buffer._active_tools) == 1, "Tool should remain in active_tools"
 
+    def test_partial_finalization_keeps_placeholder_for_remaining_tools(self):
+        """When some tools complete but others are still running, finalizing
+        the completed ones must keep ``_tool_placeholder_index`` pointing to a
+        valid slot.  Regression: a previous version reset it to ``None``,
+        which then crashed ``_safe_insert_line`` with
+        ``TypeError: unsupported operand type(s) for -: 'NoneType' and 'int'``
+        when the remaining tool finally completed.
+        """
+        self.buffer.append("model", "Starting two tools.", "write")
+        self.buffer.add_active_tool("fastTool", {}, call_id="c_fast")
+        self.buffer.add_active_tool("slowTool", {}, call_id="c_slow")
+
+        # Only the fast one finishes for now.
+        self.buffer.mark_tool_completed("fastTool", success=True, call_id="c_fast")
+
+        # User interjects while slowTool is still running.  This goes through
+        # the ``source in ("user", "parent")`` branch in ``append()`` which
+        # finalizes any completed tools regardless of whether others are
+        # still in flight — producing a partial finalization.
+        self.buffer.append("user", "Hold on.", "write")
+        assert len(self.buffer._active_tools) == 1, "Slow tool should remain active"
+        assert self.buffer._tool_placeholder_index is not None, (
+            "Placeholder must remain valid for the still-running tool"
+        )
+
+        # Now the slow tool completes.  The next finalization pass used to
+        # raise TypeError because the placeholder had been reset to None.
+        self.buffer.mark_tool_completed("slowTool", success=True, call_id="c_slow")
+        self.buffer.finalize_tool_tree()
+
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 2, "Both finalizations should produce ToolBlocks"
+        assert len(self.buffer._active_tools) == 0, "All tools cleared after second finalize"
+
     def test_render_order_matches_lines_order(self):
         """The rendered output should respect the order of items in _lines."""
         # Setup a scenario with model text and tool block

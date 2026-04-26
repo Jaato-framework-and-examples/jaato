@@ -1999,11 +1999,16 @@ class OutputBuffer:
             source="model", text="", style="",
             display_lines=1, is_turn_start=False
         )
-        self._safe_insert_line(next_pos, trailing_line)
+        trailing_pos = self._safe_insert_line(next_pos, trailing_line)
 
-        # Clear placeholder and active tools
-        self._tool_placeholder_index = None
+        # Update placeholder and active tools.  When some tools are still
+        # in flight (``to_keep`` non-empty), keep the placeholder pointing
+        # right after the trailing line so the next ToolBlock for those
+        # tools is inserted in chronological order — otherwise the next
+        # finalize pass would see ``_tool_placeholder_index is None`` and
+        # ``_safe_insert_line`` would crash on ``None - 1``.
         self._active_tools = to_keep
+        self._tool_placeholder_index = trailing_pos + 1 if to_keep else None
 
         # Now that tools are finalized, restore the expanded state if we had saved one
         # This happens AFTER finalization so the ToolBlock captures the visible state
