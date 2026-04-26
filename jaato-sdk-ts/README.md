@@ -8,12 +8,14 @@ parity is enforced by construction.
 
 **Status: pre-release (Phase 3 code + full Python parity shipped,
 not yet on npm).** The `JaatoClient` class is implemented and
-tested (35 unit tests pass against a mock WebSocket).  Method
+tested (40 unit tests pass against a mock WebSocket).  Method
 surface is feature-equivalent to the Python `IPCClient` —
 every wire verb the TUI / dashboard / external SDK consumers
 need is exposed as a typed method (see [API reference](#api-reference)
-below).  The codegen-generated event / request types stay in
-lockstep with the Python SDK via the CI staleness gate.
+below), including the multi-frame `stageFiles` and opt-in
+`autoReattachSessionId` recovery.  The codegen-generated event /
+request types stay in lockstep with the Python SDK via the CI
+staleness gate.
 
 What's still pending: the npm publish workflow and the first
 `npm publish @jaato/sdk@0.1.0`.  Consume locally per the
@@ -71,6 +73,12 @@ The result was **the SDK feature parity workstream** —
   `createSession`, `getDefaultSession`, `listSessions`,
   `listProfiles`, `respondToToolExecution`.  The last is also
   new on the Python side (jaato-sdk 0.3.3).  ✅ shipped.
+* **Phase 3.2** — landed the two items I'd initially deferred
+  to v0.2: `stageFiles` (multi-frame TEXT + N binary frame
+  protocol; `transport.sendBinary` exposed for any other future
+  multi-frame verbs) and opt-in `recovery.autoReattachSessionId`
+  (consumer no longer needs to wire the re-attach status
+  handler manually).  ✅ shipped.
 
 What pi-agent calls `agent.prompt()` is `JaatoClient.send_message()`
 here. `agent.steer(msg)` is `inject_prompt(text, source_type="user")`.
@@ -250,6 +258,12 @@ event stream and are correlated by `request_id` where applicable.
 | `disableTool(toolName)` | `tool.disable.request` |
 | `requestCommandList()` | `command_list.request` |
 | `executeCommand(command, args?)` | `command.execute` (escape hatch for any verb without a typed method) |
+
+**File staging**
+
+| Method | WS verb |
+|---|---|
+| `stageFiles(workspaceId, files)` | `workspace.files.stage_request` (TEXT) + N binary frames; resolves with `StageFilesEvent` |
 
 **Permissions**
 

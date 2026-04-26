@@ -46,6 +46,9 @@ import {
   type ToolDisableRequest,
   type ToolsRegisterClientRequest,
   type ToolExecuteResultEvent,
+  type StageFilesRequest,
+  type StageFilesEvent,
+  type StagedFileSpec,
   type InjectPromptRequest,
   type ReplayMessagesRequest,
   type ResolveForkPointRequest,
@@ -152,6 +155,33 @@ export class JaatoClient {
   constructor(options: JaatoClientOptions) {
     this._options = options;
     this._recovery = { ...DEFAULT_RECOVERY_CONFIG, ...(options.recovery ?? {}) };
+
+    // Opt-in auto re-attach.  Wires an internal status handler that
+    // fires attachSession(sessionId) on every RECONNECTING →
+    // CONNECTED transition (i.e. after a successful reconnect, not
+    // on the initial connect — sessionId is null at that point).
+    // The server then replays buffered events from the session
+    // journal so the consumer doesn't have to wire this manually.
+    if (this._recovery.autoReattachSessionId) {
+      let sawReconnecting = false;
+      this.onStatus((status) => {
+        if (status.state === ConnectionState.RECONNECTING) {
+          sawReconnecting = true;
+          return;
+        }
+        if (
+          status.state === ConnectionState.CONNECTED
+          && sawReconnecting
+          && this._sessionId
+        ) {
+          sawReconnecting = false;
+          // Fire-and-forget — re-attach failures will surface as
+          // ErrorEvents on the event stream and trigger the next
+          // status transition naturally.
+          void this.attachSession(this._sessionId);
+        }
+      });
+    }
   }
 
   // ──── Status / state ─────────────────────────────────────────────
@@ -622,6 +652,113 @@ export class JaatoClient {
       type: EventTypeValue.PERMISSION_POLICY_SNAPSHOT_REQUEST,
       request_id: requestId,
     } as PermissionPolicySnapshotRequest);
+  }
+
+  // ──── File staging (multi-frame WS protocol) ─────────────────────
+
+  /**
+   * Stage files into a workspace via the multi-frame WS protocol.
+   *
+   * Wire shape (per the server-side handler in
+   * ``websocket.py:_handle_stage_files_request``):
+   *
+   * 1. Client sends ``StageFilesRequest`` as a TEXT WS frame
+   *    declaring the file names + sizes.
+   * 2. Client immediately sends N raw BINARY frames in the same
+   *    order as ``files``.  Each frame's byte length must equal
+   *    the corresponding ``size`` value.
+   * 3. Server responds with a TEXT ``StageFilesEvent`` listing
+   *    what was written / what failed.
+   *
+   * This method handles all three steps and returns the resulting
+   * ``StageFilesEvent`` so the caller can inspect successes /
+   * failures per-file.  The response is correlated to this call
+   * by ordering: WebSocket preserves frame order per-connection
+   * and the server reads the binaries inline before producing the
+   * response, so the next ``StageFilesEvent`` arriving after this
+   * call is the response to it.  Concurrent stageFiles calls on
+   * the same client will interleave incorrectly — serialise them
+   * caller-side.
+   *
+   * @param workspaceId Target workspace.  Empty targets the
+   *   connection's currently-selected workspace.
+   * @param files Each entry needs ``name`` (workspace-relative
+   *   path) and ``data`` (the bytes).  ``contentType`` and ``mode``
+   *   are optional informational hints.
+   * @returns The server's ``StageFilesEvent`` reporting per-file
+   *   success / failure.
+   */
+  async stageFiles(
+    workspaceId: string,
+    files: Array<{
+      name: string;
+      data: ArrayBuffer | Uint8Array;
+      contentType?: string;
+      mode?: number;
+    }>,
+  ): Promise<StageFilesEvent> {
+    if (this._state !== ConnectionState.CONNECTED) {
+      throw this._state === ConnectionState.RECONNECTING
+        ? new ReconnectingError()
+        : new ConnectionClosedError();
+    }
+    if (this._transport == null) {
+      throw new ConnectionError("No active transport — call connect() first");
+    }
+    const transport = this._transport;
+
+    // Build the spec list (TEXT request body).  Coerce Uint8Array
+    // to its byte length for the size field; the server validates
+    // that the binary frame's byte length matches.
+    const specs: StagedFileSpec[] = files.map((f) => ({
+      name: f.name,
+      size:
+        f.data instanceof ArrayBuffer
+          ? f.data.byteLength
+          : (f.data as Uint8Array).byteLength,
+      content_type: f.contentType ?? null,
+      mode: f.mode ?? null,
+    }) as StagedFileSpec);
+
+    // Set up the response waiter BEFORE sending — otherwise the
+    // server's response could race with handler installation.
+    const responsePromise = this._waitForNextEvent<StageFilesEvent>(
+      (e) => e.type === EventTypeValue.WORKSPACE_FILES_STAGED,
+    );
+
+    transport.sendEvent({
+      type: EventTypeValue.WORKSPACE_FILES_STAGE_REQUEST,
+      workspace_id: workspaceId,
+      files: specs,
+    } as StageFilesRequest);
+
+    // Send the binary frames in declared order — WebSocket
+    // preserves order so the server's inline-binary-read pattern
+    // works as designed.
+    for (const f of files) {
+      transport.sendBinary(f.data);
+    }
+
+    return responsePromise;
+  }
+
+  /**
+   * Internal: resolve with the next event matching ``predicate``.
+   *
+   * One-shot subscription used by request/response methods like
+   * {@link stageFiles}.  Auto-unsubscribes after the first match.
+   */
+  private _waitForNextEvent<T extends JaatoEvent = JaatoEvent>(
+    predicate: (event: JaatoEvent) => boolean,
+  ): Promise<T> {
+    return new Promise<T>((resolve) => {
+      const unsub = this.subscribe((event) => {
+        if (predicate(event)) {
+          unsub();
+          resolve(event as T);
+        }
+      });
+    });
   }
 
   // ──── Internals ──────────────────────────────────────────────────

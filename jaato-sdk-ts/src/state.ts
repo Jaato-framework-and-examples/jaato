@@ -59,6 +59,16 @@ export interface RecoveryConfig {
   maxBackoffSeconds: number;
   /** Random jitter factor (0-1) applied to backoff. */
   jitterFactor: number;
+  /**
+   * After a successful reconnect, automatically call
+   * ``attachSession(sessionId)`` if the client knows a sessionId
+   * (from a prior ``SessionInfoEvent`` or explicit
+   * ``attachSession``).  The server then replays buffered events
+   * from the session journal so the consumer picks up where it
+   * left off.  Default: ``false`` — the consumer wires re-attach
+   * via an ``onStatus`` handler.
+   */
+  autoReattachSessionId: boolean;
 }
 
 export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
@@ -67,4 +77,5 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
   initialBackoffSeconds: 1.0,
   maxBackoffSeconds: 30.0,
   jitterFactor: 0.1,
+  autoReattachSessionId: false,
 };

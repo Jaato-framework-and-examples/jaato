@@ -51,6 +51,16 @@ export interface Transport {
   /** Send a fully-typed jaato event over the wire. */
   sendEvent(event: JaatoEvent): void;
   /**
+   * Send a raw binary frame over the wire.
+   *
+   * Used by multi-frame protocols like ``StageFilesRequest`` —
+   * caller sends the TEXT request frame via {@link sendEvent}, then
+   * follows with N binary frames in declared order.  WebSocket
+   * preserves frame order per-connection so the server-side
+   * inline-binary-read pattern works deterministically.
+   */
+  sendBinary(data: ArrayBuffer | Uint8Array): void;
+  /**
    * Async iterator of incoming events.  Yields until the
    * underlying WebSocket closes.  Rejects with
    * {@link ConnectionError} on parse failure (the wire format is
@@ -161,6 +171,15 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
             throw new ConnectionError("Transport is closed");
           }
           ws.send(JSON.stringify(event));
+        },
+        sendBinary(data: ArrayBuffer | Uint8Array): void {
+          if (closed) {
+            throw new ConnectionError("Transport is closed");
+          }
+          // The standard WebSocket API accepts both ArrayBuffer and
+          // ArrayBufferView (Uint8Array is a view).  Pass through
+          // verbatim — no copy.
+          ws.send(data);
         },
         async *events(): AsyncIterableIterator<JaatoEvent> {
           while (true) {

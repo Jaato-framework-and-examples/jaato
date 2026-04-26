@@ -26,6 +26,7 @@ import { EventTypeValue, type JaatoEvent } from "./events.js";
 interface MockInstance {
   url: string;
   sent: string[];
+  sentBinary: ArrayBuffer[];
   readyState: number;
   binaryType: string;
   onopen: (() => void) | null;
@@ -34,7 +35,7 @@ interface MockInstance {
   onclose: ((info: { code: number; reason: string }) => void) | null;
   emit(event: object): void;
   emitClose(code?: number, reason?: string): void;
-  send(text: string): void;
+  send(data: string | ArrayBuffer | Uint8Array): void;
   close(code?: number, reason?: string): void;
 }
 
@@ -47,6 +48,7 @@ function installMockWebSocket(): void {
     const instance: MockInstance = {
       url,
       sent: [],
+      sentBinary: [],
       readyState: 0,
       binaryType: "arraybuffer",
       onopen: null,
@@ -64,8 +66,17 @@ function installMockWebSocket(): void {
           this.onclose({ code, reason });
         }
       },
-      send(text: string): void {
-        this.sent.push(text);
+      send(data: string | ArrayBuffer | Uint8Array): void {
+        if (typeof data === "string") {
+          this.sent.push(data);
+        } else {
+          // Normalise Uint8Array view → underlying ArrayBuffer slice.
+          const buf =
+            data instanceof ArrayBuffer
+              ? data
+              : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+          this.sentBinary.push(buf);
+        }
       },
       close(code?: number, reason?: string): void {
         this.emitClose(code ?? 1000, reason ?? "");
@@ -394,6 +405,197 @@ describe("JaatoClient session management", () => {
     await client.listProfiles();
     const [ev] = getSent();
     assert.equal((ev as { command?: string }).command, "session.profiles");
+  });
+});
+
+describe("JaatoClient.stageFiles", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    if (lastInstance) {
+      lastInstance.sent = [];
+      lastInstance.sentBinary = [];
+    }
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  test("sends TEXT request frame followed by binary frames in order", async () => {
+    const file1 = new TextEncoder().encode("hello world");
+    const file2 = new TextEncoder().encode("second file content");
+
+    const stageFilesPromise = client.stageFiles("workspace_abc", [
+      { name: "first.txt", data: file1, contentType: "text/plain" },
+      { name: "second.txt", data: file2 },
+    ]);
+
+    // Server normally responds inline; for the test, queue up a
+    // StageFilesEvent on the next tick.
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    lastInstance!.emit({
+      type: EventTypeValue.WORKSPACE_FILES_STAGED,
+      timestamp: new Date().toISOString(),
+      workspace_id: "workspace_abc",
+      staged: [{ name: "first.txt" }, { name: "second.txt" }],
+      failed: [],
+    });
+
+    const result = await stageFilesPromise;
+
+    // The TEXT frame is the StageFilesRequest with declared specs.
+    const requestFrame = JSON.parse(lastInstance!.sent[0]!) as Record<string, unknown>;
+    assert.equal(requestFrame.type, EventTypeValue.WORKSPACE_FILES_STAGE_REQUEST);
+    assert.equal(requestFrame.workspace_id, "workspace_abc");
+    const specs = requestFrame.files as Array<{ name: string; size: number }>;
+    assert.equal(specs[0].name, "first.txt");
+    assert.equal(specs[0].size, file1.byteLength);
+    assert.equal(specs[1].name, "second.txt");
+    assert.equal(specs[1].size, file2.byteLength);
+
+    // The binary frames are sent in declared order.
+    assert.equal(lastInstance!.sentBinary.length, 2);
+    assert.equal(lastInstance!.sentBinary[0].byteLength, file1.byteLength);
+    assert.equal(lastInstance!.sentBinary[1].byteLength, file2.byteLength);
+    assert.deepEqual(
+      new Uint8Array(lastInstance!.sentBinary[0]),
+      file1,
+    );
+
+    // The returned event is the response.
+    assert.equal(result.type, EventTypeValue.WORKSPACE_FILES_STAGED);
+    assert.equal((result as unknown as { workspace_id: string }).workspace_id, "workspace_abc");
+  });
+
+  test("rejects with ConnectionClosedError after close", async () => {
+    await client.close();
+    await assert.rejects(
+      client.stageFiles("workspace_abc", [
+        { name: "x.txt", data: new Uint8Array([1, 2, 3]) },
+      ]),
+      ConnectionClosedError,
+    );
+  });
+
+  test("accepts ArrayBuffer input as well as Uint8Array", async () => {
+    const buf = new ArrayBuffer(16);
+    new Uint8Array(buf).set([1, 2, 3, 4, 5]);
+
+    const promise = client.stageFiles("ws", [
+      { name: "blob.bin", data: buf },
+    ]);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    lastInstance!.emit({
+      type: EventTypeValue.WORKSPACE_FILES_STAGED,
+      timestamp: new Date().toISOString(),
+      workspace_id: "ws",
+      staged: [{ name: "blob.bin" }],
+      failed: [],
+    });
+    await promise;
+
+    const requestFrame = JSON.parse(lastInstance!.sent[0]!) as Record<string, unknown>;
+    const specs = requestFrame.files as Array<{ size: number }>;
+    assert.equal(specs[0].size, 16);
+    assert.equal(lastInstance!.sentBinary[0].byteLength, 16);
+  });
+});
+
+describe("JaatoClient auto re-attach on reconnect", () => {
+  beforeEach(() => installMockWebSocket());
+  afterEach(() => restoreWebSocket());
+
+  test("opt-in flag triggers attachSession after RECONNECTING → CONNECTED", async () => {
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      recovery: {
+        autoReconnect: true,
+        autoReattachSessionId: true,
+        initialBackoffSeconds: 0.01,
+        maxBackoffSeconds: 0.05,
+        jitterFactor: 0.0,
+        maxReconnectAttempts: 5,
+      },
+    });
+    await connectAndAck(client);
+
+    // Simulate the server emitting a SessionInfoEvent so the
+    // client knows its session_id (the auto re-attach handler
+    // depends on this being non-null).
+    lastInstance!.emit({
+      type: EventTypeValue.SESSION_INFO,
+      timestamp: new Date().toISOString(),
+      session_id: "sess_42",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.equal(client.sessionId, "sess_42");
+
+    // Drop the connection.  Reconnect machinery kicks in.
+    lastInstance!.emitClose(1006, "abnormal");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    // After reconnect, the new mock WS receives the handshake,
+    // we ack it, and the auto re-attach should fire.
+    if (lastInstance!.readyState !== 1) {
+      // Wait for the new connection's open + ack.
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    }
+    // Drain any handshake frames the client sent on the new
+    // connection.  We only care about post-reconnect activity.
+    lastInstance!.sent = [];
+    lastInstance!.emit(makeConnectedEvent());
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    // The auto-reattach handler should have called attachSession,
+    // which sends a CommandRequest with session.attach + sess_42.
+    const sent = lastInstance!.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+    const reattach = sent.find(
+      (ev) => ev.type === EventTypeValue.COMMAND && ev.command === "session.attach",
+    );
+    assert.ok(reattach, `expected session.attach in ${JSON.stringify(sent)}`);
+    assert.deepEqual((reattach as { args?: string[] }).args, ["sess_42"]);
+    await client.close();
+  });
+
+  test("opt-out (default) does NOT auto-re-attach", async () => {
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      recovery: {
+        autoReconnect: true,
+        initialBackoffSeconds: 0.01,
+        maxBackoffSeconds: 0.05,
+        jitterFactor: 0.0,
+        maxReconnectAttempts: 5,
+      },
+    });
+    await connectAndAck(client);
+    lastInstance!.emit({
+      type: EventTypeValue.SESSION_INFO,
+      timestamp: new Date().toISOString(),
+      session_id: "sess_99",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+    lastInstance!.emitClose(1006, "lost");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    if (lastInstance!.readyState !== 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    }
+    lastInstance!.sent = [];
+    lastInstance!.emit(makeConnectedEvent());
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    const sent = lastInstance!.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+    const reattach = sent.find(
+      (ev) => ev.type === EventTypeValue.COMMAND && ev.command === "session.attach",
+    );
+    assert.equal(reattach, undefined);
+    await client.close();
   });
 });
 
