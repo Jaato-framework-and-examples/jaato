@@ -282,11 +282,21 @@ class LifecycleTools:
             else {}
         )
 
+        # AgentCompletedEvent.token_usage is typed Dict[str, int] (pydantic
+        # validates this post-Phase-0 migration; pre-migration the dataclass
+        # silently accepted whatever was passed).  get_context_usage() returns
+        # a dict with prompt/output/total token counts; forward only the int-
+        # valued keys so the payload matches the wire schema.
+        token_usage = {
+            k: v for k, v in usage.items()
+            if k in ('total_tokens', 'prompt_tokens', 'output_tokens')
+            and isinstance(v, int)
+        }
         hooks.on_agent_completed(
             agent_id=agent_id,
             completed_at=datetime.now(),
             success=True,
-            token_usage=usage.get('total_tokens'),
+            token_usage=token_usage if token_usage else None,
             turns_used=usage.get('turns'),
             payload=payload,
         )
