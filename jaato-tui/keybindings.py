@@ -168,7 +168,7 @@ DEFAULT_KEYBINDINGS = {
     "workspace_clear": "delete",  # Clear workspace file list
     "workspace_paste_ref": ["escape", "p"],  # Paste selected file/dir as @reference into input
     "workspace_hide": "h",  # Hide selected entry (per-session, client-side filter)
-    "workspace_show_hidden": "s-h",  # Toggle visibility of hidden entries
+    "workspace_show_hidden": "H",  # Toggle visibility of hidden entries (Shift+H — pt accepts the literal uppercase, ``s-h`` is rejected)
     "workspace_gitignore": "i",  # Add or remove selected entry from workspace .gitignore
 
     # Permission prompt navigation
@@ -775,7 +775,7 @@ def generate_example_config() -> str:
         "workspace_clear": "delete",
         "workspace_paste_ref": ["escape", "p"],
         "workspace_hide": "h",
-        "workspace_show_hidden": "s-h",
+        "workspace_show_hidden": "H",
         "workspace_gitignore": "i",
     }
     return json.dumps(example, indent=2)

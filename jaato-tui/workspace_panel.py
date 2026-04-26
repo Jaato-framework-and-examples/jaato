@@ -154,7 +154,7 @@ class WorkspacePanel:
         self._clear_key = clear_key or "delete"
         self._paste_ref_key = paste_ref_key or ["escape", "p"]
         self._hide_key = hide_key or "h"
-        self._show_hidden_key = show_hidden_key or "s-h"
+        self._show_hidden_key = show_hidden_key or "H"
         self._gitignore_key = gitignore_key or "i"
         self._theme: Optional["ThemeConfig"] = None
         self._tree_dirty: bool = True  # Rebuild tree before next render
