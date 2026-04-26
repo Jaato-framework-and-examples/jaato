@@ -1,0 +1,47 @@
+name: "Codegen: jaato-sdk-ts events.ts staleness"
+
+on:
+  pull_request:
+    paths:
+      - "jaato-sdk/jaato_sdk/events.py"
+      - "jaato-sdk-ts/src/events.ts"
+      - "jaato-sdk-ts/package.json"
+      - "scripts/codegen_ts_events.py"
+      - ".github/workflows/codegen-ts-events.yml"
+  push:
+    branches: [main]
+    paths:
+      - "jaato-sdk/jaato_sdk/events.py"
+      - "jaato-sdk-ts/src/events.ts"
+      - "jaato-sdk-ts/package.json"
+      - "scripts/codegen_ts_events.py"
+      - ".github/workflows/codegen-ts-events.yml"
+  workflow_dispatch:
+
+jobs:
+  staleness-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install jaato-sdk (so events.py is importable)
+        run: pip install -e jaato-sdk/
+
+      - name: Install jaato-sdk-ts npm deps (json-schema-to-typescript)
+        working-directory: jaato-sdk-ts
+        run: npm install --no-audit --no-fund
+
+      - name: Verify generated events.ts is up to date
+        # CI runs without the local .venv; the codegen script is plain
+        # python and only needs pydantic + jaato_sdk on the path
+        # (installed above).  Override the venv-relative shebang.
+        run: python scripts/codegen_ts_events.py --check
