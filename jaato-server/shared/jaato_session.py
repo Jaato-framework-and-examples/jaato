@@ -4595,10 +4595,17 @@ NOTES
         # Track that this turn has tool calls (for turn complexity classification)
         self._turn_had_tool_calls = True
 
-        # Check if parallel execution is enabled
-        parallel_enabled = os.environ.get(
-            'JAATO_PARALLEL_TOOLS', 'true'
-        ).lower() not in ('false', '0', 'no')
+        # Check if parallel execution is enabled.  Per-call override
+        # via SendMessageRequest.parallel_tools wins over env; cleared
+        # after one consultation so it only affects the current turn.
+        override = getattr(self, '_parallel_tools_override', None)
+        if override is not None:
+            parallel_enabled = bool(override)
+            self._parallel_tools_override = None
+        else:
+            parallel_enabled = os.environ.get(
+                'JAATO_PARALLEL_TOOLS', 'true'
+            ).lower() not in ('false', '0', 'no')
 
         # Use parallel execution for multiple calls, sequential for single call
         if parallel_enabled and len(function_calls) > 1:

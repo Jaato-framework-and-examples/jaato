@@ -178,6 +178,30 @@ class EventType(str, Enum):
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
 
+    # SDK feature parity (Client -> Server) — typed verbs over the
+    # public-side primitives JaatoSession.inject_prompt /
+    # replay_messages / resolve_fork_point.  The premium
+    # ``session_ops`` plugin builds higher-level model-callable tools
+    # on top of these same primitives; the WS verbs let SDK consumers
+    # reach the primitives directly.  See
+    # ``project_backlog_sdk_feature_parity.md``.
+    INJECT_PROMPT_REQUEST = "inject_prompt.request"   # Client -> Server
+    REPLAY_MESSAGES_REQUEST = "replay_messages.request"  # Client -> Server
+    REPLAY_MESSAGES_RESULT = "replay_messages.result"    # Server -> Client
+    RESOLVE_FORK_POINT_REQUEST = "resolve_fork_point.request"  # Client -> Server
+    RESOLVE_FORK_POINT_RESULT = "resolve_fork_point.result"    # Server -> Client
+
+    # SDK feature parity — typed permission-policy verbs replacing
+    # stringly-typed CommandRequest("permissions", [...]) for SDK
+    # consumers.  CLI command path stays for actual users.
+    PERMISSION_ADD_WHITELIST_REQUEST = "permission.add_whitelist"
+    PERMISSION_ADD_BLACKLIST_REQUEST = "permission.add_blacklist"
+    PERMISSION_REMOVE_REQUEST = "permission.remove"
+    PERMISSION_CLEAR_REQUEST = "permission.clear"
+    PERMISSION_SET_DEFAULT_REQUEST = "permission.set_default"
+    PERMISSION_POLICY_SNAPSHOT_REQUEST = "permission.policy_snapshot.request"  # Client -> Server
+    PERMISSION_POLICY_SNAPSHOT = "permission.policy_snapshot"                  # Server -> Client
+
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
 
@@ -319,7 +343,7 @@ class ToolOutputEvent(Event):
     chunk: str = ""  # Output text chunk (may contain newlines)
 
 
-class PermissionResponseOption:
+class PermissionResponseOption(BaseModel):
     """A valid response option for permission prompts."""
     key: str  # Single char like "y", "n", "a"
     label: str  # Display label like "yes", "no", "always"
@@ -478,7 +502,7 @@ class ReferenceSelectionResolvedEvent(Event):
     selected_ids: List[str] = Field(default_factory=list)
 
 
-class WorkspaceMismatchResponseOption:
+class WorkspaceMismatchResponseOption(BaseModel):
     """A valid response option for workspace mismatch prompts."""
     key: str  # Single char like "s", "n"
     label: str  # Display label like "switch", "new session"
@@ -539,7 +563,7 @@ class PostAuthSetupResponse(Event):
     persist_env: bool = False      # Whether to save provider/model to .env
 
 
-class PlanStepData:
+class PlanStepData(BaseModel):
     """A single step in a plan."""
     content: str
     status: str  # "pending", "in_progress", "completed"
@@ -817,7 +841,7 @@ class SessionProfilesEvent(Event):
 # Workspace Management Events (Server -> Client)
 # =============================================================================
 
-class WorkspaceInfo:
+class WorkspaceInfo(BaseModel):
     """Information about a single workspace."""
     name: str  # Relative path from workspace root (e.g., "project-a")
     configured: bool  # Has valid .env with provider
@@ -908,6 +932,11 @@ class SendMessageRequest(Event):
     text: str = ""
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {type: "file", path: "..."} or {type: "image", data: "base64..."}
+    parallel_tools: Optional[bool] = None
+    # ^ Per-call override of the JAATO_PARALLEL_TOOLS env default.
+    #   ``None`` (default) keeps the env-configured behaviour.
+    #   ``True`` / ``False`` forces parallel / sequential tool
+    #   execution for this turn only.
 
 
 class PermissionResponseRequest(Event):
@@ -1092,6 +1121,207 @@ class HistoryEvent(Event):
 
 
 # =============================================================================
+# SDK Feature Parity — Session-primitive verbs (Client <-> Server)
+#
+# Typed WS verbs over the public-side primitives
+# ``JaatoSession.inject_prompt`` / ``replay_messages`` /
+# ``resolve_fork_point``.  Premium's ``session_ops`` plugin builds
+# higher-level model-callable tools (``interrogate_session``,
+# ``setup_replay_workspace``, ``replay_in_workspace``,
+# ``discard_replay_workspace``) on top of these same primitives;
+# the WS verbs let SDK consumers reach the primitives directly
+# without going through the model loop.  See
+# ``project_backlog_sdk_feature_parity.md``.
+# =============================================================================
+
+class InjectPromptRequest(Event):
+    """Inject a prompt into a session's message queue.
+
+    Maps to :meth:`JaatoSession.inject_prompt`.  ``source_type``
+    selects the queue priority:
+
+    * ``"user"`` — USER priority (mid-turn "steer", interrupts the
+      model at the next safe point).
+    * ``"child"`` — CHILD priority (queued behind in-flight work; runs
+      when the agent would otherwise stop, the "follow-up" pattern).
+    * ``"system"`` / ``"event"`` / ``"parent"`` — other priority
+      tiers from :class:`SourceType` for reactor / hook callers.
+
+    Single verb covers both pi-agent's ``steer`` and ``followUp``
+    patterns via the priority dimension.
+    """
+    type: EventType = Field(default=EventType.INJECT_PROMPT_REQUEST)
+    text: str = ""
+    source_type: str = "user"  # "user" | "child" | "system" | "event" | "parent"
+    source_id: Optional[str] = None  # caller identifier for telemetry / logs
+
+
+class ReplayMessagesRequest(Event):
+    """Re-run the model loop against an explicit message list.
+
+    Maps to :meth:`JaatoSession.replay_messages`.  When ``messages``
+    is omitted, replays the session's current ``get_history()`` —
+    semantically equivalent to "continue from the current state with
+    no new user input" (pi-agent's ``continue()`` shape).
+
+    Acquires exclusive provider access internally so concurrent
+    in-flight turn calls are serialised.  Does NOT mutate session
+    history or turn accounting.  Use when you want a one-shot
+    completion against an arbitrary message list — fork/interrogate
+    flows compose this with ``resolve_fork_point``.
+    """
+    type: EventType = Field(default=EventType.REPLAY_MESSAGES_REQUEST)
+    request_id: str = ""
+    messages: Optional[List[Dict[str, Any]]] = None
+    # ^ When None, replay uses the session's current get_history().
+    #   When supplied, must be the serialized form of List[Message]
+    #   (same shape as HistoryEvent.history).
+    timeout_seconds: float = 120.0
+
+
+class ReplayMessagesResultEvent(Event):
+    """Server's response to :class:`ReplayMessagesRequest`."""
+    type: EventType = Field(default=EventType.REPLAY_MESSAGES_RESULT)
+    request_id: str = ""
+    response_text: str = ""  # The model's text response (empty on error)
+    error: str = ""           # Populated when the replay failed
+
+
+class ResolveForkPointRequest(Event):
+    """Resolve a fork point in the session's history to a message index.
+
+    Maps to :meth:`JaatoSession.resolve_fork_point`.  Exactly one of
+    ``after_message`` / ``after_tool_call`` / ``after_timestamp``
+    should be supplied; if none are given, the server returns the
+    last message index (full-history fork).  The session's current
+    ``get_history()`` is used as the search space — clients don't
+    pass history over the wire.
+
+    Composes with :class:`ReplayMessagesRequest` so a client can
+    resolve a fork point, snapshot history up to that point, edit,
+    and replay — the same shape premium's ``interrogate_session``
+    tool uses internally.
+    """
+    type: EventType = Field(default=EventType.RESOLVE_FORK_POINT_REQUEST)
+    request_id: str = ""
+    after_message: Optional[int] = None
+    # ^ Direct message index specifier.
+    after_tool_call: Optional[str] = None
+    # ^ Tool call ID specifier — server scans for the message
+    #   carrying this ``FunctionCall.id`` or the corresponding
+    #   ``ToolResult``.
+    after_timestamp: Optional[str] = None
+    # ^ HH:MM:SS or ISO timestamp — server returns the index of the
+    #   last message at or before this time (best-effort, based on
+    #   session turn accounting).
+
+
+class ResolveForkPointResultEvent(Event):
+    """Server's response to :class:`ResolveForkPointRequest`."""
+    type: EventType = Field(default=EventType.RESOLVE_FORK_POINT_RESULT)
+    request_id: str = ""
+    fork_index: int = -1     # -1 if no suitable point exists
+    error: str = ""
+
+
+# =============================================================================
+# SDK Feature Parity — Permission policy verbs (Client <-> Server)
+#
+# Typed verbs replacing stringly-typed
+# ``CommandRequest("permissions", [...])`` for SDK consumers.  The
+# CLI command path stays for actual users typing.  See
+# ``project_backlog_sdk_feature_parity.md`` "Broader pattern
+# (audit follow-up)" — these are the first concrete instance of
+# typed-WS-verbs-for-plugin-APIs.
+# =============================================================================
+
+class PermissionAddWhitelistRequest(Event):
+    """Add tools / patterns to the session's permission whitelist.
+
+    Maps to :meth:`PermissionPlugin.add_whitelist_tools` for tools
+    and :meth:`PermissionPolicy.add_session_whitelist` for patterns.
+    Tools and patterns can be supplied together — both lists are
+    additive.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_ADD_WHITELIST_REQUEST)
+    tools: List[str] = Field(default_factory=list)
+    patterns: List[str] = Field(default_factory=list)
+
+
+class PermissionAddBlacklistRequest(Event):
+    """Add tools / patterns to the session's permission blacklist.
+
+    Maps to :meth:`PermissionPolicy.add_session_blacklist` for both
+    tools and patterns.  Tools and patterns supplied together —
+    both lists are additive.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_ADD_BLACKLIST_REQUEST)
+    tools: List[str] = Field(default_factory=list)
+    patterns: List[str] = Field(default_factory=list)
+
+
+class PermissionRemoveRequest(Event):
+    """Remove tools / patterns from a permission list.
+
+    ``target`` selects which list: ``"whitelist"`` or
+    ``"blacklist"``.  Empty lists are no-ops.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_REMOVE_REQUEST)
+    target: str = "whitelist"  # "whitelist" | "blacklist"
+    tools: List[str] = Field(default_factory=list)
+    patterns: List[str] = Field(default_factory=list)
+
+
+class PermissionClearRequest(Event):
+    """Clear the session-level permission lists.
+
+    ``target`` selects which list to clear: ``"whitelist"``,
+    ``"blacklist"``, or ``"all"`` (clears both).  Does NOT affect
+    the base policy declared in ``permissions.json``; only the
+    session-level overrides.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_CLEAR_REQUEST)
+    target: str = "all"  # "whitelist" | "blacklist" | "all"
+
+
+class PermissionSetDefaultRequest(Event):
+    """Set the session-level default permission policy.
+
+    ``policy`` is one of ``"allow"`` | ``"deny"`` | ``"ask"``.
+    Maps to ``PermissionPolicy.session_default_policy`` — overrides
+    the base default for this session only.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_SET_DEFAULT_REQUEST)
+    policy: str = "ask"
+
+
+class PermissionPolicySnapshotRequest(Event):
+    """Request a structured snapshot of the current permission policy."""
+    type: EventType = Field(default=EventType.PERMISSION_POLICY_SNAPSHOT_REQUEST)
+    request_id: str = ""
+
+
+class PermissionPolicySnapshotEvent(Event):
+    """Structured permission policy snapshot.
+
+    Returned in response to :class:`PermissionPolicySnapshotRequest`.
+    Carries the full policy state — base policy + session overrides
+    — so clients can build introspection UIs without going through
+    the stringly-typed ``permissions check`` command.
+    """
+    type: EventType = Field(default=EventType.PERMISSION_POLICY_SNAPSHOT)
+    request_id: str = ""
+    default_policy: str = "ask"          # base default (from permissions.json)
+    session_default_policy: Optional[str] = None  # session override, when set
+    whitelist_tools: List[str] = Field(default_factory=list)
+    whitelist_patterns: List[str] = Field(default_factory=list)
+    blacklist_tools: List[str] = Field(default_factory=list)
+    blacklist_patterns: List[str] = Field(default_factory=list)
+    session_whitelist: List[str] = Field(default_factory=list)
+    session_blacklist: List[str] = Field(default_factory=list)
+
+
+# =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
 
@@ -1246,7 +1476,7 @@ class CommunicationStyle(str, Enum):
     NARRATIVE = "narrative"
 
 
-class PresentationContext:
+class PresentationContext(BaseModel):
     """Display capabilities and constraints of the connected client.
 
     Assembled by each client at connection time and transmitted to the server
@@ -1730,6 +1960,20 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PEER_AGENT_COMPLETED.value: PeerAgentCompletedEvent,
     EventType.PEER_STOP_REQUEST.value: PeerStopRequestEvent,
     EventType.PEER_STOP_ACKNOWLEDGED.value: PeerStopAcknowledgedEvent,
+    # SDK feature parity — session-primitive verbs
+    EventType.INJECT_PROMPT_REQUEST.value: InjectPromptRequest,
+    EventType.REPLAY_MESSAGES_REQUEST.value: ReplayMessagesRequest,
+    EventType.REPLAY_MESSAGES_RESULT.value: ReplayMessagesResultEvent,
+    EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,
+    EventType.RESOLVE_FORK_POINT_RESULT.value: ResolveForkPointResultEvent,
+    # SDK feature parity — permission policy verbs
+    EventType.PERMISSION_ADD_WHITELIST_REQUEST.value: PermissionAddWhitelistRequest,
+    EventType.PERMISSION_ADD_BLACKLIST_REQUEST.value: PermissionAddBlacklistRequest,
+    EventType.PERMISSION_REMOVE_REQUEST.value: PermissionRemoveRequest,
+    EventType.PERMISSION_CLEAR_REQUEST.value: PermissionClearRequest,
+    EventType.PERMISSION_SET_DEFAULT_REQUEST.value: PermissionSetDefaultRequest,
+    EventType.PERMISSION_POLICY_SNAPSHOT_REQUEST.value: PermissionPolicySnapshotRequest,
+    EventType.PERMISSION_POLICY_SNAPSHOT.value: PermissionPolicySnapshotEvent,
 }
 
 

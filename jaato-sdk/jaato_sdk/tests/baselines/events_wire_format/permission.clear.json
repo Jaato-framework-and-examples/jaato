@@ -1,0 +1,5 @@
+{
+  "type": "permission.clear",
+  "timestamp": "<TIMESTAMP>",
+  "target": "all"
+}

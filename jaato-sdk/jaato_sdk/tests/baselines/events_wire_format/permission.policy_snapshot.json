@@ -1,0 +1,13 @@
+{
+  "type": "permission.policy_snapshot",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "default_policy": "ask",
+  "session_default_policy": null,
+  "whitelist_tools": [],
+  "whitelist_patterns": [],
+  "blacklist_tools": [],
+  "blacklist_patterns": [],
+  "session_whitelist": [],
+  "session_blacklist": []
+}

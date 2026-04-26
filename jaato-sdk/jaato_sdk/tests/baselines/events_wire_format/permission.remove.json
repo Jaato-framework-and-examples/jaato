@@ -1,0 +1,7 @@
+{
+  "type": "permission.remove",
+  "timestamp": "<TIMESTAMP>",
+  "target": "whitelist",
+  "tools": [],
+  "patterns": []
+}

@@ -2919,9 +2919,32 @@ class SessionManager:
             CommandRequest,
             GetInstructionBudgetRequest,
             InstructionBudgetEvent,
+            InjectPromptRequest,
+            ReplayMessagesRequest,
+            ReplayMessagesResultEvent,
+            ResolveForkPointRequest,
+            ResolveForkPointResultEvent,
+            PermissionAddWhitelistRequest,
+            PermissionAddBlacklistRequest,
+            PermissionRemoveRequest,
+            PermissionClearRequest,
+            PermissionSetDefaultRequest,
+            PermissionPolicySnapshotRequest,
+            PermissionPolicySnapshotEvent,
         )
 
         if isinstance(event, SendMessageRequest):
+            # Per-call parallel-tools override.  When the request
+            # specifies parallel_tools (True/False), stash it on the
+            # session so the next turn's tool-execution branch
+            # consults it instead of the JAATO_PARALLEL_TOOLS env var.
+            # The session clears the override after the turn.  None
+            # leaves env-driven behaviour unchanged.
+            if event.parallel_tools is not None:
+                jaato_session = server._jaato.get_session() if server._jaato else None
+                if jaato_session is not None:
+                    jaato_session._parallel_tools_override = event.parallel_tools
+
             # Track user input for command history restoration
             if event.text and event.text.strip():
                 session.user_inputs.append(event.text)
@@ -3100,6 +3123,246 @@ class SessionManager:
                         error=f"Subagent plugin not available",
                         error_type="PluginNotFound",
                     ))
+
+        # ─── SDK feature parity — session-primitive verbs ───────────────
+        # Typed WS verbs over JaatoSession's public primitives so SDK
+        # consumers can drive inject_prompt / replay_messages /
+        # resolve_fork_point without going through the model loop.
+        # See ``project_backlog_sdk_feature_parity.md``.
+
+        elif isinstance(event, InjectPromptRequest):
+            from shared.message_queue import SourceType
+            jaato_session = server._jaato.get_session() if server._jaato else None
+            if jaato_session is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="No active JaatoSession",
+                    error_type="SessionError",
+                ))
+            else:
+                # Map the request's string source_type to the enum.
+                # Invalid values surface as a clear error rather than
+                # silently defaulting — the SDK should be explicit.
+                try:
+                    source_type = SourceType(event.source_type)
+                except ValueError:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error=(
+                            f"Invalid source_type: {event.source_type!r}. "
+                            f"Valid values: {[s.value for s in SourceType]}"
+                        ),
+                        error_type="ValidationError",
+                    ))
+                    return
+                jaato_session.inject_prompt(
+                    event.text,
+                    source_id=event.source_id,
+                    source_type=source_type,
+                )
+
+        elif isinstance(event, ReplayMessagesRequest):
+            jaato_session = server._jaato.get_session() if server._jaato else None
+            if jaato_session is None:
+                self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                    request_id=event.request_id,
+                    error="No active JaatoSession",
+                ))
+            else:
+                # Deserialise messages when supplied; fall back to the
+                # session's current history when omitted (= "continue
+                # from current state with no new user input").
+                if event.messages is None:
+                    messages = jaato_session.get_history()
+                else:
+                    from shared.plugins.session.serializer import deserialize_history
+                    messages = deserialize_history(event.messages)
+                # Run in a worker thread — replay_messages blocks
+                # until the provider call completes, and we don't
+                # want to stall the dispatcher.
+                def run_replay():
+                    try:
+                        response_text = jaato_session.replay_messages(
+                            messages, timeout=event.timeout_seconds,
+                        )
+                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                            request_id=event.request_id,
+                            response_text=response_text,
+                        ))
+                    except Exception as exc:
+                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                            request_id=event.request_id,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ))
+                threading.Thread(target=run_replay, daemon=True).start()
+
+        elif isinstance(event, ResolveForkPointRequest):
+            jaato_session = server._jaato.get_session() if server._jaato else None
+            if jaato_session is None:
+                self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                    request_id=event.request_id,
+                    fork_index=-1,
+                    error="No active JaatoSession",
+                ))
+            else:
+                try:
+                    fork_index = jaato_session.resolve_fork_point(
+                        history=jaato_session.get_history(),
+                        after_message=event.after_message,
+                        after_tool_call=event.after_tool_call,
+                        after_timestamp=event.after_timestamp,
+                    )
+                    self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                        request_id=event.request_id,
+                        fork_index=fork_index,
+                    ))
+                except Exception as exc:
+                    self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                        request_id=event.request_id,
+                        fork_index=-1,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ))
+
+        # ─── SDK feature parity — permission policy verbs ───────────────
+        # Typed verbs replacing stringly-typed CommandRequest("permissions",
+        # [...]) for SDK consumers.  CLI command path stays for users.
+
+        elif isinstance(event, PermissionAddWhitelistRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Permission plugin not available",
+                    error_type="PluginNotFound",
+                ))
+            else:
+                if event.tools:
+                    permission_plugin.add_whitelist_tools(event.tools)
+                for pattern in event.patterns:
+                    permission_plugin._policy.add_session_whitelist(pattern)
+
+        elif isinstance(event, PermissionAddBlacklistRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Permission plugin not available",
+                    error_type="PluginNotFound",
+                ))
+            else:
+                # PermissionPolicy tracks blacklist rules in a single
+                # session_blacklist set — tools and patterns live in
+                # the same set (the matcher checks exact match first,
+                # then pattern match).  Both add through the same call.
+                for tool in event.tools:
+                    permission_plugin._policy.add_session_blacklist(tool)
+                for pattern in event.patterns:
+                    permission_plugin._policy.add_session_blacklist(pattern)
+
+        elif isinstance(event, PermissionRemoveRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Permission plugin not available",
+                    error_type="PluginNotFound",
+                ))
+            elif event.target == "whitelist":
+                # Direct set mutation — no remove method on the
+                # policy, but the sets are public attributes.  discard
+                # is a no-op for missing items so the call is idempotent.
+                policy = permission_plugin._policy
+                for tool in event.tools:
+                    policy.whitelist_tools.discard(tool)
+                    policy.session_whitelist.discard(tool)
+                for pattern in event.patterns:
+                    policy.session_whitelist.discard(pattern)
+            elif event.target == "blacklist":
+                policy = permission_plugin._policy
+                for tool in event.tools:
+                    policy.blacklist_tools.discard(tool)
+                    policy.session_blacklist.discard(tool)
+                for pattern in event.patterns:
+                    policy.session_blacklist.discard(pattern)
+            else:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=(
+                        f"Invalid target: {event.target!r}. "
+                        f"Valid values: 'whitelist', 'blacklist'"
+                    ),
+                    error_type="ValidationError",
+                ))
+
+        elif isinstance(event, PermissionClearRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Permission plugin not available",
+                    error_type="PluginNotFound",
+                ))
+            else:
+                policy = permission_plugin._policy
+                # Clear targets the SESSION-level overrides only
+                # (matches the semantics of `permissions clear`).
+                # Base policy from permissions.json is unaffected.
+                if event.target in ("whitelist", "all"):
+                    policy.session_whitelist.clear()
+                if event.target in ("blacklist", "all"):
+                    policy.session_blacklist.clear()
+                if event.target == "all":
+                    policy.session_default_policy = None
+
+        elif isinstance(event, PermissionSetDefaultRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Permission plugin not available",
+                    error_type="PluginNotFound",
+                ))
+            else:
+                try:
+                    permission_plugin._policy.set_session_default_policy(
+                        event.policy
+                    )
+                except ValueError as exc:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error=str(exc),
+                        error_type="ValidationError",
+                    ))
+
+        elif isinstance(event, PermissionPolicySnapshotRequest):
+            permission_plugin = (
+                server.registry.get_plugin("permission")
+                if server.registry else None
+            )
+            if permission_plugin is None or permission_plugin._policy is None:
+                self._emit_to_client(client_id, PermissionPolicySnapshotEvent(
+                    request_id=event.request_id,
+                    default_policy="ask",
+                ))
+            else:
+                policy = permission_plugin._policy
+                self._emit_to_client(client_id, PermissionPolicySnapshotEvent(
+                    request_id=event.request_id,
+                    default_policy=policy.default_policy,
+                    session_default_policy=policy.session_default_policy,
+                    whitelist_tools=sorted(policy.whitelist_tools),
+                    whitelist_patterns=list(policy.whitelist_patterns),
+                    blacklist_tools=sorted(policy.blacklist_tools),
+                    blacklist_patterns=list(policy.blacklist_patterns),
+                    session_whitelist=sorted(policy.session_whitelist),
+                    session_blacklist=sorted(policy.session_blacklist),
+                ))
 
         else:
             self._emit_to_client(client_id, ErrorEvent(

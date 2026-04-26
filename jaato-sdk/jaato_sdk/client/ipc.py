@@ -56,6 +56,15 @@ from jaato_sdk.events import (
     ClientType,
     PresentationContext,
     SessionInfoEvent,
+    InjectPromptRequest,
+    ReplayMessagesRequest,
+    ResolveForkPointRequest,
+    PermissionAddWhitelistRequest,
+    PermissionAddBlacklistRequest,
+    PermissionRemoveRequest,
+    PermissionClearRequest,
+    PermissionSetDefaultRequest,
+    PermissionPolicySnapshotRequest,
 )
 
 
@@ -974,16 +983,22 @@ class IPCClient:
         self,
         text: str,
         attachments: Optional[list] = None,
+        parallel_tools: Optional[bool] = None,
     ) -> None:
         """Send a message to the model.
 
         Args:
             text: The message text.
             attachments: Optional file attachments.
+            parallel_tools: Per-call override for parallel tool execution.
+                ``None`` (default) keeps the env-configured behaviour
+                (``JAATO_PARALLEL_TOOLS``).  ``True`` / ``False`` forces
+                parallel / sequential tool execution for this turn only.
         """
         await self._send_event(SendMessageRequest(
             text=text,
             attachments=attachments or [],
+            parallel_tools=parallel_tools,
         ))
 
     async def respond_to_permission(
@@ -1085,6 +1100,197 @@ class IPCClient:
             agent_id: Which agent's history to request.
         """
         await self._send_event(HistoryRequest(agent_id=agent_id))
+
+    # =========================================================================
+    # SDK feature parity — session-primitive verbs
+    #
+    # Typed methods over the public-side primitives
+    # ``JaatoSession.inject_prompt`` / ``replay_messages`` /
+    # ``resolve_fork_point``.  Premium's ``session_ops`` plugin builds
+    # higher-level model-callable tools on top of these same primitives;
+    # these methods let SDK consumers reach the primitives directly
+    # without going through the model loop.  See
+    # ``project_backlog_sdk_feature_parity.md``.
+    # =========================================================================
+
+    async def inject_prompt(
+        self,
+        text: str,
+        source_type: str = "user",
+        source_id: Optional[str] = None,
+    ) -> None:
+        """Inject a prompt into the session's message queue.
+
+        Single verb covering both "steer" (USER priority — interrupts
+        the model at the next safe point) and "follow-up" (CHILD
+        priority — queued behind in-flight work) patterns via the
+        ``source_type`` dimension.
+
+        Args:
+            text: Prompt text to inject.
+            source_type: Queue priority — ``"user"`` (steer),
+                ``"child"`` (follow-up), or ``"system"`` / ``"event"``
+                / ``"parent"`` for reactor / hook callers.
+            source_id: Caller identifier for telemetry / logs.
+        """
+        await self._send_event(InjectPromptRequest(
+            text=text,
+            source_type=source_type,
+            source_id=source_id,
+        ))
+
+    async def replay_messages(
+        self,
+        request_id: str,
+        messages: Optional[list] = None,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Re-run the model loop against an explicit message list.
+
+        When ``messages`` is omitted, replays the session's current
+        ``get_history()`` — semantically equivalent to "continue from
+        the current state with no new user input".
+
+        The response arrives as a ``ReplayMessagesResultEvent`` via
+        the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the result event.
+            messages: Optional explicit message list (serialised
+                ``List[Message]``).  ``None`` uses session history.
+            timeout_seconds: Provider-exclusion lock acquisition
+                timeout.
+        """
+        await self._send_event(ReplayMessagesRequest(
+            request_id=request_id,
+            messages=messages,
+            timeout_seconds=timeout_seconds,
+        ))
+
+    async def resolve_fork_point(
+        self,
+        request_id: str,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+    ) -> None:
+        """Resolve a fork point in the session's history to a message index.
+
+        Exactly one of ``after_message`` / ``after_tool_call`` /
+        ``after_timestamp`` should be supplied; if none are given,
+        the server returns the last message index (full-history
+        fork).  The session's current ``get_history()`` is used as
+        the search space — clients don't pass history over the wire.
+
+        The response arrives as a ``ResolveForkPointResultEvent`` via
+        the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the result event.
+            after_message: Direct message index specifier.
+            after_tool_call: Tool call ID specifier.
+            after_timestamp: HH:MM:SS or ISO timestamp specifier.
+        """
+        await self._send_event(ResolveForkPointRequest(
+            request_id=request_id,
+            after_message=after_message,
+            after_tool_call=after_tool_call,
+            after_timestamp=after_timestamp,
+        ))
+
+    # =========================================================================
+    # SDK feature parity — permission policy verbs
+    #
+    # Typed methods replacing stringly-typed
+    # ``execute_command("permissions", [...])`` for SDK consumers.
+    # The CLI command path stays for actual users typing.
+    # =========================================================================
+
+    async def add_whitelist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission whitelist.
+
+        Args:
+            tools: Tool names to whitelist (exact match, auto-approved).
+            patterns: Glob patterns to add to the session whitelist.
+        """
+        await self._send_event(PermissionAddWhitelistRequest(
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def add_blacklist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission blacklist.
+
+        Args:
+            tools: Tool names to blacklist (always denied).
+            patterns: Glob patterns to add to the session blacklist.
+        """
+        await self._send_event(PermissionAddBlacklistRequest(
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def remove_permission_rules(
+        self,
+        target: str,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Remove tools / patterns from a permission list.
+
+        Args:
+            target: ``"whitelist"`` or ``"blacklist"``.
+            tools: Tool names to remove.
+            patterns: Patterns to remove.
+        """
+        await self._send_event(PermissionRemoveRequest(
+            target=target,
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def clear_permission_rules(self, target: str = "all") -> None:
+        """Clear the session-level permission lists.
+
+        Does NOT affect the base policy declared in
+        ``permissions.json``; only the session-level overrides.
+
+        Args:
+            target: ``"whitelist"``, ``"blacklist"``, or ``"all"``
+                (clears both lists and the session default).
+        """
+        await self._send_event(PermissionClearRequest(target=target))
+
+    async def set_default_policy(self, policy: str) -> None:
+        """Set the session-level default permission policy.
+
+        Overrides the base default for this session only.
+
+        Args:
+            policy: ``"allow"``, ``"deny"``, or ``"ask"``.
+        """
+        await self._send_event(PermissionSetDefaultRequest(policy=policy))
+
+    async def request_policy_snapshot(self, request_id: str = "") -> None:
+        """Request a structured snapshot of the current permission policy.
+
+        The response arrives as a ``PermissionPolicySnapshotEvent``
+        via the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the snapshot.
+        """
+        await self._send_event(PermissionPolicySnapshotRequest(
+            request_id=request_id,
+        ))
 
     # =========================================================================
     # Event Stream

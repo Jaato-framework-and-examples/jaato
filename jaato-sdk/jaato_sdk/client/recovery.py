@@ -483,12 +483,17 @@ class IPCRecoveryClient:
         self,
         text: str,
         attachments: Optional[list] = None,
+        parallel_tools: Optional[bool] = None,
     ) -> None:
         """Send a message to the model.
 
         Args:
             text: The message text.
             attachments: Optional file attachments.
+            parallel_tools: Per-call override for parallel tool execution.
+                ``None`` (default) keeps the env-configured behaviour
+                (``JAATO_PARALLEL_TOOLS``); ``True`` / ``False`` forces
+                parallel / sequential tool execution for this turn only.
 
         Raises:
             ReconnectingError: If currently reconnecting.
@@ -497,7 +502,7 @@ class IPCRecoveryClient:
         self._check_can_send()
 
         if self._client:
-            await self._client.send_message(text, attachments)
+            await self._client.send_message(text, attachments, parallel_tools=parallel_tools)
 
     async def respond_to_permission(
         self,
@@ -594,6 +599,111 @@ class IPCRecoveryClient:
 
         if self._client:
             await self._client.request_history(agent_id)
+
+    # =========================================================================
+    # SDK feature parity — session-primitive verbs
+    # =========================================================================
+
+    async def inject_prompt(
+        self,
+        text: str,
+        source_type: str = "user",
+        source_id: Optional[str] = None,
+    ) -> None:
+        """Inject a prompt into the session's message queue.
+
+        See :meth:`IPCClient.inject_prompt` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.inject_prompt(text, source_type, source_id)
+
+    async def replay_messages(
+        self,
+        request_id: str,
+        messages: Optional[list] = None,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Re-run the model loop against an explicit message list.
+
+        See :meth:`IPCClient.replay_messages` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.replay_messages(request_id, messages, timeout_seconds)
+
+    async def resolve_fork_point(
+        self,
+        request_id: str,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+    ) -> None:
+        """Resolve a fork point in the session's history.
+
+        See :meth:`IPCClient.resolve_fork_point` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.resolve_fork_point(
+                request_id,
+                after_message=after_message,
+                after_tool_call=after_tool_call,
+                after_timestamp=after_timestamp,
+            )
+
+    # =========================================================================
+    # SDK feature parity — permission policy verbs
+    # =========================================================================
+
+    async def add_whitelist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission whitelist."""
+        self._check_can_send()
+        if self._client:
+            await self._client.add_whitelist_tools(tools, patterns)
+
+    async def add_blacklist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission blacklist."""
+        self._check_can_send()
+        if self._client:
+            await self._client.add_blacklist_tools(tools, patterns)
+
+    async def remove_permission_rules(
+        self,
+        target: str,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Remove tools / patterns from a permission list."""
+        self._check_can_send()
+        if self._client:
+            await self._client.remove_permission_rules(target, tools, patterns)
+
+    async def clear_permission_rules(self, target: str = "all") -> None:
+        """Clear the session-level permission lists."""
+        self._check_can_send()
+        if self._client:
+            await self._client.clear_permission_rules(target)
+
+    async def set_default_policy(self, policy: str) -> None:
+        """Set the session-level default permission policy."""
+        self._check_can_send()
+        if self._client:
+            await self._client.set_default_policy(policy)
+
+    async def request_policy_snapshot(self, request_id: str = "") -> None:
+        """Request a structured snapshot of the current permission policy."""
+        self._check_can_send()
+        if self._client:
+            await self._client.request_policy_snapshot(request_id)
 
     # =========================================================================
     # Event Stream

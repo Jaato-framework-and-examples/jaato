@@ -2,5 +2,6 @@
   "type": "message.send",
   "timestamp": "<TIMESTAMP>",
   "text": "",
-  "attachments": []
+  "attachments": [],
+  "parallel_tools": null
 }
