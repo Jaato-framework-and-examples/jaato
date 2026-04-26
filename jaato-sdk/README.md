@@ -1,6 +1,8 @@
 # jaato-sdk
 
-Python client SDK for connecting to a [jaato](https://github.com/Jaato-framework-and-examples/jaato) server. Provides the wire protocol, async IPC client, and an auto-reconnecting recovery client.
+Python client SDK for connecting to a [jaato](https://github.com/Jaato-framework-and-examples/jaato) server. Provides the wire protocol (pydantic models), an async IPC client, an auto-reconnecting recovery client, and typed verbs over the session-primitive surface (inject, replay, fork, permission policy).
+
+A sister TypeScript package, [`@jaato/sdk`](../jaato-sdk-ts/), mirrors this one. Its event/request types are codegen'd from this package's pydantic models, so the wire surface is the same in both languages.
 
 ## Installation
 
@@ -34,7 +36,7 @@ asyncio.run(main())
 
 ### Server-first architecture
 
-Unlike a local agent loop, the agent itself runs in a separate **jaato server** process (a daemon). The SDK is purely a transport layer — it ships JSON-encoded events to the server and yields them back to your code as Python dataclasses.
+Unlike a local agent loop, the agent itself runs in a separate **jaato server** process (a daemon). The SDK is purely a transport layer — it ships JSON-encoded events to the server and yields them back to your code as typed pydantic models.
 
 ```
 your code  ──►  IPCRecoveryClient  ──►  /tmp/jaato.sock  ──►  jaato server (agent loop)
@@ -49,12 +51,12 @@ If no server is running and `auto_start=True` (the default), the client launches
 
 The server speaks the same wire protocol over two transports:
 
-| Transport | Endpoint | What's shipped in this SDK |
+| Transport | Endpoint | Where to find a client |
 |---|---|---|
-| **IPC** (Unix domain socket / Windows named pipe) | `/tmp/jaato.sock` or `\\.\pipe\jaato` | `IPCClient` and `IPCRecoveryClient` — Python async clients with auto-start, framing, and reconnection. |
-| **WebSocket** | `ws://host:port` (or `wss://`) | Just the protocol — `Event` dataclasses, `serialize_event` / `deserialize_event`. No Python WS client. |
+| **IPC** (Unix domain socket / Windows named pipe) | `/tmp/jaato.sock` or `\\.\pipe\jaato` | `IPCClient` / `IPCRecoveryClient` in this package — async, auto-start, framing, reconnection. |
+| **WebSocket** | `ws://host:port` (or `wss://`) | [`@jaato/sdk`](../jaato-sdk-ts/) for TypeScript / JavaScript / browser. The Python `JaatoClient` over WS is on the parity backlog (Phase 3) and not yet shipped. |
 
-The IPC client is for processes living on the same machine as the daemon (TUI, scripts, in-process tooling). The WebSocket transport is meant for remote and browser clients — the reference web UI talks to the server over WS, as can any JavaScript or non-Python client.
+The IPC client is for processes living on the same machine as the daemon (TUI, scripts, in-process tooling). WebSocket is for remote and browser clients — the reference web UI talks to the server over WS, as does the TS SDK.
 
 To start the server with WebSocket enabled:
 
@@ -64,7 +66,7 @@ python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 
 WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens.
 
-**If you're writing a non-Python WS client**, the [Events vs requests](#events-vs-requests) protocol below is the same — frame each event as one WS text message containing the JSON returned by `to_json()` (no length prefix; WS already frames). Adding a Python WebSocket client to this SDK is a possible future addition; until then, point your WS client library at the same `Event` schema.
+If you need a Python WS client today, the protocol is JSON-over-WS using the same pydantic models — frame each event as one WS text message of `event.model_dump_json()` and parse incoming frames through `deserialize_event(...)`.
 
 ### Two clients
 
@@ -77,12 +79,14 @@ WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.toke
 
 ### Events vs requests
 
-Everything on the wire is an `Event` dataclass.
+Everything on the wire is an `Event` (a `pydantic.BaseModel` subclass).
 
 - **Server → Client events** describe what the agent is doing: `AgentOutputEvent`, `ToolCallStartEvent`, `PermissionRequestedEvent`, `PlanUpdatedEvent`, `TurnCompletedEvent`, `ErrorEvent`, …
-- **Client → Server requests** are the same `Event` shape but flow the other way: `SendMessageRequest`, `PermissionResponseRequest`, `StopRequest`, `CommandRequest`, …
+- **Client → Server requests** share the same `Event` shape but flow the other way: `SendMessageRequest`, `PermissionResponseRequest`, `InjectPromptRequest`, `ReplayMessagesRequest`, …
 
-You never construct request events directly in normal usage — the client provides typed methods like `send_message()`, `respond_to_permission()`, `stop()`. Construct the request dataclasses only when you need to send something the convenience methods don't cover (use `client.execute_command()` for that).
+You never construct request events directly in normal usage — the client exposes typed methods (`send_message()`, `inject_prompt()`, `respond_to_permission()`, `stop()`, …). Construct the request models directly only when you need to send something the convenience methods don't cover (use `client.execute_command()` for that).
+
+The pydantic source of truth in [`jaato_sdk/events.py`](jaato_sdk/events.py) is also what feeds the TS SDK — `scripts/codegen_ts_events.py` exports JSON Schema from `pydantic.TypeAdapter` and pipes it through `json-schema-to-typescript` to produce `jaato-sdk-ts/src/events.ts`. CI fails any PR that edits `events.py` without re-running codegen.
 
 ## Event Flow
 
@@ -209,12 +213,55 @@ await client.list_profiles()           # response arrives as SessionProfilesEven
 
 ```python
 await client.send_message("Build the README", attachments=[...])
+
+# Per-call override of the JAATO_PARALLEL_TOOLS env setting (since 0.3.1):
+await client.send_message("scan three repos", parallel_tools=True)
+await client.send_message("apply migrations in order", parallel_tools=False)
+
 await client.respond_to_permission(request_id, "y")
 await client.respond_to_permission(request_id, "e", edited_arguments={"path": "..."})
 await client.respond_to_clarification(request_id, "use json")
 await client.respond_to_reference_selection(request_id, "1,3,4")
 await client.stop()
 ```
+
+### Session primitives — inject, replay, fork
+
+These are the typed verbs over `JaatoSession.inject_prompt` / `replay_messages` / `resolve_fork_point`. Premium's `session_ops` plugin builds higher-level model-callable tools (interrogate, fork-and-replay) on top of the same primitives; SDK consumers reach them directly without going through the model loop.
+
+```python
+# Inject a prompt — single verb covering steer (USER, interrupts) and
+# follow-up (CHILD, queues behind in-flight work).
+await client.inject_prompt("Stop! Do this instead.", source_type="user")
+await client.inject_prompt("Also summarize the result.", source_type="child")
+
+# Re-run the model loop. Without `messages`, replays the session's
+# current history ("continue from current state, no new user input").
+await client.replay_messages(request_id="retry-1")
+
+# Find a message index for forking. Pick one of the three after_*
+# selectors; the response arrives as ResolveForkPointResultEvent.
+await client.resolve_fork_point(
+    request_id="fork-1",
+    after_tool_call="call_abc123",   # or after_message=42, or after_timestamp="..."
+)
+```
+
+### Permission policy
+
+Typed mutators over the session's whitelist / blacklist / default policy. These replace stringly-typed `execute_command("permissions", [...])` for SDK consumers.
+
+```python
+await client.add_whitelist_tools(tools=["read"], patterns=["fs.read.*"])
+await client.add_blacklist_tools(tools=["bash"])
+await client.remove_permission_rules(target="whitelist", tools=["read"])
+await client.clear_permission_rules(target="all")     # whitelist + blacklist + default
+await client.set_default_policy("ask")                # "allow" | "deny" | "ask"
+await client.request_policy_snapshot(request_id="snap-1")
+# → PermissionPolicySnapshotEvent on the event stream
+```
+
+Result events for `replay_messages`, `resolve_fork_point`, and `request_policy_snapshot` are correlated by `request_id` — pick a value, then match it on the inbound event.
 
 ### Commands and metadata
 
@@ -322,6 +369,22 @@ presentation = PresentationContext(
 
 `ClientType` describes the kind of surface, not a specific app. Telegram, Slack and WhatsApp bots are all `CHAT`. `CommunicationStyle.CONVERSATIONAL` tells the model to send short, frequent updates; `NARRATIVE` tells it to deliver one well-structured response at the end. When `communication_style` is left `None`, `CHAT` defaults to conversational and everything else to narrative.
 
+## Helpers
+
+Mirrors of these helpers live in [`jaato-sdk-ts/src/helpers.ts`](../jaato-sdk-ts/src/helpers.ts) so a TS client and a Python client computing the same metric get identical numbers.
+
+```python
+from jaato_sdk import compute_cache_hit_percent
+
+async for event in client.events():
+    if isinstance(event, TurnCompletedEvent):
+        pct = compute_cache_hit_percent(event)   # None | 0.0 | 0..100
+        if pct is not None:
+            print(f"cache hit: {pct:.1f}%")
+```
+
+`compute_cache_hit_percent` returns `None` when the provider doesn't report cache stats (distinct from `0.0`, which means caching is supported but this turn had no hits). The denominator is `cache_read_tokens + prompt_tokens` — see the docstring for why `cache_creation_tokens` is excluded.
+
 ## Building a Custom Client
 
 Everything you need to drive the server yourself:
@@ -339,26 +402,34 @@ from jaato_sdk.events import (
     ContextUpdatedEvent, TurnCompletedEvent, TurnProgressEvent,
     SystemMessageEvent, ErrorEvent, RetryEvent, InitProgressEvent,
     SessionInfoEvent, SessionListEvent, SessionProfilesEvent,
+    ReplayMessagesResultEvent, ResolveForkPointResultEvent,
+    PermissionPolicySnapshotEvent,
 
     # Client → Server
     SendMessageRequest, PermissionResponseRequest, ClarificationResponseRequest,
     ReferenceSelectionResponseRequest, StopRequest, CommandRequest,
     HistoryRequest, ClientConfigRequest, ToolDisableRequest,
+    InjectPromptRequest, ReplayMessagesRequest, ResolveForkPointRequest,
+    PermissionAddWhitelistRequest, PermissionAddBlacklistRequest,
+    PermissionRemoveRequest, PermissionClearRequest,
+    PermissionSetDefaultRequest, PermissionPolicySnapshotRequest,
 )
 ```
 
-A reference TUI implementation lives at [`jaato-tui`](../jaato-tui/) in the same repo.
+A reference TUI implementation lives at [`jaato-tui`](../jaato-tui/) in the same repo. For TypeScript, see [`@jaato/sdk`](../jaato-sdk-ts/) — same protocol, codegen'd types.
 
 ## Low-Level API
 
-Every event is a serializable dataclass. If you need to bypass the client (for example, embedding the protocol in a different transport), you can drive serialization directly:
+Every event is a `pydantic.BaseModel` subclass — `model_dump_json()` to serialize, `deserialize_event()` to round-trip through the discriminator. If you need to bypass the client (for example, embedding the protocol in a different transport):
 
 ```python
 from jaato_sdk.events import serialize_event, deserialize_event, SendMessageRequest
 
 wire = serialize_event(SendMessageRequest(text="hi"))   # → JSON string
-event = deserialize_event(wire)                          # → typed dataclass
+event = deserialize_event(wire)                          # → typed pydantic model
 ```
+
+The same pydantic models also expose JSON Schema via `pydantic.TypeAdapter`, which is how `scripts/codegen_ts_events.py` generates the TS SDK's typed event surface. If you're building a non-Python client, regenerate the types from the schema rather than hand-writing them.
 
 Framing differs by transport:
 
@@ -379,7 +450,7 @@ These write JSONL records to per-agent files under the configured trace director
 
 - Python 3.10+
 - A reachable jaato server (auto-started by default)
-- `python-dotenv` (the only runtime dependency)
+- Runtime deps: `pydantic >= 2.0, < 3` (event models / JSON Schema export) and `python-dotenv`
 
 ## License
 
