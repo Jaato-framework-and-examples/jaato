@@ -153,6 +153,104 @@ function handle(event: JaatoEvent): void {
 }
 ```
 
+## Consuming this SDK before it's published to npm
+
+Premium webcomponents (and any other early consumer) can wire the
+SDK in locally without waiting for the first `npm publish`. Pick
+the option that matches your setup.
+
+### Option A — `npm link` (developer-mode symlink)
+
+Best when you're actively iterating on both the SDK and the
+consumer. A symlink in the consumer's `node_modules` points at
+your local `jaato-sdk-ts/dist/`, so a rebuild here is picked up
+immediately on the consumer side.
+
+```bash
+# In jaato repo:
+cd jaato-sdk-ts
+npm install
+npm run build
+npm link
+
+# In premium repo (any consuming package.json):
+npm link @jaato/sdk
+```
+
+Re-run `npm run build` in `jaato-sdk-ts/` whenever you edit a
+source file. The consumer doesn't need to reinstall.
+
+### Option B — `file:` dependency
+
+Better for CI or repeatable test environments. The consumer's
+`package.json` declares a relative path; `npm install` copies the
+built package into `node_modules`.
+
+```json
+{
+  "dependencies": {
+    "@jaato/sdk": "file:../jaato/jaato-sdk-ts"
+  }
+}
+```
+
+Run `npm install` again in the consumer to pick up SDK changes.
+The SDK must be built (`npm run build`) before the consumer
+installs.
+
+### Option C — `npm pack` (most production-like)
+
+Closest to what `npm publish` would deliver — produces a tarball
+containing exactly what would be uploaded to the registry. Use
+this right before publishing to catch missing files in the
+package's `files` field, broken `exports`, etc.
+
+```bash
+cd jaato-sdk-ts
+npm run build
+npm pack
+# produces jaato-sdk-0.1.0.tgz
+
+cd ../../jaato-premium/<consumer-package>
+npm install /path/to/jaato-sdk-0.1.0.tgz
+```
+
+### Option D — direct ESM import (vanilla JS, no build step)
+
+If the consumer is a vanilla-JS webcomponent served as a static
+file (no `package.json`, no bundler), it can import the built ESM
+output directly:
+
+```html
+<script type="module">
+  import { JaatoClient } from "/path/to/jaato-sdk-ts/dist/index.js";
+
+  const client = new JaatoClient({
+    url: "ws://localhost:8080",
+    token: "<bearer-token>",
+  });
+  await client.connect();
+  client.subscribe((event) => console.log(event));
+  await client.sendMessage("hello");
+</script>
+```
+
+Or copy `jaato-sdk-ts/dist/` into the consumer's static asset
+path. Cost: no autocomplete or type-checking on the consumer
+side — for that, introduce a build step (Vite, esbuild) and use
+Option A / B / C instead.
+
+### Recommended workflow for premium webcomponent migration
+
+1. Use **Option A** during active development — fastest iteration.
+2. Switch to **Option C** right before any publish to verify the
+   tarball contents are correct.
+3. If a webcomponent is currently vanilla JS with no build
+   pipeline, this is a good moment to introduce one (Vite or
+   esbuild + single-file bundle output). That unlocks
+   tree-shaking, type-checking, and pulls the SDK into the same
+   module graph instead of relying on a script tag.
+
 ## License
 
 BUSL-1.1 (matches jaato-server / jaato-sdk).
