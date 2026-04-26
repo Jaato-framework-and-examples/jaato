@@ -6,10 +6,15 @@ Mirrors the Python [`jaato-sdk`](../jaato-sdk/) method-for-method, with
 identical noun naming (camelCase per JS convention) so cross-language
 parity is enforced by construction.
 
-**Status: pre-alpha (Phase 2).** This package currently ships only the
-codegen-generated event/request types. The `JaatoClient` class that
-wraps the WS protocol arrives in Phase 3 — see
-[`project_backlog_sdk_feature_parity.md`](../docs/) for the full plan.
+**Status: pre-release (Phase 3 code shipped, not yet on npm).**
+The `JaatoClient` class is implemented and tested (27 unit tests
+pass against a mock WebSocket); the codegen-generated event /
+request types stay in lockstep with the Python SDK via the CI
+staleness gate. What's still pending: the npm publish workflow
+and the first `npm publish @jaato/sdk@0.1.0`. Consume locally
+per the [Consuming this SDK](#consuming-this-sdk-before-its-published-to-npm)
+section below until the first publish lands. Plan history:
+[`project_backlog_sdk_feature_parity.md`](../docs/).
 
 ## Background: why this exists
 
@@ -52,7 +57,9 @@ The result was **the SDK feature parity workstream** —
   jaato-sdk 0.3.1).
 * **Phase 2** — codegen pipeline (this package). ✅ shipped.
 * **Phase 3** — `JaatoClient` class wrapping the WS protocol
-  method-for-method with the Python SDK. *In progress.*
+  method-for-method with the Python SDK. ✅ code + tests
+  shipped; first npm publish still pending (see
+  [Publishing](#publishing) below).
 
 What pi-agent calls `agent.prompt()` is `JaatoClient.send_message()`
 here. `agent.steer(msg)` is `inject_prompt(text, source_type="user")`.
@@ -250,6 +257,40 @@ Option A / B / C instead.
    esbuild + single-file bundle output). That unlocks
    tree-shaking, type-checking, and pulls the SDK into the same
    module graph instead of relying on a script tag.
+
+## Publishing
+
+**Status: not yet on npm.** `npm install @jaato/sdk` will fail
+until the first publish lands. Use one of the local-consumption
+options above in the meantime.
+
+What's still needed before the first publish:
+
+* **A publish workflow** in `.github/workflows/publish-npm-sdk-ts.yml`
+  that runs `npm run build` + `npm test` + `npm publish` on
+  `workflow_dispatch`. Mirror of the existing
+  `publish-testpypi-{server,sdk,tui}.yml` workflows but for npm.
+* **An npm registry decision** — public npmjs.com under the
+  `@jaato` scope (requires registering the org or claiming the
+  scope), or GitHub Packages for now (no extra setup; consumers
+  add a `.npmrc` pointing at `npm.pkg.github.com`). The two are
+  switchable later.
+* **An access token** in the repo's `Settings → Secrets`
+  (`NPM_TOKEN` for npmjs.com, or the existing `GITHUB_TOKEN`
+  for GitHub Packages) that the workflow exposes via
+  `NODE_AUTH_TOKEN`.
+
+Once those land, the publish flow is the same as
+`jaato-server` / `jaato-sdk`: bump the version in
+`package.json`, commit, trigger the workflow, the new version
+appears on the registry. The CI staleness gate already prevents
+publishes that would carry a stale `events.ts`.
+
+Versioning policy mirrors the Python SDK: minor bumps for
+additive surface (new methods, new event types), patch bumps for
+fixes, major bumps for protocol-breaking changes. The `MIN_SERVER_VERSION`
+constant in `src/client.ts` documents the minimum compatible
+jaato-server version (currently `0.5.27`).
 
 ## License
 
