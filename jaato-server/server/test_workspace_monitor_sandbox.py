@@ -282,13 +282,20 @@ class TestSandboxEventTracking:
         finally:
             monitor.stop()
 
-    def test_sandbox_respects_gitignore_defaults(self, workspace, sandbox_dir):
-        """Files in gitignore-default dirs (e.g. __pycache__) under a sandbox
-        path must not be tracked.  Regression test: previously the sandbox
+    def test_sandbox_respects_gitignore_defaults(self, workspace, sandbox_dir, tmp_path):
+        """Files matched by the workspace .gitignore must not be tracked
+        under a sandbox path either.  Regression test: previously the sandbox
         event handler only filtered files whose own basename starts with
         ``.``, so files inside ``__pycache__/`` or ``output/`` leaked into
         the workspace panel.
+
+        Now that the parser only hardcodes ``.git/``, this test seeds the
+        workspace's own ``.gitignore`` with the patterns it wants enforced.
         """
+        (tmp_path / "workspace" / ".gitignore").write_text(
+            "__pycache__/\n.pytest_cache/\n.mypy_cache/\n"
+        )
+
         monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
         monitor.start()
         try:
@@ -625,5 +632,75 @@ class TestAccumulatorIntegration:
 
             assert len(changes_received) > 0
             assert any(c["path"] == new_file for c in changes_received)
+        finally:
+            monitor.stop()
+
+
+class TestGitignoreLiveReload:
+    """``_on_fs_event`` reloads the gitignore parser when ``.gitignore`` changes.
+
+    Regression test for the workspace-panel ``i`` keybinding: the TUI
+    writes a new pattern into ``<workspace>/.gitignore`` and expects the
+    server's monitor to start filtering matching files immediately,
+    without a session restart.
+    """
+
+    def test_pattern_added_to_gitignore_takes_effect_for_next_event(self, workspace):
+        monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
+        monitor.start()
+        try:
+            # Initially nothing is ignored beyond .git/, so a stray file
+            # in node_modules/ would be tracked.
+            stray = os.path.join(workspace, "node_modules", "pkg.json")
+            os.makedirs(os.path.dirname(stray), exist_ok=True)
+            open(stray, "w").close()
+            monitor._on_fs_event(stray, "created")
+            assert "node_modules/pkg.json" in monitor.tracked
+
+            # Reset and write the gitignore — first the .gitignore event
+            # itself is dispatched (which reloads the parser), then the
+            # next event for node_modules/ should be filtered out.
+            monitor.tracked.clear()
+            gi_path = os.path.join(workspace, ".gitignore")
+            with open(gi_path, "w") as fh:
+                fh.write("node_modules/\n")
+            monitor._on_fs_event(gi_path, "created")
+
+            another = os.path.join(workspace, "node_modules", "lock.json")
+            open(another, "w").close()
+            monitor._on_fs_event(another, "created")
+
+            assert "node_modules/lock.json" not in monitor.tracked
+            # The .gitignore file itself is intentionally tracked so
+            # users see it appear in the panel.
+            assert ".gitignore" in monitor.tracked
+        finally:
+            monitor.stop()
+
+    def test_pattern_removed_from_gitignore_unblocks_future_events(self, workspace):
+        """Editing ``.gitignore`` to drop a pattern lets new matching files through."""
+        gi_path = os.path.join(workspace, ".gitignore")
+        with open(gi_path, "w") as fh:
+            fh.write("logs/\n")
+
+        monitor = WorkspaceMonitor(workspace, on_changed=lambda c: None)
+        monitor.start()
+        try:
+            # While "logs/" is in .gitignore, the file is filtered.
+            log_a = os.path.join(workspace, "logs", "a.log")
+            os.makedirs(os.path.dirname(log_a), exist_ok=True)
+            open(log_a, "w").close()
+            monitor._on_fs_event(log_a, "created")
+            assert "logs/a.log" not in monitor.tracked
+
+            # Drop the pattern; subsequent events should be tracked.
+            with open(gi_path, "w") as fh:
+                fh.write("")
+            monitor._on_fs_event(gi_path, "modified")
+
+            log_b = os.path.join(workspace, "logs", "b.log")
+            open(log_b, "w").close()
+            monitor._on_fs_event(log_b, "created")
+            assert "logs/b.log" in monitor.tracked
         finally:
             monitor.stop()

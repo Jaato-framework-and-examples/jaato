@@ -78,6 +78,16 @@ class WorkspacePanel:
     Pasting an ``@`` reference (works regardless of input state, as long as
     the panel is visible) is handled in ``pt_display.py`` via the
     ``workspace_paste_ref`` keybinding (default Alt+P).
+
+    Hide / show-hidden:
+        ``hide_at_cursor()`` adds the entry under the cursor to a
+        per-session ``_hidden_paths`` set.  ``_get_flat_entries`` then
+        skips entries whose path equals or descends from any hidden
+        directory.  ``toggle_show_hidden()`` flips ``_show_hidden``: while
+        true, hidden entries reappear (with a dim ``H`` marker) so the
+        user can navigate to one and call ``hide_at_cursor()`` again to
+        unhide it.  The hidden set is purely client-side state — it
+        survives panel close/reopen but is dropped on TUI restart.
     """
 
     def __init__(
@@ -86,6 +96,9 @@ class WorkspacePanel:
         open_file_key: Optional[KeyBinding] = None,
         clear_key: Optional[KeyBinding] = None,
         paste_ref_key: Optional[KeyBinding] = None,
+        hide_key: Optional[KeyBinding] = None,
+        show_hidden_key: Optional[KeyBinding] = None,
+        gitignore_key: Optional[KeyBinding] = None,
     ):
         """Initialize the workspace panel.
 
@@ -99,6 +112,15 @@ class WorkspacePanel:
             paste_ref_key: Keybinding used to paste the selected file or
                            directory as an ``@`` reference into the input
                            line.  Shown in the footer hint.
+            hide_key: Keybinding used to hide / unhide the entry under the
+                      cursor (per-session, not persisted).  Shown in the
+                      footer hint.
+            show_hidden_key: Keybinding used to toggle visibility of the
+                             hidden set (so they can be unhidden).  Shown
+                             in the footer hint.
+            gitignore_key: Keybinding used to add / remove the cursor
+                           entry from the workspace's ``.gitignore``.
+                           Shown in the footer hint.
         """
         # File state: {relative_path: status_string}
         self._files: Dict[str, str] = {}
@@ -118,10 +140,22 @@ class WorkspacePanel:
         # Highlight tracking: path → monotonic deadline
         self._highlights: Dict[str, float] = {}
 
+        # Per-session hide state.  ``_hidden_paths`` stores the *exact*
+        # entry identifier — directory paths end with ``/``, files do not.
+        # ``_show_hidden`` is a render-only toggle: when False (default)
+        # hidden entries are filtered out of ``_get_flat_entries``; when
+        # True they reappear with a dim "H" marker so the user can
+        # navigate to one and unhide it.
+        self._hidden_paths: Set[str] = set()
+        self._show_hidden: bool = False
+
         self._toggle_key = toggle_key or "c-w"
         self._open_file_key = open_file_key or "enter"
         self._clear_key = clear_key or "delete"
         self._paste_ref_key = paste_ref_key or ["escape", "p"]
+        self._hide_key = hide_key or "h"
+        self._show_hidden_key = show_hidden_key or "s-h"
+        self._gitignore_key = gitignore_key or "i"
         self._theme: Optional["ThemeConfig"] = None
         self._tree_dirty: bool = True  # Rebuild tree before next render
 
@@ -378,6 +412,80 @@ class WorkspacePanel:
         parent = entry.get("parent_dir", "")
         return f"{parent}{entry['name']}"
 
+    # ------------------------------------------------------------------
+    # Hide / show-hidden (per-session, client-side filter)
+    # ------------------------------------------------------------------
+
+    def _selected_entry_id(self) -> Optional[str]:
+        """Return the canonical hide-set identifier for the cursor entry.
+
+        Directories use their ``dir_path`` (with trailing ``/``); files use
+        their relative path.  ``None`` if no valid entry is selected.
+        """
+        flat = self._get_flat_entries()
+        if not flat or self._cursor_index >= len(flat):
+            return None
+        entry = flat[self._cursor_index]
+        if entry["is_dir"]:
+            return entry.get("dir_path")
+        parent = entry.get("parent_dir", "")
+        return f"{parent}{entry['name']}"
+
+    def hide_at_cursor(self) -> Optional[str]:
+        """Toggle the hidden state of the entry under the cursor.
+
+        Returns the entry id (path) that was toggled, or ``None`` if the
+        list is empty.  When ``_show_hidden`` is True the cursor may be on
+        an already-hidden entry — calling this method unhides it.
+        """
+        entry_id = self._selected_entry_id()
+        if not entry_id:
+            return None
+        if entry_id in self._hidden_paths:
+            self._hidden_paths.discard(entry_id)
+        else:
+            self._hidden_paths.add(entry_id)
+        # Keep the cursor in range after the visible set shrinks/grows.
+        flat = self._get_flat_entries()
+        if flat:
+            self._cursor_index = min(self._cursor_index, len(flat) - 1)
+        else:
+            self._cursor_index = 0
+        return entry_id
+
+    def toggle_show_hidden(self) -> bool:
+        """Toggle whether hidden entries are shown.
+
+        Returns the new value.  When True, hidden entries appear with a
+        dim ``H`` marker so the user can navigate to them and unhide.
+        """
+        self._show_hidden = not self._show_hidden
+        return self._show_hidden
+
+    @property
+    def show_hidden(self) -> bool:
+        return self._show_hidden
+
+    @property
+    def hidden_paths(self) -> Set[str]:
+        return frozenset(self._hidden_paths)  # read-only view
+
+    def _is_entry_hidden(self, entry: Dict[str, Any]) -> bool:
+        """True if ``entry`` is hidden directly or under a hidden directory."""
+        if not self._hidden_paths:
+            return False
+        if entry["is_dir"]:
+            entry_id = entry.get("dir_path") or ""
+        else:
+            entry_id = f"{entry.get('parent_dir', '')}{entry['name']}"
+        if entry_id in self._hidden_paths:
+            return True
+        # Descendant of a hidden directory.
+        for hidden in self._hidden_paths:
+            if hidden.endswith("/") and entry_id.startswith(hidden):
+                return True
+        return False
+
     def set_max_visible_lines(self, n: int) -> None:
         """Set maximum visible lines in the popup.
 
@@ -452,7 +560,7 @@ class WorkspacePanel:
             for name, child in dirs:
                 dir_path = f"{path_prefix}{name}/" if path_prefix else f"{name}/"
                 is_collapsed = dir_path in self._collapsed_dirs
-                entries.append({
+                dir_entry = {
                     "name": name,
                     "depth": depth,
                     "is_dir": True,
@@ -461,12 +569,20 @@ class WorkspacePanel:
                     "collapsed": is_collapsed,
                     "dir_path": dir_path,
                     "parent_dir": parent_dir,
-                })
-                if not is_collapsed:
+                    "hidden": False,
+                }
+                hidden = self._is_entry_hidden(dir_entry)
+                dir_entry["hidden"] = hidden
+                if not hidden or self._show_hidden:
+                    entries.append(dir_entry)
+                # Skip walking into a hidden directory regardless of
+                # _show_hidden — its presence in the list is enough for
+                # the user to navigate to it and unhide.
+                if not is_collapsed and not hidden:
                     walk(child, depth + 1, dir_path, dir_path)
 
             for name, child in files:
-                entries.append({
+                file_entry = {
                     "name": name,
                     "depth": depth,
                     "is_dir": False,
@@ -475,7 +591,12 @@ class WorkspacePanel:
                     "collapsed": False,
                     "dir_path": None,
                     "parent_dir": parent_dir,
-                })
+                    "hidden": False,
+                }
+                hidden = self._is_entry_hidden(file_entry)
+                file_entry["hidden"] = hidden
+                if not hidden or self._show_hidden:
+                    entries.append(file_entry)
 
         walk(self._root, 0, "", "")
         return entries
@@ -542,12 +663,17 @@ class WorkspacePanel:
 
             line = Text()
             indent = "  " * entry["depth"]
+            is_hidden = entry.get("hidden", False)
 
             if entry["is_dir"]:
                 # Directory line
                 marker = "▸ " if entry["collapsed"] else "▾ " if entry.get("dir_path") else "  "
                 dir_style = "reverse bold" if is_cursor else ""
+                if is_hidden:
+                    dir_style = (dir_style + " dim").strip()
                 line.append(f" {indent}{marker}{entry['name']}/", style=dir_style)
+                if is_hidden:
+                    line.append(" H", style="dim")
             else:
                 # File line
                 status = entry.get("status", "")
@@ -572,6 +698,13 @@ class WorkspacePanel:
                     label_style = "dim"
 
                 name_text = entry["name"]
+
+                # Hidden entries override style with a dim wash so they
+                # read as "filtered out" even when show_hidden is on.
+                if is_hidden:
+                    file_style = "dim"
+                    label = "H"
+                    label_style = "dim"
 
                 # Cursor highlight: reverse video
                 if is_cursor:
@@ -599,21 +732,49 @@ class WorkspacePanel:
         # Separator
         elements.append(Text("─" * (width - 4), style="dim"))
 
-        # Footer with hints
-        footer = Text()
-        footer.append(f" {count} file{'s' if count != 1 else ''}", style="dim")
-        # Right-align close hint
+        # Footer is two lines:
+        #   1. file count (+ hidden tally) on the left, primary action
+        #      hints on the right ending with the close shortcut.
+        #   2. secondary action hints (hide / show-hidden / gitignore /
+        #      paste-as-@reference).  Splitting the hints over two rows
+        #      keeps each line readable instead of overflowing on narrow
+        #      panel widths.
+        hidden_count = sum(1 for e in flat if e.get("hidden"))
+        if self._show_hidden and hidden_count:
+            tally = f" {count} file{'s' if count != 1 else ''} · {hidden_count} hidden shown"
+        elif self._hidden_paths:
+            # _hidden_paths can outlive the current snapshot, so the
+            # length there doesn't necessarily match what's renderable.
+            tally = f" {count} file{'s' if count != 1 else ''} ({len(self._hidden_paths)} hidden)"
+        else:
+            tally = f" {count} file{'s' if count != 1 else ''}"
+
         close_hint = f"[{format_key_for_display(self._toggle_key)} close]"
-        open_hint = f"{format_key_for_display(self._open_file_key)} open · "
-        paste_hint = f"{format_key_for_display(self._paste_ref_key)} @ref · "
-        clear_hint = f"{format_key_for_display(self._clear_key)} clear · "
-        nav_hint = f"↑↓ · ◂▸ · {open_hint}{paste_hint}{clear_hint}"
-        right_content = nav_hint + close_hint
-        padding = max(1, width - 4 - len(f" {count} files") - len(right_content))
-        footer.append(" " * padding)
-        footer.append(nav_hint, style="dim")
-        footer.append(close_hint, style="dim")
-        elements.append(footer)
+        open_hint = f"{format_key_for_display(self._open_file_key)} open"
+        clear_hint = f"{format_key_for_display(self._clear_key)} clear"
+        primary_hint = f"↑↓ · ◂▸ · {open_hint} · {clear_hint} "
+
+        footer1 = Text()
+        footer1.append(tally, style="dim")
+        right1 = primary_hint + close_hint
+        pad1 = max(1, width - 4 - len(tally) - len(right1))
+        footer1.append(" " * pad1)
+        footer1.append(primary_hint, style="dim")
+        footer1.append(close_hint, style="dim")
+        elements.append(footer1)
+
+        hide_hint = f"{format_key_for_display(self._hide_key)} hide"
+        show_hint = f"{format_key_for_display(self._show_hidden_key)} show"
+        ignore_hint = f"{format_key_for_display(self._gitignore_key)} ignore"
+        paste_hint = f"{format_key_for_display(self._paste_ref_key)} @ref"
+        secondary_hint = (
+            f"{hide_hint} · {show_hint} · {ignore_hint} · {paste_hint}"
+        )
+        footer2 = Text()
+        pad2 = max(1, width - 4 - len(secondary_hint))
+        footer2.append(" " * pad2)
+        footer2.append(secondary_hint, style="dim")
+        elements.append(footer2)
 
         return Panel(
             Group(*elements),

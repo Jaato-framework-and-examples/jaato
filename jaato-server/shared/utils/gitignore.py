@@ -29,24 +29,13 @@ class GitignoreParser:
     enable them, or ``False`` to rely solely on the .gitignore file.
     """
 
-    # Patterns that are always ignored regardless of .gitignore content.
-    # Note: ``.jaato/`` is intentionally NOT in this list — the directory
-    # holds project-level config (profiles, GC config, instructions) that
-    # users often want visible in the workspace panel.  Add it to a
-    # workspace ``.gitignore`` if you want to hide it for a given project.
+    # ``.git/`` is the only hardcoded default — surfacing the git internals
+    # in the workspace panel would drown every other change in noise, and no
+    # workspace would ever want to track them.  Everything else
+    # (``__pycache__/``, ``node_modules/``, ``.venv/``, …) is left to the
+    # workspace's own ``.gitignore`` so users have full control.
     DEFAULT_IGNORE_PATTERNS: List[str] = [
         ".git/",
-        "__pycache__/",
-        ".venv/",
-        "venv/",
-        "node_modules/",
-        ".mypy_cache/",
-        ".pytest_cache/",
-        "*.pyc",
-        "*.pyo",
-        ".DS_Store",
-        "*.swp",
-        "*.swo",
     ]
 
     def __init__(
