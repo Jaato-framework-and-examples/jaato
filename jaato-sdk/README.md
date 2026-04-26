@@ -34,7 +34,7 @@ asyncio.run(main())
 
 ### Server-first architecture
 
-Unlike a local agent loop, the agent itself runs in a separate **jaato server** process (a daemon). The SDK is purely a transport layer — it ships JSON-encoded events over a Unix domain socket (or Windows named pipe) and yields them back to your code as Python dataclasses.
+Unlike a local agent loop, the agent itself runs in a separate **jaato server** process (a daemon). The SDK is purely a transport layer — it ships JSON-encoded events to the server and yields them back to your code as Python dataclasses.
 
 ```
 your code  ──►  IPCRecoveryClient  ──►  /tmp/jaato.sock  ──►  jaato server (agent loop)
@@ -44,6 +44,27 @@ your code  ◄──  IPCRecoveryClient  ◄──  /tmp/jaato.sock  ◄──�
 ```
 
 If no server is running and `auto_start=True` (the default), the client launches `python -m server --daemon` for you.
+
+### Transports
+
+The server speaks the same wire protocol over two transports:
+
+| Transport | Endpoint | What's shipped in this SDK |
+|---|---|---|
+| **IPC** (Unix domain socket / Windows named pipe) | `/tmp/jaato.sock` or `\\.\pipe\jaato` | `IPCClient` and `IPCRecoveryClient` — Python async clients with auto-start, framing, and reconnection. |
+| **WebSocket** | `ws://host:port` (or `wss://`) | Just the protocol — `Event` dataclasses, `serialize_event` / `deserialize_event`. No Python WS client. |
+
+The IPC client is for processes living on the same machine as the daemon (TUI, scripts, in-process tooling). The WebSocket transport is meant for remote and browser clients — the reference web UI talks to the server over WS, as can any JavaScript or non-Python client.
+
+To start the server with WebSocket enabled:
+
+```bash
+python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+```
+
+WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens.
+
+**If you're writing a non-Python WS client**, the [Events vs requests](#events-vs-requests) protocol below is the same — frame each event as one WS text message containing the JSON returned by `to_json()` (no length prefix; WS already frames). Adding a Python WebSocket client to this SDK is a possible future addition; until then, point your WS client library at the same `Event` schema.
 
 ### Two clients
 
@@ -339,7 +360,10 @@ wire = serialize_event(SendMessageRequest(text="hi"))   # → JSON string
 event = deserialize_event(wire)                          # → typed dataclass
 ```
 
-Frames on the socket are a 4-byte big-endian length prefix followed by the JSON payload. Max message size is 10 MiB. The Unix-socket variant uses `asyncio.open_unix_connection`; on Windows the SDK uses `loop.create_pipe_connection` against `\\.\pipe\<name>`.
+Framing differs by transport:
+
+- **IPC** — each frame is a 4-byte big-endian length prefix followed by the JSON payload. Max message size is 10 MiB. The Unix-socket variant uses `asyncio.open_unix_connection`; on Windows the SDK uses `loop.create_pipe_connection` against `\\.\pipe\<name>`.
+- **WebSocket** — one event per WS text frame, no length prefix (WS frames itself). Authenticate with a bearer token on the upgrade request or via `?token=...`.
 
 ## Tracing
 
