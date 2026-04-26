@@ -48,7 +48,7 @@ if str(SDK_PATH) not in sys.path:
 
 from pydantic import TypeAdapter  # noqa: E402
 
-from jaato_sdk.events import _EVENT_CLASSES  # noqa: E402
+from jaato_sdk.events import EventType, _EVENT_CLASSES  # noqa: E402
 
 OUTPUT_FILE = REPO_ROOT / "jaato-sdk-ts" / "src" / "events.ts"
 
@@ -148,9 +148,51 @@ export type JaatoEvent = JaatoEvents;
 """
 
 
+def _build_event_type_runtime() -> str:
+    """Emit a runtime ``EventType`` const object mirroring the Python enum.
+
+    json-schema-to-typescript only produces the *type* form
+    (``type EventType = "connected" | "disconnected" | ...``).
+    Client code needs the *value* form to construct events
+    (``type: EventType.SEND_MESSAGE``) without hand-maintaining
+    string literals.  This emits a ``const`` object whose keys
+    match the Python enum member names and whose values are the
+    on-the-wire string values, so both the type-narrowing union
+    and the constructor-side const are kept in lockstep with
+    ``events.py``.
+    """
+    lines = [
+        "",
+        "/**",
+        " * Runtime const mirror of the Python ``EventType`` enum.",
+        " *",
+        " * Use these for constructing events:",
+        " * ``{ type: EventTypeValue.SEND_MESSAGE, text: \"hi\" }``.",
+        " * The ``EventType`` type alias above is the type-side mirror; this",
+        " * const provides the runtime values.  Both are generated from",
+        " * ``jaato-sdk/jaato_sdk/events.py`` to stay in lockstep.",
+        " */",
+        "export const EventTypeValue = {",
+    ]
+    for member in EventType:
+        # Python enum member name maps to the const key; on-the-wire
+        # string value maps to the const value.
+        lines.append(f'  {member.name}: "{member.value}",')
+    lines.append("} as const;")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _compose(generated_body: str) -> str:
-    """Combine header + generated body + JaatoEvent alias."""
-    return GENERATED_HEADER + "\n" + generated_body.rstrip() + "\n" + _build_jaato_event_alias()
+    """Combine header + generated body + JaatoEvent alias + EventTypeValue const."""
+    return (
+        GENERATED_HEADER
+        + "\n"
+        + generated_body.rstrip()
+        + "\n"
+        + _build_jaato_event_alias()
+        + _build_event_type_runtime()
+    )
 
 
 def _generate() -> str:

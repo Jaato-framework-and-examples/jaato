@@ -10,3 +10,10 @@
 // project_backlog_sdk_feature_parity.md for the full design.
 export * from "./events.js";
 export * from "./helpers.js";
+export * from "./errors.js";
+export * from "./state.js";
+export {
+  JaatoClient,
+  MIN_SERVER_VERSION,
+  type JaatoClientOptions,
+} from "./client.js";
