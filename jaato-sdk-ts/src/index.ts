@@ -9,3 +9,4 @@
 // See ../jaato-sdk-ts/README.md and the parity backlog at
 // project_backlog_sdk_feature_parity.md for the full design.
 export * from "./events.js";
+export * from "./helpers.js";

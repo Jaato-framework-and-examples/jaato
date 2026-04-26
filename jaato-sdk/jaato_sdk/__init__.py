@@ -21,6 +21,7 @@ from jaato_sdk.events import (
     deserialize_event,
 )
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
+from jaato_sdk.helpers import compute_cache_hit_percent
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -44,6 +45,8 @@ __all__ = [
     "deserialize_event",
     # Constants
     "PRERENDERED_LINE_PREFIX",
+    # Helpers
+    "compute_cache_hit_percent",
     # Trace
     "trace",
     "provider_trace",

@@ -1742,19 +1742,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                 f"─── duration: {event.duration_seconds:.2f}s",
                                 "dim",
                             )
+                        # Hit rate via the SDK helper so every client uses the
+                        # same formula — see jaato_sdk.helpers.compute_cache_hit_percent
+                        # for the rationale (returns None when the provider
+                        # doesn't report cache stats; 0.0 vs None matters).
                         if event.cache_read_tokens:
-                            # prompt_tokens is the *new* (uncached) input only
-                            # (matches Anthropic's input_tokens semantics; jaato
-                            # normalizes other providers to this).  The hit rate
-                            # is therefore cache_read / (cache_read + new_input),
-                            # which naturally caps at 100%.  The earlier formula
-                            # (cache_read / prompt_tokens) produced absurd values
-                            # like 3697% whenever the cache served more tokens
-                            # than the new input — which is exactly when caching
-                            # is working.
-                            total_input = event.cache_read_tokens + event.prompt_tokens
-                            if total_input > 0:
-                                hit_pct = event.cache_read_tokens / total_input * 100
+                            from jaato_sdk import compute_cache_hit_percent
+                            hit_pct = compute_cache_hit_percent(event)
+                            if hit_pct is not None:
                                 buffer.add_system_message(
                                     f"─── cache hit: {hit_pct:.0f}%",
                                     "dim",
