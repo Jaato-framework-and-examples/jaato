@@ -321,6 +321,28 @@ describe("JaatoClient typed methods", () => {
     assert.deepEqual((ev as { tools?: unknown }).tools, tools);
   });
 
+  test("sendRawEvent emits arbitrary type-checking-bypassed envelopes", async () => {
+    // Premium-style daemon-extension verb — not in JaatoEvent union.
+    await client.sendRawEvent({
+      type: "reconnect.list",
+      filter: { only_attached: true },
+    });
+    const [ev] = getSent();
+    assert.equal(ev.type, "reconnect.list");
+    assert.deepEqual(
+      (ev as { filter?: unknown }).filter,
+      { only_attached: true },
+    );
+  });
+
+  test("sendRawEvent rejects after close", async () => {
+    await client.close();
+    await assert.rejects(
+      client.sendRawEvent({ type: "reconnect.list" }),
+      ConnectionClosedError,
+    );
+  });
+
   test("respondToToolExecution success path", async () => {
     await client.respondToToolExecution("call_42", '{"ok":true}');
     const [ev] = getSent();

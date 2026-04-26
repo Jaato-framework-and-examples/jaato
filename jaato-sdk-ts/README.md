@@ -226,6 +226,30 @@ client.onStatus((status) => {
 });
 ```
 
+Daemon-extension verbs (premium reconnect / asset-picker /
+custom WS handlers) — use `sendRawEvent` for envelopes that
+aren't in the public `JaatoEvent` union:
+
+```typescript
+// Premium's session_reconnect.extension verbs.
+await client.sendRawEvent({
+  type: "reconnect.list",
+  filter: { only_attached: true },
+});
+// Response arrives via subscribe() — caller filters by type.
+client.subscribe((event) => {
+  if (event.type === "reconnect.list_response") {
+    console.log(event);  // Caller knows the shape; SDK doesn't.
+  }
+});
+```
+
+`executeCommand` is the right escape hatch when the verb is
+dispatched via `command.execute` (e.g. `executeCommand("session.list")`).
+`sendRawEvent` is the right escape hatch when the verb registers
+its OWN top-level message type. Both bypass type-checking; both
+stay supported.
+
 File staging (multi-frame protocol — TEXT request + N binary
 frames + typed response):
 
@@ -297,7 +321,8 @@ event stream and are correlated by `request_id` where applicable.
 | `respondToToolExecution(callId, result?, error?)` | `tool.execute_result` (return result for client-registered tool) |
 | `disableTool(toolName)` | `tool.disable.request` |
 | `requestCommandList()` | `command_list.request` |
-| `executeCommand(command, args?)` | `command.execute` (escape hatch for any verb without a typed method) |
+| `executeCommand(command, args?)` | `command.execute` (escape hatch for any command-router verb without a typed method) |
+| `sendRawEvent(envelope)` | _arbitrary type_ (escape hatch for daemon-extension verbs that register their OWN top-level message type — premium's `reconnect.list` / `reconnect.delete` / `auth.token` / `assets.list`, etc.) |
 
 **File staging**
 

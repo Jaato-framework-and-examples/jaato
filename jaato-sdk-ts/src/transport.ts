@@ -51,6 +51,20 @@ export interface Transport {
   /** Send a fully-typed jaato event over the wire. */
   sendEvent(event: JaatoEvent): void;
   /**
+   * Send an arbitrary event-shaped object over the wire — escape
+   * hatch for daemon extensions that introduce their own typed WS
+   * verbs (e.g. premium's ``reconnect.list`` / ``reconnect.delete``
+   * / ``auth.token`` / ``assets.list``).  These verbs are full
+   * top-level envelopes (``{ type: "...", ... }``) but they're not
+   * in the public {@link JaatoEvent} discriminated union, so
+   * {@link sendEvent} would fail type-check.
+   *
+   * The caller is on the hook for shape correctness — no validation
+   * happens here.  ``type`` should still be present on the
+   * envelope so the server's dispatcher can route the message.
+   */
+  sendRawEvent(event: object): void;
+  /**
    * Send a raw binary frame over the wire.
    *
    * Used by multi-frame protocols like ``StageFilesRequest`` —
@@ -170,6 +184,15 @@ export function openTransport(options: TransportOptions): Promise<Transport> {
           if (closed) {
             throw new ConnectionError("Transport is closed");
           }
+          ws.send(JSON.stringify(event));
+        },
+        sendRawEvent(event: object): void {
+          if (closed) {
+            throw new ConnectionError("Transport is closed");
+          }
+          // Same wire shape as sendEvent, just without the type
+          // constraint — premium daemon-extension verbs that aren't
+          // in the public JaatoEvent union route through here.
           ws.send(JSON.stringify(event));
         },
         sendBinary(data: ArrayBuffer | Uint8Array): void {

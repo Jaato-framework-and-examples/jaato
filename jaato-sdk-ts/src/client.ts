@@ -569,6 +569,46 @@ export class JaatoClient {
     } as CommandRequest);
   }
 
+  /**
+   * Send an arbitrary event-shaped object over the wire — escape
+   * hatch for daemon-extension verbs that aren't in the public
+   * {@link JaatoEvent} union.
+   *
+   * Use cases:
+   * - premium's ``reconnect.list`` / ``reconnect.delete`` /
+   *   ``auth.token`` verbs from ``session_reconnect.extension``
+   * - premium's ``assets.list`` from ``asset_picker``
+   * - any third-party daemon extension that registers its own WS
+   *   message handlers (typed envelopes, not wrapped in
+   *   ``command.execute``)
+   *
+   * The envelope must include a ``type`` string that the server's
+   * dispatcher recognises.  No validation is performed on the
+   * client side — the caller owns shape correctness.
+   *
+   * Responses (if any) arrive via the regular event stream and
+   * surface in {@link subscribe} / {@link events} as
+   * ``JaatoEvent``-typed values that won't narrow against the
+   * public union; the caller filters by ``event.type``.
+   *
+   * Prefer {@link executeCommand} when the verb is dispatched via
+   * ``command.execute`` (the stringly-typed escape hatch for
+   * command-router verbs).  This method is for verbs that
+   * register their OWN top-level message type.
+   */
+  async sendRawEvent(event: object): Promise<void> {
+    if (this._state === ConnectionState.RECONNECTING) {
+      throw new ReconnectingError();
+    }
+    if (this._state === ConnectionState.CLOSED) {
+      throw new ConnectionClosedError();
+    }
+    if (this._transport == null) {
+      throw new ConnectionError("No active transport — call connect() first");
+    }
+    this._transport.sendRawEvent(event);
+  }
+
   async disableTool(toolName: string): Promise<void> {
     await this._sendEvent({
       type: EventTypeValue.TOOL_DISABLE_REQUEST,
